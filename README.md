@@ -202,10 +202,11 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 
 The repair command is read-only by default and reports fresh, upgrade-required,
 partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
-Mutating adoption is intentionally not activated yet: even with the offline apply
-flags, the backend fails closed with `reliability_v3_runtime_activation_incomplete`
-until the v3 queue writers and canonical ownership protocol are complete. It never
-deletes `run/`, knowledge, retired databases, legacy caches, or compatibility markers.
+With the offline apply flags (`--apply --adopt-ownership-v3
+--confirm-all-agents-stopped`) it performs the v3 cutover on a fresh or quiescent
+vault; the installer runs it, because session capture is refused until adoption
+has happened (issue #17). It never deletes `run/`, knowledge, retired databases,
+legacy caches, or compatibility markers.
 
 Optional extras are additive and preserve packages already selected by the operator:
 
@@ -267,7 +268,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, inside vault)
 ```
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
-- **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
+- **KNOWLEDGE** — your memory; the repository ships it empty. Every page and daily log is gitignored, only the READMEs are tracked.
 - **RUNTIME** — gitignored. Search indexes and logs are disposable; transactions, queue state, and undo images under `run/` are operational state.
 - **Authority boundary** — Markdown, Git history, and append-only project journals are authoritative. FTS, vectors, Evidence Graph databases, tiers, telemetry, and model caches are derived and rebuildable.
 
@@ -319,22 +320,16 @@ Queue delivery is at least once, so handlers use stable operation IDs for idempo
 
 ## Benchmark
 
-> **Historical legacy methodology**: BM25-only FTS5 over the git-tracked public corpus, with graph, vectors, and reranking disabled. `current-generated-v2` had 112 deterministic known-item queries: exact title, summary keywords, partial title, and slug. `legacy-60-v1.json` stores the original 60 query texts and gold paths verbatim, so later page edits cannot change that gate. Ignored personal pages and `$LLM_WIKI_ROOT` are excluded, so a clean clone reproduces the same corpus. This is not LoCoMo or LongMemEval; competitor rows use different datasets.
-
-| Historical metric | Historical current 112 | Historical legacy 60 | agentmemory | Zep | Mem0 |
-|--------|-------------|-----------|-------------|-----|------|
-| Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
-| Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
-| Recall@5 | **100.0%** | **100.0%** | 95.2% | 94.7% | 91.6% |
-| Recall@10 | **100.0%** | n/a | n/a | n/a | n/a |
-| MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
-| Latency p50 | **6.3ms** | n/a | 14ms | 155ms | 880ms |
-
-These are historical results from the legacy runner. The default command now runs the frozen retrieval-v2 benchmark. Only plain `--legacy-only` selects the old gate; combining it with `--semantic` or `--report` fails closed.
+The retrieval gate is the frozen, public, synthetic `benchmark/retrieval-v2.json`
+corpus: multilingual pages with graded evidence, distractors, temporal history
+and abstention cases, run by `benchmark/run_retrieval_v2.py`. Long-horizon
+memory is measured on the LongMemEval stand (`benchmark/run_longmemeval.py`).
+The historical BM25 gates over the pages this repository used to ship
+(112 generated queries, 60 frozen ones) were retired on 2026-09-10 together
+with those pages; their last numbers are in `benchmark/baseline-2026-07-16.md`.
+Competitor figures elsewhere use different datasets and are not comparable.
 
 Run retrieval-v2: `uv run python benchmark/run_benchmark.py`
-
-Reproduce the old gate: `uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP agent interface
 

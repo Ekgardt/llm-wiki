@@ -750,13 +750,59 @@ def _deferred_count(report: dict) -> int:
     )
 
 
+# How old the nightly's report may be before session start measures for itself
+# (#23.5): one night plus a late start, so a machine that slept through the
+# night falls back rather than trusting yesterday's morning.
+HEALTH_REPORT_MAX_AGE_SECONDS = 36 * 3600
+HEALTH_REPORT_NAME = "doctor-report.json"
+
+
+def _stored_health_report() -> tuple[dict, str] | None:
+    """The nightly's full report and when it was written, when recent enough."""
+    try:
+        payload = json.loads(
+            (STATE_ROOT / "logs" / HEALTH_REPORT_NAME).read_text(encoding="utf-8")
+        )
+        written = datetime.fromisoformat(str(payload["written_at"]))
+        age = (datetime.now(timezone.utc) - written).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    report = payload.get("report")
+    if age > HEALTH_REPORT_MAX_AGE_SECONDS or not isinstance(report, dict):
+        return None
+    return report, written.strftime("%Y-%m-%d %H:%M")
+
+
+def _stored_health_block(report: dict, when: str) -> str:
+    from doctor import degraded_summary
+
+    summary = degraded_summary(report)
+    if not summary:
+        return ""
+    return (
+        "## Health\n\n"
+        + _nightly_line()
+        + f"{summary} (measured by the nightly pass at {when} UTC; "
+        "`uv run python scripts/doctor.py` for the state now)\n\n"
+    )
+
+
 def health_block() -> str:
     """Return doctor output only when local health is degraded.
 
-    A run that ran out of budget reports nothing but the fact that it did. The
-    findings of a truncated run are artefacts of the clock, and naming them
-    teaches the reader to ignore this block.
+    The nightly's report is read first (#23.5); a budgeted run happens only
+    when there is none young enough. A run that ran out of budget reports
+    nothing but the fact that it did: the findings of a truncated run are
+    artefacts of the clock, and naming them teaches the reader to ignore
+    this block.
     """
+    stored = _stored_health_report()
+    if stored is not None:
+        return _stored_health_block(*stored)
+    return _measured_health_block()
+
+
+def _measured_health_block() -> str:
     try:
         from doctor import degraded_summary, run_doctor
 

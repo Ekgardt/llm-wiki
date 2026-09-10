@@ -205,7 +205,6 @@ def test_superset_contract_is_canonical() -> None:
     ].split("\n## ", 1)[0]
     assert agents == claude
     assert decision.encode() in agents
-    assert (ROOT / decision).is_file()
     for value in (
         "corpus-generation/v2",
         "repository_scope",
@@ -235,37 +234,9 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
     navigation = structure.split("## Implemented Python code navigation", 1)[1].split(
         "\n## ", 1
     )[0]
-    old_decision_path = (
-        ROOT / "knowledge/notes/persistent-code-intelligence-kernel-decision.md"
-    )
-    decision_path = (
-        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
-    )
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
-    assert decision_path.is_file()
-    assert old_decision_path.is_file()
-    decision = decision_path.read_text(encoding="utf-8")
-    old_decision = old_decision_path.read_text(encoding="utf-8")
-    _required_frontmatter_scalars(
-        decision,
-        {
-            "type": "decision",
-            "status": "active",
-            "confidence": "high",
-            "source_authority": "user",
-            "date": "2026-07-22",
-        },
-    )
-    _required_frontmatter_scalars(
-        old_decision,
-        {
-            "type": "decision",
-            "status": "superseded",
-            "superseded_by": "[[read-only-lsp-navigation-engine-decision]]",
-        },
-    )
     assert "evidence-graph/v2" in current
     assert "evidence-graph/v3" not in current
     navigation_words = " ".join(navigation.split())
@@ -284,11 +255,12 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
         "Python 3.10",
     ):
         assert value in navigation_words
-    for text in (agents, claude, decision):
+    for text in (agents, claude):
         normalized = " ".join(text.split())
         assert "read-only LSP" in normalized
         assert "Serena runtime dependency" in normalized
         assert "persistent daemon" in normalized
+        assert "Tasks 6-16 are superseded" in normalized
     for stale in (
         "normalized navigation is not implemented",
         "normalized navigation facade, and MCP routing remain unimplemented",
@@ -296,31 +268,17 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
         assert stale not in structure
         assert stale not in agents
         assert stale not in claude
-    assert "Tasks 6-16 are superseded" in " ".join(decision.split())
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 
 def test_lsp_live_lease_layout_is_canonical() -> None:
-    decision_path = ROOT / "knowledge/notes/lsp-live-lease-decision.md"
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
     design = (
         ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
     ).read_text(encoding="utf-8")
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert decision_path.is_file()
-    decision = decision_path.read_text(encoding="utf-8")
-    _required_frontmatter_scalars(
-        decision,
-        {
-            "type": "decision",
-            "status": "active",
-            "confidence": "high",
-            "source_authority": "user",
-            "date": "2026-07-23",
-        },
-    )
-    for text in (decision, structure, agents):
+    for text in (structure, agents):
         normalized = " ".join(text.split())
         for value in (
             "run/lsp/<owner-nonce>/lease.json",
@@ -342,28 +300,10 @@ def test_lsp_live_lease_layout_is_canonical() -> None:
             "successful terminal layout",
         ):
             assert value in normalized
-    existing = (
-        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
-    ).read_text(encoding="utf-8")
-    assert "[[lsp-live-lease-decision]]" in existing
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 
 def test_lsp_process_containment_contract_is_platform_qualified() -> None:
-    decision_path = ROOT / "knowledge/notes/lsp-process-containment-decision.md"
-    assert decision_path.is_file()
-    decision = decision_path.read_text(encoding="utf-8")
-    _required_frontmatter_scalars(
-        decision,
-        {
-            "type": "decision",
-            "status": "active",
-            "confidence": "high",
-            "source_authority": "user",
-            "date": "2026-07-24",
-        },
-    )
-
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
     design = (
         ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
@@ -374,7 +314,7 @@ def test_lsp_process_containment_contract_is_platform_qualified() -> None:
     task6 = plan.split("### Task 6:", 1)[1].split("### Task 7:", 1)[0]
     task15 = plan.split("### Task 15:", 1)[1]
     module = (ROOT / "scripts/lsp_process_tree.py").read_text(encoding="utf-8")
-    for text in (decision, structure, design, task6, task15, module):
+    for text in (structure, design, task6, task15, module):
         normalized = " ".join(text.split())
         assert "Windows Job Object" in normalized
         assert "POSIX process group" in normalized
@@ -382,33 +322,27 @@ def test_lsp_process_containment_contract_is_platform_qualified() -> None:
         assert "unsupported" in normalized
         assert "trusted" in normalized
 
-    decision_words = " ".join(decision.split())
-    assert "delegated cgroup v2" in decision_words
-    assert "future" in decision_words
-    assert "ancestry scan" in decision_words
-    assert "what is true today" in decision_words
-    assert "what we want it to become" in decision_words
-
-    navigation = (
-        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
-    ).read_text(encoding="utf-8")
-    lease = (ROOT / "knowledge/notes/lsp-live-lease-decision.md").read_text(
-        encoding="utf-8"
-    )
-    for related in (navigation, lease):
-        assert "[[lsp-process-containment-decision]]" in related
-    assert "[[read-only-lsp-navigation-engine-decision]]" in decision
-    assert "[[lsp-live-lease-decision]]" in decision
-
-    index = (ROOT / "knowledge/index.md").read_text(encoding="utf-8")
-    log = (ROOT / "knowledge/log.md").read_text(encoding="utf-8")
-    assert "[[knowledge/notes/lsp-process-containment-decision]]" in index
-    assert "2026-07-24" in log and "process containment" in log
-
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    allowlist = "!knowledge/notes/lsp-process-containment-decision.md"
-    assert gitignore.count(allowlist) == 1
     _assert_literal_note_allowlist(gitignore)
+
+
+def test_the_repository_ships_no_memory() -> None:
+    """Every page under knowledge/notes is somebody's memory (issue #19).
+
+    Only the README is allowlisted, only the README is tracked, and the two
+    runtime-written files ship as skeletons that name no page.
+    """
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    allowlisted = [line for line in gitignore if line.startswith("!knowledge/notes/")]
+    tracked = subprocess.run(
+        ["git", "ls-files", "knowledge/notes", "knowledge/daily"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    ).stdout.split()
+
+    assert allowlisted == ["!knowledge/notes/README.md"]
+    assert set(tracked) == {"knowledge/notes/README.md", "knowledge/daily/README.md"}
 
 
 def test_agent_contract_mentions_three_zone_process_rule():
@@ -633,26 +567,20 @@ QUOTED_FRONTMATTER_FORMS = (
     ("date: 2026-07-17", 'date: "2026-07-17" # implementation date'),
 )
 
-DECISION_STATEMENTS = (
-    "Markdown, Git, and project journals",
-    "graph, FTS, vector, tier, and telemetry",
-    "disposable",
-    "immutable after activation",
-    "No persistent daemon",
-    "docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md",
-    "https://www.sqlite.org/atomiccommit.html",
-    "https://www.sqlite.org/lockingv3.html",
-    "## Rejected alternatives",
-    "## Consequences",
-    "target generation layout",
-    "cache/index.sqlite",
-    "cache/vectors.npy",
-    "cache/vectors_meta.json",
-    "remain readable during migration",
-    "disposable derived caches",
-    "not members of a generation",
-    "installed-vault migration evidence",
-)
+# A decision page in the shape the vault writes them, so the frontmatter
+# reader is exercised without reading anyone's memory from the repository.
+DECISION_SAMPLE = """---
+type: decision
+status: active
+confidence: high
+source_authority: user
+date: 2026-07-17
+---
+# Derived evidence generations
+
+Markdown, Git, and project journals are authoritative.
+"""
+
 
 PRIVATE_PATTERNS = {
     "Windows absolute path": r"(?i)(?:^|[^A-Za-z0-9])[A-Z]:[\\/]",
@@ -714,8 +642,6 @@ def _documented_generation_files(structure: str) -> set[str]:
 
 def _assert_note_allowlist_is_literal() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    decision_allowlist = "!knowledge/notes/derived-evidence-generation-decision.md"
-    assert gitignore.count(decision_allowlist) == 1
     _assert_literal_note_allowlist(gitignore)
     for broad_rule in BROAD_ALLOWLIST_RULES:
         with pytest.raises(AssertionError):
@@ -777,15 +703,12 @@ def test_docs_name_stage_two_runtime_artifacts():
     _assert_structure_documents_generations(structure, " ".join(structure.split()))
     _assert_note_allowlist_is_literal()
 
-    decision = ROOT / "knowledge" / "notes" / "derived-evidence-generation-decision.md"
-    assert decision.is_file()
-    text = decision.read_text(encoding="utf-8")
-    _assert_frontmatter_accepts_quoted_forms(text)
-    _assert_frontmatter_rejects_malformed(text)
-    decision_words = " ".join(text.split())
-    for value in DECISION_STATEMENTS:
-        assert value in decision_words, f"public decision must document {value!r}"
-    _assert_no_private_paths(text)
+    # The decision page itself is the owner's private record (the repository
+    # ships no memory); `_assert_structure_documents_generations` above holds
+    # the contract where it is stated publicly.
+    _assert_frontmatter_accepts_quoted_forms(DECISION_SAMPLE)
+    _assert_frontmatter_rejects_malformed(DECISION_SAMPLE)
+    _assert_no_private_paths(DECISION_SAMPLE)
     _assert_privacy_patterns_are_honest()
 
 

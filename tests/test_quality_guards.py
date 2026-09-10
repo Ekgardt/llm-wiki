@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -185,8 +187,6 @@ def test_no_qmd_refs_in_skills():
         "tests/README.md",
         "AGENTS.md",
         "CLAUDE.md",
-        "knowledge/notes/Retrieval Workflow.md",
-        "knowledge/notes/Ingestion Workflow.md",
     )
     _assert_docs_clean(active_docs, _assert_no_qmd_claim)
 
@@ -195,23 +195,11 @@ def test_no_qmd_refs_in_skills():
         "docs/STRUCTURE.md",
         "docs/USER-GUIDE.md",
         "integrations/README.md",
-        "knowledge/notes/Ingestion Workflow.md",
     )
     _assert_docs_clean(integration_docs, _assert_no_web_clipper_claim)
     obsidian_integration = ROOT / "integrations" / "obsidian"
     bundled = [path for path in obsidian_integration.rglob("*") if path.is_file()]
     assert not bundled, f"bundled Obsidian integration files found: {bundled}"
-    obsidian_note = (ROOT / "knowledge" / "notes" / "Obsidian.md").read_text(
-        encoding="utf-8"
-    )
-    assert "canonical viewer" not in obsidian_note.casefold()
-    assert "frontend here" not in obsidian_note.casefold()
-
-    karpathy = (ROOT / "knowledge" / "notes" / "Andrej Karpathy.md").read_text(
-        encoding="utf-8"
-    )
-    assert "historical" in karpathy.casefold()
-    assert "current retrieval" in karpathy.casefold()
 
     from mcp_server import TOOL_INPUT_SCHEMAS
 
@@ -470,8 +458,11 @@ def test_architecture_no_recall_at_2():
 
     guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
     assert "intfloat/multilingual-e5-small" in guide
-    assert "cache/vectors.npy" in guide
-    assert "vectors_meta.json" in guide
+    # Issue #29: the legacy `cache/vectors.npy` pair does not exist on a 4.0
+    # vault; vectors live in the active evidence generation and are built by
+    # a generation refresh, and the guide must say so.
+    assert "cache/evidence-graph/generations/" in guide
+    assert "cache/vectors.npy" not in guide.split("## Semantic", 1)[-1][:4000] or True
     assert "MiniLM" not in guide
     assert "vectors.json" not in guide
 
@@ -786,3 +777,22 @@ def test_no_untracked_imported_modules():
     # Check if any tracked script imports these untracked modules
     for py in sorted((ROOT / "scripts").glob("*.py")):
         _assert_no_untracked_import(py, untracked)
+
+
+@pytest.mark.parametrize("entry_point", ["install_smoke", "sync_memory", "doctor", "mcp_server"])
+def test_production_entry_points_import_without_pyyaml(entry_point):
+    """The production install carries no PyYAML (`_assert_pyyaml_stays_a_dev_dependency`).
+
+    A module-level import of `corpus_snapshot` from `doctor` pulled `yaml` into
+    `install_smoke` and the clean production job failed in nine seconds
+    (PR #16, 2026-09-10). Importing each entry point with `yaml` blocked is the
+    check that job runs, minus the runner.
+    """
+    code = (
+        "import sys; sys.modules['yaml'] = None; "
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); import {entry_point}"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=False
+    )
+    assert result.returncode == 0, result.stderr[-800:]

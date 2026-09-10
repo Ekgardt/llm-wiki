@@ -86,14 +86,23 @@ def _damage_manifest(manifest, manifest_state: str) -> None:
     manifest.write_text("{not-json", encoding="utf-8")
 
 
+def _action(report, identifier: str) -> dict:
+    return next(item for item in report["actions"] if item["id"] == identifier)
+
+
+def _statuses(report) -> dict[str, str]:
+    return {item["id"]: item["status"] for item in report["actions"]}
+
+
 def _assert_stale_index_action(report, apply: bool) -> None:
     """Check mode reports the staleness; apply mode rebuilds it."""
-    action = next(item for item in report["actions"] if item["id"] == "indexes")
-    assert action["status"] == ("changed" if apply else "skipped"), action
+    action = _action(report, "indexes")
+    expected = "changed" if apply else "skipped"
+    assert action["status"] == expected, action
     if apply:
         return
-    assert action["details"]["freshness"] == "stale"
-    assert action["details"]["source_rebuild_required"] is True
+    details = action["details"]
+    assert (details["freshness"], details["source_rebuild_required"]) == ("stale", True)
 
 
 def _check_details(check_id: str, status: str) -> dict[str, object]:
@@ -220,10 +229,12 @@ def _create_index(path: Path) -> None:
 
 
 def _build_fresh_search_index(sync_memory, root: Path, state: Path) -> None:
+    # The build took 5.7 s on a Windows runner on 2026-09-07 and a five-second
+    # budget reported it as an error; the budget is for a hang, not for speed.
     result = sync_memory._run_index_builder(
         root=root,
         state_root=state,
-        timeout=5,
+        timeout=60,
     )
     assert result["status"] == "changed"
 
@@ -240,10 +251,12 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
 
     report = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
 
-    assert report["mode"] == "check"
-    assert _action_ids(report) == EXPECTED_ACTIONS
-    assert _all_actions_ok(report)
-    assert calls and _all_dry_run(calls)
+    assert (report["mode"], _action_ids(report), _all_actions_ok(report)) == (
+        "check",
+        EXPECTED_ACTIONS,
+        True,
+    )
+    assert (bool(calls), _all_dry_run(calls)) == (True, True)
 
 
 def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
@@ -301,11 +314,15 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 
     result = sync_memory._dependency_action(root=tmp_path, apply=True, run_uv=run_uv)
 
-    assert result["status"] == "changed"
-    assert result["details"] == {"lock": "current", "environment": "current"}
-    assert len(commands) == 3
-    assert "--dry-run" in commands[1]
-    assert "--dry-run" not in commands[2]
+    assert (result["status"], result["details"]) == (
+        "changed",
+        {"lock": "current", "environment": "current"},
+    )
+    assert (len(commands), "--dry-run" in commands[1], "--dry-run" in commands[2]) == (
+        3,
+        True,
+        False,
+    )
 
 
 def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
@@ -465,10 +482,13 @@ def test_uv_commands_use_process_tree_runner(tmp_path, monkeypatch):
 
     result = sync_memory._run_uv(["uv", "lock", "--check"], root=tmp_path, timeout=1)
 
-    assert result.returncode == 0
-    assert calls[0][0] == ["uv", "lock", "--check"]
-    assert calls[0][1]["timeout"] == 1
-    assert calls[0][1]["capture_output"] is True
+    command, options = calls[0]
+    assert (result.returncode, command, options["timeout"], options["capture_output"]) == (
+        0,
+        ["uv", "lock", "--check"],
+        1,
+        True,
+    )
 
 
 def test_apply_rejects_stale_lock_even_when_mcp_is_installed(tmp_path):
@@ -512,12 +532,14 @@ def test_transaction_queue_and_index_freshness_states_are_independent(tmp_path, 
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
 
     result = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path)
-    actions = {action["id"]: action for action in result["actions"]}
+    statuses = _statuses(result)
 
-    assert actions["transactions"]["status"] == "error"
-    assert actions["queue"]["status"] == "skipped"
-    assert actions["indexes"]["status"] == "skipped"
-    assert actions["indexes"]["details"]["freshness"] == "missing"
+    assert (
+        statuses["transactions"],
+        statuses["queue"],
+        statuses["indexes"],
+        _action(result, "indexes")["details"]["freshness"],
+    ) == ("error", "skipped", "skipped", "missing")
 
 
 def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
@@ -560,43 +582,53 @@ def test_apply_leaves_prepared_transaction_and_flush_compile_queue_untouched(
         transaction_state = database.execute(
             'SELECT state FROM "transaction" WHERE id=?', (transaction.id,)
         ).fetchone()[0]
-    assert target.read_bytes() == before
-    assert transaction_state == "prepared"
-    assert queue.get(flush_id).state == "ready"
-    assert queue.get(compile_id).state == "ready"
-    actions = {action["id"]: action for action in report["actions"]}
-    assert actions["transactions"]["status"] in {"skipped", "error"}
-    assert actions["queue"]["status"] in {"skipped", "error"}
+    assert (
+        target.read_bytes(),
+        transaction_state,
+        queue.get(flush_id).state,
+        queue.get(compile_id).state,
+    ) == (before, "prepared", "ready", "ready")
+    statuses = _statuses(report)
+    assert {statuses["transactions"], statuses["queue"]} <= {"skipped", "error"}
+
+
+class _RepairOnce:
+    """A doctor that repairs the runtime on the first request and then has nothing to do."""
+
+    def __init__(self) -> None:
+        self.repaired_once = {"runtime"}
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        requested = set(kwargs.get("repair_actions") or ())
+        if not kwargs["repair"] or not (requested & self.repaired_once):
+            return _doctor_report(repaired=[])
+        self.repaired_once.difference_update(requested)
+        return _doctor_report(repaired=[{"action": f"repair_{next(iter(requested))}"}])
+
+    def repair_requests(self) -> list:
+        return [call.get("repair_actions") for call in self.calls if call["repair"]]
 
 
 def test_apply_repairs_only_runtime_and_keeps_diagnostics_idempotent(tmp_path, monkeypatch):
     sync_memory = _load_sync_memory()
-    repaired_once = {"runtime"}
-    calls = []
-
-    def run_doctor(**kwargs):
-        calls.append(kwargs)
-        requested = set(kwargs.get("repair_actions") or ())
-        repaired = []
-        if kwargs["repair"] and requested & repaired_once:
-            repaired = [{"action": f"repair_{next(iter(requested))}"}]
-            repaired_once.difference_update(requested)
-        return _doctor_report(repaired=repaired)
-
-    monkeypatch.setattr(sync_memory.doctor, "run_doctor", run_doctor)
+    doctor = _RepairOnce()
+    monkeypatch.setattr(sync_memory.doctor, "run_doctor", doctor)
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
 
     first = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
     second = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
 
-    first_states = {item["id"]: item["status"] for item in first["actions"]}
-    assert first_states["environment"] == "changed"
-    assert first_states["transactions"] == "ok"
-    assert first_states["queue"] == "ok"
-    assert first_states["indexes"] == "ok"
-    assert all(item["status"] != "changed" for item in second["actions"])
-    requested = [call.get("repair_actions") for call in calls if call["repair"]]
-    assert requested == [{"runtime"}, {"runtime"}]
+    first_states = _statuses(first)
+    assert [first_states[key] for key in ("environment", "transactions", "queue", "indexes")] == [
+        "changed",
+        "ok",
+        "ok",
+        "ok",
+    ]
+    assert "changed" not in _statuses(second).values()
+    assert doctor.repair_requests() == [{"runtime"}, {"runtime"}]
 
 
 def test_blocking_index_builder_is_killed_before_timeout_is_reported(
@@ -609,7 +641,9 @@ def test_blocking_index_builder_is_killed_before_timeout_is_reported(
     builder.write_text(
         "import os, time\n"
         "from pathlib import Path\n"
-        "time.sleep(0.6)\n"
+        # Three seconds, not 0.6: on a loaded Windows runner killing the tree
+        # took longer than the builder's nap, and the marker got written.
+        "time.sleep(3.0)\n"
         "Path(os.environ['SYNC_TEST_MARKER']).write_text('alive')\n",
         encoding="utf-8",
     )
@@ -631,15 +665,17 @@ def test_blocking_index_builder_is_killed_before_timeout_is_reported(
         time_limit_seconds=0.2,
     )
     elapsed = time.monotonic() - started
-    index = next(action for action in report["actions"] if action["id"] == "indexes")
+    index = _action(report, "indexes")
 
     # The claim is that the builder is killed rather than left to finish, which
     # the marker checks below prove. The wall-clock bound only rules out waiting
     # for the child, and killing a process tree is not instant on Windows.
-    assert elapsed < 15
-    assert index["status"] == "error"
-    assert index["details"]["timed_out"] is True
-    assert not marker.exists()
+    assert (elapsed < 15, index["status"], index["details"]["timed_out"], marker.exists()) == (
+        True,
+        "error",
+        True,
+        False,
+    )
     time.sleep(0.7)
     assert not marker.exists()
 
@@ -846,10 +882,8 @@ def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monk
         sync_memory._run_process_tree(["uv"], timeout=0.1, capture_output=True)
 
     assert error.value.cleanup_error == "taskkill_failed;retained_pipes"
-    assert ("close", "stdout") in calls
-    assert ("close", "stderr") in calls
-    assert ("wait", sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS) in calls
-    assert all(item != ("communicate", None) for item in calls)
+    assert {("close", "stdout"), ("close", "stderr"), ("wait", sync_memory.PROCESS_CLEANUP_TIMEOUT_SECONDS)} <= set(calls)
+    assert ("communicate", None) not in calls
 
 
 def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
@@ -1073,22 +1107,31 @@ def test_installers_handle_sync_exit_codes_explicitly():
     shell = (ROOT / "install.sh").read_text(encoding="utf-8")
     powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
 
-    assert 'sync_memory.py" --apply' in powershell
     shell_line = _sync_apply_line(shell)
     powershell_line = _sync_apply_line(powershell)
-    assert "|| true" not in shell_line
-    assert "2>$null" not in powershell_line
-    assert "Out-Null" not in powershell_line
-    assert 'uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply' in shell
-    assert 'uv run --locked --no-sync python "$VAULT_ROOT\\scripts\\sync_memory.py" --apply' in powershell
-    assert 'case "$SYNC_EXIT" in' in shell
-    assert 'warn "Runtime synchronization completed with warnings"' in shell
-    assert '*) fail "Runtime synchronization failed"' in shell
-    assert "switch ($syncExit)" in powershell
-    assert 'Warn "Runtime synchronization completed with warnings"' in powershell
-    assert 'default { Fail "Runtime synchronization failed" }' in powershell
-    assert 'LLM-Wiki installed with warnings' in shell
-    assert 'LLM-Wiki installed with warnings' in powershell
+    silenced = ("|| true" in shell_line, "2>$null" in powershell_line, "Out-Null" in powershell_line)
+    assert silenced == (False, False, False)
+    expected_shell = (
+        'uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply',
+        'case "$SYNC_EXIT" in',
+        'warn "Runtime synchronization completed with warnings"',
+        '*) fail "Runtime synchronization failed"',
+        "LLM-Wiki installed with warnings",
+    )
+    expected_powershell = (
+        'sync_memory.py" --apply',
+        'uv run --locked --no-sync python "$VAULT_ROOT\\scripts\\sync_memory.py" --apply',
+        "switch ($syncExit)",
+        'Warn "Runtime synchronization completed with warnings"',
+        'default { Fail "Runtime synchronization failed" }',
+        "LLM-Wiki installed with warnings",
+    )
+    assert _missing(expected_shell, shell) == []
+    assert _missing(expected_powershell, powershell) == []
+
+
+def _missing(expected: tuple[str, ...], text: str) -> list[str]:
+    return [item for item in expected if item not in text]
 
 
 def test_powershell_installer_scheduler_failure_is_partial_and_nonzero(tmp_path):
@@ -1129,10 +1172,11 @@ $syncWarning = $false
     )
 
     assert completed.returncode == 1
-    assert "LLM-Wiki installed with warnings" in completed.stdout
-    assert "Maintenance: not registered" in completed.stdout
-    assert "LLM-Wiki installed successfully" not in completed.stdout
-    assert "Maintenance: Task Scheduler (nightly + weekly)" not in completed.stdout
+    assert _missing(("LLM-Wiki installed with warnings", "Maintenance: not registered"), completed.stdout) == []
+    assert _missing(("LLM-Wiki installed successfully", "Maintenance: Task Scheduler (nightly + weekly)"), completed.stdout) == [
+        "LLM-Wiki installed successfully",
+        "Maintenance: Task Scheduler (nightly + weekly)",
+    ]
 
 
 def test_powershell_installer_verifies_registered_scheduler_state(tmp_path):
@@ -1173,8 +1217,10 @@ $syncWarning = $false
     )
 
     assert completed.returncode == 1
-    assert "Install ownership transaction or Task Scheduler verification failed" in completed.stdout
-    assert "Maintenance: not registered" in completed.stdout
+    assert _missing(
+        ("Install ownership transaction or Task Scheduler verification failed", "Maintenance: not registered"),
+        completed.stdout,
+    ) == []
     assert "LLM-Wiki installed successfully" not in completed.stdout
 
 
@@ -1214,12 +1260,14 @@ def test_sync_reports_legacy_change_separately_when_generation_is_deferred(
     result = sync_memory.run_sync(
         root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True
     )
-    indexes = next(action for action in result["actions"] if action["id"] == "indexes")
+    indexes = _action(result, "indexes")
 
-    assert indexes["status"] == "skipped"
-    assert result["overall_status"] == "degraded"
-    assert indexes["details"]["legacy_index"] == "changed"
-    assert indexes["details"]["generation_refresh"] == "skipped"
+    assert (
+        indexes["status"],
+        result["overall_status"],
+        indexes["details"]["legacy_index"],
+        indexes["details"]["generation_refresh"],
+    ) == ("skipped", "degraded", "changed", "skipped")
     assert "synchronized" not in indexes["message"].casefold()
 
 
@@ -1295,10 +1343,6 @@ $agents = @()
 
 def test_sync_has_no_git_or_knowledge_mutation_code():
     source = SYNC_SCRIPT.read_text(encoding="utf-8")
+    forbidden = ("git ", "knowledge/", "knowledge\\", "write_text(", "write_bytes(", "[project.scripts]")
 
-    assert "git " not in source
-    assert "knowledge/" not in source
-    assert "knowledge\\" not in source
-    assert "write_text(" not in source
-    assert "write_bytes(" not in source
-    assert "[project.scripts]" not in source
+    assert [item for item in forbidden if item in source] == []

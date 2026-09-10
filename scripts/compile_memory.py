@@ -1805,7 +1805,7 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
         _dailies_for_evidence(inputs, date), timestamp, quote_bytes
     )
     quote_offset = _sole_quote_offset(block, quote_bytes)
-    _require_complete_line(block, quote_offset, quote_bytes, quote)
+    quote, quote_bytes, quote_offset = _completed_line(block, quote_offset, quote_bytes, quote)
     quote_start = marker_at + quote_offset
     reference = EvidenceRef(
         date,
@@ -1827,13 +1827,84 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     }
 
 
+# Every claim dropped in this process, so the compile can report the count
+# where "ok" used to hide it (#28): in the state mirror and the changelog.
+DROPPED_CLAIMS: list[dict[str, str]] = []
+
+
+# Issue #26.2: `done` and `ok` said the same thing whether pages were published
+# or only a candidate was quarantined. Each batch returns what it did.
+QUARANTINE_OPERATION_PREFIX = "compile-quarantine:"
+
+
+@dataclass(frozen=True)
+class BatchOutcome:
+    """One batch's exit status and, when it committed, what the commit was."""
+
+    status: int
+    outcome: str | None = None
+    paths: int = 0
+
+
+def _committed_outcome(result: CompileApplyResult) -> BatchOutcome:
+    """Name what this batch did, in the words the operator needs (#26.2)."""
+    paths = len(result.touched)
+    if result.operation_id.startswith(QUARANTINE_OPERATION_PREFIX):
+        print(
+            f"compile_memory: batch quarantined: {paths} candidate(s) under "
+            "knowledge/inbox/claims/, no page published; the daily stays "
+            "pending until the candidate is reviewed."
+        )
+        return BatchOutcome(0, "quarantined", paths)
+    print(f"compile_memory: batch published {paths} page(s).")
+    return BatchOutcome(0, "published", paths)
+
+
+def compile_outcome(outcomes: Sequence[BatchOutcome]) -> str:
+    """One word for the run: published, quarantined, partial, or nothing."""
+    kinds = {item.outcome for item in outcomes if item.outcome}
+    if not kinds:
+        return "nothing"
+    if len(kinds) == 1:
+        return kinds.pop()
+    return "partial"
+
+
+def _outcome_sentence(outcomes: Sequence[BatchOutcome]) -> str:
+    counts: dict[str, list[int]] = {}
+    for item in outcomes:
+        if item.outcome:
+            counts.setdefault(item.outcome, []).append(item.paths)
+    parts = [
+        f"{kind} {len(paths)} batch(es), {sum(paths)} path(s)"
+        for kind, paths in sorted(counts.items())
+    ]
+    return "; ".join(parts) or "nothing to publish"
+
+
 def _report_dropped_claim(slug: str, detail: str) -> None:
-    """A claim that cannot bind is dropped, and never dropped silently."""
+    """A claim that cannot bind is dropped, never silently, and always counted."""
+    DROPPED_CLAIMS.append({"slug": slug, "detail": detail[:MAX_FAILURE_DETAIL_CHARS]})
     print(
         f"compile_memory: claim dropped on {slug}: "
         f"{detail[:MAX_FAILURE_DETAIL_CHARS]}",
         file=sys.stderr,
     )
+    _append_drop_record(slug, detail)
+
+
+def _append_drop_record(slug: str, detail: str) -> None:
+    """One JSON line per drop under logs/, best effort, never fatal."""
+    from memory_state import REPORTS_DIR
+
+    day = datetime.now().strftime("%Y-%m-%d")
+    record = {"at": datetime.now().isoformat(timespec="seconds"), "slug": slug, "detail": detail[:MAX_FAILURE_DETAIL_CHARS]}
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with (REPORTS_DIR / f"compile-drops-{day}.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _with_derived_claims(
@@ -2076,17 +2147,52 @@ def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
     return offsets[0]
 
 
-def _require_complete_line(
-    block: bytes, quote_offset: int, quote_bytes: bytes, quote: str
-) -> None:
-    """A quote must be a whole line, so half a sentence cannot be cited."""
+def _line_bounds(block: bytes, quote_offset: int, quote_length: int) -> tuple[int, int]:
     line_start = block.rfind(b"\n", 0, quote_offset) + 1
-    line_end = block.find(b"\n", quote_offset + len(quote_bytes))
+    line_end = block.find(b"\n", quote_offset + quote_length)
     if line_end < 0:
         line_end = len(block)
+    return line_start, line_end
+
+
+def _completed_line(
+    block: bytes, quote_offset: int, quote_bytes: bytes, quote: str
+) -> tuple[str, bytes, int]:
+    """The quote as one whole line, so half a sentence cannot be cited.
+
+    A quote that is part of one line is widened to that line rather than
+    dropped: the anchor is still exact bytes of the immutable source, only the
+    whole line of them. Issue #28 counted sixteen claims dropped in one compile
+    for quoting less than a line, each fact lost for good, with the compile
+    reporting ok.
+    """
+    line_start, line_end = _line_bounds(block, quote_offset, len(quote_bytes))
     source_line = block[line_start:line_end].decode("utf-8", errors="strict").strip()
-    if quote != _without_bullet(source_line):
-        raise ValueError("compile evidence must quote one complete source line")
+    whole = _without_bullet(source_line)
+    if quote == whole:
+        return quote, quote_bytes, quote_offset
+    whole_bytes = whole.encode("utf-8")
+    whole_offset = block.find(whole_bytes, line_start, line_end)
+    if whole_offset < 0:
+        raise ValueError(
+            "compile evidence must quote one complete source line: "
+            f"quoted {quote[:MAX_QUOTE_REPORT_CHARS]!r}, line {source_line[:MAX_QUOTE_REPORT_CHARS]!r}"
+        )
+    _report_widened_quote(quote, whole)
+    return whole, whole_bytes, whole_offset
+
+
+# What a dropped or widened quote's report shows of the text: enough to find
+# the line, never the whole entry.
+MAX_QUOTE_REPORT_CHARS = 160
+
+
+def _report_widened_quote(quote: str, whole: str) -> None:
+    print(
+        "compile_memory: claim quote widened to its line: "
+        f"{quote[:MAX_QUOTE_REPORT_CHARS]!r} -> {whole[:MAX_QUOTE_REPORT_CHARS]!r}",
+        file=sys.stderr,
+    )
 
 
 def _without_bullet(source_line: str) -> str:
@@ -3825,13 +3931,27 @@ def _mark_started(trigger: str) -> None:
     update_state(_mutate)
 
 
-def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
+def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:
+    if status == "error":
+        return "failed"
+    return compile_outcome(outcomes)
+
+
+def _mark_finished(
+    trigger: str,
+    status: str,
+    error: str | None = None,
+    *,
+    outcomes: Sequence[BatchOutcome] = (),
+) -> None:
     finished_iso = datetime.now().isoformat(timespec="seconds")
 
     def _mutate(s: dict) -> None:
         s["last_compile_finished_at"] = finished_iso
         s["last_compile_finished_trigger"] = trigger
         s["last_compile_status"] = status
+        s["last_compile_outcome"] = _finished_outcome(status, outcomes)
+        s["last_compile_dropped_claims"] = len(DROPPED_CLAIMS)
         if error is not None:
             s["last_compile_error"] = error[:500]
         else:
@@ -4000,6 +4120,7 @@ def _run(
     owner: OwnerLease | None = None,
 ) -> int:
     _require_compile_active(deadline, cancelled)
+    DROPPED_CLAIMS.clear()
     state = load_state()
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
@@ -4018,8 +4139,9 @@ def _run(
         _require_compile_active(deadline, cancelled)
         return _failed_compile(args, inputs, exc)
 
+    outcomes: list[BatchOutcome] = []
     for batch in batches:
-        status = _run_batch(
+        done = _run_batch(
             _refresh_compile_batch(batch),
             args,
             coordinator=coordinator,
@@ -4027,11 +4149,12 @@ def _run(
             cancelled=cancelled,
             owner=owner,
         )
-        if status != 0:
-            return status
+        if done.status != 0:
+            return done.status
+        outcomes.append(done)
     _require_compile_active(deadline, cancelled)
-    _mark_finished(args.trigger, "ok")
-    print("compile_memory: done.")
+    _mark_finished(args.trigger, "ok", outcomes=outcomes)
+    print(f"compile_memory: done: {_outcome_sentence(outcomes)}.")
     return 0
 
 
@@ -4065,8 +4188,8 @@ def _run_batch(
     deadline: float,
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
-) -> int:
-    """Resolve and apply one batch; a non-zero result ends the whole run."""
+) -> BatchOutcome:
+    """Resolve and apply one batch; a non-zero status ends the whole run."""
     try:
         resolved = resolve_compile_plan(
             batch.inputs,
@@ -4076,7 +4199,7 @@ def _run_batch(
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return _failed_compile(args, batch.inputs, exc)
+        return BatchOutcome(_failed_compile(args, batch.inputs, exc))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -4084,7 +4207,7 @@ def _run_batch(
             f"compile_memory: dry-run resolved {len(resolved.plan['operations'])} "
             f"operation(s){' from cache' if resolved.cache_hit else ''}; no writes."
         )
-        return 0
+        return BatchOutcome(0)
     return _apply_batch(
         batch,
         resolved,
@@ -4105,7 +4228,7 @@ def _apply_batch(
     deadline: float,
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
-) -> int:
+) -> BatchOutcome:
     try:
         result = apply_compile_plan(
             batch.inputs,
@@ -4122,12 +4245,12 @@ def _apply_batch(
     except TimeoutError:
         raise
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
-        return _failed_compile(
-            args, batch.inputs, exc, prefix="transaction not committed: "
+        return BatchOutcome(
+            _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
         )
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
-    return 0
+    return _committed_outcome(result)
 
 
 def _transactional_owner(

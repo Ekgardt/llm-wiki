@@ -30,26 +30,40 @@ def _details(kinds: dict, last_at: str = JUST_NOW) -> dict:
 
 
 def test_a_lost_race_is_written_under_its_own_name():
-    for message in (
-        "OperationalOwnershipError: owner_busy",
-        "ProjectPendingPriorError: project 'x' sequence 9 waits for sequence 8",
-        "ValueError: operation_id is already bound to a different request",
+    from markdown_transaction import OperationBoundElsewhereError, ProjectPendingPriorError
+    from operational_ownership import OperationalOwnershipError
+
+    for error in (
+        OperationalOwnershipError("owner_busy"),
+        ProjectPendingPriorError("x", 9, 8),
+        OperationBoundElsewhereError("operation_id is already bound to a different request"),
     ):
         assert (
-            integration_adapter._checkpoint_log_kind(message)
+            integration_adapter._checkpoint_log_kind(error)
             == "project checkpoint contention"
         )
 
 
 def test_a_state_lock_timeout_is_contention_too():
     """The event is queued in project_checkpoint_pending and drained later."""
-    message = (
-        "TimeoutError: Could not acquire state lock: run/state.json.lock"
-    )
+    from memory_state import StateLockTimeout
+
+    error = StateLockTimeout("Could not acquire state lock: run/state.json.lock")
 
     assert (
-        integration_adapter._checkpoint_log_kind(message)
+        integration_adapter._checkpoint_log_kind(error)
         == "project checkpoint contention"
+    )
+
+
+def test_an_ownership_refusal_that_is_not_a_race_keeps_the_plain_name():
+    from operational_ownership import OperationalOwnershipError
+
+    assert (
+        integration_adapter._checkpoint_log_kind(
+            OperationalOwnershipError("owner_record_invalid")
+        )
+        == "project checkpoint"
     )
 
 
@@ -68,7 +82,7 @@ def test_the_trail_already_written_is_classified_by_what_it_says():
 
 def test_a_real_failure_keeps_the_plain_name():
     assert (
-        integration_adapter._checkpoint_log_kind("KeyError: 'project'")
+        integration_adapter._checkpoint_log_kind(KeyError("project"))
         == "project checkpoint"
     )
 

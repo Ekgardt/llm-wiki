@@ -229,3 +229,87 @@ def test_a_vault_that_never_compiled_reports_no_failure(monkeypatch):
     _state(monkeypatch, {})
 
     assert scheduled_nightly._compile_failed_this_pass(None) is None
+
+
+def test_a_running_compile_is_followed_up_to_the_wait_bound_and_then_deferred(monkeypatch):
+    """Issue #21: a healthy 6.5-minute compile was recorded as failures=2 after a 5-minute wait."""
+    import scheduled_nightly
+
+    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "0")
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: True)
+    assert scheduled_nightly._wait_compile_finished() is False
+
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
+    assert scheduled_nightly._wait_compile_finished() is True
+
+    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "not a number")
+    assert scheduled_nightly._compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
+    monkeypatch.delenv(scheduled_nightly.COMPILE_WAIT_ENV)
+    assert scheduled_nightly._compile_wait_seconds() == 1800.0
+
+
+def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monkeypatch):
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "_run_steps", lambda run_step, log, steps: 0)
+    monkeypatch.setattr(scheduled_nightly, "_wait_for_compile_idle", lambda log: None)
+    monkeypatch.setattr(scheduled_nightly, "_last_compile_finished", lambda: None)
+    monkeypatch.setattr(scheduled_nightly, "_wait_compile_finished", lambda: False)
+    messages: list[str] = []
+
+    failures = scheduled_nightly._nightly_steps(lambda *a, **k: 0, messages.append, None)
+
+    assert failures == 0
+    assert any("deferred" in message for message in messages)
+
+
+def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
+    """Issue #29: five generations, 1.05 GB, accumulated in one day with nothing removing them."""
+    import scheduled_nightly
+
+    steps = scheduled_nightly._post_compile_steps()
+    labels = [step.label for step in steps]
+    prune = next(step for step in steps if step.label == "prune_generations")
+
+    assert labels.index("prune_generations") > labels.index("search")
+    assert prune.command[-1] == "--apply"
+    assert prune.command[-2].endswith("prune_generations.py")
+
+
+def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkeypatch) -> None:
+    """Issue #23.5: the morning reads what the night measured."""
+    import doctor
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(
+        doctor,
+        "run_doctor",
+        lambda **kwargs: {"overall_status": "ok", "checks": [], "budget": kwargs["time_budget_seconds"]},
+    )
+    lines: list[str] = []
+
+    scheduled_nightly._write_health_report(lines.append)
+
+    payload = json.loads((tmp_path / "logs" / "doctor-report.json").read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "health-report/v1"
+    assert payload["report"]["budget"] == scheduled_nightly.HEALTH_REPORT_BUDGET_SECONDS
+    assert payload["written_at"].endswith("+00:00")
+    assert lines == ["  health: ok"]
+
+
+def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) -> None:
+    import doctor
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+
+    def _explode(**kwargs):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(doctor, "run_doctor", _explode)
+    lines: list[str] = []
+
+    scheduled_nightly._write_health_report(lines.append)
+
+    assert lines == ["  health report skipped: RuntimeError"]

@@ -8,6 +8,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **The repository ships no memory.** The 89 published pages under
+  `knowledge/notes/` (the owner's architecture decisions and the
+  demonstration pages), the two synthetic daily logs and the vault's log
+  entries leave the repository; a fresh install starts with an empty memory
+  instead of another person's guard rails and "89 curated pages" (issue #19).
+  The owner's pages stay where they are, private. `knowledge/index.md` and
+  `knowledge/log.md` ship as empty skeletons the runtime fills.
+- **The memory index no longer holds the product's own code.** The vault
+  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
+  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
+  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
+  repository, the checkout included when its owner asks.
+- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
+  --legacy-only` and the generated-query run measured recall over the pages
+  the repository used to ship; with no pages shipped there is nothing to
+  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
+  and `benchmark/legacy-60-v1.json` are gone.
+- **The vault stands are retired**: retrieval, application, contamination
+  and lift attribution, with their answer-key and entry-point helpers. Their
+  questions and gold pages were the owner's decision pages; with those pages
+  private there is nothing public to run them on. The synthetic
+  `retrieval-v2.json` corpus (which carries cross-language queries) and the
+  LongMemEval stand are the public measurements.
 - **Cursor and Antigravity are no longer supported platforms.** The owner uses
   neither, and carrying two hosts nobody exercises meant two managed hook
   formats, two doctor checks, two installer detections, and two event
@@ -24,6 +47,33 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Two users' first-day findings (issues #17–#29, PR #27), each with its test
+  and, where the design changed, a dated note under `docs/research/`:
+  a fresh install adopts Reliability V3 so capture works at once (#17); the
+  nightly follows a slow compile instead of failing it and prunes superseded
+  generations (#21, #29.4); the provider and model chosen at install reach
+  the hooks and the scheduler units (#22); a deleted project's journal can
+  be rebuilt from its checkpoints (#20); a compile names every claim it drops
+  and widens a partial quote to its line instead of dropping it (#28);
+  `doctor` reads the vector state without the budget (#29.1); an empty
+  `recall` names the generation it searched and the envelope repeats the
+  trace's partial and fallback state (#26.1); a compile says `published` or
+  `quarantined` per batch and records `last_compile_outcome` (#26.2); a
+  capture write deferred by a writer race is counted apart from a lost one
+  (#26.3); the claim check names each code's cause, the pages and the repair
+  (#29.5); session start reads the nightly's health report instead of saying
+  "not measured" every morning (#23.5); a busy maintenance fence names its
+  holder (#29.6); Codex hooks are discovered natively and the internal
+  classifier no longer captures itself (PR #27).
+- On a vault that adopted Reliability V3 before its queue was ever used, the
+  doctor reported the v2 queue migration as pending for ever and `--repair`
+  aborted on the v2 tombstone before repairing anything; adoption retires
+  that migration and both now say so. A capture write refused by a writer
+  race is classified by the exception's type and code, never by its text;
+  the state-lock timeout and the bound-elsewhere refusal are typed for it.
+- The Codex hook probe waits for the peer it killed to be reaped within its
+  own cleanup budget instead of the already-expired probe deadline; on
+  Windows it had returned while the peer was still exiting.
 - `uninstall` and `rollback` still take back a Cursor or Antigravity hook
   fragment written by an install from before the retirement. Deleting the
   writing code outright would have made the manifest name a resource the code
@@ -175,8 +225,11 @@ state, including everything found and fixed during the audit week.
 - Added a nonmutating installed-vault Reliability V3 inspector and redacted CLI,
   deterministic fresh/upgrade cutover validation, retained byte-identical v2 evidence,
   tombstone and crash-resume checks, and read-only SQLite validation. Public apply/adoption
-  remains fail-closed with `reliability_v3_runtime_activation_incomplete` until compatible
-  v3 queue writers and canonical ownership are complete; no runtime state is deleted.
+  performs the offline v3 cutover on a fresh or quiescent vault (the earlier
+  `reliability_v3_runtime_activation_incomplete` refusal was lifted once the v3 queue
+  writers and canonical ownership landed); no runtime state is deleted. Since
+  2026-09-10 the installer runs it, because session capture is refused until it has
+  (issue #17).
 - Bounded Claude and Codex integration configuration backups to 10 files, 90 days,
   and 100 MiB per integration. Changed merges now verify a byte-exact sibling
   preimage before atomic publication, preserve the newest restore point, prune only

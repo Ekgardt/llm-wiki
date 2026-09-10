@@ -296,7 +296,18 @@ try {
         $testFailure = "Production smoke timed out after ${testTimeoutSeconds}s; installation aborted"
     } else {
         $testExit = $testProcess.ExitCode
-        if ($testExit -ne 0) {
+        # Windows PowerShell 5.1 can hand back a process object with no exit
+        # code when the process finished before the handle was opened; the
+        # code arrives a moment later, and an absent code is never a pass.
+        $testExitWaits = 0
+        while ($null -eq $testExit -and $testExitWaits -lt 40) {
+            Start-Sleep -Milliseconds 50
+            $testExit = $testProcess.ExitCode
+            $testExitWaits += 1
+        }
+        if ($null -eq $testExit) {
+            $testFailure = "Production smoke exit status unavailable; installation aborted"
+        } elseif ($testExit -ne 0) {
             $testFailure = "Production smoke failed; installation aborted"
         } else {
             Ok "Production smoke passed"

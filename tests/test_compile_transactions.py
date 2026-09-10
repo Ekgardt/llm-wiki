@@ -1623,7 +1623,8 @@ def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):
         compile_memory.validate_compile_plan(_semantic_plan(), inputs)
 
 
-def test_evidence_quote_rejects_substring_of_complete_bullet(vault):
+def test_evidence_quote_that_is_part_of_a_bullet_is_widened_to_the_bullet(vault, capsys):
+    """Issue #28: a partial quote is widened to its line, not dropped."""
     root, _state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
     daily.write_text(
@@ -1639,8 +1640,8 @@ def test_evidence_quote_rejects_substring_of_complete_bullet(vault):
     semantic["evidence"][0]["quoted_text"] = "reject substring citations"
     plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
 
-    with pytest.raises(ValueError, match="complete source line"):
-        compile_memory.validate_compile_plan(plan, inputs)
+    compile_memory.validate_compile_plan(plan, inputs)
+    assert "widened to its line" in capsys.readouterr().err
 
     semantic["evidence"][0]["quoted_text"] = (
         "Always reject substring citations before durable publication."
@@ -2109,3 +2110,25 @@ def test_one_operation_that_cannot_be_reviewed_alone_is_refused(monkeypatch):
 
     with pytest.raises(compile_memory._ProviderStageFailure):
         compile_memory._CompileAttempt._critique_batches(attempt, None, ["a"])
+
+
+def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
+    """Issue #26.2: `done` and `ok` read the same whether pages were published or not."""
+    import compile_memory
+
+    quarantined = compile_memory.CompileApplyResult(
+        "t1", "compile-quarantine:abc", "committed", ("knowledge/inbox/claims/x.md",), 1, "now", "k"
+    )
+    published = compile_memory.CompileApplyResult(
+        "t2", "compile:def", "committed", ("knowledge/notes/a.md", "knowledge/notes/b.md"), 2, "now", "k"
+    )
+
+    first = compile_memory._committed_outcome(quarantined)
+    second = compile_memory._committed_outcome(published)
+
+    out = capsys.readouterr().out
+    assert "batch quarantined: 1 candidate(s) under knowledge/inbox/claims/" in out
+    assert "batch published 2 page(s)" in out
+    assert compile_memory.compile_outcome([first]) == "quarantined"
+    assert compile_memory.compile_outcome([first, second]) == "partial"
+    assert compile_memory._finished_outcome("error", [second]) == "failed"

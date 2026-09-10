@@ -46,6 +46,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
@@ -750,19 +751,40 @@ TOOL_INPUT_SCHEMAS = {
 
 
 def _search_vault(
-    query: str, limit: int = 8, *, deadline: float | None = None
+    query: str,
+    limit: int = 8,
+    *,
+    deadline: float | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict]:
-    """Run hybrid search on the vault."""
+    """Run hybrid search on the vault; the planner trace lands in `trace_sink`."""
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     operation_deadline = _search_deadline(deadline)
     try:
-        return _run_vault_search(query, limit, operation_deadline, semantic=True)
-    except TimeoutError:
-        lexical = _run_vault_search(
-            query, limit, operation_deadline, semantic=False, graph=False, rerank=False
+        return _run_vault_search(
+            query, limit, operation_deadline, semantic=True, trace_sink=trace_sink
         )
-        return [_lexical_fallback_row(row) for row in lexical]
+    except TimeoutError:
+        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink)
+
+
+def _lexical_after_deadline(
+    query: str, limit: int, operation_deadline: float, trace_sink: dict[str, object] | None
+) -> list[dict]:
+    """The hybrid run hit its deadline: one lexical pass, marked as the fallback it is."""
+    lexical = _run_vault_search(
+        query,
+        limit,
+        operation_deadline,
+        semantic=False,
+        graph=False,
+        rerank=False,
+        trace_sink=trace_sink,
+    )
+    if trace_sink is not None:
+        trace_sink.update(_lexical_fallback_row({}))
+    return [_lexical_fallback_row(row) for row in lexical]
 
 
 def _search_deadline(deadline: float | None) -> float:
@@ -782,6 +804,7 @@ def _run_vault_search(
     semantic: bool,
     graph: bool = True,
     rerank: bool = True,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict]:
     from search_memory import search
 
@@ -798,6 +821,7 @@ def _run_vault_search(
         rerank=rerank,
         source_tool="mcp.recall",
         deadline_monotonic=operation_deadline,
+        trace_sink=trace_sink,
     )
 
 
@@ -810,47 +834,69 @@ def _lexical_fallback_row(row: dict) -> dict:
     }
 
 
-def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
-    """Recover the planner trace from compatibility rows and validate it closed."""
-    if results and all(
-        key in results[0]
-        for key in ("requested_mode", "effective_mode", "signals_used", "generation")
-    ):
-        first = results[0]
-        trace: dict[str, object] = {
-            "schema_version": "retrieval-trace/v1",
-            "requested_mode": first.get("requested_mode"),
-            "effective_mode": first.get("effective_mode"),
-            "signals_used": first.get("signals_used", []),
-            "fallback_reason": first.get("fallback_reason"),
-            "corpus_generation": first.get("generation", "legacy"),
-            "partial": bool(first.get("partial", False)),
-            "reranker_applied": bool(first.get("reranker_applied", False)),
-            "reranker_model_id": first.get("reranker_model_id"),
-            "reranker_model_revision": first.get("reranker_model_revision"),
-            "reranker_depth": first.get("reranker_depth"),
-            "reranker_duration_ms": first.get("reranker_duration_ms"),
-            "reranker_fallback_reason": first.get("reranker_fallback_reason"),
-        }
-    else:
-        from retrieval import analyze_query
+TRACE_KEYS = ("requested_mode", "effective_mode", "signals_used", "corpus_generation")
 
-        requested = analyze_query(query).recommended_profile
-        trace = {
-            "schema_version": "retrieval-trace/v1",
+
+def _reported_trace(reported: Mapping[str, object]) -> dict[str, object]:
+    """The trace the search reported, in the envelope's shape."""
+    return {
+        "schema_version": "retrieval-trace/v1",
+        "requested_mode": reported.get("requested_mode"),
+        "effective_mode": reported.get("effective_mode"),
+        "signals_used": list(reported.get("signals_used", ())),
+        "fallback_reason": reported.get("fallback_reason"),
+        "corpus_generation": reported.get("corpus_generation") or "legacy",
+        "partial": bool(reported.get("partial", False)),
+        "reranker_applied": bool(reported.get("reranker_applied", False)),
+        "reranker_model_id": reported.get("reranker_model_id"),
+        "reranker_model_revision": reported.get("reranker_model_revision"),
+        "reranker_depth": reported.get("reranker_depth"),
+        "reranker_duration_ms": reported.get("reranker_duration_ms"),
+        "reranker_fallback_reason": reported.get("reranker_fallback_reason"),
+    }
+
+
+def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
+    """A compatibility row carries the trace under `generation`, not `corpus_generation`."""
+    return _reported_trace({**row, "corpus_generation": row.get("generation")})
+
+
+def _unreported_trace(query: str) -> dict[str, object]:
+    """Nothing reported a trace: say so, and never guess a generation."""
+    from retrieval import analyze_query
+
+    requested = analyze_query(query).recommended_profile
+    return _reported_trace(
+        {
             "requested_mode": requested,
             "effective_mode": "BASE",
-            "signals_used": [],
             "fallback_reason": "trace_unavailable",
-            "corpus_generation": "legacy",
             "partial": True,
-            "reranker_applied": False,
-            "reranker_model_id": None,
-            "reranker_model_revision": None,
-            "reranker_depth": None,
-            "reranker_duration_ms": None,
-            "reranker_fallback_reason": None,
         }
+    )
+
+
+def _carries_trace(mapping: object, *, generation_key: str) -> bool:
+    if not isinstance(mapping, Mapping):
+        return False
+    return all(key in mapping for key in (*TRACE_KEYS[:3], generation_key))
+
+
+def _retrieval_trace(
+    query: str, results: list[dict], reported: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """The planner trace: reported by the search itself, else recovered from rows.
+
+    The search reports its trace whether or not it returned rows (#26.1), so
+    an empty result names the generation it searched; rows alone are the path
+    for callers that predate the sink.
+    """
+    if _carries_trace(reported, generation_key="corpus_generation"):
+        trace = _reported_trace(reported)
+    elif results and _carries_trace(results[0], generation_key="generation"):
+        trace = _row_trace(results[0])
+    else:
+        trace = _unreported_trace(query)
     from reliable_memory import validate_schema
 
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
@@ -3914,7 +3960,7 @@ def _record_tool_failure(operation: str, error: BaseException) -> None:
         from capture_diagnostics import record_capture_failure
 
         record_capture_failure(
-            "mcp_tool", f"{operation}: {type(error).__name__}: {error}"
+            "mcp_tool", f"{operation}: {type(error).__name__}: {error}", error=error
         )
     except Exception:  # noqa: BLE001 - diagnostics never break a tool call
         pass
@@ -4360,11 +4406,41 @@ def _results_quality(results) -> dict:
     return {"coverage": 0.9, "confidence": 0.8}
 
 
+# A trace that could not be recovered is not a retrieval fallback: nothing
+# ran in place of anything else.
+NOT_A_FALLBACK = frozenset({"trace_unavailable"})
+
+
+def _fell_back(reason: object) -> bool:
+    return bool(reason) and reason not in NOT_A_FALLBACK
+
+
+def _with_trace_state(quality: dict, trace: object) -> dict:
+    """The outer envelope says what the trace says (#26.1).
+
+    A recall whose optional stage timed out carried `partial: true` and
+    `fallback_reason: optional_stage_timeout` in every row and in the trace,
+    while the envelope said `partial: false, fallback: false, warnings: []`.
+    """
+    if not isinstance(trace, dict):
+        return quality
+    merged = dict(quality)
+    if trace.get("partial"):
+        merged["partial"] = True
+    reason = trace.get("fallback_reason")
+    if _fell_back(reason):
+        merged["fallback"] = True
+        merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
+    return merged
+
+
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"recall", "get_decisions"}:
         return None
     results = data.get("results", []) if name == "recall" else data
     quality = _results_quality(results)
+    if name == "recall":
+        quality = _with_trace_state(quality, data.get("retrieval_trace"))
     if not limit_clamped:
         return quality
     return _degrade_quality(
@@ -4794,15 +4870,17 @@ def _tool_recall(arguments: dict, deadline: float):
     if arguments.get("grounded", False):
         return _grounded_recall(arguments, deadline), False
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 8))
+    reported: dict[str, object] = {}
     results = _call_with_deadline(
         _search_vault,
         arguments["query"],
         limit=effective_limit,
         deadline=deadline,
+        trace_sink=reported,
     )
     data = {
         "results": results,
-        "retrieval_trace": _retrieval_trace(arguments["query"], results),
+        "retrieval_trace": _retrieval_trace(arguments["query"], results, reported),
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped

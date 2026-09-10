@@ -91,8 +91,7 @@ def test_the_repositorys_own_allowlist_is_read(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parent.parent
     published = rebuild_memory_index._published_notes(repository)
 
-    assert published is not None
-    assert "knowledge/notes/single-directory-vault-decision.md" in published
+    assert published == {"knowledge/notes/README.md"}
 
 
 PUBLIC_GITIGNORE = """

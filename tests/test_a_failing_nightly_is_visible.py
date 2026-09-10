@@ -80,3 +80,47 @@ def test_the_unmeasured_block_carries_the_nightly_line(tmp_path, monkeypatch) ->
 
     assert "nightly maintenance is failing" in block
     assert "9 of 18 checks" in block
+
+
+def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degraded") -> None:
+    monkeypatch.setattr(session_start_context, "STATE_ROOT", tmp_path)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    report = {
+        "overall_status": status,
+        "checks": [{"id": "index", "status": status, "message": "stale"}],
+    }
+    (tmp_path / "logs" / "doctor-report.json").write_text(
+        json.dumps({"schema_version": "health-report/v1", "written_at": written_at, "report": report}),
+        encoding="utf-8",
+    )
+
+
+def test_session_start_reads_the_nightly_report_instead_of_measuring(tmp_path, monkeypatch) -> None:
+    """Issue #23.5: 'not measured' every morning on a healthy vault."""
+    from datetime import datetime, timedelta, timezone
+
+    written = datetime.now(timezone.utc) - timedelta(hours=6)
+    _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
+
+    block = session_start_context.health_block()
+
+    assert "index (degraded): stale" in block
+    assert f"measured by the nightly pass at {written.strftime('%Y-%m-%d %H:%M')} UTC" in block
+    assert "not measured" not in block
+
+
+def test_a_healthy_nightly_report_says_nothing(tmp_path, monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    _stored_report(tmp_path, monkeypatch, datetime.now(timezone.utc).isoformat(), status="ok")
+
+    assert session_start_context.health_block() == ""
+
+
+def test_a_stale_nightly_report_is_not_trusted(tmp_path, monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    written = datetime.now(timezone.utc) - timedelta(hours=40)
+    _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
+
+    assert session_start_context._stored_health_report() is None

@@ -206,9 +206,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 
 Команда repair по умолчанию работает только на чтение и сообщает о fresh,
 upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
-`run/`. Изменяющая adoption пока намеренно не активирована: даже с offline apply-флагами
-backend завершается fail-closed с `reliability_v3_runtime_activation_incomplete`, пока не
-готовы v3 queue writers и канонический ownership protocol. Команда никогда не удаляет
+`run/`. С offline apply-флагами (`--apply --adopt-ownership-v3
+--confirm-all-agents-stopped`) команда выполняет переход на v3 для свежего или
+неактивного хранилища; установщик делает это сам, потому что до перехода захват сессий
+отклоняется (issue #17). Команда никогда не удаляет
 `run/`, knowledge, retired databases, legacy caches или compatibility markers.
 
 Опциональные extras добавляются без удаления уже выбранных оператором пакетов:
@@ -271,7 +272,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 ```
 
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
-- **KNOWLEDGE** — отслеживается в git (публичные примеры). Полные пользовательские данные живут в установленном vault. Daily-логи и персональные страницы gitignored.
+- **KNOWLEDGE** — ваша память; репозиторий поставляет её пустой. Все страницы и daily-логи gitignored, отслеживаются только README.
 - **RUNTIME** — gitignored. Search-индексы и логи одноразовые; транзакции, состояние очереди и undo-образы в `run/` являются операционным состоянием.
 - **Граница авторитетности** — Markdown, Git history и append-only project journals авторитетны. FTS, vectors, базы Evidence Graph, tiers, telemetry и model caches производны и пересоздаваемы.
 
@@ -323,22 +324,17 @@ uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-cla
 
 ## Бенчмарк
 
-> **Историческая legacy-методология**: только BM25/FTS5 по git-tracked публичному корпусу; graph, vectors и reranker отключены. `current-generated-v2` содержал 112 детерминированных запросов: точный заголовок, ключевые слова summary, частичный заголовок и slug. `legacy-60-v1.json` хранит исходные 60 текстов запросов и gold paths дословно, поэтому последующие правки страниц не меняют gate. Ignored личные страницы и `$LLM_WIKI_ROOT` исключены, поэтому clean clone воспроизводит тот же корпус. Это не LoCoMo и не LongMemEval; числа конкурентов получены на других датасетах.
-
-| Историческая метрика | Исторические текущие 112 | Исторические legacy 60 | agentmemory | Zep | Mem0 |
-|---------|-------------|-----------|-------------|-----|------|
-| Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
-| Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
-| Recall@5 | **100.0%** | **100.0%** | 95.2% | 94.7% | 91.6% |
-| Recall@10 | **100.0%** | n/a | n/a | n/a | n/a |
-| MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
-| Латентность p50 | **6.3мс** | n/a | 14мс | 155мс | 880мс |
-
-Это исторические результаты legacy-runner. Команда по умолчанию теперь запускает frozen retrieval-v2 benchmark. Только отдельный флаг `--legacy-only` выбирает старый gate; сочетание с `--semantic` или `--report` завершается закрытым отказом.
+Ворота поиска — замороженный публичный синтетический корпус
+`benchmark/retrieval-v2.json`: многоязычные страницы с градуированными
+свидетельствами, отвлекающими документами, историей во времени и случаями
+отказа; запускается `benchmark/run_retrieval_v2.py`. Долгая память измеряется
+на стенде LongMemEval (`benchmark/run_longmemeval.py`). Исторические BM25-ворота
+по страницам, которые репозиторий раньше поставлял (112 сгенерированных
+запросов и 60 замороженных), сняты 2026-09-10 вместе с этими страницами;
+их последние числа — в `benchmark/baseline-2026-07-16.md`. Числа конкурентов
+получены на других датасетах и несравнимы.
 
 Запустите retrieval-v2: `uv run python benchmark/run_benchmark.py`
-
-Воспроизведите старый gate: `uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP agent interface
 

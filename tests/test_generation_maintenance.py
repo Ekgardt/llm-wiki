@@ -22,6 +22,17 @@ def _generation_directory(state_root: Path, result: dict) -> Path:
     )
 
 
+# The code-extractor tests build a generation over declared code roots, the
+# way a repository generation does; the vault's own generation holds memory
+# only (`VAULT_CODE_ROOTS`).
+CODE_ROOTS = ("scripts", "tests")
+
+
+def _code_roots(root: Path) -> tuple[str, ...]:
+    """The declared roots this fixture actually created; a policy names directories."""
+    return tuple(name for name in CODE_ROOTS if (root / name).is_dir())
+
+
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state = tmp_path / "state"
@@ -70,8 +81,7 @@ def test_production_opencode_plugin_progresses_through_generation_validation(tmp
     )
     (scripts / production_plugin.name).write_bytes(production_plugin.read_bytes())
 
-    result = doctor.run_generation_maintenance(
-        root=root,
+    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -843,14 +853,12 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
         (root / "scripts").mkdir()
         (root / "scripts" / "app.py").write_text("def shared():\n    return 1\n", encoding="utf-8")
 
-    first = doctor.run_generation_maintenance(
-        root=first_root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(first_root), root=first_root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
     )
-    second = doctor.run_generation_maintenance(
-        root=second_root,
+    second = doctor.run_generation_maintenance(code_roots=_code_roots(second_root), root=second_root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -885,8 +893,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
         "def production_worker():\n    return 42\n", encoding="utf-8"
     )
 
-    result = doctor.run_generation_maintenance(
-        root=root,
+    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -940,8 +947,7 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
 
     monkeypatch.setattr(code_extractor, "extract_code", counted_extract)
 
-    result = doctor.run_generation_maintenance(
-        root=root,
+    result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1010,16 +1016,13 @@ def test_maintenance_cross_file_incremental_equals_clean_rebuild(tmp_path, initi
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(root, initial)
-    first = doctor.run_generation_maintenance(
-        root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
     )
     _write_python_workspace(root, updated)
-    incremental = doctor.run_generation_maintenance(
-        root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root, state_root=clean_state, time_budget_seconds=60, max_sources=10
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=clean_state, time_budget_seconds=60, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1048,23 +1051,20 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     (package / "__init__.py").write_text(
         "from .dep import helper\nhelper()\n", encoding="utf-8"
     )
-    doctor.run_generation_maintenance(
-        root=root,
+    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     (package / "dep.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
 
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1121,8 +1121,7 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     (package / "__init__.py").write_text("from . import dep\n", encoding="utf-8")
     dependency = package / "dep.py"
     dependency.write_text("VALUE = 1\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1137,15 +1136,13 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     ]
 
     _apply_dependency_change(change, dependency, package)
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1174,8 +1171,7 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
     alternate = root / "tests" / "dep.py"
     alternate.write_text("def helper():\n    return 2\n", encoding="utf-8")
 
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1199,15 +1195,13 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
         ).fetchall() == [("ambiguous_target",)]
 
     alternate.write_text("def other():\n    return 2\n", encoding="utf-8")
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1233,8 +1227,7 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
             "dep.py": "def helper():\n    return 1\n",
         },
     )
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1245,15 +1238,13 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
         "def helper():\n    return 2\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1289,23 +1280,20 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
     tests_root.mkdir()
     alternate = tests_root / "dep.py"
     alternate.write_text("def helper():\n    return 2\n", encoding="utf-8")
-    doctor.run_generation_maintenance(
-        root=root,
+    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     alternate.unlink()
 
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1336,8 +1324,7 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
         "def helper():\n    return 'package'\n", encoding="utf-8"
     )
 
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1364,15 +1351,13 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
         ).fetchone()[0] == 0
 
     (root / "scripts/foo.py").unlink()
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1402,8 +1387,7 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
         },
     )
 
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1432,15 +1416,13 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
         "class Second:\n    __tablename__ = 'archived_users'\n",
         encoding="utf-8",
     )
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1468,8 +1450,7 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
             ),
         },
     )
-    doctor.run_generation_maintenance(
-        root=root,
+    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1478,15 +1459,13 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
         "class User:\n    __tablename__ = 'users'\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1512,8 +1491,7 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
             "ordinary.py": "def stable():\n    return 1\n",
         },
     )
-    doctor.run_generation_maintenance(
-        root=root,
+    doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1522,15 +1500,13 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
         "def helper():\n    return 1\n", encoding="utf-8"
     )
 
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1559,8 +1535,7 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     first_file = shared / "a.py"
     first_file.write_text("def first():\n    return 1\n", encoding="utf-8")
     (shared / "b.py").write_text("def second():\n    return 2\n", encoding="utf-8")
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1575,15 +1550,13 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
         first_file.rename(shared / "z.py")
     else:
         first_file.unlink()
-    incremental = doctor.run_generation_maintenance(
-        root=root,
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
         time_budget_seconds=60,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(
-        root=root,
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1725,8 +1698,7 @@ def test_workspace_partition_receives_generation_deadline_and_cancellation(
 
     monkeypatch.setattr(doctor, "_partition_code_extraction", capture_partition)
 
-    built = doctor.run_generation_maintenance(
-        root=root,
+    built = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1779,8 +1751,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
             "ordinary.py": "def ordinary():\n    return 2\n",
         },
     )
-    first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
     real_collect = corpus_snapshot.collect_corpus
 
@@ -1791,8 +1762,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
         return snapshot
 
     monkeypatch.setattr(corpus_snapshot, "collect_corpus", reclassified)
-    second = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=60, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1895,8 +1865,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
 
     root, state = _vault(tmp_path)
     _write_python_workspace(root, {"app.py": "def app():\n    return 1\n"})
-    first = doctor.run_generation_maintenance(
-        root=root,
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -1915,8 +1884,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
 
     monkeypatch.setattr(code_extractor, "extract_code", expired)
 
-    second = doctor.run_generation_maintenance(
-        root=root,
+    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
         time_budget_seconds=60,
         max_sources=10,
@@ -2234,3 +2202,34 @@ def test_publishing_into_another_checkout_is_still_refused(tmp_path, monkeypatch
         search_memory._require_matching_repository(
             tmp_path, expected, deadline=None, cancelled=None
         )
+
+
+def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
+    """Issue #29.2: 92 % of an installed vault's chunks were this product's own
+    tests and docs, because the checkout is the vault. The generation now
+    collects `knowledge/` only; code is indexed per repository."""
+    import doctor
+    from generation_catalog import GenerationCatalog
+
+    root, state = _vault(tmp_path)
+    (root / "knowledge/notes/mine.md").write_text(
+        "---\ntype: concept\n---\n# Mine\nmy own page\n", encoding="utf-8"
+    )
+    for relative in ("scripts/tool.py", "docs/guide.md", "tests/test_x.py"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("checkout content\n", encoding="utf-8")
+
+    built = doctor.run_generation_maintenance(
+        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+    )
+    manifest = json.loads(
+        (state / "cache/evidence-graph/generations" / built["generation_id"]
+         / "source-manifest.json").read_text(encoding="utf-8")
+    )
+    paths = sorted(item["relative_path"] for item in manifest["sources"])
+
+    assert built["status"] == "built"
+    assert paths == ["knowledge/notes/mine.md"]
+    assert manifest["policy"]["code_roots"] == []
+    assert GenerationCatalog(state).get_active()["generation_id"] == built["generation_id"]

@@ -265,3 +265,54 @@ def test_clearing_an_empty_counter_reports_nothing(diagnostics):
     module, _state = diagnostics
 
     assert module.clear_capture_failures() == {}
+
+
+def test_a_writer_race_is_deferred_not_lost(diagnostics):
+    """Issue #26.3: seventeen `owner_busy` rows read as seventeen lost captures."""
+    module, state = diagnostics
+
+    from operational_ownership import OperationalOwnershipError
+
+    module.record_capture_failure(
+        "adapter_capture_worker",
+        "OperationalOwnershipError: owner_busy",
+        error=OperationalOwnershipError("owner_busy"),
+    )
+    module.record_capture_failure(
+        "adapter_capture_worker", "OSError: disk full", error=OSError("disk full")
+    )
+
+    entry = state["capture_failures"]["adapter_capture_worker"]
+    assert entry == {**entry, "count": 2, "deferred": 1}
+    assert module.capture_failure_totals(state) == {"adapter_capture_worker": 1}
+    assert module.capture_deferred_totals(state) == {"adapter_capture_worker": 1}
+    lines = module.FAILURE_LOG.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["outcome"] for line in lines] == ["deferred", "lost"]
+
+
+def test_only_deferred_writes_keep_the_session_quiet(diagnostics):
+    module, state = diagnostics
+
+    from memory_state import StateLockTimeout
+
+    module.record_capture_failure(
+        "adapter_capture_worker",
+        "TimeoutError: Could not acquire state lock",
+        error=StateLockTimeout("Could not acquire state lock"),
+    )
+
+    assert module.capture_failure_totals(state) == {}
+    assert module.capture_failure_line(state) == ""
+
+
+def test_the_text_of_an_error_never_decides_that_it_was_a_race(diagnostics):
+    """The type and the code decide; a message that merely says busy is a loss."""
+    module, state = diagnostics
+
+    module.record_capture_failure(
+        "post_tool_append", "RuntimeError: owner_busy", error=RuntimeError("owner_busy")
+    )
+    module.record_capture_failure("session_end", "owner_busy")
+
+    assert module.capture_failure_totals(state) == {"post_tool_append": 1, "session_end": 1}
+    assert module.capture_deferred_totals(state) == {}

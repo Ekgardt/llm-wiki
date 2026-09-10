@@ -34,6 +34,8 @@ from session_start_project_state import _compute_slug
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
+CAPTURE_DRAIN_MAX_TASKS = 20
+CAPTURE_DRAIN_SECONDS = 450
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
 # One host event, not one tool result. Claude Code sends `tool_response` in the
@@ -1675,39 +1677,18 @@ def _bounded_checkpoint_error(error: BaseException) -> str:
     return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
 
 
-# What a lost race says on its way out. Every one of these means another writer
-# holds the project right now and the next session end carries the same event —
-# not that a checkpoint was lost. Measured on this vault on 2026-09-07:
-# `no-hands` logged four of these in four minutes while its committed sequence
-# advanced from 836 to 838, so nothing was missing; only the log said so.
-CHECKPOINT_CONTENTION_MARKERS = (
-    "owner_busy",
-    "ProjectPendingPriorError",
-    "operation_id is already bound to a different request",
-    "writer is busy",
-    "database is locked",
-    # The state lock is held by another writer; the event is queued in
-    # `project_checkpoint_pending` and the next drain carries it. Measured
-    # 2026-09-07: the only two lines in the recent trail that were not already
-    # contention were this, three seconds apart, while checkpoints kept
-    # committing.
-    "Could not acquire state lock",
-)
-
-
-def _is_contention(message: str) -> bool:
-    return any(marker in message for marker in CHECKPOINT_CONTENTION_MARKERS)
-
-
-def _checkpoint_log_kind(message: str) -> str:
+def _checkpoint_log_kind(error: BaseException) -> str:
     """A lost race is retried by the next session; a failure is not.
 
     Both used to be written as `project checkpoint:` and counted together, so
     the health check read six hundred retries as six hundred failures and said
     "still happening" on a vault where nothing was going wrong. Naming them
-    apart costs one word and makes the count mean something again.
+    apart costs one word and makes the count mean something again. The
+    exception decides, by type and code (#26.3), not its text.
     """
-    if _is_contention(message):
+    from capture_diagnostics import is_contention
+
+    if is_contention(error):
         return "project checkpoint contention"
     return "project checkpoint"
 
@@ -1720,7 +1701,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] {_checkpoint_log_kind(message)}: {message}\n")
+            stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
     except Exception:  # noqa: BLE001
         pass
 
@@ -2142,10 +2123,10 @@ def _cleanup_runtime_transient(path: Path) -> None:
         pass
 
 
-def _run_session_start_maintenance() -> int:
+def _run_maintenance_command(script: str, argument: str) -> None:
     try:
         subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
+            [sys.executable, str(ROOT / "scripts" / script), argument],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -2155,6 +2136,11 @@ def _run_session_start_maintenance() -> int:
         )
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _run_session_start_maintenance() -> int:
+    _run_maintenance_command("integration_adapter.py", "--capture-worker")
+    _run_maintenance_command("memory_queue.py", "work")
     try:
         spawn_compile_if_idle()
     except Exception:  # noqa: BLE001
@@ -2978,12 +2964,26 @@ def _run_active_capture_worker_once() -> int:
     queue = active_memory_queue(vault, state_root)
     coordinator = active_markdown_coordinator(vault, state_root)
     process_missing = partial(process_new_capture, queue, coordinator)
-    run_capture_worker_once(
-        queue,
-        coordinator,
-        process_missing=process_missing,
+    work = partial(
+        run_capture_worker_once, queue, coordinator, process_missing=process_missing
     )
+    _drain_capture_work(work)
     return 0
+
+
+def _drain_capture_work(work) -> None:
+    """Drain successful captures in bounded turns; failures keep their retry policy."""
+    deadline = time.monotonic() + CAPTURE_DRAIN_SECONDS
+    for _ in range(CAPTURE_DRAIN_MAX_TASKS):
+        if work() is None:
+            return
+        if time.monotonic() >= deadline:
+            break
+    # Every completed work() has released its owner. One successor checks for
+    # any remainder, including intents whose event wake met our live owner.
+    spawn_detached(
+        [sys.executable, str(SCRIPTS_DIR / "integration_adapter.py"), "--capture-worker"]
+    )
 
 
 def _oversize_stdin() -> ValueError:
@@ -3102,6 +3102,22 @@ def _failed_operation(args: argparse.Namespace | None) -> str:
     return next(iter(named), getattr(args, "event", None) or "unknown")
 
 
+def _skip_reason(error: BaseException) -> str:
+    """The error's class, and its text only for our own refusals.
+
+    A provider timeout carries the command it ran; the allowlist refusal
+    carries a fixed sentence. The first must stay off stderr, the second is
+    what the operator needs to read (issue #23).
+    """
+    name = type(error).__name__
+    if isinstance(error, PermissionError):
+        return f"{name}: {error}"[:MAX_SKIP_REASON_CHARS]
+    return name
+
+
+MAX_SKIP_REASON_CHARS = 240
+
+
 def _record_cli_capture_failure(
     args: argparse.Namespace | None, error: BaseException
 ) -> None:
@@ -3124,6 +3140,7 @@ def _record_cli_capture_failure(
         record_capture_failure(
             f"adapter_{_failed_operation(args)}",
             f"{type(error).__name__}: {error}",
+            error=error,
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session
         pass
@@ -3145,7 +3162,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = _run_cli_event(args)
     except (Exception, SystemExit) as error:  # noqa: BLE001
         _record_cli_capture_failure(args, error)
-        print("integration_adapter: capture skipped", file=sys.stderr)
+        # The reason on the hook's own stderr, not only in the failure log:
+        # issue #23 found "capture skipped" alone said nothing about the
+        # transcript allowlist that refused the path.
+        print(f"integration_adapter: capture skipped: {_skip_reason(error)}", file=sys.stderr)
         output = None
     if output is not None:
         print(json.dumps(output, ensure_ascii=False))

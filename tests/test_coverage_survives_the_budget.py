@@ -35,10 +35,40 @@ import query_memory  # noqa: E402
 class _Chunk:
     id: str
     parent_page: str
+    # Since 2026-09-08 the unit of a repeat is the entry — the page and the
+    # heading a piece sits under — because a daily file holds every session of
+    # its day. A page with one heading is one entry, as these tests assume.
+    heading_ancestry: tuple[str, ...] = ()
+
+    @property
+    def source_path(self) -> str:
+        return self.parent_page
 
 
 def _chunks(*pairs: tuple[str, str]) -> list[_Chunk]:
     return [_Chunk(identifier, page) for identifier, page in pairs]
+
+
+def test_two_entries_of_one_page_are_not_repeats_of_each_other() -> None:
+    """Two sessions of one day live in one file and are both kept."""
+    kept = [_Chunk("s1", "D", ("day", "session one")), _Chunk("s2", "D", ("day", "session two")), _Chunk("b1", "B")]
+
+    query_memory._shed_one(kept)
+
+    assert [chunk.id for chunk in kept] == ["s1", "s2"]
+
+
+def test_a_sibling_retrieval_never_chose_goes_before_a_retrieved_repeat() -> None:
+    kept = [
+        _Chunk("a1", "A", ("a",)),
+        _Chunk("a2", "A", ("a",)),
+        _Chunk("a3", "A", ("a",)),
+        _Chunk("b1", "B"),
+    ]
+
+    query_memory._shed_one(kept, frozenset({"a1", "a3", "b1"}))
+
+    assert [chunk.id for chunk in kept] == ["a1", "a3", "b1"]
 
 
 def _shed_until(kept: list, remaining: int) -> list:

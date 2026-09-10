@@ -227,14 +227,22 @@ def _install_prestarted_node_program(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     program: str,
+    *,
+    before_ready: str = "",
 ) -> tuple[Path, list[subprocess.Popen[bytes]], list[lsp_process_tree.ProcessTree]]:
+    """A node parent that is already running when the probe "spawns" it.
+
+    `before_ready` runs before the parent signals ready, so whatever it sets up
+    (a descendant, a pid file) exists before the probe's clock starts.
+    """
     node = tmp_path / ("node.exe" if os.name == "nt" else "node")
     node.write_bytes(b"synthetic node executable\n")
     ready = tmp_path / "node-parent-ready"
     release = tmp_path / "node-parent-release"
     gated_program = (
         "import pathlib,time\n"
-        f"pathlib.Path({str(ready)!r}).write_text('ready',encoding='ascii')\n"
+        + before_ready
+        + f"pathlib.Path({str(ready)!r}).write_text('ready',encoding='ascii')\n"
         f"release=pathlib.Path({str(release)!r})\n"
         "while not release.exists(): time.sleep(0.005)\n"
         + program
@@ -283,6 +291,47 @@ def _pid_alive(pid: int) -> bool:
         if closing >= 0 and payload[closing + 2 :].split()[0] in {"Z", "X", "x"}:
             return False
     return True
+
+
+def _terminate_if_alive(descendant_pid: int) -> None:
+    if not _pid_alive(descendant_pid):
+        return
+    try:
+        os.kill(descendant_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _redirection_for(inherited_stream: str) -> str:
+    if inherited_stream == "stdout":
+        return "stdout=sys.stdout, stderr=subprocess.DEVNULL"
+    return "stdout=subprocess.DEVNULL, stderr=sys.stderr"
+
+
+def _inheriting_descendant_spawn(pid_file: Path, inherited_stream: str) -> str:
+    """Spawn a descendant that inherits one output stream, and record its pid."""
+    return (
+        "import subprocess,sys\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.2)'],"
+        f"{_redirection_for(inherited_stream)})\n"
+        f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
+    )
+
+
+def _trees_unowned(trees) -> bool:
+    return all(tree.process_group is None and tree.windows_job is None for tree in trees)
+
+
+def _trees_pending_cleanup(trees) -> bool:
+    pending = pyright_profile._pending_node_probe_cleanup_snapshot()
+    return all(tree in pending for tree in trees)
+
+
+def _assert_probe_gave_up(result, processes) -> None:
+    assert result[1] is None
+    assert result[2] is None
+    assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
+    assert all(process.returncode == 0 for process in processes)
 
 
 def _pid_exits_within(pid: int, seconds: float = 2.0) -> bool:
@@ -2541,52 +2590,30 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
     inherited_stream: str,
 ) -> None:
     pid_file = tmp_path / f"{inherited_stream}-descendant.pid"
-    if inherited_stream == "stdout":
-        redirection = "stdout=sys.stdout, stderr=subprocess.DEVNULL"
-    else:
-        redirection = "stdout=subprocess.DEVNULL, stderr=sys.stderr"
-    program = (
-        "import subprocess,sys\n"
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.2)'],"
-        f"{redirection})\n"
-        f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
-        "print('v22.1.0',flush=True)\n"
+    # The descendant exists before the parent is ready, so the probe's clock
+    # starts on a parent that already holds the stream open (PR #16: on a slow
+    # runner the old test read a pid file the program had not yet written).
+    _node, processes, trees = _install_prestarted_node_program(
+        monkeypatch,
+        tmp_path,
+        "print('v22.1.0',flush=True)\n",
+        before_ready=_inheriting_descendant_spawn(pid_file, inherited_stream),
     )
-    installer = (
-        _install_prestarted_node_program
-        if inherited_stream == "stdout"
-        else _install_real_node_program
-    )
-    _node, processes, trees = installer(
-        monkeypatch, tmp_path, program
-    )
-    operation_seconds = 0.3 if inherited_stream == "stdout" else 1.0
+    descendant_pid = int(pid_file.read_text(encoding="ascii"))
+    operation_seconds = 0.3
     started = time.monotonic()
 
     result = pyright_profile._probe_node(started + operation_seconds)
     elapsed = time.monotonic() - started
-    descendant_pid = int(pid_file.read_text(encoding="ascii"))
     try:
         assert elapsed <= (
             operation_seconds + pyright_profile.NODE_PROBE_CLEANUP_SECONDS + 0.25
         )
-        assert result[1] is None
-        assert result[2] is None
-        assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
-        assert all(process.returncode == 0 for process in processes)
+        _assert_probe_gave_up(result, processes)
         assert _pid_exits_within(descendant_pid)
-        assert all(
-            tree.process_group is None and tree.windows_job is None for tree in trees
-        ) or all(
-            tree in pyright_profile._pending_node_probe_cleanup_snapshot()
-            for tree in trees
-        )
+        assert _trees_unowned(trees) or _trees_pending_cleanup(trees)
     finally:
-        if _pid_alive(descendant_pid):
-            try:
-                os.kill(descendant_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _terminate_if_alive(descendant_pid)
 
 
 def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(

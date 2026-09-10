@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -30,9 +31,11 @@ import llm_client  # noqa: E402
 class _Recorder:
     def __init__(self) -> None:
         self.cwds: list[object] = []
+        self.commands: list[list[str]] = []
 
     def __call__(self, *args, **kwargs):
         self.cwds.append(kwargs.get("cwd"))
+        self.commands.append(list(args[0]))
         return subprocess.CompletedProcess(args=args or ("x",), returncode=0, stdout="", stderr="")
 
 
@@ -92,3 +95,17 @@ def test_the_codex_call_runs_outside_the_vault(
     prompt.write_text("hello", encoding="utf-8")
     llm_client._codex_last_message(["codex"], str(prompt), str(tmp_path / "out.txt"))
     assert [_is_outside_the_vault(cwd) for cwd in recorder.cwds] == [True]
+
+
+@pytest.mark.parametrize("model", [None, "gpt-5.6-sol"])
+def test_internal_codex_does_not_capture_its_own_classifier_session(
+    recorder: _Recorder, monkeypatch: pytest.MonkeyPatch, model: str | None,
+) -> None:
+    monkeypatch.setattr(llm_client, "_find_codex_binary", lambda: "/usr/bin/codex")
+    descriptor = replace(_descriptor(), provider="codex", model=model)
+    llm_client._call_codex(descriptor, "Classify this captured session", "Classifier")
+    command, = recorder.commands
+    offset = command.index("features.hooks=false")
+    assert command[offset - 1] == "-c"
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert command[:2] == ["/usr/bin/codex", "exec"]

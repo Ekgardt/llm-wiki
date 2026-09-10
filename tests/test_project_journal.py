@@ -817,6 +817,29 @@ def test_rotation_does_not_change_the_projection(
     assert _state_body(rolled) == _state_body(expected)
 
 
+def test_a_journal_rolls_by_size_before_it_rolls_by_count(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two events in, the third finds the journal past the byte bound and seals it."""
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 1000)
+    store = ProjectStore(vault, state_root)
+    for index in range(1, 3):
+        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"size:event-{index}"), "agent-a")
+    journal = vault / "knowledge/projects/demo/journal.md"
+    whole = project_journal.parse_journal_events("demo", journal.read_bytes())
+    expected = store.render_state(whole, _validated=True)
+
+    monkeypatch.setattr(project_journal, "ROTATE_ABOVE_BYTES", 1)
+    store.checkpoint("demo", checkpoint_event("evt-3", "size:event-3"), "agent-a")
+
+    live = project_journal.parse_journal_events("demo", journal.read_bytes())
+    assert live[0]["trigger"] == "journal_rotation"
+    assert (vault / "knowledge/projects/demo/journal.000001-000002.md").exists()
+    assert _state_body(store.render_state(live[:1], _validated=True)) == _state_body(expected)
+
+
 def _state_body(state: bytes) -> list[str]:
     """The rendered sections, without the sequence line that legitimately moves."""
     return [
@@ -2052,3 +2075,36 @@ def test_a_generated_state_page_quotes_a_slug_that_would_parse_as_a_list() -> No
     assert _yaml_scalar("[redacted-api-key]") == '"[redacted-api-key]"'
     assert _yaml_scalar('has "quotes"') == '"has \\"quotes\\""'
     assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
+
+
+def test_the_vault_root_is_never_a_project(vault: Path) -> None:
+    """Issue #20: a hook run from the vault minted a project named after it."""
+    from session_start_project_state import _compute_slug
+
+    with pytest.raises(ValueError, match="vault root is not a project"):
+        _compute_slug(vault, vault / "knowledge/projects")
+    assert _compute_slug(vault / "sub-project", vault / "knowledge/projects") == "sub-project"
+
+
+def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
+    vault: Path, state_root: Path
+) -> None:
+    """Issue #20: the journal is a projection of the store; the store rebuilds it."""
+    import shutil
+
+    store = ProjectStore(vault, state_root)
+    for index in range(1, 4):
+        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"rb:event-{index}"), "agent-a")
+    journal = vault / "knowledge/projects/demo/journal.md"
+    before = project_journal.parse_journal_events("demo", journal.read_bytes())
+    expected_state = store.render_state(before, _validated=True)
+    shutil.rmtree(vault / "knowledge/projects/demo")
+
+    report = store.rebuild_journal("demo")
+
+    rebuilt = project_journal.parse_journal_events("demo", journal.read_bytes())
+    assert [event["sequence"] for event in rebuilt] == [1, 2, 3]
+    assert report["events"] == 3 and report["last_sequence"] == 3
+    assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
+    store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
+    assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4

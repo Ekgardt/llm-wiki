@@ -10798,6 +10798,10 @@ class _QueueV3CandidateReader:
                 """SELECT * FROM tasks
                    WHERE state='ready' AND attempts < ? AND available_at <= ?
                      AND NOT EXISTS (
+                         SELECT 1 FROM capture_task_links link
+                         WHERE link.task_id=tasks.id
+                     )
+                     AND NOT EXISTS (
                          SELECT 1 FROM source_fences fence
                          WHERE instr(
                                    CAST(tasks.payload_blob AS TEXT),
@@ -14095,6 +14099,7 @@ def _record_processor_failure(task: dict[str, Any], error: BaseException) -> Non
         reason = f"{kind}: {type(error).__name__}: {redact_secrets(str(error))}"
         record_capture_failure(
             "queue_processor", reason[:MAX_PROCESSOR_REASON_CHARS],
+            error=error,
             session_id=str(task.get("id", ""))[:32] or None,
         )
     except Exception:  # noqa: BLE001 - diagnostics never change the outcome

@@ -1,7 +1,7 @@
+"""`run_benchmark.py` is the retrieval-v2 entry point; the legacy gate is retired."""
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
 
@@ -15,125 +15,23 @@ def _benchmark_module():
     return module
 
 
-def test_legacy_corpus_is_versioned_and_exactly_sixty_queries():
+def test_the_default_run_is_retrieval_v2(monkeypatch):
+    benchmark = _benchmark_module()
+    received: list[list[str]] = []
+    fake = type(sys)("run_retrieval_v2")
+    fake.main = lambda args: received.append(list(args)) or 0
+    monkeypatch.setitem(sys.modules, "run_retrieval_v2", fake)
+
+    assert benchmark.main(["--retrieval-v2", "--json"]) == 0
+    assert received == [["--json"]]
+
+
+def test_the_legacy_gate_is_retired(capsys):
     benchmark = _benchmark_module()
 
-    corpus = benchmark._load_legacy_corpus()
-
-    assert corpus["version"] == "legacy-60-v1"
-    assert len(corpus["queries"]) == 60
+    assert benchmark.main(["--legacy-only"]) == 2
+    assert "retired" in capsys.readouterr().err
 
 
-def test_legacy_corpus_queries_are_loaded_verbatim(monkeypatch):
-    benchmark = _benchmark_module()
-    monkeypatch.setattr(
-        benchmark,
-        "_generate_qa_pairs",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy corpus was regenerated")),
-    )
-
-    corpus = benchmark._load_legacy_corpus()
-
-    assert corpus["queries"][0] == {
-        "query": "three conventions, one root — 2026-04-13 memory review",
-        "gold_path": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
-        "query_type": "exact_title",
-    }
-    assert corpus["queries"][-1]["query"] == "three approaches giving durable"
-
-
-def test_search_runtime_isolates_indexes_vectors_lancedb_and_model_caches(
-    tmp_path, monkeypatch
-):
-    benchmark = _benchmark_module()
-    installed = tmp_path / "installed-vault"
-    runtime = tmp_path / "benchmark-runtime"
-    installed.mkdir()
-    sentinel = installed / "sentinel.txt"
-    sentinel.write_text("unchanged", encoding="utf-8")
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(installed))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(installed))
-
-    with benchmark._isolated_search_runtime(runtime) as search_memory:
-        assert all(path.is_relative_to(runtime) for path in _runtime_paths(search_memory))
-        assert (search_memory.ROOT, search_memory.KNOWLEDGE_DIR) == (
-            benchmark.ROOT,
-            benchmark.KNOWLEDGE,
-        )
-        assert all(
-            Path(os.environ[name]).is_relative_to(runtime) for name in benchmark.MODEL_CACHE_ENV
-        )
-
-    assert (sentinel.read_text(encoding="utf-8"), list(installed.iterdir())) == (
-        "unchanged",
-        [sentinel],
-    )
-
-
-def _runtime_paths(search_memory) -> list[Path]:
-    return [
-        search_memory.INDEX_DIR,
-        search_memory.INDEX_FILE,
-        search_memory.INDEX_MANIFEST,
-        search_memory.VECTOR_NPY,
-        search_memory.VECTOR_META,
-    ]
-
-
-def test_legacy_only_command_returns_nonzero_below_gate(monkeypatch):
-    benchmark = _benchmark_module()
-    monkeypatch.setattr(sys, "argv", ["run_benchmark.py", "--legacy-only"])
-    monkeypatch.setattr(
-        benchmark,
-        "_load_legacy_corpus",
-        lambda: {"version": "legacy-60-v1", "queries": [{"query": "q"}]},
-    )
-    monkeypatch.setattr(benchmark, "_tracked_knowledge_paths", lambda: [])
-    monkeypatch.setattr(
-        benchmark,
-        "_run_benchmark",
-        lambda *args, **kwargs: {
-            "recall_at_k": {5: 0.99},
-            "corpus_version": "legacy-60-v1",
-        },
-    )
-
-    assert benchmark.main() == 2
-
-
-def test_report_lists_queries_missed_at_recall_five():
-    benchmark = _benchmark_module()
-    results = {
-        "semantic": False,
-        "total_queries": 2,
-        "corpus_version": "test-v1",
-        "k_values": [1, 5],
-        "recall_at_k": {1: 0.0, 5: 0.5},
-        "mrr": 0.1,
-        "latency_p50_ms": 1.0,
-        "latency_p95_ms": 2.0,
-        "latency_avg_ms": 1.5,
-        "per_query": [
-            {"query": "late", "query_type": "exact_title", "gold": "late.md", "found_at": 6},
-            {"query": "good", "query_type": "exact_title", "gold": "good.md", "found_at": 2},
-        ],
-    }
-
-    report = benchmark._format_report(results)
-
-    assert "Missed at Recall@5" in report
-    assert "rank 6" in report
-
-
-def test_regression_gate_rejects_hidden_current_or_legacy_drop():
-    benchmark = _benchmark_module()
-
-    assert benchmark._passes_regression_gates(
-        {"recall_at_k": {5: 0.99}}, {"recall_at_k": {5: 1.0}}
-    )
-    assert not benchmark._passes_regression_gates(
-        {"recall_at_k": {5: 0.94}}, {"recall_at_k": {5: 1.0}}
-    )
-    assert not benchmark._passes_regression_gates(
-        {"recall_at_k": {5: 0.99}}, {"recall_at_k": {5: 0.99}}
-    )
+def test_no_legacy_corpus_ships():
+    assert not (Path(__file__).resolve().parent.parent / "benchmark" / "legacy-60-v1.json").exists()

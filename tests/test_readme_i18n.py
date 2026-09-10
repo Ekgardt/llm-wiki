@@ -90,8 +90,8 @@ def test_readmes_share_locked_install_and_read_only_repair_commands():
     for path, text in _readmes():
         for command in SHARED_COMMANDS:
             assert command in text, f"{path.name}: missing shared command {command!r}"
-        assert "reliability_v3_runtime_activation_incomplete" in text, (
-            f"{path.name}: must state that mutating v3 adoption is not activated"
+        assert "--adopt-ownership-v3" in text, (
+            f"{path.name}: must name the v3 adoption command the installer runs (issue #17)"
         )
 
 
@@ -183,19 +183,19 @@ def test_all_readmes_mention_current_version():
         "README.md": (
             "12 task-shaped",
             "full regression suite",
-            "Historical current 112",
+            "retrieval-v2.json",
             "optional Obsidian viewer",
         ),
         "README.ru.md": (
             "12 task-shaped",
             "полный регрессионный набор",
-            "Исторические текущие 112",
+            "retrieval-v2.json",
             "Obsidian как опциональный viewer",
         ),
         "README.zh-CN.md": (
             "12 个 task-shaped",
             "完整回归套件",
-            "历史当前 112",
+            "retrieval-v2.json",
             "Obsidian 为可选 viewer",
         ),
     }

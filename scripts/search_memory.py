@@ -4251,8 +4251,14 @@ def search(
     deadline_monotonic: float | None = None,
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict]:
-    """Public search API — always routes through retrieval.retrieve()."""
+    """Public search API — always routes through retrieval.retrieve().
+
+    `trace_sink`, when given, receives the planner trace of the run — which
+    generation was selected, which signals ran, what fell back — even when
+    the run returns no rows (#26.1).
+    """
     limit = _validate_search_limit(limit)
     if _blank_query(query):
         return []
@@ -4286,6 +4292,7 @@ def search(
         deadline_monotonic=deadline_monotonic,
         max_candidates=max_candidates,
         cancelled=cancelled,
+        trace_sink=trace_sink,
     )
 
 

@@ -115,12 +115,33 @@ def _cpu_precision(model: Any) -> tuple[Any, str]:
     module_type = getattr(getattr(torch, "nn", None), "Module", ())
     if requested_precision() == FP32 or not isinstance(model, module_type):
         return model, FP32
+    # In place, or the model is deep-copied and the copy owns every weight —
+    # measured 2026-09-08: the copy took the process to 3.6 GB of anonymous
+    # memory and the kernel killed a stand worker at 3.8 GB, while in place
+    # it is 1.07 GB anonymous against 0.8 GB for fp32, the rest file-backed
+    # and evictable. The freed heap is handed back to the OS afterwards.
     # Deprecated in torch 2.13 in favour of torchao, which is not installed;
     # the call still works and the replacement is one line when it is.
     quantized = torch.ao.quantization.quantize_dynamic(
-        model, {torch.nn.Linear}, dtype=torch.qint8
+        model, {torch.nn.Linear}, dtype=torch.qint8, inplace=True
     )
+    _release_heap()
     return quantized, INT8_DYNAMIC
+
+
+def _release_heap() -> None:
+    """Return what quantisation freed to the OS; glibc keeps it otherwise."""
+    import ctypes
+    import gc
+    import sys
+
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        return
 
 
 def _get_reranker_bundle() -> dict[str, Any] | None:

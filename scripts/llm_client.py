@@ -1243,6 +1243,8 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
         "read-only",
         "-c",
         f"model_reasoning_effort={reasoning}",
+        "-c",
+        "features.hooks=false",
         "--output-last-message",
         out_path,
     ]

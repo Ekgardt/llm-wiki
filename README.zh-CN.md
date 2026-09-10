@@ -197,10 +197,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 ```
 
 repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
-partial、adopted 或 conflicting 状态，并且不会创建 `run/`。变更性 adoption 目前有意
-未启用：即使提供完整 offline apply 参数，backend 也会以
-`reliability_v3_runtime_activation_incomplete` fail closed，直到 v3 queue writers 与
-canonical ownership protocol 完成。该命令绝不会删除 `run/`、knowledge、retired
+partial、adopted 或 conflicting 状态，并且不会创建 `run/`。提供 offline apply 参数
+（`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`）时，该命令会在全新或
+静止的 vault 上执行 v3 切换；安装程序会自动运行它，因为切换前会话捕获会被拒绝
+（issue #17）。该命令绝不会删除 `run/`、knowledge、retired
 databases、legacy caches 或 compatibility markers。
 
 可选 extras 以 additive 方式安装，并保留操作员已选择的包：
@@ -262,7 +262,7 @@ RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
 ```
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
-- **KNOWLEDGE**——git 跟踪（源码中仅公开示例）。完整用户数据位于已安装的 vault 中。Daily 日志和个人页面 gitignored。
+- **KNOWLEDGE**——你的记忆；仓库以空状态交付。所有页面和 daily 日志均 gitignored，仅跟踪 README。
 - **RUNTIME**——gitignored。搜索索引和日志可丢弃；`run/` 中的事务、队列状态和 undo 映像属于操作状态。
 - **权威边界**——Markdown、Git history 和 append-only project journal 是权威来源。FTS、vectors、Evidence Graph 数据库、tiers、telemetry 和 model cache 都是可重建的派生状态。
 
@@ -314,22 +314,13 @@ uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-cla
 
 ## 基准测试
 
-> **历史 legacy 方法论**：仅在 git-tracked 公共语料上运行 BM25/FTS5，禁用 graph、vectors 和 reranker。`current-generated-v2` 当时包含 112 个确定性查询：精确标题、摘要关键词、部分标题和 slug。`legacy-60-v1.json` 逐字保存原始 60 条查询文本及其 gold path，因此后续页面内容修改不会改变该门禁。忽略的个人页面和 `$LLM_WIKI_ROOT` 不参与，因此 clean clone 可复现相同语料。这不是 LoCoMo 或 LongMemEval；竞争对手数字来自不同数据集。
-
-| 历史指标 | 历史当前 112 | 历史 legacy 60 | agentmemory | Zep | Mem0 |
-|------|----------|-----------|-------------|-----|------|
-| Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
-| Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
-| Recall@5 | **100.0%** | **100.0%** | 95.2% | 94.7% | 91.6% |
-| Recall@10 | **100.0%** | n/a | n/a | n/a | n/a |
-| MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
-| 延迟 p50 | **6.3ms** | n/a | 14ms | 155ms | 880ms |
-
-这些是 legacy runner 的历史结果。默认命令现在运行 frozen retrieval-v2 benchmark。只有单独使用 `--legacy-only` 才会选择旧 gate；它与 `--semantic` 或 `--report` 组合时会以失败关闭。
+检索门禁是冻结的公开合成语料 `benchmark/retrieval-v2.json`：多语言页面，带有分级证据、
+干扰文档、时间历史和弃答案例，由 `benchmark/run_retrieval_v2.py` 运行。长程记忆在
+LongMemEval 测试台（`benchmark/run_longmemeval.py`）上测量。基于仓库过去附带页面的历史
+BM25 门禁（112 条生成查询和 60 条冻结查询）已于 2026-09-10 随这些页面一起退役；其最后
+数字见 `benchmark/baseline-2026-07-16.md`。其他地方的竞品数字来自不同数据集，不可比较。
 
 运行 retrieval-v2：`uv run python benchmark/run_benchmark.py`
-
-复现旧 gate：`uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP 智能体接口
 

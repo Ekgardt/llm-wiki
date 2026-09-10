@@ -266,6 +266,7 @@ def _append_tool_tag(
         record_capture_failure(
             "post_tool_append",
             f"{type(error).__name__}: {error}",
+            error=error,
             slug=slug,
             session_id=session_id,
         )
@@ -394,7 +395,9 @@ def main() -> int:
     try:
         _capture_tool(_read_hook_input())
     except Exception as error:  # noqa: BLE001
-        record_capture_failure("post_tool_hook", f"{type(error).__name__}: {error}")
+        record_capture_failure(
+            "post_tool_hook", f"{type(error).__name__}: {error}", error=error
+        )
     return 0
 
 

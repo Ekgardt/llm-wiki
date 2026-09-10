@@ -148,3 +148,44 @@ def test_the_inline_state_probe_writes_nothing(tmp_path: Path) -> None:
 
     assert state == "disabled"
     assert config.read_bytes() == before
+
+
+def test_inline_trust_metadata_is_preserved_and_not_an_event(tmp_path: Path) -> None:
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[hooks.state."opaque-hook-id"]\nenabled = true\ntrusted_hash = "opaque-hash"\n'
+        '[[hooks.SessionStart]]\nmatcher = "startup"\n'
+        '[[hooks.SessionStart.hooks]]\ntype = "command"\n'
+        f"command = '{OUR_COMMAND}'\ntimeout = 15\n"
+        '[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\n'
+        'type = "command"\ncommand = "codebase-memory-mcp update"\n',
+        encoding="utf-8",
+    )
+    before = config.read_bytes()
+
+    assert codex_memory._inline_hook_state(config, TEMPLATE) == "equivalent"
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("metadata", ["[]", '"invalid"', "false", "1"])
+def test_inline_state_metadata_requires_a_table(tmp_path: Path, metadata: str) -> None:
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(f"[hooks]\nstate = {metadata}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid Codex hooks config"):
+        codex_memory._inline_hook_state(config, TEMPLATE)
+
+
+@pytest.mark.parametrize("event", ["SessionStart", "unknown", "State", "states"])
+def test_trust_metadata_does_not_hide_malformed_event_tables(
+    tmp_path: Path, event: str
+) -> None:
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(f"[hooks.state]\n[hooks.{event}]\nbad = true\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid Codex hooks config"):
+        codex_memory._inline_hook_state(config, TEMPLATE)

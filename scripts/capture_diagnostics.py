@@ -24,7 +24,12 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, load_state, update_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    StateLockTimeout,
+    load_state,
+    update_state,
+)
 from secret_redact import redact_secrets  # noqa: E402
 
 FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
@@ -40,6 +45,42 @@ CAPTURE_RECENT_SECONDS = 7 * 24 * 3600
 STATE_LOCK_TIMEOUT = 0.5
 
 
+# A lost race is decided by the exception's type and code, never by its text
+# (#26.3): another writer holds the resource now and the next session end or
+# queue drain carries the same event, so it is retried work, not lost work.
+CONTENTION_OWNERSHIP_CODES = frozenset({"owner_busy"})
+# SQLITE_BUSY and SQLITE_LOCKED; the driver reports them from Python 3.11 on.
+SQLITE_CONTENTION_CODES = frozenset({5, 6})
+
+
+def _sqlite_contention(error: BaseException) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in SQLITE_CONTENTION_CODES
+
+
+def _typed_contention(error: BaseException) -> bool:
+    from markdown_transaction import OperationBoundElsewhereError, ProjectPendingPriorError
+
+    return isinstance(
+        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout)
+    )
+
+
+def is_contention(error: BaseException) -> bool:
+    """Whether a failure is a writer race rather than a loss."""
+    from operational_ownership import OperationalOwnershipError
+
+    if isinstance(error, OperationalOwnershipError):
+        return error.code in CONTENTION_OWNERSHIP_CODES
+    return _typed_contention(error) or _sqlite_contention(error)
+
+
+def _outcome_of(error: BaseException | None) -> str:
+    if error is not None and is_contention(error):
+        return "deferred"
+    return "lost"
+
+
 def _safe_reason(reason: str) -> str:
     """One redacted line — reasons carry exception text, never payloads."""
     single_line = " ".join(str(reason).split())
@@ -51,11 +92,13 @@ def _failure_record(
     reason: str,
     slug: str | None,
     session_id: str | None,
+    outcome: str,
 ) -> dict[str, str]:
     record = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "kind": str(kind),
         "reason": _safe_reason(reason),
+        "outcome": outcome,
     }
     if slug:
         record["slug"] = str(slug)
@@ -98,9 +141,12 @@ def _append_failure_line(record: dict[str, str]) -> None:
 def _bump_counter(state: dict, record: dict[str, str]) -> None:
     counters = state.setdefault(STATE_KEY, {})
     entry = counters.get(record["kind"])
-    previous = int(entry.get("count", 0)) if isinstance(entry, dict) else 0
+    if not isinstance(entry, dict):
+        entry = {}
+    deferred = int(entry.get("deferred", 0)) + int(record["outcome"] == "deferred")
     counters[record["kind"]] = {
-        "count": previous + 1,
+        "count": int(entry.get("count", 0)) + 1,
+        "deferred": deferred,
         "last_at": record["at"],
         "last_reason": record["reason"],
     }
@@ -120,11 +166,16 @@ def record_capture_failure(
     kind: str,
     reason: str,
     *,
+    error: BaseException | None = None,
     slug: str | None = None,
     session_id: str | None = None,
 ) -> None:
-    """Record one lost capture. Never raises — diagnostics never break a hook."""
-    record = _failure_record(kind, reason, slug, session_id)
+    """Record one failed capture. Never raises — diagnostics never break a hook.
+
+    With the exception in hand the record says whether the write was lost or
+    deferred by a writer race; without it, a failure is a loss.
+    """
+    record = _failure_record(kind, reason, slug, session_id, _outcome_of(error))
     try:
         _append_failure_line(record)
     except Exception:  # noqa: BLE001 - the counter still records the loss
@@ -138,16 +189,30 @@ def record_capture_failure(
         pass
 
 
-def capture_failure_totals(state: dict) -> dict[str, int]:
-    """Failure count per kind as recorded in state.json."""
+def _counter_entries(state: dict) -> dict[str, dict]:
     counters = state.get(STATE_KEY)
     if not isinstance(counters, dict):
         return {}
-    return {
-        kind: int(entry.get("count", 0))
-        for kind, entry in counters.items()
-        if isinstance(entry, dict)
+    return {kind: entry for kind, entry in counters.items() if isinstance(entry, dict)}
+
+
+def _lost_count(entry: dict) -> int:
+    return max(int(entry.get("count", 0)) - int(entry.get("deferred", 0)), 0)
+
+
+def capture_failure_totals(state: dict) -> dict[str, int]:
+    """Lost captures per kind: every record minus the ones a writer race deferred."""
+    totals = {kind: _lost_count(entry) for kind, entry in _counter_entries(state).items()}
+    return {kind: count for kind, count in totals.items() if count}
+
+
+def capture_deferred_totals(state: dict) -> dict[str, int]:
+    """Captures a writer race deferred, per kind: retried, not lost."""
+    totals = {
+        kind: int(entry.get("deferred", 0))
+        for kind, entry in _counter_entries(state).items()
     }
+    return {kind: count for kind, count in totals.items() if count}
 
 
 def _trail_pointer() -> str:
@@ -246,6 +311,8 @@ def clear_capture_failures() -> dict[str, int]:
 
 def _print_summary(state: dict) -> int:
     totals = capture_failure_totals(state)
+    for kind, count in sorted(capture_deferred_totals(state).items()):
+        print(f"{kind}: {count} deferred by a writer race (retried, not lost)")
     if not totals:
         print("capture_diagnostics: no capture failures recorded")
         return 0

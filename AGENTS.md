@@ -49,8 +49,8 @@ The repository is organized into three zones. This layout is enforced by
 # CODE (tracked in git)
 scripts/   tests/   docs/   skills/   rules/   integrations/   benchmark/
 
-# KNOWLEDGE (tracked in git — public examples only in source;
-#            full user data lives in the installed vault)
+# KNOWLEDGE (the repository ships no memory: only READMEs, the project
+#            scaffold and two empty runtime files are tracked)
 knowledge/
   daily/      # append-only session capture
   notes/      # durable compiled pages (OKF frontmatter, flat slugs)
@@ -245,7 +245,7 @@ a directory boundary.** Read that sentence again before you commit anything.
 |---|---|---|
 | `scripts/ tests/ docs/ skills/ rules/ integrations/ benchmark/` | yes | the product |
 | `knowledge/daily/*.md`, `knowledge/notes/*` | **denied by default** | your real memory |
-| the `!` allowlist inside those denials | yes | published example and decision pages |
+| the `!` allowlist inside those denials | yes | the READMEs only — the repository ships no memory (2026-09-10) |
 | `cache/ logs/ run/` | never | runtime state |
 
 `knowledge/index.md` and `knowledge/log.md` are the exception: the runtime
@@ -256,9 +256,10 @@ holds the line — every page they name by path must be published.
 - Writing a knowledge page here is **normal runtime behaviour**, not a
   violation. It stays private because its directory is denied by default.
 - **Publishing** a page is a deliberate, separate act: adding an explicit `!`
-  line for it in `.gitignore`. Do that only for pages about the product —
-  architecture decisions, conventions, public examples — never for pages about
-  the owner's other projects, debugging notes, or personal rules.
+  line for it in `.gitignore`. Since 2026-09-10 no page is published: the
+  architecture decision pages this file refers to are the owner's private
+  record, and a fresh install starts with an empty memory (issue #19). The
+  contracts themselves are stated here and in `docs/STRUCTURE.md`.
 - Running `compile_memory.py`, `flush_memory.py` or any pipeline script here is
   **correct**, because here is the vault. It was forbidden when a second,
   private directory existed to run them against.

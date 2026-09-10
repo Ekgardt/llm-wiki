@@ -32,6 +32,7 @@ CANONICAL_ROLES = (
 )
 
 
+
 def _transaction_db(state_root: Path, now: datetime) -> Path:
     database = state_root / "run/markdown-transactions.sqlite3"
     database.parent.mkdir(parents=True)
@@ -1391,10 +1392,14 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     assert checks["run_deletion"]["status"] == "ok"
     assert checks["generation"]["status"] == "ok"
     assert checks["generation"]["details"]["recommended_action"] == "rebuild_generation"
-    assert report["overall_status"] == "ok"
-    assert doctor.degraded_summary(report) == ""
+    # A legacy pair is a vault that has not adopted Reliability V3, and that
+    # is the one finding here (issue #17): capture is disabled until it does.
+    # Retention itself degrades nothing.
+    degraded = {check["id"] for check in report["checks"] if check["status"] != "ok"}
+    assert degraded <= {"capture", "scheduler"}, degraded
+    assert "Session capture is disabled" in checks["capture"]["message"]
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
-    assert session_start_context.health_block() == ""
+    assert "Session capture is disabled" in session_start_context.health_block()
 
 
 @pytest.mark.parametrize(

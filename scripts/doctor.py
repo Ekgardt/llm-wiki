@@ -11,6 +11,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -76,6 +77,11 @@ DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
+# How long a probe that gave up waits for the peer it killed to be reaped.
+# Independent of the probe deadline, which by then has passed: with the wait
+# bounded by that deadline, Windows returned while the peer was still exiting
+# (PR #16, three jobs). The Pyright probe keeps the same 0.5 s budget.
+CODEX_HOOK_PROBE_CLEANUP_SECONDS = 0.5
 MAX_CODEX_HOOK_PROBE_BYTES = 256 * 1024
 _CODEX_PROBE_NOT_COMPLETED = object()
 INDEX_COLUMNS = {"path", "title", "summary", "body", "project", "timestamp", "slug"}
@@ -1689,6 +1695,18 @@ def _empty_queue_details() -> tuple[dict, dict[str, int]]:
 
 
 def _record_queue_migration(state_root: Path, details: dict) -> None:
+    from markdown_transaction import _reliability_v3_records_present
+
+    if _reliability_v3_records_present(state_root):
+        # Adoption retired the v2 queue and left a tombstone where it stood
+        # (`memory_queue` refuses to migrate one), so there is no legacy
+        # migration left to finish and the v2 marker proves nothing.
+        details["migration"] = "retired"
+        return
+    _record_v2_queue_marker(state_root, details)
+
+
+def _record_v2_queue_marker(state_root: Path, details: dict) -> None:
     marker = state_root / "run" / "queue-migrated-v2"
     marker_kind = _safe_kind(marker, state_root)[0]
     details["migration"] = "complete" if marker_kind == "regular" else "pending"
@@ -2329,11 +2347,13 @@ def _count_claims(database: sqlite3.Connection, details: dict) -> None:
         ).fetchall()
     )
     rows = database.execute(
-        "SELECT code FROM claim_index_diagnostic ORDER BY code LIMIT ?",
+        "SELECT code, page FROM claim_index_diagnostic ORDER BY code, page LIMIT ?",
         (MAX_OPERATIONAL_ROWS + 1,),
     ).fetchall()
     details["diagnostics"] = min(len(rows), MAX_OPERATIONAL_ROWS)
     details["codes"] = sorted({str(row[0]) for row in rows})
+    details["by_code"] = _claims_by_code(rows)
+    details["pages"] = sorted({str(row[1]) for row in rows})[:MAX_CLAIM_PAGES_NAMED]
     if len(rows) > MAX_OPERATIONAL_ROWS or details["claims"] > MAX_OPERATIONAL_ROWS:
         details["codes"].append("claim_scan_truncated")
 
@@ -2346,12 +2366,53 @@ def _claim_status(details: dict) -> str:
     return "ok"
 
 
+# Issue #29.5: "requires operator attention" named neither the cause nor the
+# repair. One cause per code, in the words the operator needs.
+CLAIM_CODE_CAUSES = {
+    "evidence_unresolved": (
+        "cite daily bytes that no longer resolve under the recorded digest "
+        "(the daily was appended or rewritten after the page was compiled)"
+    ),
+    "evidence_ambiguous": "cite bytes that match more than one slice of the daily",
+    "evidence_literal_mismatch": "quote text that differs from the bytes at the cited place",
+    "claim_scan_truncated": "were not scanned: the bounded scan stopped early",
+}
+CLAIM_REPAIR = (
+    "Repair: `uv run python scripts/doctor.py --repair` rebuilds the claim index "
+    "against the current dailies; a claim that still does not resolve stays "
+    "listed by page in details, and that page's evidence line must be re-bound "
+    "by hand or by recompiling its daily with `compile_memory.py --file`."
+)
+MAX_CLAIM_PAGES_NAMED = 8
+
+
+def _claims_by_code(rows: list) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[str(row[0])] = counts.get(str(row[0]), 0) + 1
+    return counts
+
+
+def _claim_cause(code: str, count: int) -> str:
+    cause = CLAIM_CODE_CAUSES.get(code, f"are flagged `{code}`")
+    return f"{count} claim(s) {cause}"
+
+
+def _claim_message(status: str, details: dict) -> str:
+    if status == "ok":
+        return "Claim index is healthy."
+    if details["index"] == "invalid":
+        return "Claim index is unreadable; " + CLAIM_REPAIR
+    causes = "; ".join(
+        _claim_cause(code, count) for code, count in sorted(details["by_code"].items())
+    )
+    pages = ", ".join(details["pages"])
+    return f"Claim index: {causes}. Pages: {pages}. {CLAIM_REPAIR}"
+
+
 def _claim_result(details: dict) -> dict:
     status = _claim_status(details)
-    message = "Claim index is healthy."
-    if status != "ok":
-        message = "Claim index requires operator attention."
-    return _result("claims", status, message, details)
+    return _result("claims", status, _claim_message(status, details), details)
 
 
 def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
@@ -2361,6 +2422,8 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
         "claims": 0,
         "diagnostics": 0,
         "codes": [],
+        "by_code": {},
+        "pages": [],
         "read_error": False,
         "deletion_codes": [],
     }
@@ -2888,7 +2951,7 @@ def _pyright_check(
     return _result(
         "pyright",
         "degraded",
-        "Pyright identity is degraded or mismatched.",
+        _pyright_degraded_message(codes),
         details,
     )
 
@@ -2897,6 +2960,12 @@ def _extend_unique(codes: list[str], extra) -> None:
     for code in extra:
         if code not in codes:
             codes.append(code)
+
+
+def _pyright_degraded_message(codes: list[str]) -> str:
+    """Name which lookup failed (issue #23): `node_major: null` alone said nothing."""
+    named = ", ".join(codes) if codes else "unspecified"
+    return f"Pyright identity is degraded or mismatched: {named}."
 
 
 def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> None:
@@ -4418,6 +4487,36 @@ def _require_positive_source_limit(max_sources: object) -> None:
         raise ValueError("max_sources must be a positive integer")
 
 
+def _quick_vector_state(state_root: Path) -> dict | None:
+    """The active generation's vector fields from its manifest, or None."""
+    from generation_catalog import GenerationCatalog
+
+    try:
+        active = GenerationCatalog(state_root).get_active() or {}
+        generation = str(active.get("generation_id") or "")
+        path = Path(state_root) / "cache" / "evidence-graph" / "generations" / generation / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a hint, never a failure
+        return None
+    return {key: manifest.get(key) for key in ("vector_state", "embedding_model_id", "vector_dimensions")}
+
+
+def _vector_hint(vector: dict | None) -> str:
+    if not vector or vector.get("vector_state") != "absent":
+        return ""
+    return " Vectors are absent: run `uv run python scripts/doctor.py --repair` after installing the semantic extra."
+
+
+def _vector_fields(vector: dict | None) -> dict:
+    if not vector:
+        return {}
+    return {
+        "vector_state": vector.get("vector_state") or "unknown",
+        "vector_model": vector.get("embedding_model_id"),
+        "vector_dimensions": vector.get("vector_dimensions"),
+    }
+
+
 def _generation_check(
     root: Path,
     state_root: Path,
@@ -4465,13 +4564,19 @@ def _generation_check(
             state,
         )
     except TimeoutError:
+        # The full check did not fit, but the active manifest is one small
+        # file: its vector state is reported regardless of the budget (issue
+        # #29 found "vector_state: unknown" hiding absent vectors for a day).
+        vector = _quick_vector_state(state_root)
         return _generation_result(
             "degraded",
-            "Evidence generation check was deferred by its time bound.",
+            "Evidence generation check was deferred by its time bound."
+            + _vector_hint(vector),
             catalog="valid",
-            budget_exhausted=True,
+            budget_exhausted=vector is None,
             partial=True,
             repairable=False,
+            **_vector_fields(vector),
         )
     except (
         KeyError,
@@ -4827,23 +4932,35 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     return (value or {}, problem)
 
 
+def _deferred_sentence(details: dict) -> str:
+    deferred = int(details.get("deferred", 0))
+    if not deferred:
+        return ""
+    return (
+        f" {deferred} write(s) were deferred by a writer race and retried;"
+        " they are not counted as lost."
+    )
+
+
 def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     """The capture verdict, once the diagnostics themselves have been read."""
+    suffix = _deferred_sentence(details)
     if live:
-        return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
+        return _result("capture", "degraded", f"{lost} capture(s) were lost.{suffix}", details)
     if lost:
         return _result(
             "capture",
             "ok",
-            f"{lost} capture(s) were lost, none recently.",
+            f"{lost} capture(s) were lost, none recently.{suffix}",
             details,
         )
-    return _result("capture", "ok", "No lost capture is recorded.", details)
+    return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
-def _capture_check(state_root: Path, deadline: float) -> dict:
+def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
+        capture_deferred_totals,
         capture_failure_is_live,
         capture_failure_totals,
         last_capture_failure_at,
@@ -4856,6 +4973,7 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
     details: dict[str, Any] = {
         "lost": lost,
         "kinds": totals,
+        "deferred": sum(capture_deferred_totals(state).values()),
         "trail": "logs/capture-failures.jsonl",
         "state_error": state_error,
         "last_at": last_capture_failure_at(state),
@@ -4869,7 +4987,31 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
+    adoption = _adoption_state(root, state_root)
+    details["adoption_state"] = adoption
+    if adoption not in {"adopted", "unknown"}:
+        return _result("capture", "degraded", _capture_disabled_message(adoption), details)
     return _capture_loss_result(lost, live, details)
+
+
+def _adoption_state(root: Path, state_root: Path) -> str:
+    """The Reliability V3 adoption state, from the two records under run/, or unknown."""
+    from installed_memory_repair import inspect_installed_vault
+
+    try:
+        report = inspect_installed_vault(root=root, state_root=state_root)
+    except Exception:  # noqa: BLE001 - a health check never raises
+        return "unknown"
+    return str(report.get("details", {}).get("adoption_state") or "unknown")
+
+
+def _capture_disabled_message(adoption: str) -> str:
+    """Plain words for what issue #17 found buried in a failure log: no capture until adoption."""
+    return (
+        f"Session capture is disabled: Reliability V3 state is '{adoption}'. Run "
+        "uv run --locked --no-sync python scripts/repair_installed_memory.py "
+        "--apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+    )
 
 
 # The hook error trail nothing ever read. Measured 2026-08-29: 5 682 failures
@@ -5350,11 +5492,17 @@ def _codex_probe_payload(root: Path) -> bytes:
     ).encode("utf-8")
 
 
-def _kill_and_reap(process: Any, probe_deadline: float) -> None:
-    process.kill()
+def _kill_and_reap(tree: Any) -> None:
+    """Kill the peer's whole process tree and reap it, within the cleanup budget.
+
+    The tree, not the direct child: on Windows a venv `python.exe` is a
+    trampoline that starts the interpreter as its child, so killing the child
+    alone left the peer running (PR #16, three Windows jobs). `ProcessTree`
+    owns a Job Object there and a process group on POSIX.
+    """
     try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
+        tree.terminate(deadline=time.monotonic() + CODEX_HOOK_PROBE_CLEANUP_SECONDS)
+    except (OSError, TimeoutError, subprocess.SubprocessError, RuntimeError):
         pass
 
 
@@ -5364,21 +5512,26 @@ def _codex_pipes_missing(process: Any) -> bool:
     )
 
 
+def _capture_codex_chunk(name, chunk, process, captured, overflow) -> bool:
+    remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
+    captured[name].extend(chunk[: max(0, remaining)])
+    if len(chunk) > remaining:
+        overflow.set()
+        process.kill()
+        return False
+    return True
+
+
 def _start_codex_readers(process: Any) -> _CodexProbeStreams:
-    """Drain both pipes into bounded buffers so the child cannot block on us."""
+    """Drain available chunks while the peer waits for the next request."""
     overflow = threading.Event()
     captured = {"stdout": bytearray(), "stderr": bytearray()}
 
     def drain(name: str, stream: Any) -> None:
         try:
-            while chunk := stream.read(8192):
-                remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
-                if len(chunk) > remaining:
-                    captured[name].extend(chunk[: max(0, remaining)])
-                    overflow.set()
-                    process.kill()
+            while chunk := stream.read1(8192):
+                if not _capture_codex_chunk(name, chunk, process, captured, overflow):
                     return
-                captured[name].extend(chunk)
         except OSError:
             overflow.set()
             process.kill()
@@ -5392,22 +5545,57 @@ def _start_codex_readers(process: Any) -> _CodexProbeStreams:
     return _CodexProbeStreams(readers, captured, overflow)
 
 
-def _await_codex_process(
-    process: Any, payload: bytes, probe_deadline: float
-) -> bool:
-    """True when the probe process finished within its own deadline."""
-    if _deadline_reached(probe_deadline):
-        _kill_and_reap(process, probe_deadline)
+def _codex_response_line(line: bytes, request_id: int) -> bool:
+    response = json.loads(line)
+    if not isinstance(response, dict) or response.get("id") != request_id:
         return False
+    if "error" in response:
+        raise ValueError("Codex probe request failed")
+    return "result" in response
+
+
+def _codex_response_received(streams: _CodexProbeStreams, request_id: int) -> bool:
+    complete = bytes(streams.captured["stdout"]).split(b"\n")[:-1]
+    return any(_codex_response_line(line, request_id) for line in complete)
+
+
+def _await_codex_response(streams, request_id: int, probe_deadline: float) -> None:
+    while not _codex_response_received(streams, request_id):
+        if streams.overflow.is_set() or not _readers_still_running(streams.readers):
+            raise ValueError("Codex probe ended before its response")
+        if _deadline_reached(probe_deadline):
+            raise subprocess.TimeoutExpired("Codex hooks probe", 0)
+        time.sleep(min(0.01, max(0.0, probe_deadline - time.monotonic())))
+
+
+def _send_codex_payload(process, payload: bytes) -> None:
     process.stdin.write(payload)
     process.stdin.flush()
-    process.stdin.close()
+
+
+def _finish_codex_process(tree: Any, probe_deadline: float) -> bool:
     try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        tree.process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        _kill_and_reap(process, probe_deadline)
+        _kill_and_reap(tree)
         return False
     return True
+
+
+def _await_codex_process(tree, payload, probe_deadline, streams) -> bool:
+    """Initialize, await acknowledgement, then request hooks before closing stdin."""
+    first, _, remainder = payload.partition(b"\n")
+    process = tree.process
+    try:
+        _send_codex_payload(process, first + b"\n")
+        _await_codex_response(streams, 1, probe_deadline)
+        _send_codex_payload(process, remainder)
+        _await_codex_response(streams, 2, probe_deadline)
+        process.stdin.close()
+        return _finish_codex_process(tree, probe_deadline)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _kill_and_reap(tree)
+        return False
 
 
 def _readers_still_running(readers: list) -> bool:
@@ -5419,15 +5607,14 @@ def _clean_codex_exit(process: Any, streams: _CodexProbeStreams) -> bool:
 
 
 def _drained_codex_output(
-    process: Any, streams: _CodexProbeStreams, probe_deadline: float
+    tree: Any, streams: _CodexProbeStreams, probe_deadline: float
 ) -> bytes | object | None:
     for reader in streams.readers:
         reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
     if _readers_still_running(streams.readers):
-        if process.returncode is None:
-            process.kill()
+        _kill_and_reap(tree)
         return _PROBE_INCOMPLETE
-    if not _clean_codex_exit(process, streams):
+    if not _clean_codex_exit(tree.process, streams):
         return None
     return bytes(streams.captured["stdout"])
 
@@ -5438,24 +5625,48 @@ def _run_codex_probe(
     env = os.environ.copy()
     env["CODEX_HOME"] = str(home / ".codex")
     payload = _codex_probe_payload(root)
-    try:
-        process = subprocess.Popen(  # noqa: S603
-            command,
-            cwd=str(root),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if _codex_pipes_missing(process):
-            _kill_and_reap(process, probe_deadline)
-            return _PROBE_INCOMPLETE
-        streams = _start_codex_readers(process)
-        if not _await_codex_process(process, payload, probe_deadline):
-            return _PROBE_INCOMPLETE
-        return _drained_codex_output(process, streams, probe_deadline)
-    except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
+    tree = _spawned_codex_tree(command, root, env, probe_deadline)
+    if tree is None:
         return _PROBE_INCOMPLETE
+    try:
+        return _probed_codex_tree(tree, payload, probe_deadline)
+    except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
+        _kill_and_reap(tree)
+        return _PROBE_INCOMPLETE
+    finally:
+        _close_codex_tree(tree)
+
+
+def _close_codex_tree(tree: Any) -> None:
+    """Release the tree's handles; a tree still live after its cleanup budget
+    is the probe's failure to report, never a reason to raise out of health."""
+    try:
+        tree.close()
+    except (OSError, RuntimeError):
+        pass
+
+
+def _spawned_codex_tree(command: list[str], root: Path, env: dict, probe_deadline: float):
+    """The peer as an owned process tree (Job Object / process group), or None."""
+    from lsp_process_tree import ProcessTree
+
+    try:
+        return ProcessTree.spawn_with_deadline(
+            command, cwd=root, env=env, deadline=probe_deadline
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _probed_codex_tree(tree: Any, payload: bytes, probe_deadline: float) -> bytes | object | None:
+    if _codex_pipes_missing(tree.process):
+        _kill_and_reap(tree)
+        return _PROBE_INCOMPLETE
+    streams = _start_codex_readers(tree.process)
+    if not _await_codex_process(tree, payload, probe_deadline, streams):
+        _drained_codex_output(tree, streams, time.monotonic() + 0.2)
+        return _PROBE_INCOMPLETE
+    return _drained_codex_output(tree, streams, probe_deadline)
 
 
 def _codex_hooks_message(line: str) -> tuple[bool, dict | None]:
@@ -5638,12 +5849,41 @@ def _expected_codex_hooks(root: Path, ours: list) -> tuple[list | None, str]:
     return expected, ""
 
 
-def _matching_hooks(wanted: dict, ours: list) -> list:
-    return [
-        hook
-        for hook in ours
-        if all(hook.get(field) == value for field, value in wanted.items())
-    ]
+def _rendered_codex_hook_command(root: Path, command: str) -> str:
+    """Recognize one explicit POSIX installation, without executing its shell."""
+    root = root.resolve()
+    prefix = shlex.join([
+        "env", f"LLM_WIKI_ROOT={root}", f"LLM_WIKI_STATE_ROOT={root}",
+        str(Path.home() / ".local" / "bin" / "uv"),
+    ])
+    rendered = command.removeprefix("uv ")
+    rendered = rendered.replace('"$LLM_WIKI_ROOT"', shlex.quote(str(root)))
+    script = root / "scripts" / "codex_memory.py"
+    rendered = rendered.replace('"$LLM_WIKI_ROOT/scripts/codex_memory.py"', shlex.quote(str(script)))
+    return f"{prefix} {rendered}"
+
+
+def _codex_hook_commands(root: Path, command: str) -> set[str]:
+    if os.name == "nt" or not command.startswith("uv "):
+        return {command}
+    return {command, _rendered_codex_hook_command(root, command)}
+
+
+def _canonical_codex_event(event: object) -> object:
+    return {"sessionStart": "SessionStart", "preCompact": "PreCompact",
+            "postCompact": "PostCompact", "stop": "Stop"}.get(str(event), event)
+
+
+def _codex_hook_matches(wanted: dict, hook: dict, root: Path) -> bool:
+    if hook.get("command") not in _codex_hook_commands(root, wanted["command"]):
+        return False
+    comparable = dict(hook, command=wanted["command"],
+                      eventName=_canonical_codex_event(hook.get("eventName")))
+    return all(comparable.get(field) == value for field, value in wanted.items())
+
+
+def _matching_hooks(wanted: dict, ours: list, root: Path) -> list:
+    return [hook for hook in ours if _codex_hook_matches(wanted, hook, root)]
 
 
 def _codex_hook_trust_code(trust: object) -> str:
@@ -5652,8 +5892,8 @@ def _codex_hook_trust_code(trust: object) -> str:
     return "runtime_hooks_trust_unknown"
 
 
-def _codex_hook_problem(wanted: dict, ours: list) -> str:
-    matches = _matching_hooks(wanted, ours)
+def _codex_hook_problem(wanted: dict, ours: list, root: Path) -> str:
+    matches = _matching_hooks(wanted, ours, root)
     if len(matches) != 1:
         return "runtime_hooks_mismatch"
     hook = matches[0]
@@ -5669,7 +5909,7 @@ def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
     if expected is None:
         return False, problem
     for wanted in expected:
-        problem = _codex_hook_problem(wanted, ours)
+        problem = _codex_hook_problem(wanted, ours, root)
         if problem:
             return False, problem
     return True, "runtime_hooks_active"
@@ -6402,7 +6642,15 @@ class MaintenanceFenceLost(RuntimeError):
         self.observed = observed
 
 
-_OWNER_ROW_FIELDS = ("process_id", "fencing_epoch", "acquired_at", "heartbeat_at", "expires_at")
+_OWNER_ROW_FIELDS = (
+    "process_id",
+    "fencing_epoch",
+    "acquired_at",
+    "heartbeat_at",
+    "expires_at",
+    "role",
+    "actor_id",
+)
 
 
 def _observed_owner_row(row: sqlite3.Row | None) -> dict[str, object]:
@@ -6542,6 +6790,21 @@ def _release_v3_maintenance(lease: dict[str, object]) -> None:
         lease["registry"].release(lease["owner"])
     except OperationalOwnershipError as exc:
         raise _v3_fence_lost("release", lease) from exc
+
+
+def _maintenance_holder(root: Path, state_root: Path) -> dict[str, object]:
+    """Who holds the maintenance fence, so a deferred caller knows whether to wait (#29.6)."""
+    from markdown_transaction import active_or_legacy_coordinator
+
+    try:
+        coordinator = active_or_legacy_coordinator(root, state_root)
+        registry = _maintenance_ownership_registry(coordinator)
+        if registry is not None:
+            return _observed_owner_row(_read_v3_owner_row(registry))
+        with coordinator._connect() as database:  # noqa: SLF001
+            return _observed_owner_row(_read_owner_row(database))
+    except (OSError, sqlite3.Error, ValueError, AttributeError):
+        return {"present": None}
 
 
 def _acquire_maintenance_owner(
@@ -7447,12 +7710,6 @@ def _generation_source_bytes(snapshot: object) -> dict:
     return {source.record.logical_id: source.content for source in snapshot.sources}
 
 
-def _approved_code_roots(root: Path, approved: set[str]) -> tuple[str, ...]:
-    return tuple(
-        relative for relative in sorted(approved) if (root / relative).is_dir()
-    )
-
-
 def _active_generation_id(parent: dict | None) -> str | None:
     if parent is None:
         return None
@@ -7500,8 +7757,9 @@ def _build_or_refresh_generation(
     max_sources: int,
     force_rebuild: bool,
     coordinator: object | None = None,
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
-    from corpus_snapshot import APPROVED_CODE_ROOTS, collect_corpus
+    from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
     from evidence_graph_builder import (
         GRAPH_SCHEMA_VERSION,
         IncrementalReuseConfig,
@@ -7516,7 +7774,7 @@ def _build_or_refresh_generation(
     extractor_version = _maintenance_extractor_identity()
     snapshot = collect_corpus(
         root,
-        code_roots=_approved_code_roots(root, APPROVED_CODE_ROOTS),
+        code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
         max_files=max_sources,
         deadline=deadline,
     )
@@ -7677,6 +7935,7 @@ def _refreshed_generation(
     max_sources: int,
     force_rebuild: bool,
     repaired: list[dict],
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
     with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
         guard.run(
@@ -7695,6 +7954,7 @@ def _refreshed_generation(
             max_sources=max_sources,
             force_rebuild=force_rebuild,
             coordinator=coordinator,
+            code_roots=code_roots,
         )
         result["repairs"] = repaired
         return result
@@ -7747,8 +8007,17 @@ def run_generation_maintenance(
     time_budget_seconds: float = DEFAULT_GENERATION_TIME_BUDGET_SECONDS,
     max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
     force_rebuild: bool = False,
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
-    """Run one bounded fenced generation refresh; never mutate knowledge."""
+    """Run one bounded fenced generation refresh; never mutate knowledge.
+
+    `code_roots` is the generation's policy: None means the vault's own
+    generation, which holds memory only (`corpus_snapshot.VAULT_CODE_ROOTS`,
+    empty); a caller that builds a generation over declared code roots — a
+    repository, or a test of the code extractor — names them here and the
+    manifest records them. `corpus_snapshot` is imported where it is used:
+    it needs PyYAML, which the production install does not carry.
+    """
     _require_positive_time_budget(time_budget_seconds)
     _require_positive_source_limit(max_sources)
     root_path = Path(
@@ -7765,10 +8034,22 @@ def run_generation_maintenance(
         root_path, state_path, datetime.now(timezone.utc)
     )
     if acquired is None:
-        return _maintenance_outcome("deferred", "maintenance_owner_busy", partial=True)
+        return _maintenance_outcome(
+            "deferred",
+            "maintenance_owner_busy",
+            partial=True,
+            details={"holder": _maintenance_holder(root_path, state_path)},
+        )
     coordinator, lease = acquired
     return _guarded_generation_refresh(
-        root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild
+        root_path,
+        state_path,
+        coordinator,
+        lease,
+        deadline,
+        max_sources,
+        force_rebuild,
+        code_roots=code_roots,
     )
 
 
@@ -7788,7 +8069,15 @@ def _fence_lost_outcome(exc: RuntimeError, repaired: list[dict]) -> dict:
 
 
 def _attempted_generation_refresh(
-    root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild, repaired
+    root_path,
+    state_path,
+    coordinator,
+    lease,
+    deadline,
+    max_sources,
+    force_rebuild,
+    repaired,
+    code_roots=None,
 ) -> dict:
     try:
         return _refreshed_generation(
@@ -7800,6 +8089,7 @@ def _attempted_generation_refresh(
             max_sources,
             force_rebuild,
             repaired,
+            code_roots=code_roots,
         )
     except TimeoutError:
         return _maintenance_outcome(
@@ -7820,7 +8110,14 @@ def _attempted_generation_refresh(
 
 
 def _guarded_generation_refresh(
-    root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild
+    root_path,
+    state_path,
+    coordinator,
+    lease,
+    deadline,
+    max_sources,
+    force_rebuild,
+    code_roots=None,
 ) -> dict:
     repaired: list[dict] = []
     try:
@@ -7833,6 +8130,7 @@ def _guarded_generation_refresh(
             max_sources,
             force_rebuild,
             repaired,
+            code_roots=code_roots,
         )
     except ValueError as exc:
         return _value_error_outcome(exc, repaired)
@@ -8072,15 +8370,10 @@ def _migrated_legacy_queue(
     )
 
 
-def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
-    """Repair the legacy queue and report whether the v2 queue is usable."""
-    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
-
-    legacy_available = guard.run(
-        _repair_leases, context.state_path, context.generated_at, context.repaired
-    )
-    if not legacy_available:
-        context.repair_deferred.add("queue")
+def _legacy_queue_migrated(
+    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
+) -> bool:
+    """Run the v2 migration where it is still owed; True when the marker stands."""
     marker = context.state_path / "run" / "queue-migrated-v2"
     marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
     migration = _migrated_legacy_queue(
@@ -8088,8 +8381,25 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     )
     _record_queue_migration_repair(migration, marker_existed, context)
     marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
-    if migration is None and not marker_valid:
-        return False
+    return migration is not None or marker_valid
+
+
+def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
+    """Repair the legacy queue and report whether the v2 queue is usable."""
+    from markdown_transaction import _reliability_v3_records_present
+    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
+
+    legacy_available = guard.run(
+        _repair_leases, context.state_path, context.generated_at, context.repaired
+    )
+    if not legacy_available:
+        context.repair_deferred.add("queue")
+    # Adoption retired the v2 queue; `migrate_legacy_queue` would construct it
+    # and abort on its tombstone. An adopted vault has no migration to finish
+    # and no marker to wait for (`memory_queue` applies the same rule).
+    if not _reliability_v3_records_present(context.state_path):
+        if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
+            return False
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the
@@ -8348,7 +8658,7 @@ def _deferrable_checks(
                 root_path, state_path, generated_at, budget
             ),
         ),
-        ("capture", lambda budget: _capture_check(state_path, budget)),
+        ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),

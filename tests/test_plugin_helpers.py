@@ -449,11 +449,11 @@ def _exercise_maintenance_runs_work_then_compile(
     order = []
 
     def work(*args, **kwargs):
-        assert args[0][-1] == "work"
+        assert args[0][-1] in ("--capture-worker", "work")
         assert kwargs["timeout"] == integration_adapter.MAINTENANCE_DRAIN_TIMEOUT_SECONDS
-        pending_daily.parent.mkdir(parents=True)
+        pending_daily.parent.mkdir(parents=True, exist_ok=True)
         pending_daily.write_text("pending", encoding="utf-8")
-        order.append("work")
+        order.append(args[0][-1])
         return subprocess.CompletedProcess(args[0], 1, "secret stdout", "secret stderr")
 
     def compile_after_work():
@@ -464,7 +464,7 @@ def _exercise_maintenance_runs_work_then_compile(
     monkeypatch.setattr(integration_adapter.subprocess, "run", work)
     monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", compile_after_work)
     assert integration_adapter.main(["--maintenance"]) == 0
-    assert order == ["work", "compile"]
+    assert order == ["--capture-worker", "work", "compile"]
     assert capsys.readouterr() == ("", "")
 
 
@@ -554,7 +554,8 @@ def test_delegate_timeout_is_bounded_and_secret_free(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "integration_adapter: capture skipped\n"
+    assert captured.err.startswith("integration_adapter: capture skipped: ")
+    assert "secret" not in captured.err
 
 
 def test_failed_delegate_does_not_forward_valid_hook_json(monkeypatch, capsys):

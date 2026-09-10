@@ -229,7 +229,7 @@ if ! command -v uv &>/dev/null; then
 fi
 installedUvVersion="$(uv --version | awk '{print $2}')"
 if [ "$installedUvVersion" != "$UV_VERSION" ]; then
-  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade uv explicitly and rerun the installer."
+  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade it and rerun: standalone installs use 'uv self update ${UV_VERSION}'; pip or uv-tool installs use 'uv tool install \"uv==${UV_VERSION}\" --force' (or 'pip install uv==${UV_VERSION}')."
 fi
 ok "uv ${installedUvVersion}"
 
@@ -539,7 +539,7 @@ if command -v codex &>/dev/null; then
       warn "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed."
       ;;
     *)
-      warn "Codex hooks were not changed; review the existing hooks configuration manually."
+      warn "Codex hooks were not changed: the existing $CODEX_HOOKS state is '${CODEX_HOOKS_STATE}'. Compare it with integrations/codex/hooks.json and merge the LLM-Wiki entries by hand, then open /hooks in Codex to trust them."
       ;;
   esac
   if [ "$CODEX_MCP_READY" -eq 1 ] && [ "$CODEX_HOOKS_READY" -eq 1 ]; then
@@ -597,6 +597,32 @@ case "$SYNC_EXIT" in
   0) ok "Runtime state synchronized" ;;
   1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
   *) fail "Runtime synchronization failed" ;;
+esac
+
+# ─── 8b. Reliability V3 adoption ───────────────────────────────────
+# Session capture writes through the V3 queue, and a vault that has not
+# adopted V3 refuses every capture with `legacy_protocol_unquiesced` (issue
+# #17). A fresh vault, or one whose legacy pair the check finds quiescent,
+# is adopted here; any other state is named with the command to run.
+
+info "Checking Reliability V3 adoption..."
+ADOPTION_STATE="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>/dev/null || echo unknown)"
+case "$ADOPTION_STATE" in
+  adopted) ok "Reliability V3 adopted" ;;
+  fresh|upgrade-required)
+    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >/dev/null 2>&1; then
+      ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
+    else
+      SYNC_WARNING=1
+      warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
+      warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+    fi
+    ;;
+  *)
+    SYNC_WARNING=1
+    warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
+    warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    ;;
 esac
 
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────

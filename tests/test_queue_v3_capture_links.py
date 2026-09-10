@@ -406,8 +406,8 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
         intent_id=intent_id,
         intent_sha256="c" * 64,
     )
-    lease = queue.claim("worker")
-    assert lease is not None and lease.id == binding.task_id
+    lease = queue.claim_capture("worker")
+    _assert_capture_lease(lease, binding.task_id)
     decision = canonical_json_bytes(
         {"schema_version": "semantic-decision/v1", "stage": stage, "value": "retain"}
     )
@@ -456,13 +456,7 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
                     intent_fence=intent_fence,
                     owner=owner,
                 )
-            with sqlite3.connect(queue.db_path) as database:
-                assert database.execute(
-                    "SELECT COUNT(*) FROM capture_task_link_seals"
-                ).fetchone() == (0,)
-                assert database.execute(
-                    "SELECT COUNT(*) FROM semantic_decisions"
-                ).fetchone() == (0,)
+            _assert_no_semantic_publication(queue)
 
             monkeypatch.setattr(queue, "_insert_semantic_decision", real_insert)
             indexed = queue.publish_semantic_decision(
@@ -478,30 +472,7 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
                 owner=owner,
             )
 
-    assert indexed.stage == stage
-    assert indexed.seal_digest is not None
-    with sqlite3.connect(queue.db_path) as database:
-        task = database.execute(
-            """SELECT state,result_reference,result_sha256,result_operation_id
-               FROM tasks WHERE id=?""",
-            (binding.task_id,),
-        ).fetchone()
-        rows = database.execute(
-            "SELECT COUNT(*) FROM semantic_decisions WHERE intent_id=? AND stage=?",
-            (intent_id, stage),
-        ).fetchone()
-        database.execute(
-            "UPDATE tasks SET lease_expires_at=? WHERE id=?",
-            ("2000-01-01T00:00:00+00:00", binding.task_id),
-        )
-    assert task == ("leased", None, None, None)
-    assert rows == (1,)
-    assert queue.recover_expired_leases() == 1
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute(
-            "SELECT state,result_reference FROM tasks WHERE id=?", (binding.task_id,)
-        ).fetchone() == ("ready", None)
-    assert target.read_bytes() == decision
+    _assert_sealed_decision(queue, binding, indexed, stage, intent_id, target, decision)
     registry.release(owner)
 
 
@@ -558,3 +529,49 @@ def test_project_capture_binding_requires_live_intent_fence_and_is_immutable(
             coordinator._check_preconditions(validated, {}, database=database)
     assert error.value.code == "precondition_failed"
     registry.release(owner)
+
+
+def _assert_capture_lease(lease, task_id):
+    assert lease is not None
+    assert lease.id == task_id
+
+
+def _assert_no_semantic_publication(queue):
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute("SELECT COUNT(*) FROM capture_task_link_seals").fetchone() == (0,)
+        assert database.execute("SELECT COUNT(*) FROM semantic_decisions").fetchone() == (0,)
+
+
+def _assert_sealed_decision(queue, binding, indexed, stage, intent_id, target, decision):
+    _assert_indexed_stage(indexed, stage)
+    with sqlite3.connect(queue.db_path) as database:
+        task = database.execute(
+            """SELECT state,result_reference,result_sha256,result_operation_id
+               FROM tasks WHERE id=?""",
+            (binding.task_id,),
+        ).fetchone()
+        rows = database.execute(
+            "SELECT COUNT(*) FROM semantic_decisions WHERE intent_id=? AND stage=?",
+            (intent_id, stage),
+        ).fetchone()
+        database.execute(
+            "UPDATE tasks SET lease_expires_at=? WHERE id=?",
+            ("2000-01-01T00:00:00+00:00", binding.task_id),
+        )
+    assert task == ("leased", None, None, None)
+    assert rows == (1,)
+    _assert_capture_lease_recovered(queue, binding.task_id)
+    assert target.read_bytes() == decision
+
+
+def _assert_capture_lease_recovered(queue, task_id):
+    assert queue.recover_expired_leases() == 1
+    with sqlite3.connect(queue.db_path) as database:
+        assert database.execute(
+            "SELECT state,result_reference FROM tasks WHERE id=?", (task_id,)
+        ).fetchone() == ("ready", None)
+
+
+def _assert_indexed_stage(indexed, stage):
+    assert indexed.stage == stage
+    assert indexed.seal_digest is not None

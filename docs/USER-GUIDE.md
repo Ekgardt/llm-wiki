@@ -303,6 +303,11 @@ instead of claiming triple-fusion.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 
+The memory index holds `knowledge/` only. The product's own `scripts/`,
+`docs/` and `tests/` are not in it (they once were 92 % of an installed
+vault's chunks and outranked the user's pages). Code questions go through
+`get_architecture`, which reads a directory or a repository index.
+
 ### Compiling knowledge manually
 
 ```bash
@@ -506,7 +511,14 @@ preflight, exact evidence, or pins do not validate. Published BagIt bags are imm
 and uncompressed; logical evidence resolves from the flat file first and then a
 verified bag. There is no gzip archive tier. Claims with invalid evidence, evaluator
 disagreement, unsupported semantics, or low confidence enter
-`knowledge/inbox/claims/` quarantine. The frozen benchmark reports false
+`knowledge/inbox/claims/` quarantine. A batch that quarantines publishes the
+candidate only, no page: the compile prints `batch quarantined`, records
+`last_compile_outcome: quarantined` (or `partial` when other batches published),
+and the daily stays pending, so the next run retries it. The batch is atomic:
+an independent decision in the same daily is not published on its own. There is
+no accept command for a candidate; review it, then publish the decision as a
+page through the transaction API, or edit the daily and recompile it with
+`compile_memory.py --file`. The candidate and the audit trail are kept. The frozen benchmark reports false
 supersession and provenance metrics; automatic semantic supersession and eager
 backfill remain disabled.
 
@@ -548,9 +560,15 @@ uv sync --extra semantic
 ```
 
 This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
-Embeddings are cached in `cache/vectors.npy` with metadata in
-`cache/vectors_meta.json` (both gitignored) and rebuilt automatically when
-pages change.
+A first query in a fresh process loads the model: measured on one host, about
+11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
+it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
+Vectors live inside the active evidence generation
+(`cache/evidence-graph/generations/<id>/`, beside its search index), and
+are built by a generation refresh — the nightly maintenance pass, or
+`uv run python scripts/doctor.py --repair` — not at install and not when a
+page changes. Until a refresh has run with the model installed, `doctor`
+reports `vector_state: absent` and search stays lexical. (Issue #29.)
 
 ---
 

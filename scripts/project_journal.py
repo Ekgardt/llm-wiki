@@ -10,6 +10,7 @@ import re
 import secrets
 import stat
 import unicodedata
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -1419,6 +1420,13 @@ def _appended_journal(current_journal: bytes, event: object, records: list) -> b
 # of everything sealed, so the same projection comes back from the live segment
 # alone.
 _ROTATION_ID = "journal-rotation"
+# A journal also rolls by size, as every append-only log does (Kafka rolls a
+# segment at `segment.bytes` or `segment.ms`, whichever comes first). Rolling
+# by count alone let the no-hands journal reach 4.2 MB at 981 events, past
+# the claim tree's 4 MB page cap, and the nightly compile failed for two
+# nights. Two megabytes keeps a live journal at half that cap.
+# See `docs/research/2026-09-09-a-journal-rolls-by-size-too.md`.
+ROTATE_ABOVE_BYTES = 2 * 1024 * 1024
 
 
 def _sealed_segment_path(slug: str, records: list) -> str:
@@ -1501,9 +1509,16 @@ def _snapshot_event(slug: str, records: list, segment: str) -> dict[str, object]
     }
 
 
+def _journal_is_full(records: list, current_journal: bytes) -> bool:
+    """Full by count, or full by size — whichever comes first."""
+    if not records:
+        return False
+    return len(records) >= MAX_JOURNAL_EVENTS or len(current_journal) >= ROTATE_ABOVE_BYTES
+
+
 def _rotated_journal(slug: str, records: list, current_journal: bytes):
     """Seal a full journal and open a fresh one. None when it is not full."""
-    if len(records) < MAX_JOURNAL_EVENTS:
+    if not _journal_is_full(records, current_journal):
         return None
     segment = _sealed_segment_path(slug, records)
     snapshot = _snapshot_event(slug, records, segment)
@@ -1542,6 +1557,26 @@ def _extended_journal(
     journal = _appended_journal(current_journal, event, records)
     _require_journal_bounds(records, journal)
     return journal, None
+
+
+def rebuilt_journal(slug: str, events: Sequence[Mapping[str, object]]) -> tuple[bytes, list, list[dict]]:
+    """The journal bytes a sequence of committed events folds to, with any sealed segments.
+
+    Issue #20: deleting a project directory left its committed checkpoints in
+    the store and every later sequence blocked with `journal_rebuild_required`,
+    and nothing performed the rebuild. The committed `event_json` rows are the
+    truth the journal was only ever a projection of, so they fold back into
+    one, rolling by size and count exactly as appends did.
+    """
+    ordered = sorted(events, key=lambda item: int(item["sequence"]))
+    records: list = []
+    journal = JOURNAL_HEADER.encode("utf-8")
+    sealed: list = []
+    for event in ordered:
+        journal, segment = _extended_journal(slug, int(event["sequence"]), event, records, journal)
+        if segment is not None:
+            sealed.append(segment)
+    return journal, sealed, records
 
 
 def _markdown_change(
@@ -2465,6 +2500,45 @@ class ProjectStore:
                 return
             _require_traversable_directory(metadata, label)
 
+    def committed_events(self, slug: str) -> list[dict[str, object]]:
+        """Every committed checkpoint event of the slug, in sequence order."""
+        slug = _require_slug(slug)
+        with self.coordinator._connect() as database:
+            rows = database.execute(
+                "SELECT event_json FROM project_checkpoints WHERE project = ? "
+                "AND state = 'committed' ORDER BY sequence",
+                (slug,),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def rebuild_journal(self, slug: str) -> dict[str, object]:
+        """Write the journal and its projection back from the committed checkpoints.
+
+        One recoverable transaction creates or replaces `journal.md`, `state.md`
+        and any sealed segment the fold produced; the checkpoint rows are not
+        touched. Pending sequences are settled afterwards by `recover`. See
+        `rebuilt_journal`.
+        """
+        from markdown_transaction import _mutate_knowledge
+
+        slug = _require_slug(slug)
+        events = self.committed_events(slug)
+        if not events:
+            raise ProjectJournalReadError("no_committed_events", f"project {slug!r} has no committed checkpoints")
+        journal, sealed, records = rebuilt_journal(slug, events)
+        self._ensure_project_directory(slug)
+        changes: dict[Path, bytes | None] = {
+            self.vault / f"knowledge/projects/{slug}/journal.md": journal,
+            self.vault / f"knowledge/projects/{slug}/state.md": self.render_state(records, _validated=True),
+        }
+        for segment_path, segment_bytes in sealed:
+            changes[self.vault / segment_path] = segment_bytes
+        last = int(records[-1]["sequence"])
+        transaction = _mutate_knowledge(
+            self.coordinator, f"journal-rebuild:{slug}:{last}:{uuid.uuid4().hex}", changes, (), None
+        )
+        return {"project": slug, "events": len(events), "last_sequence": last, "sealed": len(sealed), "transaction": transaction.id}
+
     def _ensure_project_directory(self, slug: str) -> None:
         target = self._project_directory(slug)
         relative = target.relative_to(self.vault)
@@ -2703,3 +2777,27 @@ class ProjectStore:
             transaction_id=str(row["transaction_id"]) if row["transaction_id"] else None,
             duplicate=duplicate,
         )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Operator entry: rebuild a project's journal from its committed checkpoints.
+
+        uv run python scripts/project_journal.py --rebuild <slug>
+    """
+    import argparse
+
+    from memory_state import ROOT, STATE_ROOT
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--rebuild", metavar="SLUG", required=True, help="project slug to rebuild")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    store = ProjectStore(ROOT, STATE_ROOT)
+    report = store.rebuild_journal(args.rebuild)
+    report["recovered"] = len(store.recover(args.rebuild))
+    print(json.dumps(report, ensure_ascii=False) if args.json else f"rebuilt {report['project']}: {report['events']} events, head {report['last_sequence']}, {report['recovered']} pending settled")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

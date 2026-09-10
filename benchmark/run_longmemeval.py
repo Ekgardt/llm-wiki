@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--provider", default="claude")
+    parser.add_argument(
+        "--policy",
+        choices=("refuse", "answer"),
+        default="refuse",
+        help="refuse: the product's contract; answer: a claim the gates dropped is reported, marked uncited",
+    )
     parser.add_argument("--provider-timeout", type=int, default=240)
     parser.add_argument("--results", default=None, help="JSONL stream (resumable)")
     parser.add_argument("--report", default=None, help="aggregate report JSON")
@@ -135,6 +141,7 @@ def _worker_environment(args: argparse.Namespace) -> dict[str, str]:
     environment.pop("LLM_WIKI_ROOT", None)
     environment.pop("LLM_WIKI_STATE_ROOT", None)
     environment["MEMORY_LLM_PROVIDER"] = args.provider
+    environment["LLMWIKI_BENCH_POLICY"] = getattr(args, "policy", "refuse")
     environment["MEMORY_LLM_TIMEOUT_S"] = str(args.provider_timeout)
     environment.setdefault("OMP_NUM_THREADS", str(worker_threads(args.concurrency)))
     return environment

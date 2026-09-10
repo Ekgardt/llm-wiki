@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
@@ -2993,15 +2993,18 @@ def _backend_limit(limit: int, max_candidates: int | None) -> int:
 
 def _place_by_page(
     candidate: RetrievalCandidate,
-    seen: set[str],
+    seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
-    page = candidate.relative_path
-    if page in seen:
+    # The unit of a repeat is the entry — the page and the heading the chunk
+    # sits under — since 2026-09-08: a daily file holds every session of its
+    # day, and by page two sessions of one day took one slot between them.
+    entry = (candidate.relative_path, tuple(candidate.heading_path))
+    if entry in seen:
         extras.append(candidate)
         return
-    seen.add(page)
+    seen.add(entry)
     first.append(candidate)
 
 
@@ -3034,7 +3037,7 @@ def _page_diverse(
     """
     first: list[RetrievalCandidate] = []
     extras: list[RetrievalCandidate] = []
-    seen: set[str] = set()
+    seen: set[tuple] = set()
     for group in _diversity_groups(candidates):
         _place_group(group, seen, first, extras)
     return tuple(first + extras)
@@ -3042,7 +3045,7 @@ def _page_diverse(
 
 def _place_group(
     group: Sequence[RetrievalCandidate],
-    seen: set[str],
+    seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
@@ -3982,6 +3985,7 @@ def retrieve_via_search_memory(
     deadline_monotonic: float | None = None,
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict[str, Any]]:
     """Public search path: independent backends → retrieve() → legacy rows."""
     import search_memory
@@ -4236,6 +4240,8 @@ def retrieve_via_search_memory(
         generation_fallback=generation_fallback,
         legacy_fallback=legacy_fallback,
     )
+    if trace_sink is not None:
+        trace_sink.update(asdict(result.trace))
     rows = candidates_to_legacy(result, display_meta=result.display_meta)
     if emit_telemetry:
         _record_impressions(

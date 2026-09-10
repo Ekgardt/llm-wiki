@@ -314,6 +314,7 @@ def _append_prompt_tag(
         record_capture_failure(
             "user_prompt_append",
             f"{type(error).__name__}: {error}",
+            error=error,
             slug=slug,
             session_id=session_id,
         )
@@ -408,7 +409,9 @@ def main() -> int:
     except Exception as error:  # noqa: BLE001
         # Last-resort: never break the user's session over a logging hook,
         # but never lose the capture silently either.
-        record_capture_failure("user_prompt_hook", f"{type(error).__name__}: {error}")
+        record_capture_failure(
+            "user_prompt_hook", f"{type(error).__name__}: {error}", error=error
+        )
     return 0
 
 

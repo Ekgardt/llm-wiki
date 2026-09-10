@@ -118,8 +118,50 @@ stand now sets `OMP_NUM_THREADS` to that share for each worker unless the
 operator set one. Expected on the runs: embedding and reranking in roughly
 half the time per question; unmeasured on a full run until the next one.
 
+## Addendum 2026-09-08 — the quantised copy cost 2.5 GB of memory
+
+The first stand run with int8 lost a worker to the kernel OOM killer at
+3.8 GB anonymous memory, and the long-lived MCP server sat at 4.3 GB. Measured
+in one process (`/proc/self/status`, anonymous vs file-backed):
+
+| state | anonymous | file-backed |
+|---|---|---|
+| fp32 loaded, idle | 785 MB | 324 MB |
+| fp32 after scoring twelve pairs | 804 MB | 1 484 MB |
+| int8 by `quantize_dynamic` copy, fp32 deleted, gc | 3 606 MB total | — |
+| int8 **in place**, heap trimmed | 1 066 MB | 1 485 MB |
+
+The copy owns every weight — including the 1 GB word-embedding table the
+fp32 model only maps from disk — and glibc keeps the freed heap. In place, the
+int8 model costs 0.27 GB more anonymous memory than fp32 and scores twelve
+pairs in 4.9 s. `_cpu_precision` now quantises in place and calls
+`malloc_trim`. The 2.6 GB file-backed pages are the page cache and are
+evictable; they are not what the OOM killer counts.
+
+Two other things the night measured: ONNX export is closed for now (the
+installed `optimum` 1.27 does not import against `transformers` 5.13 and the
+`onnx` package is not installed — both dependency decisions, not for
+tonight); and the stand's two workers do not fit beside VS Code Server and
+two MCP servers on 16 GB, so the runs go one worker at a time.
+
 ## What this changes for the measurements
 
 Every run from here has a reranker in it. The next three runs are therefore
 not comparable to the 0.6983 baseline on retrieval alone; the comparison must
 say so.
+
+## Addendum 2026-09-08, evening: it still never finishes
+
+Run 2 (`second-look-n200-seed101-r2.jsonl`): `retrieve_seconds` median
+0.13 s, p90 0.15 s. Checked directly on a stand vault: every row carries
+`reranker_applied: false, reranker_fallback_reason: optional_stage_timeout`,
+on the cold call and on the warm one. Warmed first as the stand does
+(7.5 s), the first retrieval still waited the whole 12-second bound and
+gave up: twenty pairs of 4 KB pieces at two threads do not fit. After that
+the recorded cost is the ceiling and the stage is never awaited again in
+the process. So runs 1–3 and both arms of the tasks 1–6 measurement rank
+by reciprocal rank fusion alone; the cross-encoder has scored nothing on
+this stand at any point, and the 98% session recall was reached without
+it. Task 10 is therefore a measured question with two arms — the stage
+bound raised so the reranker actually runs, against no reranker at all —
+and the loser is deleted.

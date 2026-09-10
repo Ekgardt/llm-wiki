@@ -44,7 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from corpus_snapshot import (  # noqa: E402
-    APPROVED_CODE_ROOTS,
+    VAULT_CODE_ROOTS,
     CorpusChanged,
     collect_corpus,
     probe_corpus_identity,
@@ -157,13 +157,12 @@ class SessionReport:
 def approved_code_roots(root: Path) -> tuple[str, ...]:
     """Exactly the roots the builder indexes, so the probe cannot disagree.
 
-    Read from `doctor` rather than re-derived: a second answer to "which roots
-    are in the corpus" is how a watcher ends up chasing a delta the builder
-    will never close.
+    One definition, read where the corpus declares it: a second answer to
+    "which roots are in the corpus" is how a watcher ends up chasing a delta
+    the builder will never close. The vault's generation holds memory only.
     """
-    from doctor import _approved_code_roots  # noqa: PLC2701 - one definition, not two
-
-    return _approved_code_roots(root, set(APPROVED_CODE_ROOTS))
+    del root
+    return VAULT_CODE_ROOTS
 
 
 def _generation_directory(state_root: Path, generation_id: str) -> Path:
@@ -205,6 +204,22 @@ def _manifest_digests(
         return {item["relative_path"]: item["sha256"] for item in stored["sources"]}
     except (OSError, PermissionError, ValueError, KeyError, TypeError):
         return None
+
+
+def _generation_code_roots(generation_path: Path, state_root: Path) -> tuple[str, ...]:
+    """The roots the generation recorded in its policy; the vault default without one."""
+    from reliable_memory import read_runtime_bytes
+
+    try:
+        raw = read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=MAX_SOURCE_MANIFEST_BYTES,
+        )
+        roots = json.loads(raw)["policy"]["code_roots"]
+        return tuple(str(item) for item in roots)
+    except (OSError, PermissionError, ValueError, KeyError, TypeError):
+        return VAULT_CODE_ROOTS
 
 
 def _source_delta(indexed: dict[str, str], snapshot) -> int:
@@ -258,7 +273,7 @@ def _tier1_verdict(
         )
     snapshot = collect_corpus(
         root,
-        code_roots=approved_code_roots(root),
+        code_roots=_generation_code_roots(generation_path, state_root),
         deadline=deadline,
     )
     delta = _source_delta(indexed, snapshot)
@@ -296,7 +311,9 @@ def _looked_at_generation(
     deadline: float,
 ) -> FreshnessVerdict:
     probe = probe_corpus_identity(
-        target.root, code_roots=approved_code_roots(target.root), deadline=deadline
+        target.root,
+        code_roots=_generation_code_roots(target.generation_path, target.state_root),
+        deadline=deadline,
     )
     early = _tier0_verdict(probe, built_ns, now_ns, window_seconds)
     if early is not None:

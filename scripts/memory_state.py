@@ -251,11 +251,15 @@ def _unlink_quietly() -> None:
         pass
 
 
+class StateLockTimeout(TimeoutError):
+    """The state lock is held by a live writer; the caller's event is retried."""
+
+
 def _wait_for_slow_owner(deadline: float, poll: float) -> None:
     """Sleep for the live owner, but never past the caller's deadline."""
     remaining = deadline - time.time()
     if remaining <= 0:
-        raise TimeoutError(f"Could not acquire state lock: {LOCK_FILE}")
+        raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
     time.sleep(min(poll * 10, remaining))
 
 
@@ -268,7 +272,7 @@ def _await_lock_turn(deadline: float, poll: float) -> None:
         _unlink_quietly()
         return
     if time.time() > deadline:
-        raise TimeoutError(f"Could not acquire state lock: {LOCK_FILE}")
+        raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
     time.sleep(poll)
 
 

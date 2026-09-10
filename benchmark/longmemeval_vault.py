@@ -304,6 +304,34 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
     return snapshot, info
 
 
+FACT_KEYS_ENV = "LLMWIKI_BENCH_FACT_KEYS"
+
+
+def _key_the_haystack(state: Path, snapshot: object) -> int | None:
+    """Extract fact keys for this question's turns when the arm asks for it.
+
+    About ten batched provider calls a question; off by default because it is
+    the stand's cost, not the product's, where the nightly step pays it once.
+    """
+    if os.environ.get(FACT_KEYS_ENV, "").strip() != "1":
+        return None
+    import fact_keys
+    from llm_client import call_llm
+    from query_memory import _sentence_encoder
+
+    store = fact_keys.KeyStore(fact_keys.store_path(state))
+    try:
+        return fact_keys.key_turns(
+            store,
+            snapshot.chunks,
+            lambda prompt, system_prompt: call_llm(prompt, system_prompt, 1500),
+            _sentence_encoder(),
+            time.monotonic() + BUILD_DEADLINE_SECONDS,
+        )
+    finally:
+        store.close()
+
+
 def profile_for(question_text: str) -> str:
     from retrieval import analyze_query
 
@@ -325,7 +353,16 @@ def _searchable(question_text: str, question_date: str) -> str:
     return searchable_question(question_text, date.fromisoformat(day_of(question_date)))
 
 
-def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) -> list[dict]:
+def _retrieved_rows(
+    question_text: str,
+    profile: str,
+    limit: int | None = None,
+    *,
+    rerank: bool = True,
+    since: str | None = None,
+    as_of: str | None = None,
+) -> list[dict]:
+    """The candidates for one query; a sub-query skips the cross-encoder; a dated leg bounds the days."""
     from retrieval import retrieve_via_search_memory
 
     return list(
@@ -334,6 +371,9 @@ def _retrieved_rows(question_text: str, profile: str, limit: int | None = None) 
             limit=limit or _qa_candidates(),
             semantic=True,
             profile=profile,
+            rerank=rerank,
+            since=since,
+            as_of=as_of,
             deadline_monotonic=time.monotonic() + RETRIEVE_DEADLINE_SECONDS,
         )
     )
@@ -417,6 +457,20 @@ def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool
 #
 # One-based, and 0 when no candidate comes from a labelled answer session, so
 # the value is directly comparable with how many candidates the budget kept.
+def _reranker_fields(rows: list[dict]) -> dict[str, object]:
+    """Whether the cross-encoder scored this question's candidates, and why not.
+
+    Run 2 retrieved in 0.13 s a question because the stage never ran; without
+    these three fields the row could not say so.
+    """
+    head = rows[0] if rows else {}
+    return {
+        "reranker_applied": bool(head.get("reranker_applied")),
+        "reranker_fallback_reason": head.get("reranker_fallback_reason"),
+        "reranker_duration_ms": head.get("reranker_duration_ms"),
+    }
+
+
 def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int:
     """The position of the first candidate drawn from a labelled answer session."""
     labelled = _labelled_sessions(question)
@@ -481,15 +535,22 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
     return generate
 
 
+def _call_kinds() -> dict[str, str]:
+    from aggregation_pass import CLUSTER_SYSTEM_PROMPT, FANOUT_SYSTEM_PROMPT
+    from refusal_pass import MISSING_SYSTEM_PROMPT
+
+    return {
+        CLUSTER_SYSTEM_PROMPT: "cluster_calls",
+        FANOUT_SYSTEM_PROMPT: "fanout_calls",
+        MISSING_SYSTEM_PROMPT: "search_calls",
+    }
+
+
 def _count_call(metrics: dict, system_prompt: str) -> None:
     """Which kind of call this was, so a second look is visible in the row."""
-    from aggregation_pass import CLUSTER_SYSTEM_PROMPT
-
     metrics["provider_calls"] = metrics.get("provider_calls", 0) + 1
-    if system_prompt == CLUSTER_SYSTEM_PROMPT:
-        metrics["cluster_calls"] = metrics.get("cluster_calls", 0) + 1
-        return
-    metrics["answer_calls"] = metrics.get("answer_calls", 0) + 1
+    kind = _call_kinds().get(system_prompt, "answer_calls")
+    metrics[kind] = metrics.get(kind, 0) + 1
 
 
 def dated_question(question: dict) -> str:
@@ -497,9 +558,43 @@ def dated_question(question: dict) -> str:
     return f"{question['question']}\n(Current date: {question['question_date']})"
 
 
-def hypothesis_of(document: dict) -> str:
-    claims = document.get("claims") or []
-    return " ".join(str(claim.get("text", "")) for claim in claims).strip()
+POLICY_ENV = "LLMWIKI_BENCH_POLICY"
+POLICIES = ("refuse", "answer")
+UNCITED = "(uncited) "
+
+
+def policy() -> str:
+    """`refuse` keeps the product's contract; `answer` reports a dropped claim as the answer."""
+    chosen = os.environ.get(POLICY_ENV, "refuse").strip().casefold()
+    if chosen in POLICIES:
+        return chosen
+    return "refuse"
+
+
+def _joined(texts) -> str:
+    return " ".join(str(text) for text in texts).strip()
+
+
+def _uncited_hypothesis(document: dict) -> str:
+    unverified = _joined(document.get("unverified_claims") or [])
+    if not unverified:
+        return ""
+    return UNCITED + unverified
+
+
+def hypothesis_of(document: dict, chosen: str = "refuse") -> str:
+    text = _joined(claim.get("text", "") for claim in document.get("claims") or [])
+    if text or chosen != "answer":
+        return text
+    return _uncited_hypothesis(document)
+
+
+def _status_under(document: dict, hypothesis: str, chosen: str) -> dict:
+    """The row's status: the product's, or `answered` where answer mode spoke uncited."""
+    status = str(document.get("status"))
+    if not hypothesis.startswith(UNCITED):
+        return {"status": status, "uncited": False, "refusal_status": None}
+    return {"status": "answered", "uncited": True, "refusal_status": status}
 
 
 def error_kind(exc: BaseException) -> str:
@@ -565,6 +660,8 @@ def _answer_outcome(
     profile: str,
     gold: str = "",
     retrieve=None,
+    search=None,
+    chosen: str = "refuse",
 ) -> dict:
     from context_budget import ContextBudget
     from query_memory import QA_MAX_OUTPUT_TOKENS, grounded_qa
@@ -576,6 +673,8 @@ def _answer_outcome(
             snapshot=snapshot,
             candidates=rows,
             retrieve=retrieve,
+            search=search,
+            keep_unverified=chosen == "answer",
             generator=_instrumented_generator(metrics, gold),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
@@ -588,9 +687,11 @@ def _answer_outcome(
             "error": f"{type(exc).__name__}: {exc}"[:500],
             "error_kind": error_kind(exc),
         }
+    hypothesis = hypothesis_of(document, chosen)
     return {
-        "status": str(document.get("status")),
-        "hypothesis": hypothesis_of(document),
+        **_status_under(document, hypothesis, chosen),
+        "hypothesis": hypothesis,
+        "policy": chosen,
         "reason": document.get("reason"),
         "claims": len(document.get("claims") or []),
         "citations": len(document.get("citations") or []),
@@ -611,6 +712,7 @@ def run_question(question: dict, work: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
+    keyed = _key_the_haystack(state, snapshot)
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
@@ -621,8 +723,13 @@ def run_question(question: dict, work: Path) -> dict:
     outcome = _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
-        # The second look's way of asking for more than the first twelve.
+        # The second look's way of asking for more than the first twelve, and
+        # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
+        search=lambda query, limit, **window: _retrieved_rows(
+            query, profile, limit, rerank=False, **window
+        ),
+        chosen=policy(),
     )
     finished = time.monotonic()
     return {
@@ -641,8 +748,10 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_sessions_labelled": len(_labelled_sessions(question)),
         "gold_in_candidates": gold_in_candidates(question, rows),
         "answer_session_rank": answer_session_rank(question, rows),
+        **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
+        "keyed_turns": keyed,
         **outcome,
         **metrics,
         "ingest_seconds": round(build_started - ingest_started, 2),

@@ -24,6 +24,45 @@ DOCTOR = SCRIPTS / "doctor.py"
 GENEROUS_BUDGET_SECONDS = 120.0
 
 
+def _adopt(root: Path, state_root: Path) -> None:
+    """Adopt Reliability V3 the way an install does, so the capture check can run.
+
+    A vault that has not adopted reports capture as disabled (issue #17); a test
+    that asserts a healthy report needs the real records under `run/`, not a
+    patched answer.
+    """
+    from installed_memory_repair import repair_installed_vault
+
+    (root / "scripts" / "integration_adapter.py").write_bytes(
+        (SCRIPTS / "integration_adapter.py").read_bytes()
+    )
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok", report
+
+
+def test_a_vault_that_has_not_adopted_v3_says_capture_is_disabled_and_names_the_command(
+    tmp_path,
+):
+    """Issue #17: every capture failed silently until the adoption was run by hand."""
+    import time
+
+    import doctor
+
+    root, state_root, _home = _build_root(tmp_path)
+
+    result = doctor._capture_check(root, state_root, time.monotonic() + 30)
+
+    assert result["status"] == "degraded"
+    assert "Session capture is disabled" in result["message"]
+    assert "--adopt-ownership-v3" in result["message"]
+    assert result["details"]["adoption_state"] in {"fresh", "upgrade-required", "conflict", "unknown"}
+
+
 @pytest.fixture(autouse=True)
 def _budget_that_survives_a_slow_runner(monkeypatch):
     """Give every doctor run in this file enough time to reach its findings.
@@ -283,6 +322,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
     now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
     (state_root / "run" / "state.json").write_text(
@@ -817,6 +857,38 @@ def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_pat
     assert codex["not_completed"] is True
 
 
+def _fake_codex_tree(monkeypatch, process_factory, observed=None):
+    """The probe spawns its peer as an owned process tree; a test stands in
+    for the tree, not for `Popen`, so the pipes and the kill go where the
+    product sends them (a Job Object on Windows, a process group on POSIX)."""
+    import lsp_process_tree
+
+    class Tree:
+        def __init__(self, process):
+            self.process = process
+
+        def terminate(self, *, deadline):
+            # Like the real tree: kill, then wait for the exit until the deadline.
+            self.process.kill()
+            try:
+                self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        def close(self):
+            return None
+
+    def spawn(command, *, cwd, env, deadline):
+        del deadline
+        kwargs = {"cwd": str(cwd), "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+        if observed is not None:
+            observed["args"] = list(command)
+            observed["kwargs"] = kwargs
+        return Tree(process_factory(list(command), **kwargs))
+
+    monkeypatch.setattr(lsp_process_tree.ProcessTree, "spawn_with_deadline", staticmethod(spawn))
+
+
 def test_codex_hooks_probe_cleanup_honors_absolute_deadline(tmp_path, monkeypatch):
     import doctor
 
@@ -840,7 +912,7 @@ def test_codex_hooks_probe_cleanup_honors_absolute_deadline(tmp_path, monkeypatc
             return None
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -876,7 +948,7 @@ def test_codex_hooks_probe_own_timeout_remains_unverified(tmp_path, monkeypatch)
             return None
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -909,7 +981,7 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
                 "result": _runtime_hooks(root),
             }
             self.stdin = Input()
-            self.stdout = io.BytesIO((json.dumps(response) + "\n").encode())
+            self.stdout = io.BytesIO((' {"id":1,"result":{}}\n' + json.dumps(response) + "\n").encode())
             self.stderr = io.BytesIO()
 
         def wait(self, timeout=None):
@@ -920,7 +992,7 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         def kill(self):
             pytest.fail("bounded probe unexpectedly timed out")
 
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process, observed)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -933,18 +1005,32 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         deadline=time.monotonic() + doctor.CODEX_HOOK_PROBE_SECONDS,
     )
 
-    requests = [json.loads(line) for line in observed["input"].splitlines()]
+    _assert_codex_probe_identity(observed, root, home)
+    _assert_codex_probe_limits(observed)
+    _assert_codex_probe_requests(observed, root)
+    assert response == _runtime_hooks(root)
+
+
+def _assert_codex_probe_identity(observed, root, home):
     assert observed["args"] == ["codex", "app-server", "--listen", "stdio://"]
     assert observed["kwargs"]["cwd"] == str(root)
     assert observed["kwargs"]["env"]["CODEX_HOME"] == str(home / ".codex")
+
+
+def _assert_codex_probe_limits(observed):
+    import doctor
+
     assert observed["kwargs"]["stdout"] is subprocess.PIPE
     assert observed["kwargs"]["stderr"] is subprocess.PIPE
     assert observed["timeout"] <= doctor.CODEX_HOOK_PROBE_SECONDS
+
+
+def _assert_codex_probe_requests(observed, root):
+    requests = list(map(json.loads, observed["input"].splitlines()))
     assert requests[0]["method"] == "initialize"
     assert requests[1]["method"] == "initialized"
     assert requests[2] == {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}}
     assert "bypass" not in observed["input"].casefold()
-    assert response == _runtime_hooks(root)
 
 
 def test_codex_app_server_command_supports_windows_cmd_shim(monkeypatch):
@@ -1538,6 +1624,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     today = datetime.now(timezone.utc).date().isoformat()
     (state_root / "run" / "state.json").write_text(
         json.dumps({"last_nightly_date": today, "last_nightly_status": "success"}),
@@ -1581,7 +1668,10 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     import doctor
 
     root, _, home = _build_root(tmp_path)
+    # Adopted, so capture is enabled (issue #17); everything else under the
+    # state root is still missing and is what `--repair` creates.
     state_root = tmp_path / "missing-state"
+    _adopt(root, state_root)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setenv("HOME", str(home))
@@ -4135,6 +4225,7 @@ def test_a_loss_that_stopped_happening_returns_the_capture_check_to_green(tmp_pa
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     (state_root / "run").mkdir(parents=True, exist_ok=True)
     (state_root / "run" / "state.json").write_text(
         json.dumps(
@@ -4163,6 +4254,7 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
@@ -4698,3 +4790,95 @@ def _fixed_ok(doctor, check_id):
         return doctor._result(check_id, "ok", "ok", {})
 
     return check
+
+
+def test_deferred_writes_are_reported_beside_lost_captures_not_as_them(tmp_path):
+    """Issue #26.3: a writer race is retried by the next session, not lost."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "adapter_capture_worker": {
+                        "count": 17,
+                        "deferred": 17,
+                        "last_reason": "OperationalOwnershipError: owner_busy",
+                        "last_at": _moment_days_ago(0),
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 0
+    assert check["details"]["deferred"] == 17
+    assert "17 write(s) were deferred by a writer race" in check["message"]
+    del home
+
+
+def test_the_claim_check_names_the_cause_the_pages_and_the_repair() -> None:
+    """Issue #29.5: `requires operator attention` said neither why nor what to do."""
+    import doctor
+
+    details = {
+        "index": "valid",
+        "claims": 40,
+        "diagnostics": 6,
+        "codes": ["evidence_unresolved"],
+        "by_code": {"evidence_unresolved": 6},
+        "pages": ["knowledge/notes/alarm-thresholds.md", "knowledge/notes/verify-first.md"],
+        "read_error": False,
+        "deletion_codes": [],
+    }
+
+    result = doctor._claim_result(details)
+
+    assert result["status"] == "degraded"
+    assert "6 claim(s) cite daily bytes that no longer resolve" in result["message"]
+    assert "knowledge/notes/alarm-thresholds.md, knowledge/notes/verify-first.md" in result["message"]
+    assert "doctor.py --repair" in result["message"]
+
+
+def test_an_adopted_vault_owes_no_v2_queue_migration(tmp_path, monkeypatch):
+    """Adoption retires the v2 queue; the doctor must not wait for its marker.
+
+    Found by adopting a test vault for real instead of patching the answer:
+    `memory_queue` declines to migrate after adoption, so the marker never
+    appears, and the queue check called that a pending migration for ever.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "queue")
+
+    assert not (state_root / "run" / "queue-migrated-v2").exists()
+    assert check["details"]["migration"] == "retired"
+    assert check["status"] == "ok"
+
+
+def test_repair_on_an_adopted_vault_does_not_run_the_retired_v2_migration(tmp_path, monkeypatch):
+    """`doctor --repair` aborted on the v2 queue tombstone when the v2 marker was absent."""
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    state_root = tmp_path / "adopted-only"
+    _adopt(root, state_root)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+
+    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
+
+    runtime = _check(report, "runtime")
+    assert runtime["details"].get("repair_errors", []) == []
+    assert not (state_root / "run" / "queue-migrated-v2").exists()
+    assert all(item["action"] != "migrate_queue" for item in report["repaired"])
