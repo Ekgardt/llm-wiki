@@ -283,6 +283,15 @@ def _post_compile_steps() -> list[_Step]:
             _script("search_memory.py") + ["--rebuild"],
             60,
         ),
+        _Step(
+            # Every refresh publishes a new immutable generation and nothing
+            # removed the old ones: five in one day, 1.05 GB, on the vault of
+            # issue #29. The pruner keeps the active generation and one ancestor.
+            "Step 3c: pruning superseded evidence generations...",
+            "prune_generations",
+            _script("prune_generations.py") + ["--apply"],
+            300,
+        ),
         _checkpoint_step(),
     ]
 
@@ -335,13 +344,31 @@ def _last_compile_finished() -> str | None:
     return str(finished) if finished else None
 
 
+# How long a nightly pass follows a running compile before deferring the
+# steps that read its output. Five minutes was the old bound; issue #21
+# measured a healthy compile of one daily log at 6.5 minutes through the
+# Claude CLI and the pass recorded it as two failures. Thirty minutes is
+# the new floor, and an operator sets `MEMORY_COMPILE_WAIT_SECONDS`.
+COMPILE_WAIT_SECONDS = 1800.0
+COMPILE_WAIT_ENV = "MEMORY_COMPILE_WAIT_SECONDS"
+
+
+def _compile_wait_seconds() -> float:
+    raw = os.environ.get(COMPILE_WAIT_ENV, "").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return COMPILE_WAIT_SECONDS
+
+
 def _wait_compile_finished() -> bool:
-    """Wait up to 5 minutes (60 × 5s) for a running compile to finish."""
-    for _ in range(60):
-        if not _compile_running():
-            return True
+    """Follow a running compile until it stops or the wait bound passes."""
+    deadline = time.monotonic() + _compile_wait_seconds()
+    while _compile_running():
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(5)
-    return False
+    return True
 
 
 def _compact_telemetry(log) -> None:
@@ -401,9 +428,11 @@ def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
 
     log("Step 2b: waiting for compile to finish...")
     if not _wait_compile_finished():
-        log("WARNING: compile still running after 5 min — skipping lint/index/graph")
-        # Steps 3, 3b, 3c depend on compile output.
-        return failures + 1
+        # A compile that is still running is deferred, not failed: its outcome
+        # is unknown, and the steps that read its output wait for the next
+        # pass. Counting it as a failure turned a slow healthy night red (#21).
+        log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
+        return failures
     failures += _report_compile_outcome(log, before)
     return failures + _post_compile_pass(run_step, log, ownership)
 

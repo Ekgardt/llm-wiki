@@ -229,7 +229,7 @@ if ! command -v uv &>/dev/null; then
 fi
 installedUvVersion="$(uv --version | awk '{print $2}')"
 if [ "$installedUvVersion" != "$UV_VERSION" ]; then
-  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade uv explicitly and rerun the installer."
+  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade it and rerun: standalone installs use 'uv self update ${UV_VERSION}'; pip or uv-tool installs use 'uv tool install \"uv==${UV_VERSION}\" --force' (or 'pip install uv==${UV_VERSION}')."
 fi
 ok "uv ${installedUvVersion}"
 

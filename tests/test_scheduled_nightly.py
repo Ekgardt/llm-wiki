@@ -229,3 +229,48 @@ def test_a_vault_that_never_compiled_reports_no_failure(monkeypatch):
     _state(monkeypatch, {})
 
     assert scheduled_nightly._compile_failed_this_pass(None) is None
+
+
+def test_a_running_compile_is_followed_up_to_the_wait_bound_and_then_deferred(monkeypatch):
+    """Issue #21: a healthy 6.5-minute compile was recorded as failures=2 after a 5-minute wait."""
+    import scheduled_nightly
+
+    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "0")
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: True)
+    assert scheduled_nightly._wait_compile_finished() is False
+
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
+    assert scheduled_nightly._wait_compile_finished() is True
+
+    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "not a number")
+    assert scheduled_nightly._compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
+    monkeypatch.delenv(scheduled_nightly.COMPILE_WAIT_ENV)
+    assert scheduled_nightly._compile_wait_seconds() == 1800.0
+
+
+def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monkeypatch):
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "_run_steps", lambda run_step, log, steps: 0)
+    monkeypatch.setattr(scheduled_nightly, "_wait_for_compile_idle", lambda log: None)
+    monkeypatch.setattr(scheduled_nightly, "_last_compile_finished", lambda: None)
+    monkeypatch.setattr(scheduled_nightly, "_wait_compile_finished", lambda: False)
+    messages: list[str] = []
+
+    failures = scheduled_nightly._nightly_steps(lambda *a, **k: 0, messages.append, None)
+
+    assert failures == 0
+    assert any("deferred" in message for message in messages)
+
+
+def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
+    """Issue #29: five generations, 1.05 GB, accumulated in one day with nothing removing them."""
+    import scheduled_nightly
+
+    steps = scheduled_nightly._post_compile_steps()
+    labels = [step.label for step in steps]
+    prune = next(step for step in steps if step.label == "prune_generations")
+
+    assert labels.index("prune_generations") > labels.index("search")
+    assert prune.command[-1] == "--apply"
+    assert prune.command[-2].endswith("prune_generations.py")
