@@ -50,7 +50,12 @@ nothing and failed. The legacy-60 and current-generated gates are retired
 retrieval-v2 entry point. The synthetic `retrieval-v2.json` corpus and the
 LongMemEval stand are the measurements that remain, and both are
 self-contained.
-The vault-application stand (`benchmark/run_vault_application.py`, seven
-cases whose gold pages and expected tokens were the owner's decision pages)
-goes the same way, and the daily-heading reader test now exercises the
+The vault stands go the same way — retrieval (`run_vault_retrieval.py`, ten
+Russian questions against the owner's English pages), application
+(`run_vault_application.py`, seven cases), contamination and lift attribution,
+with `answer_key.py`, `retrieval_paths.py` and `lift_corpus.py` — because
+their questions and gold pages were the owner's decision pages; a clean
+checkout could not even import them. The cross-lingual measurement planned in
+`2026-09-10-cross-lingual-memory-world-practice.md` uses a public synthetic
+fixture instead, and the daily-heading reader test now exercises the
 producer in a temporary vault instead of reading this repository's daily logs.

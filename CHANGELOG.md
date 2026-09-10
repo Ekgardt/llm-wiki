@@ -25,10 +25,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   the repository used to ship; with no pages shipped there is nothing to
   measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
   and `benchmark/legacy-60-v1.json` are gone.
-- **The vault-application stand is retired.** Its seven cases named the
-  owner's decision pages as gold pages and quoted their tokens; with those
-  pages private there is nothing public to run it on. The LongMemEval stand
-  measures applied memory on a public dataset.
+- **The vault stands are retired**: retrieval, application, contamination
+  and lift attribution, with their answer-key and entry-point helpers. Their
+  questions and gold pages were the owner's decision pages; with those pages
+  private there is nothing public to run them on. The synthetic
+  `retrieval-v2.json` corpus (which carries cross-language queries) and the
+  LongMemEval stand are the public measurements.
 - **Cursor and Antigravity are no longer supported platforms.** The owner uses
   neither, and carrying two hosts nobody exercises meant two managed hook
   formats, two doctor checks, two installer detections, and two event
