@@ -24,6 +24,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Two users' first-day findings (issues #17–#29, PR #27), each with its test
+  and, where the design changed, a dated note under `docs/research/`:
+  a fresh install adopts Reliability V3 so capture works at once (#17); the
+  nightly follows a slow compile instead of failing it and prunes superseded
+  generations (#21, #29.4); the provider and model chosen at install reach
+  the hooks and the scheduler units (#22); a deleted project's journal can
+  be rebuilt from its checkpoints (#20); a compile names every claim it drops
+  and widens a partial quote to its line instead of dropping it (#28);
+  `doctor` reads the vector state without the budget (#29.1); an empty
+  `recall` names the generation it searched and the envelope repeats the
+  trace's partial and fallback state (#26.1); a compile says `published` or
+  `quarantined` per batch and records `last_compile_outcome` (#26.2); a
+  capture write deferred by a writer race is counted apart from a lost one
+  (#26.3); the claim check names each code's cause, the pages and the repair
+  (#29.5); session start reads the nightly's health report instead of saying
+  "not measured" every morning (#23.5); a busy maintenance fence names its
+  holder (#29.6); Codex hooks are discovered natively and the internal
+  classifier no longer captures itself (PR #27).
 - `uninstall` and `rollback` still take back a Cursor or Antigravity hook
   fragment written by an install from before the retirement. Deleting the
   writing code outright would have made the manifest name a resource the code
