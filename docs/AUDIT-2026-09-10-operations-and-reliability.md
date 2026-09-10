@@ -189,6 +189,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-07 — Three stale-lock stealers unlink without checking what they unlink
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md`).
+
 - Rule: L4 (race window), C (at most one writer).
 - Evidence: `scripts/maybe_compile.py:177-182, 190-194` (read, decide stale,
   `LOCK_FILE.unlink()`); `scripts/memory_state.py:266-273` (`_await_lock_turn`:

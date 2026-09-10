@@ -236,19 +236,52 @@ def _lock_age() -> float:
         return 0.0
 
 
-def _lock_owner_alive() -> bool:
+def _lock_bytes() -> bytes | None:
+    try:
+        return LOCK_FILE.read_bytes()
+    except OSError:
+        return None
+
+
+def _owner_alive(payload: bytes | None) -> bool:
     """True when the recorded owner is a live process; corrupt reads say no."""
     try:
-        return _is_pid_alive(int(LOCK_FILE.read_text(encoding="utf-8").strip()))
-    except (ValueError, OSError):
+        return _is_pid_alive(int((payload or b"").decode("utf-8").strip()))
+    except ValueError:
         return False
 
 
-def _unlink_quietly() -> None:
+def _put_back(aside: Path, path: Path) -> None:
+    """Return a lock we moved aside; refused when the name was taken meanwhile."""
     try:
-        LOCK_FILE.unlink()
+        os.link(aside, path)
+        aside.unlink()
     except OSError:
-        pass
+        return
+
+
+def retire_stale_lock(path: Path, judged: bytes) -> bool:
+    """Remove `path` only while it still holds the bytes the caller judged stale.
+
+    The lock is renamed aside first — one winner among concurrent stealers —
+    and deleted only when the moved bytes match; a fresh owner's lock moved by
+    mistake is put back. Research:
+    docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md
+    """
+    aside = path.with_name(f"{path.name}.stale-{os.getpid()}-{secrets.token_hex(4)}")
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return False
+    try:
+        current = aside.read_bytes()
+    except OSError:
+        return False
+    if current != judged:
+        _put_back(aside, path)
+        return False
+    aside.unlink(missing_ok=True)
+    return True
 
 
 class StateLockTimeout(TimeoutError):
@@ -264,12 +297,14 @@ def _wait_for_slow_owner(deadline: float, poll: float) -> None:
 
 
 def _await_lock_turn(deadline: float, poll: float) -> None:
-    """One turn of waiting: steal a dead lock, wait out a live one."""
+    """One turn of waiting: retire a dead lock, wait out a live one."""
     if _lock_age() > _STALE_LOCK_SECONDS:
-        if _lock_owner_alive():
+        payload = _lock_bytes()
+        if _owner_alive(payload):
             _wait_for_slow_owner(deadline, poll)
             return
-        _unlink_quietly()
+        if payload is not None:
+            retire_stale_lock(LOCK_FILE, payload)
         return
     if time.time() > deadline:
         raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")

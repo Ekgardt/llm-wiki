@@ -58,7 +58,9 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
     state_root = tmp_path / "state"
     lock = state_root / "run" / "maintenance.lock"
     lock.parent.mkdir(parents=True)
-    lock.write_text("999", encoding="utf-8")
+    # A live owner: the marker is stale with its process, never by age
+    # (audit OPS-01/OPS-07), so a dead PID would be retired and the pass run.
+    lock.write_text(str(os.getpid()), encoding="utf-8")
     monkeypatch.setattr(memory_state, "STATE_DIR", state_root / "run")
     monkeypatch.setattr(memory_state, "STATE_FILE", state_root / "run" / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", state_root / "run" / "state.json.lock")

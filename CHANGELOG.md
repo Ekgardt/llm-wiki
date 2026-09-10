@@ -96,6 +96,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A stale lock is moved aside and checked before it is removed.** The
+  three legacy lock stealers (`run/compile.pid`, `run/state.json.lock`, the
+  legacy `run/maintenance.lock`) decided "stale" from one read and then
+  unlinked whatever was at the path, so two stealers could remove each
+  other's fresh lock and both proceed. One helper now renames the lock aside
+  (one winner), deletes it only while it still holds the judged bytes, and
+  puts a fresh owner's lock back; the legacy marker is judged by its process,
+  not by age (audit OPS-07). Research:
+  `docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md`.
 - **A maintenance step that times out takes its children with it.** The
   nightly and weekly runner killed only the direct child at the bound; a
   step's own workers (queue processors, repository refresh, model download)

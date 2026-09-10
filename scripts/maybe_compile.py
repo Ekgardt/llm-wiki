@@ -41,6 +41,7 @@ from memory_state import (  # noqa: E402
     atomic_write,
     file_hash,
     load_state,
+    retire_stale_lock,
     spawn_detached,
 )
 from memory_state import (  # noqa: E402
@@ -77,17 +78,23 @@ def _is_pid_alive(pid: int) -> bool:
     return _os_pid_alive(pid)
 
 
+def _lock_bytes() -> bytes | None:
+    try:
+        return LOCK_FILE.read_bytes()
+    except OSError:
+        return None
+
+
 def _read_lock() -> dict | None:
     """The lock as {pid, started_at, owner}, or None when absent or unreadable.
 
     The optional third line is a random owner token written by
     `_write_lock`/`_try_claim_lock`; older 2-line lock files have owner=None.
     """
-    try:
-        text = LOCK_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
+    payload = _lock_bytes()
+    if payload is None:
         return None
-    return _parse_lock(text.splitlines())
+    return _parse_lock(payload.decode("utf-8", errors="replace").strip().splitlines())
 
 
 def _parse_lock(lines: list[str]) -> dict | None:
@@ -162,13 +169,6 @@ def _lock_state() -> tuple[str, str]:
     return _owner_state(lock)
 
 
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
-
-
 def _lock_is_ours() -> bool:
     lock = _read_lock()
     owner = None if lock is None else lock.get("owner")
@@ -179,17 +179,27 @@ def _clear_lock() -> bool:
     """Remove the lock unless a live process we do not own holds it.
 
     Returns True when the lock is gone (cleared or absent), False when a
-    live lock belongs to another caller.
+    live lock belongs to another caller. The removal retires exactly the
+    bytes that were judged: a lock replaced meanwhile by a fresh owner is
+    left alone (audit OPS-07).
     """
     global _current_owner
-    state, _reason = _lock_state()
-    if state == "absent":
-        return True
-    if state == "live" and not _lock_is_ours():
+    judged = _lock_bytes()
+    if judged is None:
+        return not LOCK_FILE.exists()
+    if _judged_state(judged) == "live" and not _lock_is_ours():
         return False
-    _unlink_quietly(LOCK_FILE)
+    removed = retire_stale_lock(LOCK_FILE, judged)
     _current_owner = None
-    return True
+    return removed or not LOCK_FILE.exists()
+
+
+def _judged_state(judged: bytes) -> str:
+    """absent/stale/live for the exact bytes that will be retired; unreadable is stale."""
+    lock = _parse_lock(judged.decode("utf-8", errors="replace").strip().splitlines())
+    if lock is None:
+        return "stale"
+    return _owner_state(lock)[0]
 
 
 def _is_compile_running() -> tuple[bool, str]:

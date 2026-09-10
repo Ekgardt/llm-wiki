@@ -607,25 +607,28 @@ def _write_marker(marker: Path) -> bool:
     return True
 
 
-def _marker_is_abandoned(marker: Path) -> bool:
-    """A marker older than 30 minutes whose owner process is gone."""
+def _abandoned_marker_bytes(marker: Path) -> bytes | None:
+    """The bytes of a marker whose owner process is gone; None while it lives.
+
+    Liveness is the process, never the age (the compile-lock note of
+    2026-09-10); this legacy marker serves only vaults without a V3
+    coordinator, where the registry's reclaim is unavailable.
+    """
     from memory_state import _is_pid_alive
 
     try:
-        if time.time() - marker.stat().st_mtime <= 1800:
-            return False
-        old_pid = int(marker.read_text(encoding="utf-8").strip())
+        payload = marker.read_bytes()
+        old_pid = int(payload.decode("utf-8").strip())
     except (OSError, ValueError):
-        return False
-    return not _is_pid_alive(old_pid)
+        return None
+    return None if _is_pid_alive(old_pid) else payload
 
 
 def _steal_marker(marker: Path) -> bool:
-    if not _marker_is_abandoned(marker):
-        return False
-    try:
-        marker.unlink()
-    except OSError:
+    from memory_state import retire_stale_lock
+
+    judged = _abandoned_marker_bytes(marker)
+    if judged is None or not retire_stale_lock(marker, judged):
         return False
     return _write_marker(marker)
 
