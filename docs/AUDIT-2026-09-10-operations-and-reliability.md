@@ -295,6 +295,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-13 — The MCP warm-up hides its own failure from the user and the doctor
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-failed-warm-up-is-in-the-health-answer.md`).
+
 - Rule: L3, L4 (silent fallback).
 - Evidence: `scripts/mcp_server.py:5639-5643` (`contextlib.suppress(
   BaseException)` around `_warm_reranker` and each warm-up pass), `:5679-5681`

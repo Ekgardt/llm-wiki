@@ -96,6 +96,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A failed MCP warm-up is in the health answer.** The retrieval warm-up
+  swallowed every failure, including `KeyboardInterrupt` and `MemoryError`,
+  and the first answers of a session silently fell back to the lexical leg.
+  It now records its state (`not_started`, `running`, `warm` with seconds,
+  `failed` with stage and error class), prints one line to the server log,
+  and `llm-wiki://health` carries it with a warning (audit OPS-13). Research:
+  `docs/research/2026-09-10-a-failed-warm-up-is-in-the-health-answer.md`.
 - **Docstrings and docs say what the code does.** The nightly's header
   names its scheduler and its steps, `maybe_compile` and its tests describe
   the lock they have, the search module quotes measured costs instead of

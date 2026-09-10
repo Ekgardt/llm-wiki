@@ -6043,3 +6043,52 @@ def test_precise_components_report_provider_and_graph_without_private_state() ->
         "provider": {"generation": "1.1.411", "freshness": "fresh"},
         "graph": {"generation": "generation-17", "freshness": "fresh"},
     }
+
+
+class TestWarmupIsInTheHealthAnswer:
+    """Audit OPS-13: a failed warm-up is recorded and shown, never swallowed."""
+
+    def test_a_failed_stage_is_named_in_the_health_resource(self, monkeypatch, capsys):
+        import mcp_server
+
+        def broken_reranker():
+            raise RuntimeError("no torch")
+
+        monkeypatch.setattr(mcp_server, "_warm_reranker", broken_reranker)
+        mcp_server.warmup_retrieval_path()
+
+        state = mcp_server.warmup_state()
+        assert (state["status"], state["stage"], state["error"]) == (
+            "failed",
+            "reranker",
+            "RuntimeError",
+        )
+        assert "retrieval warm-up failed at reranker: RuntimeError: no torch" in capsys.readouterr().err
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_vault_status",
+            lambda **_k: {
+                "last_compile": "2026-09-10T03:00:00",
+                "last_compile_status": "ok",
+                "compile_backlog": 0,
+                "warmup": state,
+            },
+        )
+        envelope = json.loads(mcp_server._handle_resource_read("llm-wiki://health"))
+
+        assert envelope["partial"] is True
+        assert any("warm-up failed at reranker" in w for w in envelope["warnings"])
+        assert envelope["data"]["warmup"]["status"] == "failed"
+
+    def test_a_completed_warm_up_records_its_seconds(self, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_warm_reranker", lambda: None)
+        monkeypatch.setattr(mcp_server, "_warmup_pass", lambda _seconds: None)
+
+        mcp_server.warmup_retrieval_path()
+
+        state = mcp_server.warmup_state()
+        assert state["status"] == "warm"
+        assert isinstance(state["seconds"], float)

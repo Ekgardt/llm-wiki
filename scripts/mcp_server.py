@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import contextlib
 import contextvars
 import datetime as dt
 import hashlib
@@ -1114,6 +1113,7 @@ def _vault_status(*, deadline: float | None = None) -> dict:
         "last_compile": state.get("last_compile_at", "never"),
         "last_compile_status": state.get("last_compile_status", "unknown"),
         "compile_backlog": _compile_backlog(ROOT, file_hash, compiled, deadline),
+        "warmup": warmup_state(),
     }
 
 
@@ -4793,7 +4793,24 @@ def _backlog_quality(backlog) -> dict:
     return {"coverage": 0.9, "confidence": 0.85}
 
 
+def _with_warmup_warning(quality: dict, status: dict) -> dict:
+    """A failed warm-up is in the health answer, not only on a daemon thread."""
+    warmup = status.get("warmup")
+    if not isinstance(warmup, dict) or warmup.get("status") != "failed":
+        return quality
+    warnings = list(quality.get("warnings", []))
+    warnings.append(
+        f"Retrieval warm-up failed at {warmup.get('stage')}: {warmup.get('error')}; "
+        "first answers may fall back to the lexical leg."
+    )
+    return {**quality, "partial": True, "warnings": warnings}
+
+
 def _compile_health_quality(status: dict) -> dict:
+    return _with_warmup_warning(_compile_quality(status), status)
+
+
+def _compile_quality(status: dict) -> dict:
     compile_status = status.get("last_compile_status", "unknown")
     last_compile = status.get("last_compile", "never")
     if compile_status in {None, "unknown"} or last_compile in {None, "never"}:
@@ -5661,6 +5678,44 @@ def _warmup_pass(deadline_seconds: float) -> None:
     )
 
 
+# What the warm-up did, for the health resource: not_started, running,
+# warm (with seconds), or failed (stage and a redacted error). Research:
+# docs/research/2026-09-10-a-failed-warm-up-is-in-the-health-answer.md
+_WARMUP_LOCK = threading.Lock()
+_WARMUP: dict[str, object] = {"status": "not_started"}
+
+
+def warmup_state() -> dict[str, object]:
+    with _WARMUP_LOCK:
+        return dict(_WARMUP)
+
+
+def _set_warmup(**fields: object) -> None:
+    with _WARMUP_LOCK:
+        _WARMUP.clear()
+        _WARMUP.update(fields)
+
+
+def _record_warmup_failure(stage: str, error: Exception) -> None:
+    # The client sees the class, the server log the message: exception text
+    # never crosses the MCP boundary (`_safe_exception_text`'s rule).
+    _set_warmup(status="failed", stage=stage, error=type(error).__name__)
+    print(
+        f"mcp_server: retrieval warm-up failed at {stage}: {type(error).__name__}: {error}",
+        file=sys.stderr,
+    )
+
+
+def _warmup_stage(stage: str, run) -> bool:
+    """One stage of the warm-up; a failure is recorded, never raised."""
+    try:
+        run()
+    except Exception as error:  # noqa: BLE001 - recorded in the health answer
+        _record_warmup_failure(stage, error)
+        return False
+    return True
+
+
 def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
     """Load the retrieval path and record what a *warm* optional stage costs.
 
@@ -5685,14 +5740,18 @@ def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> Non
     literature on cold starts does, and the arithmetic here is the same.
 
     It runs where the caller puts it: on a daemon thread for stdio, so serving
-    starts immediately. A failure is never fatal — warming is an optimisation,
-    and an unwarmed path serves exactly as it does today.
+    starts immediately. A failure is never fatal — warming is an optimisation —
+    but it is not silent either: the health resource names the stage and the
+    error, because an unwarmed path answers from the lexical leg alone.
     """
-    with contextlib.suppress(BaseException):
-        _warm_reranker()
-    for _ in range(WARMUP_PASSES):
-        with contextlib.suppress(BaseException):
-            _warmup_pass(deadline_seconds)
+    started = time.monotonic()
+    _set_warmup(status="running")
+    if not _warmup_stage("reranker", _warm_reranker):
+        return
+    for index in range(WARMUP_PASSES):
+        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds)):
+            return
+    _set_warmup(status="warm", seconds=round(time.monotonic() - started, 3))
 
 
 def _warm_reranker() -> None:
@@ -5728,11 +5787,7 @@ def _start_encoder_warmup() -> None:
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return
 
-    def warm() -> None:
-        with contextlib.suppress(Exception):
-            warmup_retrieval_path()
-
-    threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
+    threading.Thread(target=warmup_retrieval_path, name="encoder-warmup", daemon=True).start()
 
 
 def build_server():
