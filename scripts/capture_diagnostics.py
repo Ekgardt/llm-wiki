@@ -40,6 +40,33 @@ CAPTURE_RECENT_SECONDS = 7 * 24 * 3600
 STATE_LOCK_TIMEOUT = 0.5
 
 
+# What a lost race says on its way out. Every one of these means another writer
+# holds the resource right now and the next session end or queue drain carries
+# the same event: retried work, not lost work. Issue #26.3: seventeen
+# `owner_busy` worker rows read as seventeen lost captures while the owner
+# finished the task. Measured on this vault on 2026-09-07: `no-hands` logged
+# four of these in four minutes while its committed sequence advanced 836→838.
+CONTENTION_MARKERS = (
+    "owner_busy",
+    "ProjectPendingPriorError",
+    "operation_id is already bound to a different request",
+    "writer is busy",
+    "database is locked",
+    "Could not acquire state lock",
+)
+
+
+def is_contention(message: str) -> bool:
+    """Whether a failure message describes a writer race rather than a loss."""
+    return any(marker in message for marker in CONTENTION_MARKERS)
+
+
+def _outcome(reason: str) -> str:
+    if is_contention(reason):
+        return "deferred"
+    return "lost"
+
+
 def _safe_reason(reason: str) -> str:
     """One redacted line — reasons carry exception text, never payloads."""
     single_line = " ".join(str(reason).split())
@@ -56,6 +83,7 @@ def _failure_record(
         "at": datetime.now().isoformat(timespec="seconds"),
         "kind": str(kind),
         "reason": _safe_reason(reason),
+        "outcome": _outcome(str(reason)),
     }
     if slug:
         record["slug"] = str(slug)
@@ -98,9 +126,12 @@ def _append_failure_line(record: dict[str, str]) -> None:
 def _bump_counter(state: dict, record: dict[str, str]) -> None:
     counters = state.setdefault(STATE_KEY, {})
     entry = counters.get(record["kind"])
-    previous = int(entry.get("count", 0)) if isinstance(entry, dict) else 0
+    if not isinstance(entry, dict):
+        entry = {}
+    deferred = int(entry.get("deferred", 0)) + int(record["outcome"] == "deferred")
     counters[record["kind"]] = {
-        "count": previous + 1,
+        "count": int(entry.get("count", 0)) + 1,
+        "deferred": deferred,
         "last_at": record["at"],
         "last_reason": record["reason"],
     }
@@ -138,16 +169,30 @@ def record_capture_failure(
         pass
 
 
-def capture_failure_totals(state: dict) -> dict[str, int]:
-    """Failure count per kind as recorded in state.json."""
+def _counter_entries(state: dict) -> dict[str, dict]:
     counters = state.get(STATE_KEY)
     if not isinstance(counters, dict):
         return {}
-    return {
-        kind: int(entry.get("count", 0))
-        for kind, entry in counters.items()
-        if isinstance(entry, dict)
+    return {kind: entry for kind, entry in counters.items() if isinstance(entry, dict)}
+
+
+def _lost_count(entry: dict) -> int:
+    return max(int(entry.get("count", 0)) - int(entry.get("deferred", 0)), 0)
+
+
+def capture_failure_totals(state: dict) -> dict[str, int]:
+    """Lost captures per kind: every record minus the ones a writer race deferred."""
+    totals = {kind: _lost_count(entry) for kind, entry in _counter_entries(state).items()}
+    return {kind: count for kind, count in totals.items() if count}
+
+
+def capture_deferred_totals(state: dict) -> dict[str, int]:
+    """Captures a writer race deferred, per kind: retried, not lost."""
+    totals = {
+        kind: int(entry.get("deferred", 0))
+        for kind, entry in _counter_entries(state).items()
     }
+    return {kind: count for kind, count in totals.items() if count}
 
 
 def _trail_pointer() -> str:
@@ -246,6 +291,8 @@ def clear_capture_failures() -> dict[str, int]:
 
 def _print_summary(state: dict) -> int:
     totals = capture_failure_totals(state)
+    for kind, count in sorted(capture_deferred_totals(state).items()):
+        print(f"{kind}: {count} deferred by a writer race (retried, not lost)")
     if not totals:
         print("capture_diagnostics: no capture failures recorded")
         return 0

@@ -2425,6 +2425,29 @@ class TestHandleToolCall:
             "generation": "gen-17", "freshness": "fresh"
         }
 
+    def test_the_envelope_says_what_the_trace_says(self, monkeypatch):
+        """Issue #26.1: rows and trace said partial and a timeout; the envelope said neither."""
+        import mcp_server
+
+        row = {
+            "path": "knowledge/notes/auth.md",
+            "fused_score": 1.0,
+            "requested_mode": "HYBRID",
+            "effective_mode": "BASE",
+            "signals_used": ["lexical"],
+            "fallback_reason": "optional_stage_timeout",
+            "generation": "gen-17",
+            "partial": True,
+        }
+        monkeypatch.setattr(mcp_server, "_search_vault", lambda *args, **kwargs: [row])
+        monkeypatch.setattr(mcp_server, "_meta", lambda: {})
+
+        envelope = json.loads(self._run("recall", {"query": "auth"}))
+
+        assert envelope["partial"] is True
+        assert envelope["fallback"] is True
+        assert "Retrieval fell back: optional_stage_timeout." in envelope["warnings"]
+
     def test_empty_recall_does_not_claim_any_retrieval_signal(self, monkeypatch):
         import mcp_server
 

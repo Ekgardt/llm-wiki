@@ -4745,3 +4745,57 @@ def _fixed_ok(doctor, check_id):
         return doctor._result(check_id, "ok", "ok", {})
 
     return check
+
+
+def test_deferred_writes_are_reported_beside_lost_captures_not_as_them(tmp_path):
+    """Issue #26.3: a writer race is retried by the next session, not lost."""
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (state_root / "run").mkdir(parents=True, exist_ok=True)
+    (state_root / "run" / "state.json").write_text(
+        json.dumps(
+            {
+                "capture_failures": {
+                    "adapter_capture_worker": {
+                        "count": 17,
+                        "deferred": 17,
+                        "last_reason": "OperationalOwnershipError: owner_busy",
+                        "last_at": _moment_days_ago(0),
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
+
+    assert check["status"] == "ok"
+    assert check["details"]["lost"] == 0
+    assert check["details"]["deferred"] == 17
+    assert "17 write(s) were deferred by a writer race" in check["message"]
+    del home
+
+
+def test_the_claim_check_names_the_cause_the_pages_and_the_repair() -> None:
+    """Issue #29.5: `requires operator attention` said neither why nor what to do."""
+    import doctor
+
+    details = {
+        "index": "valid",
+        "claims": 40,
+        "diagnostics": 6,
+        "codes": ["evidence_unresolved"],
+        "by_code": {"evidence_unresolved": 6},
+        "pages": ["knowledge/notes/alarm-thresholds.md", "knowledge/notes/verify-first.md"],
+        "read_error": False,
+        "deletion_codes": [],
+    }
+
+    result = doctor._claim_result(details)
+
+    assert result["status"] == "degraded"
+    assert "6 claim(s) cite daily bytes that no longer resolve" in result["message"]
+    assert "knowledge/notes/alarm-thresholds.md, knowledge/notes/verify-first.md" in result["message"]
+    assert "doctor.py --repair" in result["message"]

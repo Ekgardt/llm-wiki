@@ -1677,28 +1677,8 @@ def _bounded_checkpoint_error(error: BaseException) -> str:
     return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
 
 
-# What a lost race says on its way out. Every one of these means another writer
-# holds the project right now and the next session end carries the same event —
-# not that a checkpoint was lost. Measured on this vault on 2026-09-07:
-# `no-hands` logged four of these in four minutes while its committed sequence
-# advanced from 836 to 838, so nothing was missing; only the log said so.
-CHECKPOINT_CONTENTION_MARKERS = (
-    "owner_busy",
-    "ProjectPendingPriorError",
-    "operation_id is already bound to a different request",
-    "writer is busy",
-    "database is locked",
-    # The state lock is held by another writer; the event is queued in
-    # `project_checkpoint_pending` and the next drain carries it. Measured
-    # 2026-09-07: the only two lines in the recent trail that were not already
-    # contention were this, three seconds apart, while checkpoints kept
-    # committing.
-    "Could not acquire state lock",
-)
-
-
-def _is_contention(message: str) -> bool:
-    return any(marker in message for marker in CHECKPOINT_CONTENTION_MARKERS)
+# One list, kept beside the capture counters it also classifies (#26.3).
+from capture_diagnostics import is_contention as _is_contention  # noqa: E402
 
 
 def _checkpoint_log_kind(message: str) -> str:

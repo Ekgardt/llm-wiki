@@ -1832,6 +1832,47 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
 DROPPED_CLAIMS: list[dict[str, str]] = []
 
 
+# Issue #26.2: `done` and `ok` said the same thing whether pages were published
+# or only a candidate was quarantined. One record per batch, named.
+BATCH_OUTCOMES: list[dict[str, object]] = []
+QUARANTINE_OPERATION_PREFIX = "compile-quarantine:"
+
+
+def _report_batch_outcome(result: CompileApplyResult) -> None:
+    """Say what this batch did, in the words the operator needs (#26.2)."""
+    if result.operation_id.startswith(QUARANTINE_OPERATION_PREFIX):
+        BATCH_OUTCOMES.append({"outcome": "quarantined", "paths": len(result.touched)})
+        print(
+            f"compile_memory: batch quarantined: {len(result.touched)} candidate(s) "
+            "under knowledge/inbox/claims/, no page published; the daily stays "
+            "pending until the candidate is reviewed."
+        )
+        return
+    BATCH_OUTCOMES.append({"outcome": "published", "paths": len(result.touched)})
+    print(f"compile_memory: batch published {len(result.touched)} page(s).")
+
+
+def compile_outcome() -> str:
+    """One word for the run: published, quarantined, partial, or nothing."""
+    kinds = {str(item["outcome"]) for item in BATCH_OUTCOMES}
+    if not kinds:
+        return "nothing"
+    if len(kinds) == 1:
+        return kinds.pop()
+    return "partial"
+
+
+def _outcome_sentence() -> str:
+    counts: dict[str, list[int]] = {}
+    for item in BATCH_OUTCOMES:
+        counts.setdefault(str(item["outcome"]), []).append(int(item["paths"]))
+    parts = [
+        f"{kind} {len(paths)} batch(es), {sum(paths)} path(s)"
+        for kind, paths in sorted(counts.items())
+    ]
+    return "; ".join(parts) or "nothing to publish"
+
+
 def _report_dropped_claim(slug: str, detail: str) -> None:
     """A claim that cannot bind is dropped, never silently, and always counted."""
     DROPPED_CLAIMS.append({"slug": slug, "detail": detail[:MAX_FAILURE_DETAIL_CHARS]})
@@ -3881,6 +3922,12 @@ def _mark_started(trigger: str) -> None:
     update_state(_mutate)
 
 
+def _finished_outcome(status: str) -> str:
+    if status == "error":
+        return "failed"
+    return compile_outcome()
+
+
 def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
     finished_iso = datetime.now().isoformat(timespec="seconds")
 
@@ -3888,6 +3935,7 @@ def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
         s["last_compile_finished_at"] = finished_iso
         s["last_compile_finished_trigger"] = trigger
         s["last_compile_status"] = status
+        s["last_compile_outcome"] = _finished_outcome(status)
         s["last_compile_dropped_claims"] = len(DROPPED_CLAIMS)
         if error is not None:
             s["last_compile_error"] = error[:500]
@@ -4057,6 +4105,8 @@ def _run(
     owner: OwnerLease | None = None,
 ) -> int:
     _require_compile_active(deadline, cancelled)
+    BATCH_OUTCOMES.clear()
+    DROPPED_CLAIMS.clear()
     state = load_state()
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
@@ -4088,7 +4138,7 @@ def _run(
             return status
     _require_compile_active(deadline, cancelled)
     _mark_finished(args.trigger, "ok")
-    print("compile_memory: done.")
+    print(f"compile_memory: done: {_outcome_sentence()}.")
     return 0
 
 
@@ -4184,6 +4234,7 @@ def _apply_batch(
         )
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
+    _report_batch_outcome(result)
     return 0
 
 

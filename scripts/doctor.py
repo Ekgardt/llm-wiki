@@ -2330,11 +2330,13 @@ def _count_claims(database: sqlite3.Connection, details: dict) -> None:
         ).fetchall()
     )
     rows = database.execute(
-        "SELECT code FROM claim_index_diagnostic ORDER BY code LIMIT ?",
+        "SELECT code, page FROM claim_index_diagnostic ORDER BY code, page LIMIT ?",
         (MAX_OPERATIONAL_ROWS + 1,),
     ).fetchall()
     details["diagnostics"] = min(len(rows), MAX_OPERATIONAL_ROWS)
     details["codes"] = sorted({str(row[0]) for row in rows})
+    details["by_code"] = _claims_by_code(rows)
+    details["pages"] = sorted({str(row[1]) for row in rows})[:MAX_CLAIM_PAGES_NAMED]
     if len(rows) > MAX_OPERATIONAL_ROWS or details["claims"] > MAX_OPERATIONAL_ROWS:
         details["codes"].append("claim_scan_truncated")
 
@@ -2347,12 +2349,53 @@ def _claim_status(details: dict) -> str:
     return "ok"
 
 
+# Issue #29.5: "requires operator attention" named neither the cause nor the
+# repair. One cause per code, in the words the operator needs.
+CLAIM_CODE_CAUSES = {
+    "evidence_unresolved": (
+        "cite daily bytes that no longer resolve under the recorded digest "
+        "(the daily was appended or rewritten after the page was compiled)"
+    ),
+    "evidence_ambiguous": "cite bytes that match more than one slice of the daily",
+    "evidence_literal_mismatch": "quote text that differs from the bytes at the cited place",
+    "claim_scan_truncated": "were not scanned: the bounded scan stopped early",
+}
+CLAIM_REPAIR = (
+    "Repair: `uv run python scripts/doctor.py --repair` rebuilds the claim index "
+    "against the current dailies; a claim that still does not resolve stays "
+    "listed by page in details, and that page's evidence line must be re-bound "
+    "by hand or by recompiling its daily with `compile_memory.py --file`."
+)
+MAX_CLAIM_PAGES_NAMED = 8
+
+
+def _claims_by_code(rows: list) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[str(row[0])] = counts.get(str(row[0]), 0) + 1
+    return counts
+
+
+def _claim_cause(code: str, count: int) -> str:
+    cause = CLAIM_CODE_CAUSES.get(code, f"are flagged `{code}`")
+    return f"{count} claim(s) {cause}"
+
+
+def _claim_message(status: str, details: dict) -> str:
+    if status == "ok":
+        return "Claim index is healthy."
+    if details["index"] == "invalid":
+        return "Claim index is unreadable; " + CLAIM_REPAIR
+    causes = "; ".join(
+        _claim_cause(code, count) for code, count in sorted(details["by_code"].items())
+    )
+    pages = ", ".join(details["pages"])
+    return f"Claim index: {causes}. Pages: {pages}. {CLAIM_REPAIR}"
+
+
 def _claim_result(details: dict) -> dict:
     status = _claim_status(details)
-    message = "Claim index is healthy."
-    if status != "ok":
-        message = "Claim index requires operator attention."
-    return _result("claims", status, message, details)
+    return _result("claims", status, _claim_message(status, details), details)
 
 
 def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
@@ -2362,6 +2405,8 @@ def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -
         "claims": 0,
         "diagnostics": 0,
         "codes": [],
+        "by_code": {},
+        "pages": [],
         "read_error": False,
         "deletion_codes": [],
     }
@@ -4870,23 +4915,35 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     return (value or {}, problem)
 
 
+def _deferred_sentence(details: dict) -> str:
+    deferred = int(details.get("deferred", 0))
+    if not deferred:
+        return ""
+    return (
+        f" {deferred} write(s) were deferred by a writer race and retried;"
+        " they are not counted as lost."
+    )
+
+
 def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     """The capture verdict, once the diagnostics themselves have been read."""
+    suffix = _deferred_sentence(details)
     if live:
-        return _result("capture", "degraded", f"{lost} capture(s) were lost.", details)
+        return _result("capture", "degraded", f"{lost} capture(s) were lost.{suffix}", details)
     if lost:
         return _result(
             "capture",
             "ok",
-            f"{lost} capture(s) were lost, none recently.",
+            f"{lost} capture(s) were lost, none recently.{suffix}",
             details,
         )
-    return _result("capture", "ok", "No lost capture is recorded.", details)
+    return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
 def _capture_check(state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
+        capture_deferred_totals,
         capture_failure_is_live,
         capture_failure_totals,
         last_capture_failure_at,
@@ -4899,6 +4956,7 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
     details: dict[str, Any] = {
         "lost": lost,
         "kinds": totals,
+        "deferred": sum(capture_deferred_totals(state).values()),
         "trail": "logs/capture-failures.jsonl",
         "state_error": state_error,
         "last_at": last_capture_failure_at(state),

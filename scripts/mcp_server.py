@@ -4374,11 +4374,36 @@ def _results_quality(results) -> dict:
     return {"coverage": 0.9, "confidence": 0.8}
 
 
+def _fell_back(reason: object) -> bool:
+    return bool(reason) and reason != "no_results"
+
+
+def _with_trace_state(quality: dict, trace: object) -> dict:
+    """The outer envelope says what the trace says (#26.1).
+
+    A recall whose optional stage timed out carried `partial: true` and
+    `fallback_reason: optional_stage_timeout` in every row and in the trace,
+    while the envelope said `partial: false, fallback: false, warnings: []`.
+    """
+    if not isinstance(trace, dict):
+        return quality
+    merged = dict(quality)
+    if trace.get("partial"):
+        merged["partial"] = True
+    reason = trace.get("fallback_reason")
+    if _fell_back(reason):
+        merged["fallback"] = True
+        merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
+    return merged
+
+
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"recall", "get_decisions"}:
         return None
     results = data.get("results", []) if name == "recall" else data
     quality = _results_quality(results)
+    if name == "recall":
+        quality = _with_trace_state(quality, data.get("retrieval_trace"))
     if not limit_clamped:
         return quality
     return _degrade_quality(
