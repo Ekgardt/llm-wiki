@@ -48,6 +48,11 @@ from operational_ownership import (  # noqa: E402
 # night and the generation was never rebuilt at all. The unit itself has no
 # start timeout, so the only bound that matters is this one.
 NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
+# The refresh of every registered foreign repository shares one bound; the
+# refresh itself is incremental (measured 2026-09-10: 16 s after one edited
+# file in a 1 022-file repository, against 60 s for the full build), and a
+# repository that does not fit is deferred to the next night, never half-built.
+REPOSITORY_REFRESH_BUDGET_SECONDS = 15 * 60
 
 
 def _generation_result(ownership: OwnerLease | None) -> dict:
@@ -285,10 +290,20 @@ def _post_compile_steps() -> list[_Step]:
             60,
         ),
         _Step(
+            # Issue #24, section A: the timer half of the background refresh.
+            # Every registered repository whose checkout still exists is looked
+            # at and rebuilt incrementally only when its sources changed, each
+            # under its own per-repository fence.
+            "Step 3c: refreshing registered repository generations...",
+            "repositories",
+            _script("repository_index.py") + ["refresh-all"],
+            REPOSITORY_REFRESH_BUDGET_SECONDS,
+        ),
+        _Step(
             # Every refresh publishes a new immutable generation and nothing
             # removed the old ones: five in one day, 1.05 GB, on the vault of
             # issue #29. The pruner keeps the active generation and one ancestor.
-            "Step 3c: pruning superseded evidence generations...",
+            "Step 3d: pruning superseded evidence generations...",
             "prune_generations",
             _script("prune_generations.py") + ["--apply"],
             300,
