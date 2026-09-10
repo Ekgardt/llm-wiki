@@ -6597,7 +6597,15 @@ class MaintenanceFenceLost(RuntimeError):
         self.observed = observed
 
 
-_OWNER_ROW_FIELDS = ("process_id", "fencing_epoch", "acquired_at", "heartbeat_at", "expires_at")
+_OWNER_ROW_FIELDS = (
+    "process_id",
+    "fencing_epoch",
+    "acquired_at",
+    "heartbeat_at",
+    "expires_at",
+    "role",
+    "actor_id",
+)
 
 
 def _observed_owner_row(row: sqlite3.Row | None) -> dict[str, object]:
@@ -6737,6 +6745,21 @@ def _release_v3_maintenance(lease: dict[str, object]) -> None:
         lease["registry"].release(lease["owner"])
     except OperationalOwnershipError as exc:
         raise _v3_fence_lost("release", lease) from exc
+
+
+def _maintenance_holder(root: Path, state_root: Path) -> dict[str, object]:
+    """Who holds the maintenance fence, so a deferred caller knows whether to wait (#29.6)."""
+    from markdown_transaction import active_or_legacy_coordinator
+
+    try:
+        coordinator = active_or_legacy_coordinator(root, state_root)
+        registry = _maintenance_ownership_registry(coordinator)
+        if registry is not None:
+            return _observed_owner_row(_read_v3_owner_row(registry))
+        with coordinator._connect() as database:  # noqa: SLF001
+            return _observed_owner_row(_read_owner_row(database))
+    except (OSError, sqlite3.Error, ValueError, AttributeError):
+        return {"present": None}
 
 
 def _acquire_maintenance_owner(
@@ -7960,7 +7983,12 @@ def run_generation_maintenance(
         root_path, state_path, datetime.now(timezone.utc)
     )
     if acquired is None:
-        return _maintenance_outcome("deferred", "maintenance_owner_busy", partial=True)
+        return _maintenance_outcome(
+            "deferred",
+            "maintenance_owner_busy",
+            partial=True,
+            details={"holder": _maintenance_holder(root_path, state_path)},
+        )
     coordinator, lease = acquired
     return _guarded_generation_refresh(
         root_path, state_path, coordinator, lease, deadline, max_sources, force_rebuild

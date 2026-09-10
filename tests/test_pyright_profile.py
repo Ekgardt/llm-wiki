@@ -285,6 +285,75 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _spawned_pid(pid_file: Path, seconds: float = 2.0) -> int | None:
+    """The descendant's pid, or None when the probe ended before it was spawned.
+
+    On the Windows runners a 0.3 s probe deadline fired before the fake node
+    program had started Python and written the file (PR #16, four jobs), and
+    the test read a file that was never going to exist. No descendant means
+    nothing to leak, not a failure.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pid_file.exists():
+            return int(pid_file.read_text(encoding="ascii"))
+        time.sleep(0.02)
+    return None
+
+
+def _descendant_is_gone(descendant_pid: int | None) -> bool:
+    if descendant_pid is None:
+        return True
+    return _pid_exits_within(descendant_pid)
+
+
+def _terminate_if_alive(descendant_pid: int | None) -> None:
+    if descendant_pid is None or not _pid_alive(descendant_pid):
+        return
+    try:
+        os.kill(descendant_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _redirection_for(inherited_stream: str) -> str:
+    if inherited_stream == "stdout":
+        return "stdout=sys.stdout, stderr=subprocess.DEVNULL"
+    return "stdout=subprocess.DEVNULL, stderr=sys.stderr"
+
+
+def _inheriting_descendant_program(pid_file: Path, inherited_stream: str) -> str:
+    return (
+        "import subprocess,sys\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.2)'],"
+        f"{_redirection_for(inherited_stream)})\n"
+        f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
+        "print('v22.1.0',flush=True)\n"
+    )
+
+
+def _installer_for(inherited_stream: str):
+    if inherited_stream == "stdout":
+        return _install_prestarted_node_program, 0.3
+    return _install_real_node_program, 1.0
+
+
+def _trees_unowned(trees) -> bool:
+    return all(tree.process_group is None and tree.windows_job is None for tree in trees)
+
+
+def _trees_pending_cleanup(trees) -> bool:
+    pending = pyright_profile._pending_node_probe_cleanup_snapshot()
+    return all(tree in pending for tree in trees)
+
+
+def _assert_probe_gave_up(result, processes) -> None:
+    assert result[1] is None
+    assert result[2] is None
+    assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
+    assert all(process.returncode == 0 for process in processes)
+
+
 def _pid_exits_within(pid: int, seconds: float = 2.0) -> bool:
     deadline = time.monotonic() + seconds
     while _pid_alive(pid) and time.monotonic() < deadline:
@@ -2541,52 +2610,24 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
     inherited_stream: str,
 ) -> None:
     pid_file = tmp_path / f"{inherited_stream}-descendant.pid"
-    if inherited_stream == "stdout":
-        redirection = "stdout=sys.stdout, stderr=subprocess.DEVNULL"
-    else:
-        redirection = "stdout=subprocess.DEVNULL, stderr=sys.stderr"
-    program = (
-        "import subprocess,sys\n"
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.2)'],"
-        f"{redirection})\n"
-        f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
-        "print('v22.1.0',flush=True)\n"
-    )
-    installer = (
-        _install_prestarted_node_program
-        if inherited_stream == "stdout"
-        else _install_real_node_program
-    )
+    installer, operation_seconds = _installer_for(inherited_stream)
     _node, processes, trees = installer(
-        monkeypatch, tmp_path, program
+        monkeypatch, tmp_path, _inheriting_descendant_program(pid_file, inherited_stream)
     )
-    operation_seconds = 0.3 if inherited_stream == "stdout" else 1.0
     started = time.monotonic()
 
     result = pyright_profile._probe_node(started + operation_seconds)
     elapsed = time.monotonic() - started
-    descendant_pid = int(pid_file.read_text(encoding="ascii"))
+    descendant_pid = _spawned_pid(pid_file)
     try:
         assert elapsed <= (
             operation_seconds + pyright_profile.NODE_PROBE_CLEANUP_SECONDS + 0.25
         )
-        assert result[1] is None
-        assert result[2] is None
-        assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
-        assert all(process.returncode == 0 for process in processes)
-        assert _pid_exits_within(descendant_pid)
-        assert all(
-            tree.process_group is None and tree.windows_job is None for tree in trees
-        ) or all(
-            tree in pyright_profile._pending_node_probe_cleanup_snapshot()
-            for tree in trees
-        )
+        _assert_probe_gave_up(result, processes)
+        assert _descendant_is_gone(descendant_pid)
+        assert _trees_unowned(trees) or _trees_pending_cleanup(trees)
     finally:
-        if _pid_alive(descendant_pid):
-            try:
-                os.kill(descendant_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _terminate_if_alive(descendant_pid)
 
 
 def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(

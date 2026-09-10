@@ -12,6 +12,7 @@ All output goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 import time
@@ -391,7 +392,39 @@ def _post_compile_pass(run_step, log, ownership: OwnerLease | None) -> int:
     # Step 3d: compact disposable telemetry without touching knowledge.
     log("Step 3d: compacting retrieval telemetry...")
     _compact_telemetry(log)
+
+    # Step 3e: one full health report, read at session start instead of measured there.
+    log("Step 3e: writing the health report...")
+    _write_health_report(log)
     return failures
+
+
+# Issue #23.5: session start allows the doctor 0.1 s and said "not measured"
+# every morning. The night has the time; the morning reads what it wrote.
+HEALTH_REPORT_NAME = "doctor-report.json"
+HEALTH_REPORT_BUDGET_SECONDS = 60
+
+
+def _write_health_report(log) -> None:
+    """A full doctor run, written where session start can read it. Never fails the night."""
+    from doctor import run_doctor
+
+    try:
+        report = run_doctor(
+            root=ROOT, state_root=STATE_ROOT, time_budget_seconds=HEALTH_REPORT_BUDGET_SECONDS
+        )
+        payload = {
+            "schema_version": "health-report/v1",
+            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "report": report,
+        }
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        (REPORTS_DIR / HEALTH_REPORT_NAME).write_text(
+            json.dumps(payload, sort_keys=True, default=str), encoding="utf-8"
+        )
+        log(f"  health: {report.get('overall_status', 'unknown')}")
+    except Exception as exc:  # noqa: BLE001 - a report is never a reason to fail
+        log(f"  health report skipped: {type(exc).__name__}")
 
 
 def _update_code(log) -> None:

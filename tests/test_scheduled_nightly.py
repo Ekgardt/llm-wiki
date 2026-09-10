@@ -274,3 +274,42 @@ def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
     assert labels.index("prune_generations") > labels.index("search")
     assert prune.command[-1] == "--apply"
     assert prune.command[-2].endswith("prune_generations.py")
+
+
+def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkeypatch) -> None:
+    """Issue #23.5: the morning reads what the night measured."""
+    import doctor
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(
+        doctor,
+        "run_doctor",
+        lambda **kwargs: {"overall_status": "ok", "checks": [], "budget": kwargs["time_budget_seconds"]},
+    )
+    lines: list[str] = []
+
+    scheduled_nightly._write_health_report(lines.append)
+
+    payload = json.loads((tmp_path / "logs" / "doctor-report.json").read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "health-report/v1"
+    assert payload["report"]["budget"] == scheduled_nightly.HEALTH_REPORT_BUDGET_SECONDS
+    assert payload["written_at"].endswith("+00:00")
+    assert lines == ["  health: ok"]
+
+
+def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) -> None:
+    import doctor
+    import scheduled_nightly
+
+    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+
+    def _explode(**kwargs):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(doctor, "run_doctor", _explode)
+    lines: list[str] = []
+
+    scheduled_nightly._write_health_report(lines.append)
+
+    assert lines == ["  health report skipped: RuntimeError"]

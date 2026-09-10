@@ -555,6 +555,9 @@ uv sync --extra semantic
 ```
 
 This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
+A first query in a fresh process loads the model: measured on one host, about
+11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
+it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or
