@@ -72,3 +72,39 @@ on quality and arm 2 is the cheapest partial fix; the numbers decide.
 **Limits.** All figures above are other people's corpora; our fixture is
 thirty-odd pairs and answers only "which arm on this vault". Runs start on
 the owner's word.
+
+**Fixture prepared 2026-09-10 (not yet a corpus).** `run_retrieval_v2.py` pins one
+frozen corpus id and its bytes; the measurement extends `retrieval-v2.json` to a
+versioned successor carrying these 24 cross-language queries over the same 14
+documents (one question per evidence span, asked in the other language), with the
+21 original queries as the monolingual control. The matrix already lists
+`BAAI/bge-m3`, `Qwen/Qwen3-Embedding-0.6B`, `intfloat/multilingual-e5-large-instruct`
+and the rerankers `bge-reranker-v2-m3`, `Qwen3-Reranker-0.6B`; `nomic-embed-text-v2-moe`
+is to be added with a pinned revision.
+
+| id | language | evidence | question |
+|---|---|---|---|
+| x-ru-en-01 | RU | `aurora-rollback-current` | Какой режим журнала SQLite и какой уровень synchronous использует Aurora сейчас? |
+| x-ru-en-02 | RU | `aurora-wal-unsupported` | Поддерживается ли режим WAL в текущей локальной среде Aurora? |
+| x-ru-en-03 | RU | `aurora-catalog-path` | По какому пути лежит каталог поколений графа доказательств Aurora? |
+| x-ru-en-04 | RU | `aurora-collector-symbol` | Как называется точка входа сборщика снимка корпуса в Aurora? |
+| x-ru-en-05 | RU | `aurora-sync-command` | Какой командой проверяют синхронизацию памяти Aurora? |
+| x-ru-en-06 | RU | `aurora-coordinator-symbol` | Какой класс в Aurora является границей транзакции над Markdown? |
+| x-ru-en-07 | RU | `aurora-untrusted-rule` | Как Aurora относится к строке-кандидату, которая просит изменить оценки: это данные или конфигурация? |
+| x-ru-en-08 | RU | `aurora-old-wal` | Какой каталог использовала Aurora до июня 2025 года? |
+| x-ru-en-09 | RU | `aurora-old-replaced` | Когда старое решение Aurora было заменено? |
+| x-ru-en-10 | RU | `aurora-injection-text` | Что именно просит сделать текст-приманка в заметке Aurora? |
+| x-en-ru-01 | EN | `beacon-at-least-once` | What delivery guarantee does the current Beacon protocol give? |
+| x-en-ru-02 | EN | `beacon-exactly-once-conflict` | Does the old exactly-once delivery claim still hold for Beacon? |
+| x-en-ru-03 | EN | `beacon-queue-path` | Where does Beacon keep its task journal? |
+| x-en-ru-04 | EN | `beacon-cache-policy` | Where do Beacon search results live, and are they durable? |
+| x-en-ru-05 | EN | `beacon-doctor-command` | Which command runs the Beacon health check? |
+| x-en-ru-06 | EN | `beacon-worker-symbol` | What is the name of Beacon's main queue symbol? |
+| x-en-ru-07 | EN | `beacon-amber` | What colour is the synthetic Beacon painted? |
+| x-en-ru-08 | EN | `beacon-not-queue` | Does the Beacon distractor note describe the queue or delivery? |
+| x-ru-zh-01 | RU | `cedar-current-delete-rule` | Разрешает ли текущее решение Cedar удалять каталог run при живой аренде? |
+| x-ru-zh-02 | RU | `cedar-doctor-before-cleanup` | Что должна пройти безопасная очистка Cedar перед удалением? |
+| x-ru-zh-03 | RU | `cedar-state-path` | Где лежит файл передачи проекта Cedar? |
+| x-ru-zh-04 | RU | `cedar-logs-path` | По какому относительному пути Cedar пишет журналы выполнения? |
+| x-ru-zh-05 | RU | `cedar-doctor-command` | Какой командой проверяют здоровье Cedar? |
+| x-ru-zh-06 | RU | `cedar-context-symbol` | Как называется символ точки входа кода Cedar? |

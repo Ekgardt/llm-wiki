@@ -28,7 +28,6 @@ from typing import Any, NamedTuple
 
 import reliable_memory
 from bounded_io import read_stable_bytes
-from corpus_snapshot import VAULT_CODE_ROOTS  # noqa: E402
 from install_control import validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
@@ -7730,9 +7729,9 @@ def _build_or_refresh_generation(
     max_sources: int,
     force_rebuild: bool,
     coordinator: object | None = None,
-    code_roots: tuple[str, ...] = VAULT_CODE_ROOTS,
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
-    from corpus_snapshot import collect_corpus
+    from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
     from evidence_graph_builder import (
         GRAPH_SCHEMA_VERSION,
         IncrementalReuseConfig,
@@ -7747,7 +7746,7 @@ def _build_or_refresh_generation(
     extractor_version = _maintenance_extractor_identity()
     snapshot = collect_corpus(
         root,
-        code_roots=code_roots,
+        code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
         max_files=max_sources,
         deadline=deadline,
     )
@@ -7908,7 +7907,7 @@ def _refreshed_generation(
     max_sources: int,
     force_rebuild: bool,
     repaired: list[dict],
-    code_roots: tuple[str, ...] = VAULT_CODE_ROOTS,
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
     with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
         guard.run(
@@ -7980,14 +7979,16 @@ def run_generation_maintenance(
     time_budget_seconds: float = DEFAULT_GENERATION_TIME_BUDGET_SECONDS,
     max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
     force_rebuild: bool = False,
-    code_roots: tuple[str, ...] = VAULT_CODE_ROOTS,
+    code_roots: tuple[str, ...] | None = None,
 ) -> dict:
     """Run one bounded fenced generation refresh; never mutate knowledge.
 
-    `code_roots` is the generation's policy: the vault's own generation holds
-    memory only (`VAULT_CODE_ROOTS`, empty); a caller that builds a generation
-    over declared code roots — a repository, or a test of the code
-    extractor — names them here and the manifest records them.
+    `code_roots` is the generation's policy: None means the vault's own
+    generation, which holds memory only (`corpus_snapshot.VAULT_CODE_ROOTS`,
+    empty); a caller that builds a generation over declared code roots — a
+    repository, or a test of the code extractor — names them here and the
+    manifest records them. `corpus_snapshot` is imported where it is used:
+    it needs PyYAML, which the production install does not carry.
     """
     _require_positive_time_budget(time_budget_seconds)
     _require_positive_source_limit(max_sources)
@@ -8048,7 +8049,7 @@ def _attempted_generation_refresh(
     max_sources,
     force_rebuild,
     repaired,
-    code_roots=VAULT_CODE_ROOTS,
+    code_roots=None,
 ) -> dict:
     try:
         return _refreshed_generation(
@@ -8088,7 +8089,7 @@ def _guarded_generation_refresh(
     deadline,
     max_sources,
     force_rebuild,
-    code_roots=VAULT_CODE_ROOTS,
+    code_roots=None,
 ) -> dict:
     repaired: list[dict] = []
     try:

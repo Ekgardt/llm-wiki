@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -775,3 +777,22 @@ def test_no_untracked_imported_modules():
     # Check if any tracked script imports these untracked modules
     for py in sorted((ROOT / "scripts").glob("*.py")):
         _assert_no_untracked_import(py, untracked)
+
+
+@pytest.mark.parametrize("entry_point", ["install_smoke", "sync_memory", "doctor", "mcp_server"])
+def test_production_entry_points_import_without_pyyaml(entry_point):
+    """The production install carries no PyYAML (`_assert_pyyaml_stays_a_dev_dependency`).
+
+    A module-level import of `corpus_snapshot` from `doctor` pulled `yaml` into
+    `install_smoke` and the clean production job failed in nine seconds
+    (PR #16, 2026-09-10). Importing each entry point with `yaml` blocked is the
+    check that job runs, minus the runner.
+    """
+    code = (
+        "import sys; sys.modules['yaml'] = None; "
+        f"sys.path.insert(0, {str(ROOT / 'scripts')!r}); import {entry_point}"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, check=False
+    )
+    assert result.returncode == 0, result.stderr[-800:]
