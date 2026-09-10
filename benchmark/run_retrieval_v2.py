@@ -4840,7 +4840,17 @@ def _worker_arguments(argv: Sequence[str], output: Path) -> list[str]:
     return [*cleaned, "--output", str(output), "--internal-worker"]
 
 
-def _validate_worker_payload(report: dict, raw: bytes) -> None:
+def _validate_worker_payload(
+    report: dict,
+    raw: bytes,
+    matrix_path: Path | str = DEFAULT_MATRIX,
+    corpus_path: Path | str = DEFAULT_CORPUS,
+    schema_path: Path | str = DEFAULT_SCHEMA,
+) -> None:
+    """The parent re-derives the candidate and the metrics from the same matrix,
+    corpus and schema the worker was given; validating against the defaults
+    refused every candidate only a non-default matrix names and every trace
+    set of a non-default corpus (2026-09-10, the cross-lingual run)."""
     if raw != _canonical_report_bytes(report):
         raise ValueError("worker report is not canonical")
     _require_exact_keys(report, REPORT_FIELDS, "worker report")
@@ -4850,8 +4860,8 @@ def _validate_worker_payload(report: dict, raw: bytes) -> None:
         raise ValueError("degraded worker payload cannot become quality evidence")
     reranker_target = report.get("candidate", {}).get("reranker")
     selection = load_model_selection(
-        DEFAULT_MATRIX,
-        DEFAULT_CORPUS,
+        matrix_path,
+        corpus_path,
         model_id=report.get("model_id"),
         variant_id=report.get("variant_id"),
         reranker_id=reranker_target.get("id") if isinstance(reranker_target, dict) else None,
@@ -4879,7 +4889,7 @@ def _validate_worker_payload(report: dict, raw: bytes) -> None:
     environment = report["methodology"].get("environment_provenance")
     if environment != _environment_provenance(report["vector_backend"]):
         raise ValueError("worker payload environment provenance mismatch")
-    corpus = load_corpus(DEFAULT_CORPUS, DEFAULT_SCHEMA)
+    corpus = load_corpus(corpus_path, schema_path)
     _recompute_report_metrics(corpus, report)
     _recompute_reranker_depth_metrics(corpus, report)
     lexical = report["methodology"].get("lexical_configuration", {}).get("id")
@@ -5077,7 +5087,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if not isinstance(payload, _WorkerPayload):
                 raise ValueError("benchmark worker did not return a worker payload")
-            _validate_worker_payload(payload.report, payload.canonical_bytes)
+            _validate_worker_payload(
+                payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema
+            )
             report = json.loads(json.dumps(payload.report))
             if args.output is None:
                 report["gates"]["interpretation"] = "stdout-only-non-quality"
