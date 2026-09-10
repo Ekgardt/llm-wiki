@@ -31,4 +31,3 @@ Ownership is determined by strict match of `- Project root:` in the existing `st
 - `Source:` line records the project root path (and git remote if any).
 - `## Editorial note` footer marks the page as vault metadata.
 
-See [[Global Multi-Project Migration Plan]] for the full model and rollout.

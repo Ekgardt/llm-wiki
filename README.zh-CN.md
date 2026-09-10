@@ -262,7 +262,7 @@ RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
 ```
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
-- **KNOWLEDGE**——git 跟踪（源码中仅公开示例）。完整用户数据位于已安装的 vault 中。Daily 日志和个人页面 gitignored。
+- **KNOWLEDGE**——你的记忆；仓库以空状态交付。所有页面和 daily 日志均 gitignored，仅跟踪 README。
 - **RUNTIME**——gitignored。搜索索引和日志可丢弃；`run/` 中的事务、队列状态和 undo 映像属于操作状态。
 - **权威边界**——Markdown、Git history 和 append-only project journal 是权威来源。FTS、vectors、Evidence Graph 数据库、tiers、telemetry 和 model cache 都是可重建的派生状态。
 

@@ -263,8 +263,11 @@ def test_no_forbidden_legacy_paths_in_scripts():
 
 
 def test_no_title_case_duplicate_notes():
-    notes = Path(__file__).resolve().parent.parent / "knowledge" / "notes"
-    assert not (notes / "Editorial Notes Pattern.md").exists()
-    assert not (notes / "Pipeline Mirroring.md").exists()
-    assert (notes / "editorial-notes-pattern.md").exists()
-    assert (notes / "pipeline-mirroring.md").exists()
+    """Tracked notes are the README alone; a Title Case duplicate cannot ship."""
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    tracked = subprocess.run(
+        ["git", "ls-files", "knowledge/notes"], capture_output=True, text=True, cwd=root
+    ).stdout.split()
+    assert tracked == ["knowledge/notes/README.md"]

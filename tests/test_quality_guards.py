@@ -185,8 +185,6 @@ def test_no_qmd_refs_in_skills():
         "tests/README.md",
         "AGENTS.md",
         "CLAUDE.md",
-        "knowledge/notes/Retrieval Workflow.md",
-        "knowledge/notes/Ingestion Workflow.md",
     )
     _assert_docs_clean(active_docs, _assert_no_qmd_claim)
 
@@ -195,23 +193,11 @@ def test_no_qmd_refs_in_skills():
         "docs/STRUCTURE.md",
         "docs/USER-GUIDE.md",
         "integrations/README.md",
-        "knowledge/notes/Ingestion Workflow.md",
     )
     _assert_docs_clean(integration_docs, _assert_no_web_clipper_claim)
     obsidian_integration = ROOT / "integrations" / "obsidian"
     bundled = [path for path in obsidian_integration.rglob("*") if path.is_file()]
     assert not bundled, f"bundled Obsidian integration files found: {bundled}"
-    obsidian_note = (ROOT / "knowledge" / "notes" / "Obsidian.md").read_text(
-        encoding="utf-8"
-    )
-    assert "canonical viewer" not in obsidian_note.casefold()
-    assert "frontend here" not in obsidian_note.casefold()
-
-    karpathy = (ROOT / "knowledge" / "notes" / "Andrej Karpathy.md").read_text(
-        encoding="utf-8"
-    )
-    assert "historical" in karpathy.casefold()
-    assert "current retrieval" in karpathy.casefold()
 
     from mcp_server import TOOL_INPUT_SCHEMAS
 

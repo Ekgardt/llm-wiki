@@ -272,7 +272,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 ```
 
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
-- **KNOWLEDGE** — отслеживается в git (публичные примеры). Полные пользовательские данные живут в установленном vault. Daily-логи и персональные страницы gitignored.
+- **KNOWLEDGE** — ваша память; репозиторий поставляет её пустой. Все страницы и daily-логи gitignored, отслеживаются только README.
 - **RUNTIME** — gitignored. Search-индексы и логи одноразовые; транзакции, состояние очереди и undo-образы в `run/` являются операционным состоянием.
 - **Граница авторитетности** — Markdown, Git history и append-only project journals авторитетны. FTS, vectors, базы Evidence Graph, tiers, telemetry и model caches производны и пересоздаваемы.
 

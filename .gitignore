@@ -29,8 +29,6 @@ knowledge/daily/*.md
 # does not match. Seen 2026-09-07: `.2026-09-07.md.<hex>.tmp`, 91 KB.
 knowledge/**/.*.tmp
 # Public Evidence fixtures (synthetic; no personal content)
-!knowledge/daily/2026-04-13.md
-!knowledge/daily/2026-04-19.md
 !knowledge/daily/README.md
 # Empty local scratch dailies stay ignored (no un-ignore for 2026-07-*)
 # Compile receipts bind a private daily to the pages it produced, so they
@@ -38,101 +36,12 @@ knowledge/**/.*.tmp
 knowledge/daily/receipts/
 
 # === Knowledge allowlist ===
-# Personal/user notes are blocked; public system-self-knowledge samples are un-ignored.
+# Every page under knowledge/notes is somebody's memory and stays private.
+# The repository ships no memory (2026-09-10, issue #19): only the README is
+# tracked. A page is published only by an explicit literal `!` line here —
+# never a broad !*.md — and only when the owner decides so.
 knowledge/notes/*
 !knowledge/notes/README.md
-# Explicit allowlist of public system-self-knowledge pages.
-# Do NOT use a broad !*.md — personal compiled notes must stay ignored so
-# they can never be accidentally `git add`ed and pushed to the public remote.
-!knowledge/notes/2026-04-13 Three Conventions One Root.md
-!knowledge/notes/Andrej Karpathy.md
-!knowledge/notes/Global Multi-Project Migration Plan.md
-!knowledge/notes/Karpathy LLM Wiki Workflow.md
-!knowledge/notes/Karpathy X Thread - April 2026.md
-!knowledge/notes/LLM Knowledge Base.md
-!knowledge/notes/Memory Subsystem Action Plan.md
-!knowledge/notes/Obsidian.md
-!knowledge/notes/Preliminary Flagging.md
-!knowledge/notes/Product Requirements in the AI Era.md
-!knowledge/notes/Wiki vs Memory Compiler vs Fusion.md
-!knowledge/notes/add-reciprocal-backlinks-at-creation.md
-!knowledge/notes/audit-current-vs-intended.md
-!knowledge/notes/b-sim-hook-testing.md
-!knowledge/notes/case-sensitive-grep-injected-context.md
-!knowledge/notes/centralized-memory-subsystem.md
-!knowledge/notes/agent-native-mcp-foundation.md
-!knowledge/notes/baseline-environment-binding-decision.md
-!knowledge/notes/warm-navigation-overhead-threshold-decision.md
-!knowledge/notes/one-trust-weight-across-retrieval-paths-decision.md
-!knowledge/notes/rerank-tier-ordering-decision.md
-!knowledge/notes/dead-task-retirement-and-restore-decision.md
-!knowledge/notes/an-index-may-lag-decision.md
-!knowledge/notes/a-fact-is-stored-with-its-date-decision.md
-!knowledge/notes/the-model-names-the-evidence-we-locate-it-decision.md
-!knowledge/notes/a-question-is-not-a-conjunction-decision.md
-!knowledge/notes/a-failing-claim-does-not-destroy-the-answer-decision.md
-!knowledge/notes/citation-relevance-gate-decision.md
-!knowledge/notes/daily-entry-boundary-decision.md
-!knowledge/notes/daily-entry-quote-anchor-decision.md
-!knowledge/notes/cross-lingual-citation-relevance-decision.md
-!knowledge/notes/single-directory-vault-decision.md
-!knowledge/notes/classification-measurement-stand-decision.md
-!knowledge/notes/idempotent-retry-after-quarantine-decision.md
-!knowledge/notes/identity-is-a-function-of-its-content-decision.md
-!knowledge/notes/memory-keeps-a-second-copy-decision.md
-!knowledge/notes/self-resolving-health-findings-decision.md
-!knowledge/notes/bounded-read-is-not-corruption-decision.md
-!knowledge/notes/bounded-capture-excerpt-decision.md
-!knowledge/notes/session-evidence-retention-decision.md
-!knowledge/notes/session-promotion-policy-decision.md
-!knowledge/notes/nightly-builds-generation-vectors-decision.md
-!knowledge/notes/automatic-code-update-decision.md
-!knowledge/notes/Ingestion Workflow.md
-!knowledge/notes/Retrieval Workflow.md
-!knowledge/notes/Review Workflow.md
-!knowledge/notes/blackboard-fenced-resource-claims-decision.md
-!knowledge/notes/managed-ide-hooks-install-update-decision.md
-!knowledge/notes/retire-cursor-and-antigravity-decision.md
-!knowledge/notes/retire-lancedb-decision.md
-!knowledge/notes/audit-closure-security-recovery-control-plane-decision.md
-!knowledge/notes/derived-evidence-generation-decision.md
-!knowledge/notes/dependency-answers-one-hop-decision.md
-!knowledge/notes/lsp-live-lease-decision.md
-!knowledge/notes/lsp-process-containment-decision.md
-!knowledge/notes/persistent-code-intelligence-kernel-decision.md
-!knowledge/notes/read-only-lsp-navigation-engine-decision.md
-!knowledge/notes/reliability-v3-runtime-adoption-implementation-decision.md
-!knowledge/notes/durable-capture-producer-activation-decision.md
-!knowledge/notes/observable-capture-and-bounded-maintenance-decision.md
-!knowledge/notes/system-symlink-ancestor-decision.md
-!knowledge/notes/integration-config-backup-retention-decision.md
-!knowledge/notes/install-ownership-control-plane-decision.md
-!knowledge/notes/solo-operator-superset-product-decision.md
-!knowledge/notes/oversized-daily-compile-decision.md
-!knowledge/notes/part-scoped-evidence-decision.md
-!knowledge/notes/secret-shape-not-secret-name-decision.md
-!knowledge/notes/finding-level-dlp-allowlist-decision.md
-!knowledge/notes/daily-heading-tolerant-reader-decision.md
-!knowledge/notes/ownership-actor-is-the-agent-decision.md
-!knowledge/notes/provider-runs-outside-the-vault-decision.md
-!knowledge/notes/the-changelog-is-not-preamble-decision.md
-!knowledge/notes/reliable-memory-stage-2.md
-!knowledge/notes/v4-reliability-contracts-decision.md
-!knowledge/notes/docs-portability-absolute-paths.md
-!knowledge/notes/edit-multiple-matches.md
-!knowledge/notes/editorial-disclaimer-over-history-rewrite.md
-!knowledge/notes/editorial-notes-pattern.md
-!knowledge/notes/flag-inferred-content-as-preliminary.md
-!knowledge/notes/hook-errors-silent-without-state-root.md
-!knowledge/notes/hook-scripts-defense-in-depth.md
-!knowledge/notes/inbox-vs-raw-after-compile.md
-!knowledge/notes/mirror-existing-pipelines.md
-!knowledge/notes/no-gitkeep-in-inbox-articles.md
-!knowledge/notes/pipeline-mirroring.md
-!knowledge/notes/prospective-memory-page-drift.md
-!knowledge/notes/provenance-rule-6.md
-!knowledge/notes/state-md-exempt-from-lint.md
-!knowledge/notes/adoption-digest-is-provenance-decision.md
 # Nested personal categories stay ignored unless explicitly published:
 knowledge/notes/*/**
 

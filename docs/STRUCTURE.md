@@ -503,16 +503,16 @@ or nonzero active state remains fail-closed.
   lock file. See
   `knowledge/notes/baseline-environment-binding-decision.md`.
 
-### KNOWLEDGE zone (tracked: public fixtures; gitignored: personal)
-- `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored).
-  Public synthetic fixtures (`2026-04-13.md`, `2026-04-19.md`) are
-  un-ignored to restore Evidence links.
+### KNOWLEDGE zone (gitignored: the repository ships no memory)
+- `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored);
+  no daily log is published.
 - `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
   Current v2 is keyed by source digest. The proposed v3 target above adds logical
   path identity and commits one source receipt with compile output; v2 then remains
   historical evidence only.
-- `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. Public examples
-  tracked via allowlist; personal pages gitignored.
+- `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. All gitignored:
+  the repository ships no memory (2026-09-10). The decision pages named in
+  this document are the owner's private record; the contracts are stated here.
 - `knowledge/projects/<slug>/` — generated `state.md`, append-only
   `knowledge/projects/<slug>/journal.md`,
   `context.md`, `.blackboard/`. Template tracked; real projects gitignored.

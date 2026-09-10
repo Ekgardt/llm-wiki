@@ -8,6 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **The repository ships no memory.** The 89 published pages under
+  `knowledge/notes/` (the owner's architecture decisions and the
+  demonstration pages), the two synthetic daily logs and the vault's log
+  entries leave the repository; a fresh install starts with an empty memory
+  instead of another person's guard rails and "89 curated pages" (issue #19).
+  The owner's pages stay where they are, private. `knowledge/index.md` and
+  `knowledge/log.md` ship as empty skeletons the runtime fills.
 - **Cursor and Antigravity are no longer supported platforms.** The owner uses
   neither, and carrying two hosts nobody exercises meant two managed hook
   formats, two doctor checks, two installer detections, and two event
@@ -48,6 +55,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   that migration and both now say so. A capture write refused by a writer
   race is classified by the exception's type and code, never by its text;
   the state-lock timeout and the bound-elsewhere refusal are typed for it.
+- The Codex hook probe waits for the peer it killed to be reaped within its
+  own cleanup budget instead of the already-expired probe deadline; on
+  Windows it had returned while the peer was still exiting.
 - `uninstall` and `rollback` still take back a Cursor or Antigravity hook
   fragment written by an install from before the retirement. Deleting the
   writing code outright would have made the manifest name a resource the code

@@ -77,6 +77,11 @@ DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
+# How long a probe that gave up waits for the peer it killed to be reaped.
+# Independent of the probe deadline, which by then has passed: with the wait
+# bounded by that deadline, Windows returned while the peer was still exiting
+# (PR #16, three jobs). The Pyright probe keeps the same 0.5 s budget.
+CODEX_HOOK_PROBE_CLEANUP_SECONDS = 0.5
 MAX_CODEX_HOOK_PROBE_BYTES = 256 * 1024
 _CODEX_PROBE_NOT_COMPLETED = object()
 INDEX_COLUMNS = {"path", "title", "summary", "body", "project", "timestamp", "slug"}
@@ -5487,10 +5492,12 @@ def _codex_probe_payload(root: Path) -> bytes:
     ).encode("utf-8")
 
 
-def _kill_and_reap(process: Any, probe_deadline: float) -> None:
-    process.kill()
+def _kill_and_reap(process: Any) -> None:
+    """Kill the peer and wait for the kernel to reap it, within the cleanup budget."""
+    if process.returncode is None:
+        process.kill()
     try:
-        process.wait(timeout=max(0.1, min(1.0, probe_deadline - time.monotonic())))
+        process.wait(timeout=CODEX_HOOK_PROBE_CLEANUP_SECONDS)
     except subprocess.TimeoutExpired:
         pass
 
@@ -5566,7 +5573,7 @@ def _finish_codex_process(process: Any, probe_deadline: float) -> bool:
     try:
         process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        _kill_and_reap(process, probe_deadline)
+        _kill_and_reap(process)
         return False
     return True
 
@@ -5582,7 +5589,7 @@ def _await_codex_process(process, payload, probe_deadline, streams) -> bool:
         process.stdin.close()
         return _finish_codex_process(process, probe_deadline)
     except (OSError, ValueError, subprocess.SubprocessError):
-        _kill_and_reap(process, probe_deadline)
+        _kill_and_reap(process)
         return False
 
 
@@ -5600,8 +5607,7 @@ def _drained_codex_output(
     for reader in streams.readers:
         reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
     if _readers_still_running(streams.readers):
-        if process.returncode is None:
-            process.kill()
+        _kill_and_reap(process)
         return _PROBE_INCOMPLETE
     if not _clean_codex_exit(process, streams):
         return None
@@ -5624,7 +5630,7 @@ def _run_codex_probe(
             stderr=subprocess.PIPE,
         )
         if _codex_pipes_missing(process):
-            _kill_and_reap(process, probe_deadline)
+            _kill_and_reap(process)
             return _PROBE_INCOMPLETE
         streams = _start_codex_readers(process)
         if not _await_codex_process(process, payload, probe_deadline, streams):

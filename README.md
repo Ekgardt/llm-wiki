@@ -268,7 +268,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, inside vault)
 ```
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
-- **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
+- **KNOWLEDGE** — your memory; the repository ships it empty. Every page and daily log is gitignored, only the READMEs are tracked.
 - **RUNTIME** — gitignored. Search indexes and logs are disposable; transactions, queue state, and undo images under `run/` are operational state.
 - **Authority boundary** — Markdown, Git history, and append-only project journals are authoritative. FTS, vectors, Evidence Graph databases, tiers, telemetry, and model caches are derived and rebuildable.
 
