@@ -309,6 +309,24 @@ The memory index holds `knowledge/` only. The product's own `scripts/`,
 vault's chunks and outranked the user's pages). Code questions go through
 `get_architecture`, which reads a directory or a repository index.
 
+```bash
+uv run python scripts/repository_index.py index /path/to/repo     # build and register
+uv run python scripts/repository_index.py detect /path/to/repo    # what changed since
+uv run python scripts/repository_index.py refresh /path/to/repo   # rebuild only if stale
+uv run python scripts/repository_index.py refresh-all             # every registered repo
+uv run python scripts/repository_index.py list
+uv run python scripts/code_graph.py /path/to/repo --callers NAME  # from the index; --live re-parses
+```
+
+Structural code answers are read from a reader that is validated once per
+MCP process and reused (warm `callers` on a 1 000-file repository: ~40 ms),
+and each answer carries a `freshness` block naming the commit its generation
+was built from and the commit the checkout is at. When they differ the
+bounded incremental refresh starts in the background; the answer you get is
+from the generation the vault has, and the next answer sees the new one. The
+nightly pass refreshes every registered repository. See
+`docs/CODE-NAVIGATION.md`.
+
 ### Compiling knowledge manually
 
 ```bash

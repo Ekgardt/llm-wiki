@@ -1790,6 +1790,90 @@ def _architecture_report(architecture) -> dict:
     }
 
 
+# Issue #24, section A: a structural answer names the commit its generation
+# was built from against the commit the checkout is at, and when they differ
+# the bounded incremental refresh is started detached - once per repository
+# and commit in this process - so the session never waits for it. See
+# `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
+_REFRESH_REQUESTED: dict[str, str] = {}
+_REFRESH_REQUESTED_LOCK = threading.Lock()
+
+
+def _freshness_fields(resolved: Path, architecture) -> dict:
+    """Only answers read from a generation have a commit to compare."""
+    if _architecture_report(architecture).get("source_generation") is None:
+        return {}
+    freshness = _repository_freshness(resolved)
+    return {} if freshness is None else {"freshness": freshness}
+
+
+def _repository_freshness(resolved: Path) -> dict | None:
+    import code_graph
+
+    lease = code_graph._active_evidence_graph(resolved)
+    if lease is None:
+        return None
+    try:
+        checkout = getattr(lease, "cached_scope", None)
+        if checkout is None:
+            return None
+        return _freshness_block(resolved, checkout, lease.repository_scope)
+    finally:
+        lease.close()
+
+
+def _freshness_block(resolved: Path, checkout, generation) -> dict:
+    stale = checkout.git_commit != generation.git_commit
+    return {
+        "generation_commit": generation.git_commit,
+        "checkout_commit": checkout.git_commit,
+        "stale_by_commit": stale,
+        "refresh": _refresh_action(resolved, checkout, stale),
+    }
+
+
+def _is_the_vault(resolved: Path) -> bool:
+    from memory_state import ROOT, STATE_ROOT
+
+    return resolved in {Path(ROOT).resolve(), Path(STATE_ROOT).resolve()}
+
+
+def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
+    if not stale:
+        return "not_needed"
+    if _is_the_vault(resolved):
+        # The vault's own generation is rebuilt and activated by the nightly
+        # pass and the freshness watch; a foreign-repository refresh refuses it.
+        return "vault_nightly"
+    return _request_repository_refresh(resolved, checkout)
+
+
+def _refresh_log_paths(repository_id: str) -> tuple[Path, Path]:
+    from memory_state import STATE_ROOT
+
+    folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
+    stem = repository_id.rsplit(":", 1)[-1][:16]
+    return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
+
+
+def _request_repository_refresh(resolved: Path, checkout) -> str:
+    """Start the bounded refresh once per (repository, commit); never wait for it."""
+    from memory_state import spawn_detached
+
+    with _REFRESH_REQUESTED_LOCK:
+        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+            return "already_requested"
+        _REFRESH_REQUESTED[checkout.repository_id] = checkout.git_commit
+    out_log, err_log = _refresh_log_paths(checkout.repository_id)
+    script = Path(__file__).resolve().parent / "repository_index.py"
+    pid = spawn_detached(
+        [sys.executable, str(script), "refresh", str(resolved)],
+        stdout_path=out_log,
+        stderr_path=err_log,
+    )
+    return "started" if pid is not None else "spawn_failed"
+
+
 def _get_architecture_mode(
     directory: str,
     *,
@@ -1826,6 +1910,7 @@ def _get_architecture_mode(
         "mode": mode,
         "architecture": architecture,
         **_architecture_report(architecture),
+        **_freshness_fields(resolved, architecture),
     }
 
 
@@ -4427,20 +4512,21 @@ def _with_trace_state(quality: dict, trace: object) -> dict:
     merged = dict(quality)
     if trace.get("partial"):
         merged["partial"] = True
-    reason = trace.get("fallback_reason")
-    if _fell_back(reason):
-        merged["fallback"] = True
-        merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
+    return _with_fallback_state(merged, trace.get("fallback_reason"))
+
+
+def _with_fallback_state(merged: dict, reason: object) -> dict:
+    if not _fell_back(reason):
+        return merged
+    merged["fallback"] = True
+    merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
     return merged
 
 
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"recall", "get_decisions"}:
         return None
-    results = data.get("results", []) if name == "recall" else data
-    quality = _results_quality(results)
-    if name == "recall":
-        quality = _with_trace_state(quality, data.get("retrieval_trace"))
+    quality = _named_results_quality(name, data)
     if not limit_clamped:
         return quality
     return _degrade_quality(
@@ -4449,6 +4535,14 @@ def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
         coverage=0.8,
         confidence=0.8,
     )
+
+
+def _named_results_quality(name: str, data) -> dict:
+    """Recall carries its rows under `results` and a trace; decisions are the rows."""
+    if name != "recall":
+        return _results_quality(data)
+    quality = _results_quality(data.get("results", []))
+    return _with_trace_state(quality, data.get("retrieval_trace"))
 
 
 def _impact_warnings(data, fallback: str) -> list:

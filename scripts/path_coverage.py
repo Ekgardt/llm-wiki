@@ -83,6 +83,13 @@ def coverage_for_path(directory: Path, relative: str, deadline: float) -> dict:
             "coverage": "no_active_generation",
             "note": COVERAGE_NOTE,
         }
+    try:
+        return _coverage_answer(graph, directory, relative, deadline)
+    finally:
+        graph.close()
+
+
+def _coverage_answer(graph, directory: Path, relative: str, deadline: float) -> dict:
     sources = _source_manifest(directory, str(graph.generation_id))
     row = _manifest_row(sources, relative) if sources else None
     recorded = row.get("sha256") if row else None

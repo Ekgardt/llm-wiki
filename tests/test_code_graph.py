@@ -412,8 +412,8 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
     import repository_scope
 
     captured = {}
-    catalog = object()
-    graph = object()
+    catalog = SimpleNamespace(catalog_path=tmp_path / "catalog.sqlite3")
+    graph = SimpleNamespace(database_path=tmp_path / "evidence.sqlite3", close=lambda: None)
 
     def cancelled():
         return False
@@ -449,7 +449,11 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
     )
     forwarded = {"deadline": deadline, "cancelled": cancelled}
 
-    assert (opened is graph, captured["graph"][0] is catalog) == (True, True)
+    # The reader comes back through a cache lease that delegates to it.
+    assert (opened.database_path is graph.database_path, captured["graph"][0] is catalog) == (
+        True,
+        True,
+    )
     assert (captured["catalog"], captured["scope"], captured["graph"][2]) == (
         (tmp_path, {"read_only": True, **forwarded}),
         (tmp_path, forwarded),
@@ -462,8 +466,8 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
     import evidence_graph
     import repository_scope
 
-    catalog = object()
-    graph = object()
+    catalog = SimpleNamespace(catalog_path=tmp_path / "catalog.sqlite3")
+    graph = SimpleNamespace(database_path=tmp_path / "evidence.sqlite3", close=lambda: None)
     calls = []
 
     def open_catalog(directory):
@@ -472,7 +476,7 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
 
     def resolve_scope(directory):
         calls.append(("scope", directory))
-        return object()
+        return SimpleNamespace(checkout_root=str(tmp_path), git_common_dir=None)
 
     def open_graph(received_catalog, _scope):
         calls.append(("graph", received_catalog))
@@ -486,7 +490,7 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
         open_graph,
     )
 
-    assert code_graph._active_evidence_graph(tmp_path) is graph
+    assert code_graph._active_evidence_graph(tmp_path).database_path is graph.database_path
     assert calls == [
         ("catalog", tmp_path),
         ("scope", tmp_path),
@@ -509,7 +513,9 @@ def test_active_evidence_graph_propagates_delayed_scope_deadline(
     monkeypatch.setattr(
         code_graph,
         "_generation_catalog",
-        lambda _directory, **_options: object(),
+        lambda _directory, **_options: SimpleNamespace(
+            catalog_path=tmp_path / "catalog.sqlite3"
+        ),
     )
 
     def delayed_scope(directory, **options):

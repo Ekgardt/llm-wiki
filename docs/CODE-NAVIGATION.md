@@ -45,6 +45,59 @@ deadline created before validation.
 
 Input positions are **one-based lines** and **zero-based UTF-8 byte offsets**.
 
+## Warm answers and the background refresh
+
+Structural answers (`callers`, `callees`, `symbol`, `snippet`, `coverage`)
+read the repository's registered generation through a process-local reader
+cache (`scripts/evidence_reader_cache.py`). A generation is validated once
+per MCP process and then reused while `catalog.sqlite3`, the generation's
+`evidence.sqlite3` and the checkout's Git state files keep their stat
+identity; a registration or activation re-runs the full validated open, a
+commit re-resolves the scope. Nothing is written to disk. A reader nobody
+asked for in ten minutes is closed on the next cache access; a process that
+never asks again holds one reader until it exits, which on Windows can defer
+pruning of that superseded generation until then. Measured
+2026-09-10 on a 1 022-file fixture with a 44.7 MB generation, warm p50:
+`callers` 42 ms (was 511), `callees` 23 ms (249), `symbol` 86 ms (1 007),
+snippet 21 ms (335), coverage 21 ms (258). The cost before was proportional
+to artifact bytes times opens per answer, which is why a 105 MB generation
+answered `callers` in 1.1 s.
+
+Every structural answer read from a generation carries a `freshness` block:
+
+```json
+"freshness": {
+  "generation_commit": "…",
+  "checkout_commit": "…",
+  "stale_by_commit": true,
+  "refresh": "started"
+}
+```
+
+`refresh` is `not_needed`, `started` (the bounded incremental refresh was
+spawned detached — once per repository and commit in this process; the
+answer itself came from the generation the vault has, and the session never
+waits), `already_requested`, `spawn_failed`, or `vault_nightly` (the vault's
+own generation is rebuilt by the nightly pass and the freshness watch).
+
+The refresh (`python scripts/repository_index.py refresh <dir>`) decides by
+content, not by the commit: it hashes the repository's sources against the
+newest generation's source manifest and rebuilds only when something differs,
+reusing every unchanged record (one edited file in the 1 022-file fixture:
+100 rebuilt, 922 reused, 16 s against 60 s for the full build). It is fenced
+under the ownership registry's `doctor` role scoped to the one repository, so
+the vault's global maintenance and a second session's refresh of the same
+repository never collide; a vault that has not adopted the v3 coordinator
+reports `refresh_unavailable` and does not build unfenced. The nightly pass
+runs `refresh-all` over every registered repository whose checkout still
+exists (a missing checkout is named, not deleted). An unregistered repository
+is never indexed automatically: `mode=index` stays the explicit operator
+action.
+
+`python scripts/code_graph.py --callers NAME DIR` answers from the generation
+and, when the repository has none, says so and exits 2 instead of re-parsing
+the tree; `--live` opts into the whole-tree scan.
+
 ## Status semantics
 
 - `ok`: completed against one unchanged revision; empty provider result is still

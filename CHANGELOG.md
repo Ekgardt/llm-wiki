@@ -18,6 +18,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   degraded` with the command while they are missing. Before this nothing in
   the product downloaded a model: a fresh install answered by words alone
   and only the trace said so.
+- **Background incremental refresh of repository indexes (#24, A).**
+  `repository_index.py refresh <dir>` hashes a registered repository's sources
+  against its newest generation and rebuilds only when something changed,
+  reusing every unchanged record (one edited file in a 1 022-file fixture:
+  100 rebuilt, 922 reused, 16 s against 60 s for the full build), fenced under
+  the ownership registry's `doctor` role scoped to that one repository. The
+  MCP server spawns it detached once per repository and commit when a
+  structural answer finds the checkout's commit ahead of the generation's; the
+  nightly pass runs `refresh-all`. Structural answers carry a `freshness`
+  block naming both commits and what was done. `repository_index.py` gains a
+  command line (`index`, `list`, `detect`, `refresh`, `refresh-all`).
+
 
 ### Changed
 
@@ -31,6 +43,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   cross-language MRR 0.60 → 0.98 on the shipped encoder, where swapping the
   encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
   once and not retried per question.
+- **Structural code answers are warm (#24, A).** The validated Evidence Graph
+  reader is kept per MCP process and reused while the catalog, the artifact
+  and the checkout's Git state keep their stat identity, instead of the
+  catalog re-validating the generation three times per open and hashing every
+  artifact each time. Same 44.7 MB generation, warm p50: `callers` 42 ms (was
+  511), `callees` 23 ms (249), `symbol` 86 ms (1 007), snippet 21 ms (335),
+  coverage 21 ms (258).
+- **`code_graph.py --callers` no longer re-parses a repository without a
+  generation** (300 s on 1 026 files in #24): it names `mode=index` and exits
+  2; `--live` opts into the scan.
 
 ### Fixed
 

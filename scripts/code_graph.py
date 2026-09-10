@@ -1381,6 +1381,48 @@ def _active_graph_or_none(
     )
 
 
+def _leased_active_graph(directory, read_only, deadline, cancelled):
+    """The cached validated reader for `directory`, or a fresh one on a miss.
+
+    Measured 2026-09-10: opening a generation cost 458 of a warm answer's
+    521 ms, all of it re-validating an immutable artifact. The cache keeps the
+    validated reader and reuses it while the catalog, the artifact and the
+    checkout's Git state keep their stat identity. See
+    `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
+    """
+    try:
+        from . import evidence_reader_cache
+        from .evidence_graph import EvidenceGraph, SharedEvidenceGraph
+        from .repository_scope import resolve_repository_scope
+    except ImportError:
+        import evidence_reader_cache
+        from evidence_graph import EvidenceGraph, SharedEvidenceGraph
+        from repository_scope import resolve_repository_scope
+
+    if not evidence_reader_cache.shared_readers_supported():
+        return _active_graph_or_none(
+            directory, read_only, deadline, cancelled,
+            EvidenceGraph, resolve_repository_scope,
+        )
+    _check_generation_stop(deadline, cancelled)
+    key = (str(Path(directory).resolve()), bool(read_only))
+    catalog = _generation_catalog_for(directory, read_only, deadline, cancelled)
+    if catalog is None:
+        evidence_reader_cache.forget(key)
+        return None
+    return evidence_reader_cache.leased_graph(
+        key,
+        catalog_path=Path(catalog.catalog_path),
+        resolve_scope=lambda: _bounded_call(
+            resolve_repository_scope, directory, deadline=deadline, cancelled=cancelled
+        ),
+        open_graph=lambda scope: _bounded_call(
+            SharedEvidenceGraph.open_active_for_repository, catalog, scope,
+            deadline=deadline, cancelled=cancelled,
+        ),
+    )
+
+
 def _active_evidence_graph(
     directory: Path,
     *,
@@ -1389,17 +1431,7 @@ def _active_evidence_graph(
     cancelled=None,
 ):
     try:
-        from .evidence_graph import EvidenceGraph
-        from .repository_scope import resolve_repository_scope
-    except ImportError:
-        from evidence_graph import EvidenceGraph
-        from repository_scope import resolve_repository_scope
-
-    try:
-        return _active_graph_or_none(
-            directory, read_only, deadline, cancelled,
-            EvidenceGraph, resolve_repository_scope,
-        )
+        return _leased_active_graph(directory, read_only, deadline, cancelled)
     except TimeoutError:
         raise
     except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
@@ -1645,10 +1677,20 @@ def _live_community_answer(
     )
 
 
+def _observation_count(graph) -> int:
+    """Counted once per generation: the table cannot change after registration."""
+
+    def count() -> int:
+        return graph._database.execute("SELECT count(*) FROM observation").fetchone()[0]
+
+    memoized = getattr(graph, "memoized", None)
+    if memoized is None:
+        return count()
+    return memoized("observation_count", count)
+
+
 def _store_report(graph) -> dict[str, object]:
-    unresolved_count = graph._database.execute(
-        "SELECT count(*) FROM observation"
-    ).fetchone()[0]
+    unresolved_count = _observation_count(graph)
     return {
         "source_generation": graph.generation_id,
         "source_scope": "checkout",
@@ -3458,23 +3500,56 @@ def _print_unresolved_callers(function_name: str, answer: dict) -> None:
         print(f"    {row['file']}:{row['line']}  {row['call_text']} ({row['reason']})")
 
 
+NO_GENERATION_MESSAGE = (
+    "No generation is registered for this repository, so callers cannot be "
+    "answered from an index. Build one with get_architecture mode=index "
+    "(or `python scripts/repository_index.py index <dir>`), or pass --live to "
+    "re-parse every file now, which took 300 s on a 1 026-file repository."
+)
+
+
+def _print_callers(function_name: str, answer: dict) -> None:
+    callers = answer["callers"]
+    print(f"Callers of '{function_name}': {len(callers)} found.")
+    for c in callers[:20]:
+        print(f"  {c['file']}:{c['line']}")
+    _print_unresolved_callers(function_name, answer)
+
+
+def _cli_callers(function_name: str, directory: Path, *, live: bool) -> int:
+    """Answer from the generation; without one, say so instead of re-parsing.
+
+    Issue #24: `--callers` on a repository without a generation silently fell
+    through to the whole-tree parse and timed out at 300 s. An index that
+    is missing is a fact worth stating, not a reason to spend five minutes.
+    """
+    if live:
+        _print_callers(function_name, find_callers(function_name, directory, live=True, with_report=True))
+        return 0
+    stored = _stored_callers(function_name, directory, True)
+    if stored is None:
+        print(NO_GENERATION_MESSAGE)
+        return 2
+    _print_callers(function_name, stored)
+    return 0
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Code graph — tree-sitter code intelligence.")
     p.add_argument("directory", nargs="?", default=".", help="Directory to index.")
     p.add_argument("--callers", type=str, default=None, help="Find callers of a function.")
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="With --callers: re-parse the whole tree instead of reading the generation.",
+    )
     args = p.parse_args()
 
     directory = Path(args.directory)
 
     if args.callers:
-        answer = find_callers(args.callers, directory, with_report=True)
-        callers = answer["callers"]
-        print(f"Callers of '{args.callers}': {len(callers)} found.")
-        for c in callers[:20]:
-            print(f"  {c['file']}:{c['line']}")
-        _print_unresolved_callers(args.callers, answer)
-        return 0
+        return _cli_callers(args.callers, directory, live=args.live)
 
     index_directory(directory)
     return 0
