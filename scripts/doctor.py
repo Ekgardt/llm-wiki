@@ -4957,6 +4957,41 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
+def _models_check() -> dict:
+    """Name the pinned model weights the cache lacks, with the command that fetches them.
+
+    Without them the vault answers by words alone and only the trace says so.
+    Presence at the pinned revision is what is checked here; the digest is
+    verified by `install_models.py` when it fetches.
+    """
+    from install_models import hub_library, missing_models, pinned_models
+
+    hub = hub_library()
+    if hub is None:
+        return _result(
+            "models",
+            "ok",
+            "Semantic search is not installed; no model weights are expected.",
+            {"installed": False, "missing": []},
+        )
+    missing = [f"{model.repo_id}@{model.revision[:12]}" for model in missing_models(hub)]
+    details = {
+        "installed": True,
+        "missing": missing,
+        "expected": [model.repo_id for model in pinned_models()],
+        "command": "uv run python scripts/install_models.py",
+    }
+    if not missing:
+        return _result("models", "ok", "Pinned model weights are in the local cache.", details)
+    return _result(
+        "models",
+        "degraded",
+        "Model weights missing: " + ", ".join(missing)
+        + "; search answers by words alone until `uv run python scripts/install_models.py` runs.",
+        details,
+    )
+
+
 def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
@@ -8659,6 +8694,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),

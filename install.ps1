@@ -534,6 +534,16 @@ switch ($syncExit) {
     default { Fail "Runtime synchronization failed" }
 }
 
+# --- 8a. Pinned model weights ------------------------------------
+# The read path loads weights local-only; with the semantic extra installed,
+# fetch the two pinned models now, verified.
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
+switch ($LASTEXITCODE) {
+    0 { Ok "Pinned model weights present" }
+    2 { Info "Semantic search not installed; model weights are fetched once it is" }
+    default { Warn "Model weights incomplete; run: uv run python scripts/install_models.py" }
+}
+
 # --- 9. Summary ---------------------------------------------------
 
 Write-Host ""

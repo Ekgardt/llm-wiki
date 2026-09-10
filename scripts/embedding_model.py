@@ -15,6 +15,10 @@ from __future__ import annotations
 
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+# The weights file at that revision, as `scripts/install_models.py` verifies it
+# after a download; the Hub cache names the blob by this digest too.
+EMBEDDING_WEIGHTS_SHA256 = "1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477"
+EMBEDDING_WEIGHTS_BYTES = 470641600
 EMBEDDING_DIM = 384
 
 # E5 is trained with these two prefixes and loses accuracy without them, so both

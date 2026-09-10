@@ -35,6 +35,11 @@ IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 # `docs/research/2026-09-10-cross-lingual-memory-world-practice.md`.
 DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 DEFAULT_RERANKER_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
+# The weights file at that revision, verified by `scripts/install_models.py`.
+DEFAULT_RERANKER_WEIGHTS_SHA256 = (
+    "d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286"
+)
+DEFAULT_RERANKER_WEIGHTS_BYTES = 2271071852
 RERANKER_OFF = "off"
 # Ten passages of up to 512 tokens are about 3.5 s at int8 on four loaded
 # cores; twenty were 4.2 s and overran the optional stage's share on the MCP

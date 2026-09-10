@@ -599,6 +599,17 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
+# ─── 8a. Pinned model weights ──────────────────────────────────────
+# The read path loads weights local-only. With the semantic extra installed,
+# fetch the two pinned models now, verified; without it, nothing is expected.
+MODELS_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+case "$MODELS_EXIT" in
+  0) ok "Pinned model weights present" ;;
+  2) info "Semantic search not installed; model weights are fetched once it is" ;;
+  *) warn "Model weights incomplete; run: uv run python scripts/install_models.py" ;;
+esac
+
 # ─── 8b. Reliability V3 adoption ───────────────────────────────────
 # Session capture writes through the V3 queue, and a vault that has not
 # adopted V3 refuses every capture with `legacy_protocol_unquiesced` (issue

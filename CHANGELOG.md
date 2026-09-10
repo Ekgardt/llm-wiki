@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **The weights arrive with the install.** `scripts/install_models.py`
+  fetches the encoder and the default reranker at their pinned commits,
+  only the files the loaders read, verifies `model.safetensors` against the
+  size and SHA-256 recorded beside each revision, removes a file that does
+  not match, and never fetches a present file again. The installer runs it
+  when the semantic extra is present, the nightly pass runs it every night
+  (a no-op once the weights are there), and `doctor` reports `models:
+  degraded` with the command while they are missing. Before this nothing in
+  the product downloaded a model: a fresh install answered by words alone
+  and only the trace said so.
+
 ### Changed
 
 - **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`

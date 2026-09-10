@@ -266,7 +266,8 @@ NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   Drain deferred queue → consolidate yesterday's session records into the daily
   log → compile all pending → structural lint → add owed backlinks → rebuild the
   FTS index → refresh the immutable evidence generation (and its vectors) →
-  compact retrieval telemetry → prune old reports → fast-forward the checkout
+  fetch any missing pinned model weights → compact retrieval telemetry →
+  prune old reports → fast-forward the checkout
 
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
@@ -559,7 +560,23 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
+This installs `sentence-transformers`; the encoder is `intfloat/multilingual-e5-small`
+— 384 dimensions over 100 languages, so a question in one language reaches a page
+written in another. The English-only model it replaces scored every candidate alike
+on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
+reranker below) are fetched by one explicit, verified step that the installer and
+the nightly pass run for you and that you can run by hand:
+
+```bash
+uv run python scripts/install_models.py          # fetch what is missing, verify
+uv run python scripts/install_models.py --check  # report only
+```
+
+Each model is fetched at its pinned commit, only the files the loaders read,
+and `model.safetensors` is checked against the size and SHA-256 recorded beside
+the revision; a file that does not match is removed and the command fails.
+Present files are never fetched again. Until the weights are there, `doctor`
+reports `models: degraded` with that command and search stays lexical.
 A first query in a fresh process loads the model: measured on one host, about
 11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
 it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
@@ -586,8 +603,8 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - The CLI reranks only when asked with `--rerank`: a one-shot process cannot
   amortise the load.
 - Weights are read from the local Hugging Face cache only, like the embedding
-  model's; without them the trace says `reranker_unavailable` and the fused
-  order stands. Nothing in the product downloads a model.
+  model's; `scripts/install_models.py` puts them there (see above). Without
+  them the trace says `reranker_unavailable` and the fused order stands.
 - `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
   40-hex `LLMWIKI_RERANKER_REVISION` name another model.
   `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.

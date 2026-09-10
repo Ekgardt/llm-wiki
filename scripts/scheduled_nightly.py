@@ -294,6 +294,15 @@ def _post_compile_steps() -> list[_Step]:
             300,
         ),
         _checkpoint_step(),
+        _Step(
+            # The read path loads weights local-only; a cache that lacks the
+            # two pinned models answers by words alone. Present files are not
+            # fetched again, so this is a no-op on every night but the first.
+            "Step 3f: fetching missing model weights...",
+            "models",
+            _script("install_models.py"),
+            1800,
+        ),
     ]
 
 
