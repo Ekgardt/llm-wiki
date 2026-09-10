@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -40,6 +41,12 @@ from pathlib import Path
 # Eight directories is more than one session ever queries at once; beyond it
 # the least recently used reader is closed.
 MAX_ENTRIES = 8
+# A reader nobody has asked for in ten minutes is closed on the next cache
+# access. An open reader pins its generation's file, and on Windows a pinned
+# file cannot be pruned; a session that keeps asking keeps the reader, a
+# session that moved on releases it. A process that never asks again still
+# holds one reader until it exits.
+IDLE_SECONDS = 10 * 60
 
 # What a commit, checkout, reset or merge touches in the checkout's own git
 # directory, and in the common directory shared by linked worktrees.
@@ -124,6 +131,7 @@ class _Entry:
     git_identity: tuple
     leases: int = 0
     retired: bool = False
+    last_used: float = field(default_factory=time.monotonic)
     memo: dict = field(default_factory=dict)
     # Held for the lifetime of every lease. Python's sqlite3 interleaves the
     # statements of one connection used from two threads — measured 2026-09-10:
@@ -225,8 +233,18 @@ def _borrow(entry: _Entry) -> bool:
         if entry.retired:
             return False
         entry.leases += 1
+        entry.last_used = time.monotonic()
         _ENTRIES.move_to_end(entry.key)
         return True
+
+
+def _expire_idle(now: float) -> None:
+    """Close readers nobody asked for within IDLE_SECONDS; a held lease waits."""
+    with _LOCK:
+        idle = [entry for entry in _ENTRIES.values() if now - entry.last_used > IDLE_SECONDS]
+        for entry in idle:
+            _ENTRIES.pop(entry.key, None)
+            _retire_entry(entry)
 
 
 def _lease(entry: _Entry) -> GraphLease | None:
@@ -323,6 +341,7 @@ def leased_graph(
     run only on a miss or after the checkout's Git state moved. `None` means
     the catalog holds no generation for this repository right now.
     """
+    _expire_idle(time.monotonic())
     with _LOCK:
         entry = _ENTRIES.get(key)
     reusable = _reusable(entry, catalog_path, resolve_scope)

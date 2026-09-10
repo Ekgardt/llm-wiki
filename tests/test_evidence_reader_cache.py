@@ -217,6 +217,21 @@ def test_a_held_lease_defers_the_close_until_it_is_released(tmp_path, monkeypatc
     assert (still_open, readers["first"].closed) == (True, True)
 
 
+def test_an_idle_reader_is_closed_on_the_next_access_and_a_held_one_is_not(
+    tmp_path, monkeypatch
+):
+    readers: dict[str, _FakeReader] = {}
+    _lease_for("idle", tmp_path, readers).close()
+    held = _lease_for("held", tmp_path, readers)
+    monkeypatch.setattr(evidence_reader_cache, "IDLE_SECONDS", 0.0)
+
+    _lease_for("fresh", tmp_path, readers).close()
+    idle_closed, held_still_open = readers["idle"].closed, not readers["held"].closed
+    held.close()
+
+    assert (idle_closed, held_still_open, readers["held"].closed) == (True, True, True)
+
+
 def test_a_missing_generation_is_not_cached(tmp_path):
     answer = evidence_reader_cache.leased_graph(
         ("absent", False),

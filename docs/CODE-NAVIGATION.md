@@ -53,7 +53,10 @@ cache (`scripts/evidence_reader_cache.py`). A generation is validated once
 per MCP process and then reused while `catalog.sqlite3`, the generation's
 `evidence.sqlite3` and the checkout's Git state files keep their stat
 identity; a registration or activation re-runs the full validated open, a
-commit re-resolves the scope. Nothing is written to disk. Measured
+commit re-resolves the scope. Nothing is written to disk. A reader nobody
+asked for in ten minutes is closed on the next cache access; a process that
+never asks again holds one reader until it exits, which on Windows can defer
+pruning of that superseded generation until then. Measured
 2026-09-10 on a 1 022-file fixture with a 44.7 MB generation, warm p50:
 `callers` 42 ms (was 511), `callees` 23 ms (249), `symbol` 86 ms (1 007),
 snippet 21 ms (335), coverage 21 ms (258). The cost before was proportional

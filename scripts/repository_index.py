@@ -943,8 +943,10 @@ def _staleness(catalog, admission: Admission, generation_id, manifest, deadline)
     still publishes a whole new generation.
     """
     report = _detected(catalog, admission, generation_id, manifest, deadline)
-    recorded = (manifest.get("repository_scope") or {}).get("git_commit")
-    commit_moved = recorded != admission.scope.git_commit
+    recorded_scope = manifest.get("repository_scope") or {}
+    # Two commits, never two scopes: the generation's recorded commit against
+    # the checkout's current one (the identity guard in tests watches this).
+    commit_moved = recorded_scope.get("git_commit") != admission.scope.git_commit
     if report["stale"]:
         return {"stale": True, "reason": "sources_changed", "counts": report["counts"]}
     return {"stale": False, "reason": "unchanged", "commit_moved": commit_moved}
