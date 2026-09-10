@@ -71,7 +71,14 @@ def configured_reranker_identity() -> tuple[str, str] | None:
         return DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
     if model.lower() == RERANKER_OFF:
         return None
-    if not model or not IMMUTABLE_REVISION.fullmatch(revision):
+    return _explicit_identity(model, revision)
+
+
+def _explicit_identity(model: str, revision: str) -> tuple[str, str] | None:
+    """A named model with a pinned revision, or nothing."""
+    if not model:
+        return None
+    if not IMMUTABLE_REVISION.fullmatch(revision):
         return None
     return model, revision
 
@@ -182,8 +189,8 @@ def _get_reranker_bundle() -> dict[str, Any] | None:
         return _reranker_bundle
     if _reranker_unavailable_reason is not None:
         return None
-    identity = configured_reranker_identity()
-    if identity is None or not _have_reranker_deps():
+    identity = _loadable_identity()
+    if identity is None:
         return None
     try:
         _reranker_bundle = _loaded_bundle(*identity)
@@ -191,6 +198,14 @@ def _get_reranker_bundle() -> dict[str, Any] | None:
         _reranker_unavailable_reason = f"{type(exc).__name__}: {exc}"[:512]
         return None
     return _reranker_bundle
+
+
+def _loadable_identity() -> tuple[str, str] | None:
+    """The configured identity when the libraries that load it are present."""
+    identity = configured_reranker_identity()
+    if identity is None or not _have_reranker_deps():
+        return None
+    return identity
 
 
 def reranker_unavailable_reason() -> str | None:
