@@ -50,6 +50,26 @@ def vault(tmp_path: Path) -> Path:
     return root
 
 
+def _chunk_for(snapshot, page: Path, vault: Path):
+    return next(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+
+
+def _chunks_for(snapshot, page: Path, vault: Path) -> tuple:
+    return tuple(
+        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
+    )
+
+
+def _chunk_containing(snapshot, page: Path, vault: Path, needle: str):
+    return next(
+        chunk
+        for chunk in snapshot.chunks
+        if chunk.source_path == page.relative_to(vault).as_posix() and needle in chunk.text
+    )
+
+
 def _answer_for_prompt(prompt: str, *, status: str = "answered") -> str:
     marker = "<evidence_manifest>\n"
     manifest_text = prompt.split(marker, 1)[1].split("\n</evidence_manifest>", 1)[0]
@@ -101,11 +121,7 @@ def test_ordinary_qa_sends_only_retrieved_parent_evidence_not_entire_index(vault
     snapshot = collect_corpus(vault)
     # The chunk that carries the sentence: since 2026-09-08 a chunk is
     # delivered as itself, not widened to its page.
-    alpha_chunk = next(
-        chunk
-        for chunk in snapshot.chunks
-        if chunk.source_path == alpha.relative_to(vault).as_posix() and "enabled" in chunk.text
-    )
+    alpha_chunk = _chunk_containing(snapshot, alpha, vault, "enabled")
     seen: dict[str, object] = {}
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
@@ -121,6 +137,10 @@ def test_ordinary_qa_sends_only_retrieved_parent_evidence_not_entire_index(vault
     )
 
     assert result["status"] == "answered"
+    _assert_the_prompt_holds_the_span_and_nothing_else(seen)
+
+
+def _assert_the_prompt_holds_the_span_and_nothing_else(seen: dict[str, object]) -> None:
     assert "Alpha is enabled." in str(seen["prompt"])
     assert "ENTIRE INDEX SENTINEL" not in str(seen["prompt"])
     assert "SECRET INDEX-ONLY SENTINEL" not in str(seen["prompt"])
@@ -160,18 +180,24 @@ def test_cached_full_is_allowed_only_when_measured_full_context_fits(vault: Path
 def test_evidence_manifest_contains_verified_identity_revision_and_span(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "## Decision\n\nAlpha is enabled.")
     snapshot = collect_corpus(vault)
-    chunk = next(
-        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
-    )
+    chunk = _chunk_for(snapshot, page, vault)
 
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
 
     assert len(context.evidence) == 1
     item = context.evidence[0]
+    _assert_identity_and_revision_are_verified(item, page, snapshot)
+    _assert_span_is_hashed_and_prompt_is_fenced(item, context)
+
+
+def _assert_identity_and_revision_are_verified(item, page: Path, snapshot) -> None:
     assert item.citation_id == "E1"
     assert item.relative_path == "knowledge/notes/alpha.md"
     assert item.source_sha256 == hashlib.sha256(page.read_bytes()).hexdigest()
     assert item.revision == snapshot.corpus_sha256
+
+
+def _assert_span_is_hashed_and_prompt_is_fenced(item, context) -> None:
     assert item.byte_start < item.byte_end
     assert item.span_sha256 == hashlib.sha256(item.text.encode("utf-8")).hexdigest()
     assert "citation_id" in context.prompt_context
@@ -181,9 +207,7 @@ def test_evidence_manifest_contains_verified_identity_revision_and_span(vault: P
 def test_candidates_are_grouped_by_parent_and_share_one_budget(vault: Path) -> None:
     page = _write_page(vault, "large.md", "## One\n\nFirst fact.\n\n## Two\n\nSecond fact.\n")
     snapshot = collect_corpus(vault)
-    chunks = tuple(
-        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
-    )
+    chunks = _chunks_for(snapshot, page, vault)
     context = build_grounded_context(
         snapshot,
         chunks,
@@ -249,9 +273,7 @@ def test_a_tampered_locator_cannot_be_believed_because_it_is_not_read(
     """
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
-    chunk = next(
-        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
-    )
+    chunk = _chunk_for(snapshot, page, vault)
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
     candidate = json.loads(_answer_for_prompt(context.prompt_context))
     candidate["citations"][0][field] = bad
@@ -388,9 +410,7 @@ def test_mapping_retrieval_rows_resolve_to_captured_child_chunks(vault: Path) ->
 def test_verifier_rejects_source_changed_after_generation(vault: Path) -> None:
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
-    chunk = next(
-        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
-    )
+    chunk = _chunk_for(snapshot, page, vault)
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
     answer = json.loads(_answer_for_prompt(context.prompt_context))
     page.write_text(page.read_text(encoding="utf-8") + "Changed.\n", encoding="utf-8")
@@ -451,9 +471,7 @@ def test_a_citation_about_something_else_is_rejected(vault: Path) -> None:
     """
     page = _write_page(vault, "alpha.md", "Alpha is enabled.")
     snapshot = collect_corpus(vault)
-    chunk = next(
-        item for item in snapshot.chunks if item.source_path == page.relative_to(vault).as_posix()
-    )
+    chunk = _chunk_for(snapshot, page, vault)
     context = build_grounded_context(snapshot, (chunk,), vault=vault, profile="BASE")
     answer = json.loads(_answer_for_prompt(context.prompt_context))
     answer["claims"] = [
