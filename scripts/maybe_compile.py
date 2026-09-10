@@ -17,7 +17,7 @@ schedulers. It guarantees:
   1. At most one compile runs at any time.
   2. Never blocks the caller (fire-and-forget).
   3. Quick exit if nothing to compile (state.json hash check).
-  4. Self-heals from stale locks (crashed compile, killed process).
+  4. Clears a stale lock (crashed compile, killed process) by process liveness, never by age.
 
 Usage:
     uv run python scripts/maybe_compile.py           # spawn if needed

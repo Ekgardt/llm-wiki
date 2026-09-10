@@ -300,6 +300,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
 ## Low
 
 ### L1 — Stale LanceDB references after the 2026-09-07 retirement [defect]
+- Status: fixed 2026-09-10.
 - Rule: R3. Evidence: `scripts/embedding_model.py:3-4` ("the LanceDB store
   and the LanceDB rebuild"), `scripts/search_memory.py:151-153`,
   `docs/STRUCTURE.md:75` ("FTS5/vector/graph/LanceDB"),
@@ -307,9 +308,10 @@ disposable, fail-closed, bounded reads, no silent fallback).
   Verified: read. Fix: delete the four mentions.
 
 ### L2 — `docs/STRUCTURE.md:489` lists `SETUP-COGNEE.md`, which does not exist [defect]
+- Status: fixed 2026-09-10.
 - Rule: R3. Verified: ran (`ls docs`). Fix: remove from the list.
 
-### L3 — `search_memory.py:8-11` promises "<10ms / <50ms"; the same file measures the dense leg at about three seconds (`6119-6121`) [defect]
+### L3 (fixed 2026-09-10) — `search_memory.py:8-11` promises "<10ms / <50ms"; the same file measures the dense leg at about three seconds (`6119-6121`) [defect]
 - Rule: R3. Verified: read. Fix: replace with the measured numbers or delete.
 
 ### L4 — `llm_client.py:641-648` docstring contains mojibake ("???") [defect]

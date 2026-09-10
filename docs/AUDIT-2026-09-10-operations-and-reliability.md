@@ -344,6 +344,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-16 — Stale docstrings state behaviour the code does not have
 
+- Status: fixed 2026-09-10 (the three docstrings rewritten from the code).
+
 - Rule: L3.
 - Evidence: `scripts/scheduled_nightly.py:1-10` ("runs at 03:00 via Windows
   Task Scheduler", a three-step list; the pass has fourteen steps and three
@@ -356,6 +358,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 - Fix direction: rewrite the three docstrings from the code.
 
 ### OPS-17 — Two tests assert the defect rather than the intent
+
+- Status: the maybe_compile assertion retargeted 2026-09-10 with OPS-01; the nightly health-line assertion and the end-to-end nightly test remain open.
 
 - Rule: L4 (tests that do not test what their name claims).
 - Evidence: `tests/test_maybe_compile.py:165-174` (alive PID plus old

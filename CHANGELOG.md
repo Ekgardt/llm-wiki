@@ -56,6 +56,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Docstrings and docs say what the code does.** The nightly's header
+  names its scheduler and its steps, `maybe_compile` and its tests describe
+  the lock they have, the search module quotes measured costs instead of
+  "<10 ms", and the last LanceDB and `SETUP-COGNEE.md` mentions are gone
+  (audit OPS-16, L1, L2, L3).
 - **The status names what the search reads.** `search_memory.py --status`
   reports the active generation (id, extractor, vector state, model) before
   the legacy index, `--rebuild` says it rebuilds the legacy index only, and

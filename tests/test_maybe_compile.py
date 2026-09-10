@@ -2,10 +2,11 @@
 
 Locks in:
 1. PID liveness probe (Windows OpenProcess + POSIX signal 0).
-2. Lock is created when spawn happens; stale lock (dead PID) is stolen.
+2. Lock is created when spawn happens; a stale lock (dead PID, expired PID-0
+   placeholder) is cleared; a live process holds its lock however old it is.
 3. Lock is cleared when compile_memory finishes.
-4. Multiple concurrent spawn attempts only one succeeds.
-5. --force ignores existing lock.
+4. A lost claim names the lock that won, never a race.
+5. --force bypasses the pending-work gate and refuses a live lock.
 6. _has_pending_work returns False when all hashes match.
 """
 from __future__ import annotations

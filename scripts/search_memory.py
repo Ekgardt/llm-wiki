@@ -5,10 +5,11 @@ Optionally uses sentence-transformers for semantic (vector) search
 when the library is installed. Results are fused via Reciprocal
 Rank Fusion (RRF) for hybrid ranking.
 
-For solo-developer vaults (<500 pages):
-- BM25 only: <10ms, zero deps, good for keyword-precise queries
-- BM25 + Vector: <50ms, needs `pip install sentence-transformers`,
-  finds semantically related pages ("database performance" → "N+1 query fix")
+Costs measured on this vault (2026-09-10, `docs/ISSUES-2026-09-10.md`):
+- lexical only: tens of milliseconds, zero optional dependencies
+- with vectors: the dense leg costs seconds on a cold process and about a
+  second warm (`sentence-transformers`), and finds semantically related pages
+  ("database performance" → "N+1 query fix")
 
 Usage:
     uv run python scripts/search_memory.py "auth decision"
@@ -148,8 +149,8 @@ SUMMARY_RE = re.compile(
 )
 
 # The model, its revision and its prefixes live in one module, because the
-# LanceDB store and its rebuild encode with the same model and a drifting copy
-# would embed questions and pages with different ones.
+# generation builder encodes with the same model and a drifting copy would
+# embed questions and pages with different ones.
 from embedding_model import (  # noqa: E402
     EMBEDDING_DIM,
     EMBEDDING_MODEL,

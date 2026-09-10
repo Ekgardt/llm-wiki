@@ -1,12 +1,17 @@
-"""Nightly consolidation — runs at 03:00 via Windows Task Scheduler.
+"""Nightly consolidation pass — started at 03:00 by the installed scheduler.
 
-What it does:
-1. Work any pending queue tasks (deferred LLM work).
-2. Force-spawn compile to process all uncompiled daily logs.
-3. Run lint and bounded immutable generation maintenance.
-
-Designed to be invoked by Task Scheduler; never requires user interaction.
-All output goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
+The scheduler is Task Scheduler on Windows, a user LaunchAgent on macOS, a
+user systemd timer on Linux, cron as the explicit degraded fallback
+(`install_control.py`). The pass runs, in order: capture-intent adoption,
+runtime reclaim, the deferred memory queue, yesterday's session
+consolidation; the compile (spawned through `maybe_compile`, followed until
+it finishes or the wait bound passes) and user-turn keying; then the steps
+that read the compile's output — orphaned-checkpoint clearing, structural
+lint, backlink repair, the FTS5 index, registered-repository refresh,
+generation pruning, model weights, the bounded generation refresh —
+telemetry compaction, the health report, report pruning and the bounded
+fast-forward of the checkout. Never requires user interaction. All output
+goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 """
 
 from __future__ import annotations

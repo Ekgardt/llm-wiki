@@ -1,9 +1,9 @@
 """The one place that names the embedding model and its prefixes.
 
-Three modules encode text with it — the search runtime, the LanceDB store and
-the LanceDB rebuild — and each used to carry its own copy of the name. A copy
-that drifts is worse than no copy at all here: queries embedded by one model and
-pages by another still produce numbers, and the numbers are meaningless.
+The search runtime and the generation builder encode text with it, and each
+used to carry its own copy of the name. A copy that drifts is worse than no copy
+at all here: queries embedded by one model and pages by another still produce
+numbers, and the numbers are meaningless.
 
 The model is multilingual on purpose. The pages of this vault are written in
 English and its owner asks in Russian, and an English-only encoder scored every

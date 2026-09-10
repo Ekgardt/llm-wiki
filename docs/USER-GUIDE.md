@@ -401,8 +401,8 @@ pending**. Use `doctor` for overall runtime health and inspect MCP retrieval row
 Migration is additive and non-destructive:
 
 1. Back up or commit authoritative Markdown and Git state as you normally would.
-2. Leave `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
-   `cache/lancedb/` in place.
+2. Leave `cache/index.sqlite`, `cache/vectors.npy` and `cache/vectors_meta.json`
+   in place.
 3. Build and validate a generation through the integrated builder/catalog API.
 4. Activate only with the expected active generation ID; a CAS mismatch means retry
    from a fresh snapshot, not overwrite.

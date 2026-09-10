@@ -72,7 +72,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
 │
-├── cache/                        RUNTIME — gitignored (FTS5/vector/graph/LanceDB)
+├── cache/                        RUNTIME — gitignored (FTS5/vector/graph)
 │   ├── evidence-graph/              immutable corpus-generation layout
 │   │   ├── catalog.sqlite3            active-generation catalog
 │   │   ├── telemetry.sqlite3          private cross-generation telemetry
@@ -486,7 +486,7 @@ or nonzero active state remains fail-closed.
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
   subsystem brief — subordinate to the root `../AGENTS.md` contract),
-  `EXPORTING.md`, `SETUP-COGNEE.md`, `operating-model.md`,
+  `EXPORTING.md`, `operating-model.md`,
   `STRUCTURE.md` (this file).
 - `scripts/queries/` — 12 language-specific Tree-sitter queries for function,
   class/type, call, and import extraction. Grammar packages are optional and
