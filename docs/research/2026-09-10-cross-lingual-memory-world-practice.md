@@ -108,3 +108,12 @@ is to be added with a pinned revision.
 | x-ru-zh-04 | RU | `cedar-logs-path` | По какому относительному пути Cedar пишет журналы выполнения? |
 | x-ru-zh-05 | RU | `cedar-doctor-command` | Какой командой проверяют здоровье Cedar? |
 | x-ru-zh-06 | RU | `cedar-context-symbol` | Как называется символ точки входа кода Cedar? |
+
+**Corpus built (owner's permission to measure, 2026-09-10).**
+`benchmark/retrieval-v2-crosslingual.json` (the 14 documents, 45 queries, 27
+cross-language) with its schema copy and `benchmark/model-matrix-crosslingual-v1.json`
+(the v1 matrix plus `intfloat/multilingual-e5-small`, revision `614241f6`, so the
+product's own encoder is an arm). `run_retrieval_v2.py` accepts both frozen
+corpus ids. Arms run: BM25 only (L4); e5-small; bge-m3; Qwen3-Embedding-0.6B;
+e5-large-instruct; e5-small and bge-m3 each with bge-reranker-v2-m3. The
+query-expansion arm (Haiku) is not in the runner and is not measured here.

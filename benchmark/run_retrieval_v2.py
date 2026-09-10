@@ -67,6 +67,12 @@ urlopen = None
 DEFAULT_CORPUS = Path(__file__).with_name("retrieval-v2.json")
 DEFAULT_SCHEMA = Path(__file__).with_name("retrieval-v2.schema.json")
 DEFAULT_MATRIX = Path(__file__).with_name("model-matrix-v1.json")
+# The frozen corpora this runner accepts. The cross-lingual corpus (2026-09-10)
+# carries the same 14 documents and 24 added cross-language queries; it has its
+# own matrix copy because the contract pins the corpus bytes.
+FROZEN_CORPUS_IDS = frozenset(
+    {"public-synthetic-retrieval-v2", "public-synthetic-retrieval-v2-crosslingual"}
+)
 ADAPTER_KIND = "deterministic-fake"
 MODEL_MATRIX_ADAPTER_KIND = "model-matrix"
 SELECTION_AGGREGATION_ADAPTER_KIND = "selection-aggregation"
@@ -645,7 +651,7 @@ def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
         raise ValueError("corpus bytes are not canonical and frozen")
     if corpus["schema_version"] != "retrieval-corpus/v2":
         raise ValueError("unsupported retrieval corpus schema version")
-    if corpus["corpus_id"] != "public-synthetic-retrieval-v2":
+    if corpus["corpus_id"] not in FROZEN_CORPUS_IDS:
         raise ValueError("unexpected frozen corpus id")
 
     documents = corpus["documents"]
@@ -3822,7 +3828,7 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
     if (
         set(report) != REPORT_FIELDS
         or report.get("schema_version") != "retrieval-report/v2"
-        or report.get("corpus_id") != "public-synthetic-retrieval-v2"
+        or report.get("corpus_id") not in FROZEN_CORPUS_IDS
         or report.get("adapter_kind") != MODEL_MATRIX_ADAPTER_KIND
         or report.get("quality_claim") is not True
         or report.get("requested_mode") != MODEL_MATRIX_ADAPTER_KIND
@@ -4194,7 +4200,7 @@ def _aggregate_reports(
             raise ValueError("candidate raw report must use canonical JSON bytes")
         if (
             report["schema_version"] != "retrieval-report/v2"
-            or report["corpus_id"] != "public-synthetic-retrieval-v2"
+            or report["corpus_id"] not in FROZEN_CORPUS_IDS
             or report["adapter_kind"] != MODEL_MATRIX_ADAPTER_KIND
             or report["release_evidence"] is not False
             or report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND
