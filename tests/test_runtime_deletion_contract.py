@@ -32,6 +32,18 @@ CANONICAL_ROLES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _test_vaults_count_as_adopted(monkeypatch):
+    """A hermetic vault has no Reliability V3 records, so the capture check
+    would read "disabled until adoption" (issue #17) and degrade every report
+    here about something else. `tests/test_doctor.py` does the same.
+    """
+    import doctor
+
+    monkeypatch.setattr(doctor, "_adoption_state", lambda state_root: "adopted")
+
+
+
 def _transaction_db(state_root: Path, now: datetime) -> Path:
     database = state_root / "run/markdown-transactions.sqlite3"
     database.parent.mkdir(parents=True)
