@@ -400,7 +400,9 @@ def _dirty_reach(repository: Path) -> tuple[dict, dict]:
 
 def test_impact_reaches_the_code_symbols_behind_a_dirty_change(indexed):
     impact, reach = _with_edited_core(indexed, _dirty_reach, indexed)
-    assert _values(impact["changed_symbols"], "name") == ["helper"]
+    # The whole answer is the failure message: a Windows runner answered []
+    # twice on 2026-09-10 and the reason is in `changes`/`warnings`.
+    assert _values(impact["changed_symbols"], "name") == ["helper"], impact
     assert impact["affected"] == EMPTY_AFFECTED
     rows = _pairs(reach["affected_symbols"], "qualified_name", "depth")
     assert rows == [("pkg.core.caller", 1), ("pkg.core.top", 2), ("pkg.core.Widget.frob", 3)]
