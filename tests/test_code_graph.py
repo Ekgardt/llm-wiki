@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from code_graph import (  # noqa: E402
@@ -582,7 +584,7 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
     def paused_edges(graph, **options):
         if graph.generation_id == "prior":
             entered.set()
-            assert release.wait(5)
+            assert release.wait(PAUSE_TIMEOUT)
         return real_edges(graph, **options)
 
     monkeypatch.setattr(EvidenceGraph, "edges", paused_edges)
@@ -590,10 +592,10 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
         reader = pool.submit(
             code_graph.find_callers, "callee", tmp_path, with_report=True
         )
-        assert entered.wait(5)
+        assert entered.wait(LONG_TIMEOUT)
         catalog.activate("next", expected_active="prior")
         release.set()
-        during = reader.result(timeout=5)
+        during = reader.result(timeout=LONG_TIMEOUT)
 
     assert during["source_generation"] == "prior"
     after = code_graph.find_callers("callee", tmp_path, with_report=True)

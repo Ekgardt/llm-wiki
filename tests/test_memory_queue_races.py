@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -89,7 +91,7 @@ def _join_all(threads: list[threading.Thread]) -> None:
     # Windows runner on 2026-09-07; a ten-second join per thread called that a
     # hang. The bound is for a real deadlock, so it is generous.
     for thread in threads:
-        thread.join(timeout=120)
+        thread.join(timeout=LONG_TIMEOUT)
         assert not thread.is_alive()
 
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 
 def sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
@@ -379,20 +381,20 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
 
     def slow_read(page: Path):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(PAUSE_TIMEOUT)
         return original(page)
 
     stale._page_bytes = slow_read
     stale_thread = threading.Thread(target=stale.rebuild, args=(lambda: [old_page],))
     fresh_thread = threading.Thread(target=fresh.rebuild, args=(lambda: [new_page],))
     stale_thread.start()
-    assert entered.wait(5)
+    assert entered.wait(LONG_TIMEOUT)
     fresh_thread.start()
     time.sleep(0.2)
     assert fresh_thread.is_alive()
     release.set()
-    stale_thread.join(5)
-    fresh_thread.join(5)
+    stale_thread.join(LONG_TIMEOUT)
+    fresh_thread.join(LONG_TIMEOUT)
     assert not stale_thread.is_alive() and not fresh_thread.is_alive()
     assert [item.page for item in fresh.candidates(normalized)] == [
         "knowledge/notes/new.md"
@@ -436,7 +438,7 @@ def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
         newer = json.loads(json.dumps(normalized.record))
         newer["id"] = "claim:newer:0"
         new_page.write_bytes(ledger_page(newer))
-    worker.join(5)
+    worker.join(LONG_TIMEOUT)
 
     assert not worker.is_alive()
     assert errors == []
@@ -463,7 +465,7 @@ def test_claim_rebuild_lock_timeout_does_not_unlock_the_owner(tmp_path: Path) ->
     with _exclusive_file_lock(lock):
         contender = threading.Thread(target=contend)
         contender.start()
-        contender.join(2)
+        contender.join(LONG_TIMEOUT)
         assert not contender.is_alive()
         assert len(failures) == 1
         assert isinstance(failures[0], TimeoutError)

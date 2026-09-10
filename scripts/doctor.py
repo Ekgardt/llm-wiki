@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -7793,6 +7794,7 @@ def _build_or_refresh_generation(
     force_rebuild: bool,
     coordinator: object | None = None,
     code_roots: tuple[str, ...] | None = None,
+    phases: dict[str, float] | None = None,
 ) -> dict:
     from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
     from evidence_graph_builder import (
@@ -7803,26 +7805,29 @@ def _build_or_refresh_generation(
     from generation_catalog import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    repository_scope = resolve_repository_scope(
-        root, deadline=deadline, cancelled=cancelled
-    )
+    with _timed_phase(phases, "scope"):
+        repository_scope = resolve_repository_scope(
+            root, deadline=deadline, cancelled=cancelled
+        )
     extractor_version = _maintenance_extractor_identity()
-    snapshot = collect_corpus(
-        root,
-        code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
-        max_files=max_sources,
-        deadline=deadline,
-    )
+    with _timed_phase(phases, "snapshot"):
+        snapshot = collect_corpus(
+            root,
+            code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
+            max_files=max_sources,
+            deadline=deadline,
+        )
     if len(snapshot.sources) > max_sources:
         raise ValueError("corpus source limit exceeded")
 
     catalog = GenerationCatalog(state_root)
-    parent = catalog.get_active(deadline=deadline)
-    parent_id = _active_generation_id(parent)
-    workspace_sha256 = _workspace_manifest_sha256(snapshot)
-    parent_workspace_sha256 = _parent_workspace_manifest(
-        catalog, parent_id, deadline, cancelled
-    )
+    with _timed_phase(phases, "parent"):
+        parent = catalog.get_active(deadline=deadline)
+        parent_id = _active_generation_id(parent)
+        workspace_sha256 = _workspace_manifest_sha256(snapshot)
+        parent_workspace_sha256 = _parent_workspace_manifest(
+            catalog, parent_id, deadline, cancelled
+        )
     if _parent_is_current(
         parent,
         force_rebuild,
@@ -7849,26 +7854,46 @@ def _build_or_refresh_generation(
         schema_version=GRAPH_SCHEMA_VERSION,
         workspace_manifest_sha256=workspace_sha256,
     )
-    built = build_incremental_generation(
-        catalog,
-        sources=_generation_source_rows(snapshot),
-        source_bytes=_generation_source_bytes(snapshot),
-        extractor=_generation_source_extractor(
-            snapshot, repository_scope.repository_id
-        ),
-        reuse_config=config,
-        generation_id=_fresh_generation_id(catalog),
-        parent_generation_id=_reuse_parent_id(force_rebuild, parent_id),
-        policy=_corpus_policy(snapshot),
-        expected_active=parent_id,
-        deadline=deadline,
-        cancelled=cancelled,
-        repository_scope=repository_scope,
-        snapshot=snapshot,
-        publication_root=root,
-        coordinator=coordinator,
-    )
+    with _timed_phase(phases, "build"):
+        built = build_incremental_generation(
+            catalog,
+            sources=_generation_source_rows(snapshot),
+            source_bytes=_generation_source_bytes(snapshot),
+            extractor=_generation_source_extractor(
+                snapshot, repository_scope.repository_id
+            ),
+            reuse_config=config,
+            generation_id=_fresh_generation_id(catalog),
+            parent_generation_id=_reuse_parent_id(force_rebuild, parent_id),
+            policy=_corpus_policy(snapshot),
+            expected_active=parent_id,
+            deadline=deadline,
+            cancelled=cancelled,
+            repository_scope=repository_scope,
+            snapshot=snapshot,
+            publication_root=root,
+            coordinator=coordinator,
+        )
     return _generation_build_result(built, snapshot)
+
+
+@contextlib.contextmanager
+def _timed_phase(phases: dict[str, float] | None, name: str):
+    """Record what this phase cost, so a deferred build can say where its time went.
+
+    A refresh that stopped at its budget used to report `time_limit` and
+    nothing else; on a hosted Windows runner a two-file build passed 60 s and
+    no one could say in which phase. See
+    `docs/research/2026-09-10-a-timeout-is-a-hang-bound-not-a-stopwatch.md`.
+    """
+    if phases is None:
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        phases[name] = round(time.monotonic() - started, 3)
 
 
 def _maintenance_outcome(
@@ -7971,6 +7996,7 @@ def _refreshed_generation(
     force_rebuild: bool,
     repaired: list[dict],
     code_roots: tuple[str, ...] | None = None,
+    phases: dict[str, float] | None = None,
 ) -> dict:
     with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
         guard.run(
@@ -7990,8 +8016,10 @@ def _refreshed_generation(
             force_rebuild=force_rebuild,
             coordinator=coordinator,
             code_roots=code_roots,
+            phases=phases,
         )
         result["repairs"] = repaired
+        result["details"] = {"phase_seconds": dict(phases or {})}
         return result
 
 
@@ -8114,6 +8142,7 @@ def _attempted_generation_refresh(
     repaired,
     code_roots=None,
 ) -> dict:
+    phases: dict[str, float] = {}
     try:
         return _refreshed_generation(
             root_path,
@@ -8125,10 +8154,15 @@ def _attempted_generation_refresh(
             force_rebuild,
             repaired,
             code_roots=code_roots,
+            phases=phases,
         )
     except TimeoutError:
         return _maintenance_outcome(
-            "deferred", "time_limit", partial=True, repairs=repaired
+            "deferred",
+            "time_limit",
+            partial=True,
+            repairs=repaired,
+            details={"phase_seconds": phases},
         )
     except _corpus_changed_error():
         # The vault was written to while its snapshot was being validated. That

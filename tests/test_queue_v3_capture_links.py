@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -350,7 +352,7 @@ def test_first_consumer_seals_active_digest_before_side_effect(
     resolution_finished = threading.Event()
 
     def resolve() -> None:
-        start_resolution.wait(2)
+        start_resolution.wait(PAUSE_TIMEOUT)
         try:
             queue.append_capture_link_resolution(
                 binding.task_id,
@@ -382,8 +384,8 @@ def test_first_consumer_seals_active_digest_before_side_effect(
             active_link_digest=binding.active_digest,
             before_side_effect=lambda: start_resolution.set(),
         )
-        assert resolution_finished.wait(2)
-        thread.join(timeout=2)
+        assert resolution_finished.wait(LONG_TIMEOUT)
+        thread.join(timeout=LONG_TIMEOUT)
 
     assert sealed.seal_digest is not None
     assert observed == ["capture_link_sealed"]

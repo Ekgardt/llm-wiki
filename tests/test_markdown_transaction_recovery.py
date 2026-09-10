@@ -23,6 +23,8 @@ from markdown_transaction import (
 from project_journal import ProjectStore
 from reliable_memory import OperationalDatabaseContractError, sha256_bytes
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
@@ -1292,13 +1294,13 @@ def test_project_takeover_is_locked_out_from_final_check_through_commit(
 
     def pause_before_mutation(*args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(PAUSE_TIMEOUT)
         return mutate(*args, **kwargs)
 
     monkeypatch.setattr(coordinator, "_mutate_and_mark", pause_before_mutation)
     with ThreadPoolExecutor(max_workers=1) as pool:
         applying = pool.submit(coordinator.apply, transaction.id)
-        assert entered.wait(5)
+        assert entered.wait(LONG_TIMEOUT)
         with sqlite3.connect(coordinator.database_path, timeout=0.1) as contender:
             with pytest.raises(sqlite3.OperationalError, match="locked"):
                 contender.execute(
@@ -1307,7 +1309,7 @@ def test_project_takeover_is_locked_out_from_final_check_through_commit(
                 )
                 contender.commit()
         release.set()
-        assert applying.result(timeout=5).state == "committed"
+        assert applying.result(timeout=LONG_TIMEOUT).state == "committed"
 
     with sqlite3.connect(coordinator.database_path) as database:
         database.execute(
@@ -1354,13 +1356,13 @@ def test_new_project_epoch_wins_before_final_fence_and_old_touches_nothing(
         if kwargs.get("database") is None and not paused:
             paused = True
             early_check_done.set()
-            assert takeover_done.wait(5)
+            assert takeover_done.wait(PAUSE_TIMEOUT)
         return result
 
     monkeypatch.setattr(coordinator, "_check_preconditions", pause_after_early_check)
     with ThreadPoolExecutor(max_workers=1) as pool:
         applying = pool.submit(coordinator.apply, transaction.id)
-        assert early_check_done.wait(5)
+        assert early_check_done.wait(LONG_TIMEOUT)
         with sqlite3.connect(coordinator.database_path) as database:
             database.execute(
                 "UPDATE project_leases SET lease_token = 'new-token', "
@@ -1369,7 +1371,7 @@ def test_new_project_epoch_wins_before_final_fence_and_old_touches_nothing(
             database.commit()
         takeover_done.set()
         with pytest.raises(RuntimeError, match="precondition"):
-            applying.result(timeout=5)
+            applying.result(timeout=LONG_TIMEOUT)
 
     assert not (vault / "knowledge/projects/demo/journal.md").exists()
     assert coordinator._record(transaction.id).state == "quarantined"

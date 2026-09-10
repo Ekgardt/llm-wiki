@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -304,7 +306,7 @@ def test_concurrent_migration_has_one_exclusive_owner(
 
     def paused_scan(*args, **kwargs):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(PAUSE_TIMEOUT)
         return real_scan(*args, **kwargs)
 
     monkeypatch.setattr(memory_queue, "_scan_legacy_records", paused_scan)
@@ -318,12 +320,12 @@ def test_concurrent_migration_has_one_exclusive_owner(
 
     owner = threading.Thread(target=migrate)
     owner.start()
-    assert entered.wait(5)
+    assert entered.wait(LONG_TIMEOUT)
     contender = threading.Thread(target=migrate)
     contender.start()
-    contender.join(5)
+    contender.join(LONG_TIMEOUT)
     release.set()
-    owner.join(5)
+    owner.join(LONG_TIMEOUT)
 
     assert sum(isinstance(item, memory_queue.MigrationReceipt) for item in outcomes) == 1
     busy = [item for item in outcomes if isinstance(item, MigrationBusy)]
@@ -487,13 +489,13 @@ except mq.MigrationBusy as exc:
     # spawning two interpreters that import the queue module is itself slow on
     # a hosted Windows image, and the second wait must not inherit what the
     # first one spent.
-    _await_file(entered, 120)
-    _await_first_exit(processes, 120)
+    _await_file(entered, LONG_TIMEOUT)
+    _await_first_exit(processes, LONG_TIMEOUT)
     assert sum(process.poll() is not None for process in processes) == 1
     release.write_text("go", encoding="ascii")
     outputs = []
     for process in processes:
-        stdout, stderr = process.communicate(timeout=180)
+        stdout, stderr = process.communicate(timeout=PAUSE_TIMEOUT)
         assert process.returncode == 0, stderr
         outputs.append(json.loads(stdout))
 
@@ -515,7 +517,7 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
         assert path.name.startswith("queue-migration-")
         assert not (tmp_path / "run" / "queue").exists()
         renamed.set()
-        assert release.wait(180)
+        assert release.wait(PAUSE_TIMEOUT)
         return real_scan(path)
 
     monkeypatch.setattr(memory_queue, "_scan_legacy_records", paused_scan)
@@ -529,13 +531,13 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
 
     thread = threading.Thread(target=migrate)
     thread.start()
-    assert renamed.wait(120)
+    assert renamed.wait(LONG_TIMEOUT)
     with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
         memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
     assert raised.value.code == "legacy_migration_quiesced"
     assert not (tmp_path / "run" / "queue").exists()
     release.set()
-    thread.join(120)
+    thread.join(LONG_TIMEOUT)
     assert isinstance(outcome[0], memory_queue.MigrationReceipt)
 
 
