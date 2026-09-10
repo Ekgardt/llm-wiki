@@ -227,3 +227,22 @@ reranker's: every search took about 34 s, inside the generation catalog's
 artifact hashing (the nightly has been failing since 2026-09-07 and the
 generation is stale), and two of three Russian questions returned no rows
 at all. Both are recorded as open in `docs/ISSUES-2026-09-10.md`.
+
+**Measured again at the MCP budget, after the generation fix (2026-09-10,
+one warm process, load 1.5–2.6, six questions, `deadline` 10 s as the MCP
+server grants it).** The 166–471 ms above was measured while the read path
+still refused the generation and the fused pool held short lexical
+sections; with the hybrid pool of real chunks the warm rerank stage costs
+2.2–3.6 s for ten pairs at int8, and under load 5.8 it was 3.9–6.5 s. At
+the MCP budget the stage was applied on four of the five questions it was
+eligible for (the fifth was an exact-match bypass, which is correct); one
+question hit `optional_stage_timeout` and answered from the fused order.
+Whole answers took 5.2–6.5 s, inside the 10 s operation budget. The open
+risk is that window: the optional share (`OPTIONAL_STAGE_BUDGET_SHARE`,
+`OPTIONAL_STAGE_TAIL_RESERVE_SECONDS` in `scripts/retrieval.py`) leaves
+about 3.5–4.5 s, so on a loaded machine the stage is started and abandoned
+on most calls, costing CPU and returning nothing. Options, none chosen here
+because each changes quality or the budget contract and needs its own
+evidence: depth 5 (halves the cost; LongMemEval must show what it loses),
+a larger optional share for the rerank kind only, or an ONNX int8 export of
+the cross-encoder. Recorded in `docs/ISSUES-2026-09-10.md`.
