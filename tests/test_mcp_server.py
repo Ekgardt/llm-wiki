@@ -2434,7 +2434,8 @@ class TestHandleToolCall:
         envelope = json.loads(self._run("recall", {"query": "missing"}))
 
         assert envelope["data"]["retrieval_trace"]["signals_used"] == []
-        assert envelope["data"]["retrieval_trace"]["fallback_reason"] == "trace_unavailable"
+        assert envelope["data"]["retrieval_trace"]["fallback_reason"] == "no_results"
+        assert envelope["data"]["retrieval_trace"]["partial"] is False
         assert all(
             detail["freshness"] != "fresh"
             for detail in envelope["components"].values()

@@ -810,6 +810,20 @@ def _lexical_fallback_row(row: dict) -> dict:
     }
 
 
+def _selected_generation() -> str:
+    """The generation a search selects, named even when it returned no rows.
+
+    An empty result used to be a partial ``legacy`` trace with
+    ``trace_unavailable``, which hid which generation answered and made a
+    freshly published note look like a search failure (issue #26).
+    """
+    from freshness_watch import _active_generation_id
+    from memory_state import STATE_ROOT
+
+    active = _active_generation_id(STATE_ROOT, time.monotonic() + 1.0)
+    return active or "legacy"
+
+
 def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
     """Recover the planner trace from compatibility rows and validate it closed."""
     if results and all(
@@ -841,9 +855,9 @@ def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
             "requested_mode": requested,
             "effective_mode": "BASE",
             "signals_used": [],
-            "fallback_reason": "trace_unavailable",
-            "corpus_generation": "legacy",
-            "partial": True,
+            "fallback_reason": "no_results",
+            "corpus_generation": _selected_generation(),
+            "partial": False,
             "reranker_applied": False,
             "reranker_model_id": None,
             "reranker_model_revision": None,
