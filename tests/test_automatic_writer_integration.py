@@ -35,7 +35,7 @@ WRITER_TARGETS = [
 ]
 
 TASK14_BEHAVIORAL_ENTRYPOINTS = {
-    "scripts/access_tracking.py:flush_access_to_frontmatter",
+    "scripts/access_tracking.py:_flush_page",
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
     "scripts/blackboard.py:_append_jsonl",
@@ -59,7 +59,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
 }
 
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
-    "scripts/access_tracking.py:flush_access_to_frontmatter",
+    "scripts/access_tracking.py:_flush_page",
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
     "scripts/build_guardrails.py:main",

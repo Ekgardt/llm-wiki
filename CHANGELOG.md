@@ -96,6 +96,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A page that cannot be flushed is named.** `access_tracking.py` was the
+  one module under `scripts/` the complexity gate refused (four functions
+  up to CCN 15, six bare excepts); a page whose frontmatter export failed
+  was skipped in silence while the cursor moved on. The module is a pipeline
+  of small steps with the same behaviour, and a failed page is reported with
+  its reason (`last_flush_failures()`, stderr, `--flush` output) while the
+  bounded scan still advances (audit H2). Research:
+  `docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md`.
 - **A failing in-process step says why, not only its class.** The nightly's
   health report, three doctor repair paths and the self-update reported a
   failure as `RuntimeError` alone; they now report

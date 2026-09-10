@@ -62,6 +62,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   keep only the helpers `retrieval.py` imports, and update STRUCTURE.md.
 
 ### H2 — `access_tracking.py` fails the owner's complexity gate and swallows every failure [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md`); gate exit 0 on the file.
 - Rule: R5; R4/R3 (silent fallback).
 - Evidence: gate output — `_parse_frontmatter_integer` CCN 6 (49-65),
   `flush_access_to_frontmatter` CCN 12 (108-208, nesting 3 at 165-174),
