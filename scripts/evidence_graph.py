@@ -3443,6 +3443,11 @@ def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
 class EvidenceGraph:
     """Read-only facade over one catalog-selected immutable graph generation."""
 
+    # sqlite3 refuses to use one connection from another thread unless the
+    # caller promises to serialise access. The default stays strict; the
+    # reader cache opts in through `SharedEvidenceGraph` below.
+    _check_same_thread = True
+
     def __init__(
         self,
         database_path: Path,
@@ -3470,7 +3475,9 @@ class EvidenceGraph:
                 "Evidence Graph must remain inside an existing state root"
             ) from exc
         uri = f"{self.database_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-        database = sqlite3.connect(uri, uri=True, timeout=0)
+        database = sqlite3.connect(
+            uri, uri=True, timeout=0, check_same_thread=type(self)._check_same_thread
+        )
         try:
             current = self.database_path.stat(follow_symlinks=False)
             if not os.path.samestat(expected, current):
@@ -4458,3 +4465,14 @@ ORDER BY depth, assertion_ids LIMIT ?
             "count": int(totals[0]["total"]),
             "truncated": truncated,
         }
+
+
+class SharedEvidenceGraph(EvidenceGraph):
+    """A reader `evidence_reader_cache` may lend to several worker threads.
+
+    The generation is immutable and every statement is a read, so the only
+    thing a shared connection needs is a serialized sqlite3 build; the cache
+    checks `sqlite3.threadsafety` before it opens one of these.
+    """
+
+    _check_same_thread = False

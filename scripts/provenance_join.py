@@ -41,7 +41,10 @@ def _graph_locations(directory: Path, symbol: str, deadline: float) -> list[dict
     graph = _active_evidence_graph(directory)
     if graph is None:
         return []
-    rows = graph.find_nodes(name=symbol, max_rows=MAX_LOCATIONS, deadline=deadline)
+    try:
+        rows = graph.find_nodes(name=symbol, max_rows=MAX_LOCATIONS, deadline=deadline)
+    finally:
+        graph.close()
     return [_location_row(row) for row in rows[:MAX_LOCATIONS]]
 
 
