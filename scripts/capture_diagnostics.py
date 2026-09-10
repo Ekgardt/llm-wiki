@@ -24,7 +24,12 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, load_state, update_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    StateLockTimeout,
+    load_state,
+    update_state,
+)
 from secret_redact import redact_secrets  # noqa: E402
 
 FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
@@ -40,29 +45,38 @@ CAPTURE_RECENT_SECONDS = 7 * 24 * 3600
 STATE_LOCK_TIMEOUT = 0.5
 
 
-# What a lost race says on its way out. Every one of these means another writer
-# holds the resource right now and the next session end or queue drain carries
-# the same event: retried work, not lost work. Issue #26.3: seventeen
-# `owner_busy` worker rows read as seventeen lost captures while the owner
-# finished the task. Measured on this vault on 2026-09-07: `no-hands` logged
-# four of these in four minutes while its committed sequence advanced 836→838.
-CONTENTION_MARKERS = (
-    "owner_busy",
-    "ProjectPendingPriorError",
-    "operation_id is already bound to a different request",
-    "writer is busy",
-    "database is locked",
-    "Could not acquire state lock",
-)
+# A lost race is decided by the exception's type and code, never by its text
+# (#26.3): another writer holds the resource now and the next session end or
+# queue drain carries the same event, so it is retried work, not lost work.
+CONTENTION_OWNERSHIP_CODES = frozenset({"owner_busy"})
+# SQLITE_BUSY and SQLITE_LOCKED; the driver reports them from Python 3.11 on.
+SQLITE_CONTENTION_CODES = frozenset({5, 6})
 
 
-def is_contention(message: str) -> bool:
-    """Whether a failure message describes a writer race rather than a loss."""
-    return any(marker in message for marker in CONTENTION_MARKERS)
+def _sqlite_contention(error: BaseException) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in SQLITE_CONTENTION_CODES
 
 
-def _outcome(reason: str) -> str:
-    if is_contention(reason):
+def _typed_contention(error: BaseException) -> bool:
+    from markdown_transaction import OperationBoundElsewhereError, ProjectPendingPriorError
+
+    return isinstance(
+        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout)
+    )
+
+
+def is_contention(error: BaseException) -> bool:
+    """Whether a failure is a writer race rather than a loss."""
+    from operational_ownership import OperationalOwnershipError
+
+    if isinstance(error, OperationalOwnershipError):
+        return error.code in CONTENTION_OWNERSHIP_CODES
+    return _typed_contention(error) or _sqlite_contention(error)
+
+
+def _outcome_of(error: BaseException | None) -> str:
+    if error is not None and is_contention(error):
         return "deferred"
     return "lost"
 
@@ -78,12 +92,13 @@ def _failure_record(
     reason: str,
     slug: str | None,
     session_id: str | None,
+    outcome: str,
 ) -> dict[str, str]:
     record = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "kind": str(kind),
         "reason": _safe_reason(reason),
-        "outcome": _outcome(str(reason)),
+        "outcome": outcome,
     }
     if slug:
         record["slug"] = str(slug)
@@ -151,11 +166,16 @@ def record_capture_failure(
     kind: str,
     reason: str,
     *,
+    error: BaseException | None = None,
     slug: str | None = None,
     session_id: str | None = None,
 ) -> None:
-    """Record one lost capture. Never raises — diagnostics never break a hook."""
-    record = _failure_record(kind, reason, slug, session_id)
+    """Record one failed capture. Never raises — diagnostics never break a hook.
+
+    With the exception in hand the record says whether the write was lost or
+    deferred by a writer race; without it, a failure is a loss.
+    """
+    record = _failure_record(kind, reason, slug, session_id, _outcome_of(error))
     try:
         _append_failure_line(record)
     except Exception:  # noqa: BLE001 - the counter still records the loss

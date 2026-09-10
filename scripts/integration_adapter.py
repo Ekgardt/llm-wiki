@@ -1677,19 +1677,18 @@ def _bounded_checkpoint_error(error: BaseException) -> str:
     return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
 
 
-# One list, kept beside the capture counters it also classifies (#26.3).
-from capture_diagnostics import is_contention as _is_contention  # noqa: E402
-
-
-def _checkpoint_log_kind(message: str) -> str:
+def _checkpoint_log_kind(error: BaseException) -> str:
     """A lost race is retried by the next session; a failure is not.
 
     Both used to be written as `project checkpoint:` and counted together, so
     the health check read six hundred retries as six hundred failures and said
     "still happening" on a vault where nothing was going wrong. Naming them
-    apart costs one word and makes the count mean something again.
+    apart costs one word and makes the count mean something again. The
+    exception decides, by type and code (#26.3), not its text.
     """
-    if _is_contention(message):
+    from capture_diagnostics import is_contention
+
+    if is_contention(error):
         return "project checkpoint contention"
     return "project checkpoint"
 
@@ -1702,7 +1701,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] {_checkpoint_log_kind(message)}: {message}\n")
+            stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
     except Exception:  # noqa: BLE001
         pass
 
@@ -3141,6 +3140,7 @@ def _record_cli_capture_failure(
         record_capture_failure(
             f"adapter_{_failed_operation(args)}",
             f"{type(error).__name__}: {error}",
+            error=error,
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session
         pass

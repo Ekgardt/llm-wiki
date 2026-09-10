@@ -2116,7 +2116,6 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
     """Issue #26.2: `done` and `ok` read the same whether pages were published or not."""
     import compile_memory
 
-    compile_memory.BATCH_OUTCOMES.clear()
     quarantined = compile_memory.CompileApplyResult(
         "t1", "compile-quarantine:abc", "committed", ("knowledge/inbox/claims/x.md",), 1, "now", "k"
     )
@@ -2124,13 +2123,12 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
         "t2", "compile:def", "committed", ("knowledge/notes/a.md", "knowledge/notes/b.md"), 2, "now", "k"
     )
 
-    compile_memory._report_batch_outcome(quarantined)
-    assert compile_memory.compile_outcome() == "quarantined"
-    compile_memory._report_batch_outcome(published)
+    first = compile_memory._committed_outcome(quarantined)
+    second = compile_memory._committed_outcome(published)
 
     out = capsys.readouterr().out
     assert "batch quarantined: 1 candidate(s) under knowledge/inbox/claims/" in out
     assert "batch published 2 page(s)" in out
-    assert compile_memory.compile_outcome() == "partial"
-    assert compile_memory._finished_outcome("error") == "failed"
-    compile_memory.BATCH_OUTCOMES.clear()
+    assert compile_memory.compile_outcome([first]) == "quarantined"
+    assert compile_memory.compile_outcome([first, second]) == "partial"
+    assert compile_memory._finished_outcome("error", [second]) == "failed"

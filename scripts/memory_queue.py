@@ -14099,6 +14099,7 @@ def _record_processor_failure(task: dict[str, Any], error: BaseException) -> Non
         reason = f"{kind}: {type(error).__name__}: {redact_secrets(str(error))}"
         record_capture_failure(
             "queue_processor", reason[:MAX_PROCESSOR_REASON_CHARS],
+            error=error,
             session_id=str(task.get("id", ""))[:32] or None,
         )
     except Exception:  # noqa: BLE001 - diagnostics never change the outcome

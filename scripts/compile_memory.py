@@ -1833,28 +1833,36 @@ DROPPED_CLAIMS: list[dict[str, str]] = []
 
 
 # Issue #26.2: `done` and `ok` said the same thing whether pages were published
-# or only a candidate was quarantined. One record per batch, named.
-BATCH_OUTCOMES: list[dict[str, object]] = []
+# or only a candidate was quarantined. Each batch returns what it did.
 QUARANTINE_OPERATION_PREFIX = "compile-quarantine:"
 
 
-def _report_batch_outcome(result: CompileApplyResult) -> None:
-    """Say what this batch did, in the words the operator needs (#26.2)."""
+@dataclass(frozen=True)
+class BatchOutcome:
+    """One batch's exit status and, when it committed, what the commit was."""
+
+    status: int
+    outcome: str | None = None
+    paths: int = 0
+
+
+def _committed_outcome(result: CompileApplyResult) -> BatchOutcome:
+    """Name what this batch did, in the words the operator needs (#26.2)."""
+    paths = len(result.touched)
     if result.operation_id.startswith(QUARANTINE_OPERATION_PREFIX):
-        BATCH_OUTCOMES.append({"outcome": "quarantined", "paths": len(result.touched)})
         print(
-            f"compile_memory: batch quarantined: {len(result.touched)} candidate(s) "
-            "under knowledge/inbox/claims/, no page published; the daily stays "
+            f"compile_memory: batch quarantined: {paths} candidate(s) under "
+            "knowledge/inbox/claims/, no page published; the daily stays "
             "pending until the candidate is reviewed."
         )
-        return
-    BATCH_OUTCOMES.append({"outcome": "published", "paths": len(result.touched)})
-    print(f"compile_memory: batch published {len(result.touched)} page(s).")
+        return BatchOutcome(0, "quarantined", paths)
+    print(f"compile_memory: batch published {paths} page(s).")
+    return BatchOutcome(0, "published", paths)
 
 
-def compile_outcome() -> str:
+def compile_outcome(outcomes: Sequence[BatchOutcome]) -> str:
     """One word for the run: published, quarantined, partial, or nothing."""
-    kinds = {str(item["outcome"]) for item in BATCH_OUTCOMES}
+    kinds = {item.outcome for item in outcomes if item.outcome}
     if not kinds:
         return "nothing"
     if len(kinds) == 1:
@@ -1862,10 +1870,11 @@ def compile_outcome() -> str:
     return "partial"
 
 
-def _outcome_sentence() -> str:
+def _outcome_sentence(outcomes: Sequence[BatchOutcome]) -> str:
     counts: dict[str, list[int]] = {}
-    for item in BATCH_OUTCOMES:
-        counts.setdefault(str(item["outcome"]), []).append(int(item["paths"]))
+    for item in outcomes:
+        if item.outcome:
+            counts.setdefault(item.outcome, []).append(item.paths)
     parts = [
         f"{kind} {len(paths)} batch(es), {sum(paths)} path(s)"
         for kind, paths in sorted(counts.items())
@@ -3922,20 +3931,26 @@ def _mark_started(trigger: str) -> None:
     update_state(_mutate)
 
 
-def _finished_outcome(status: str) -> str:
+def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:
     if status == "error":
         return "failed"
-    return compile_outcome()
+    return compile_outcome(outcomes)
 
 
-def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
+def _mark_finished(
+    trigger: str,
+    status: str,
+    error: str | None = None,
+    *,
+    outcomes: Sequence[BatchOutcome] = (),
+) -> None:
     finished_iso = datetime.now().isoformat(timespec="seconds")
 
     def _mutate(s: dict) -> None:
         s["last_compile_finished_at"] = finished_iso
         s["last_compile_finished_trigger"] = trigger
         s["last_compile_status"] = status
-        s["last_compile_outcome"] = _finished_outcome(status)
+        s["last_compile_outcome"] = _finished_outcome(status, outcomes)
         s["last_compile_dropped_claims"] = len(DROPPED_CLAIMS)
         if error is not None:
             s["last_compile_error"] = error[:500]
@@ -4105,7 +4120,6 @@ def _run(
     owner: OwnerLease | None = None,
 ) -> int:
     _require_compile_active(deadline, cancelled)
-    BATCH_OUTCOMES.clear()
     DROPPED_CLAIMS.clear()
     state = load_state()
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
@@ -4125,8 +4139,9 @@ def _run(
         _require_compile_active(deadline, cancelled)
         return _failed_compile(args, inputs, exc)
 
+    outcomes: list[BatchOutcome] = []
     for batch in batches:
-        status = _run_batch(
+        done = _run_batch(
             _refresh_compile_batch(batch),
             args,
             coordinator=coordinator,
@@ -4134,11 +4149,12 @@ def _run(
             cancelled=cancelled,
             owner=owner,
         )
-        if status != 0:
-            return status
+        if done.status != 0:
+            return done.status
+        outcomes.append(done)
     _require_compile_active(deadline, cancelled)
-    _mark_finished(args.trigger, "ok")
-    print(f"compile_memory: done: {_outcome_sentence()}.")
+    _mark_finished(args.trigger, "ok", outcomes=outcomes)
+    print(f"compile_memory: done: {_outcome_sentence(outcomes)}.")
     return 0
 
 
@@ -4172,8 +4188,8 @@ def _run_batch(
     deadline: float,
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
-) -> int:
-    """Resolve and apply one batch; a non-zero result ends the whole run."""
+) -> BatchOutcome:
+    """Resolve and apply one batch; a non-zero status ends the whole run."""
     try:
         resolved = resolve_compile_plan(
             batch.inputs,
@@ -4183,7 +4199,7 @@ def _run_batch(
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return _failed_compile(args, batch.inputs, exc)
+        return BatchOutcome(_failed_compile(args, batch.inputs, exc))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -4191,7 +4207,7 @@ def _run_batch(
             f"compile_memory: dry-run resolved {len(resolved.plan['operations'])} "
             f"operation(s){' from cache' if resolved.cache_hit else ''}; no writes."
         )
-        return 0
+        return BatchOutcome(0)
     return _apply_batch(
         batch,
         resolved,
@@ -4212,7 +4228,7 @@ def _apply_batch(
     deadline: float,
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
-) -> int:
+) -> BatchOutcome:
     try:
         result = apply_compile_plan(
             batch.inputs,
@@ -4229,13 +4245,12 @@ def _apply_batch(
     except TimeoutError:
         raise
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
-        return _failed_compile(
-            args, batch.inputs, exc, prefix="transaction not committed: "
+        return BatchOutcome(
+            _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
         )
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
-    _report_batch_outcome(result)
-    return 0
+    return _committed_outcome(result)
 
 
 def _transactional_owner(

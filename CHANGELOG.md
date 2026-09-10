@@ -42,6 +42,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   "not measured" every morning (#23.5); a busy maintenance fence names its
   holder (#29.6); Codex hooks are discovered natively and the internal
   classifier no longer captures itself (PR #27).
+- On a vault that adopted Reliability V3 before its queue was ever used, the
+  doctor reported the v2 queue migration as pending for ever and `--repair`
+  aborted on the v2 tombstone before repairing anything; adoption retires
+  that migration and both now say so. A capture write refused by a writer
+  race is classified by the exception's type and code, never by its text;
+  the state-lock timeout and the bound-elsewhere refusal are typed for it.
 - `uninstall` and `rollback` still take back a Cursor or Antigravity hook
   fragment written by an install from before the retirement. Deleting the
   writing code outright would have made the manifest name a resource the code

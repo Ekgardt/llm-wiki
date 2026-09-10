@@ -1690,6 +1690,18 @@ def _empty_queue_details() -> tuple[dict, dict[str, int]]:
 
 
 def _record_queue_migration(state_root: Path, details: dict) -> None:
+    from markdown_transaction import _reliability_v3_records_present
+
+    if _reliability_v3_records_present(state_root):
+        # Adoption retired the v2 queue and left a tombstone where it stood
+        # (`memory_queue` refuses to migrate one), so there is no legacy
+        # migration left to finish and the v2 marker proves nothing.
+        details["migration"] = "retired"
+        return
+    _record_v2_queue_marker(state_root, details)
+
+
+def _record_v2_queue_marker(state_root: Path, details: dict) -> None:
     marker = state_root / "run" / "queue-migrated-v2"
     marker_kind = _safe_kind(marker, state_root)[0]
     details["migration"] = "complete" if marker_kind == "regular" else "pending"
@@ -4940,7 +4952,7 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
-def _capture_check(state_root: Path, deadline: float) -> dict:
+def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
         capture_deferred_totals,
@@ -4970,20 +4982,19 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
-    adoption = _adoption_state(state_root)
+    adoption = _adoption_state(root, state_root)
     details["adoption_state"] = adoption
     if adoption not in {"adopted", "unknown"}:
         return _result("capture", "degraded", _capture_disabled_message(adoption), details)
     return _capture_loss_result(lost, live, details)
 
 
-def _adoption_state(state_root: Path) -> str:
+def _adoption_state(root: Path, state_root: Path) -> str:
     """The Reliability V3 adoption state, from the two records under run/, or unknown."""
     from installed_memory_repair import inspect_installed_vault
-    from memory_state import ROOT
 
     try:
-        report = inspect_installed_vault(root=ROOT, state_root=state_root)
+        report = inspect_installed_vault(root=root, state_root=state_root)
     except Exception:  # noqa: BLE001 - a health check never raises
         return "unknown"
     return str(report.get("details", {}).get("adoption_state") or "unknown")
@@ -8295,15 +8306,10 @@ def _migrated_legacy_queue(
     )
 
 
-def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
-    """Repair the legacy queue and report whether the v2 queue is usable."""
-    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
-
-    legacy_available = guard.run(
-        _repair_leases, context.state_path, context.generated_at, context.repaired
-    )
-    if not legacy_available:
-        context.repair_deferred.add("queue")
+def _legacy_queue_migrated(
+    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
+) -> bool:
+    """Run the v2 migration where it is still owed; True when the marker stands."""
     marker = context.state_path / "run" / "queue-migrated-v2"
     marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
     migration = _migrated_legacy_queue(
@@ -8311,8 +8317,25 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     )
     _record_queue_migration_repair(migration, marker_existed, context)
     marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
-    if migration is None and not marker_valid:
-        return False
+    return migration is not None or marker_valid
+
+
+def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
+    """Repair the legacy queue and report whether the v2 queue is usable."""
+    from markdown_transaction import _reliability_v3_records_present
+    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
+
+    legacy_available = guard.run(
+        _repair_leases, context.state_path, context.generated_at, context.repaired
+    )
+    if not legacy_available:
+        context.repair_deferred.add("queue")
+    # Adoption retired the v2 queue; `migrate_legacy_queue` would construct it
+    # and abort on its tombstone. An adopted vault has no migration to finish
+    # and no marker to wait for (`memory_queue` applies the same rule).
+    if not _reliability_v3_records_present(context.state_path):
+        if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
+            return False
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the
@@ -8571,7 +8594,7 @@ def _deferrable_checks(
                 root_path, state_path, generated_at, budget
             ),
         ),
-        ("capture", lambda budget: _capture_check(state_path, budget)),
+        ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),

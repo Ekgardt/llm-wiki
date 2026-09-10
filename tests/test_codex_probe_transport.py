@@ -4,7 +4,23 @@ import sys
 import time
 
 import doctor
-import pytest
+
+
+def _peer_is_gone(pid: int) -> bool:
+    """Whether the peer was killed and reaped, asked the way each platform answers.
+
+    `os.kill(pid, 0)` is a POSIX idiom; on Windows it raises `WinError 87` for
+    a dead pid (and a `SystemError` on some builds), so the kernel is asked.
+    """
+    if os.name == "nt":
+        from lsp_process_tree import _windows_pid_alive
+
+        return not _windows_pid_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
 
 
 def _probe(tmp_path, code, seconds=1):
@@ -39,8 +55,7 @@ time.sleep(60)
     assert _probe(tmp_path, code, seconds=0.2) is doctor._PROBE_INCOMPLETE
     assert time.monotonic() - started < 2
     pid = int((tmp_path / "peer.pid").read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert _peer_is_gone(pid)
 
 
 def test_excessive_peer_output_is_bounded_and_reaped(tmp_path, monkeypatch):
@@ -52,8 +67,7 @@ time.sleep(60)
 '''
     assert _probe(tmp_path, code) is doctor._PROBE_INCOMPLETE
     pid = int((tmp_path / "peer.pid").read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert _peer_is_gone(pid)
 
 
 def test_initialize_error_is_not_accepted_as_a_handshake(tmp_path):

@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
@@ -3985,6 +3985,7 @@ def retrieve_via_search_memory(
     deadline_monotonic: float | None = None,
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict[str, Any]]:
     """Public search path: independent backends → retrieve() → legacy rows."""
     import search_memory
@@ -4239,6 +4240,8 @@ def retrieve_via_search_memory(
         generation_fallback=generation_fallback,
         legacy_fallback=legacy_fallback,
     )
+    if trace_sink is not None:
+        trace_sink.update(asdict(result.trace))
     rows = candidates_to_legacy(result, display_meta=result.display_meta)
     if emit_telemetry:
         _record_impressions(

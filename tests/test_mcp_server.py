@@ -1647,7 +1647,7 @@ class TestHandleToolCall:
         monkeypatch.setattr(
             mcp_server,
             "_search_vault",
-            lambda query, *, limit: searches.append((query, limit)) or [],
+            lambda query, *, limit, trace_sink=None: searches.append((query, limit)) or [],
         )
         monkeypatch.setattr(
             query_memory,
@@ -2448,19 +2448,37 @@ class TestHandleToolCall:
         assert envelope["fallback"] is True
         assert "Retrieval fell back: optional_stage_timeout." in envelope["warnings"]
 
-    def test_empty_recall_does_not_claim_any_retrieval_signal(self, monkeypatch):
+    def test_empty_recall_reports_the_run_that_found_nothing(self, monkeypatch):
+        """Issue #26.1: an empty result names the generation and the signals that ran."""
         import mcp_server
 
-        monkeypatch.setattr(mcp_server, "_search_vault", lambda *args, **kwargs: [])
+        def _empty_run(*args, trace_sink=None, **kwargs):
+            trace_sink.update(
+                {
+                    "requested_mode": "HYBRID",
+                    "effective_mode": "HYBRID",
+                    "signals_used": ("lexical", "dense"),
+                    "fallback_reason": None,
+                    "corpus_generation": "gen-17",
+                    "partial": False,
+                }
+            )
+            return []
+
+        monkeypatch.setattr(mcp_server, "_search_vault", _empty_run)
         monkeypatch.setattr(mcp_server, "_meta", lambda: {})
 
         envelope = json.loads(self._run("recall", {"query": "missing"}))
 
-        assert envelope["data"]["retrieval_trace"]["signals_used"] == []
-        assert envelope["data"]["retrieval_trace"]["fallback_reason"] == "no_results"
-        assert envelope["data"]["retrieval_trace"]["partial"] is False
+        trace = envelope["data"]["retrieval_trace"]
+        assert trace["corpus_generation"] == "gen-17"
+        assert trace["signals_used"] == ["lexical", "dense"]
+        assert trace["fallback_reason"] is None
+        assert trace["partial"] is False
+        assert envelope["components"]["dense"] == {"generation": "gen-17", "freshness": "fresh"}
+        assert envelope["components"]["graph"]["freshness"] == "missing"
         assert all(
-            detail["freshness"] != "fresh"
+            detail["generation"] == "gen-17"
             for detail in envelope["components"].values()
         )
 
@@ -2808,7 +2826,7 @@ class TestHandleToolCall:
 
         received = []
 
-        def search(query, *, limit):
+        def search(query, *, limit, trace_sink=None):
             received.append(limit)
             return [{"path": "page.md", "fused_score": 0.1}]
 

@@ -24,21 +24,29 @@ DOCTOR = SCRIPTS / "doctor.py"
 GENEROUS_BUDGET_SECONDS = 120.0
 
 
-@pytest.fixture(autouse=True)
-def _test_vaults_count_as_adopted(monkeypatch):
-    """A hermetic vault here has no Reliability V3 records, so its capture check
-    would say "disabled until adoption" (issue #17) in every test about
-    something else. The one test about that message uses the real check.
-    """
-    import doctor
+def _adopt(root: Path, state_root: Path) -> None:
+    """Adopt Reliability V3 the way an install does, so the capture check can run.
 
-    real = doctor._adoption_state
-    monkeypatch.setattr(doctor, "_adoption_state", lambda state_root: "adopted")
-    return real
+    A vault that has not adopted reports capture as disabled (issue #17); a test
+    that asserts a healthy report needs the real records under `run/`, not a
+    patched answer.
+    """
+    from installed_memory_repair import repair_installed_vault
+
+    (root / "scripts" / "integration_adapter.py").write_bytes(
+        (SCRIPTS / "integration_adapter.py").read_bytes()
+    )
+    report = repair_installed_vault(
+        root=root,
+        state_root=state_root,
+        adopt_ownership_v3=True,
+        confirm_all_agents_stopped=True,
+    )
+    assert report["overall_status"] == "ok", report
 
 
 def test_a_vault_that_has_not_adopted_v3_says_capture_is_disabled_and_names_the_command(
-    tmp_path, monkeypatch, _test_vaults_count_as_adopted
+    tmp_path,
 ):
     """Issue #17: every capture failed silently until the adoption was run by hand."""
     import time
@@ -46,10 +54,8 @@ def test_a_vault_that_has_not_adopted_v3_says_capture_is_disabled_and_names_the_
     import doctor
 
     root, state_root, _home = _build_root(tmp_path)
-    monkeypatch.setattr(doctor, "_adoption_state", _test_vaults_count_as_adopted)
-    monkeypatch.setattr("memory_state.ROOT", root)
 
-    result = doctor._capture_check(state_root, time.monotonic() + 30)
+    result = doctor._capture_check(root, state_root, time.monotonic() + 30)
 
     assert result["status"] == "degraded"
     assert "Session capture is disabled" in result["message"]
@@ -316,6 +322,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
     now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
     (state_root / "run" / "state.json").write_text(
@@ -1585,6 +1592,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     today = datetime.now(timezone.utc).date().isoformat()
     (state_root / "run" / "state.json").write_text(
         json.dumps({"last_nightly_date": today, "last_nightly_status": "success"}),
@@ -1628,7 +1636,10 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     import doctor
 
     root, _, home = _build_root(tmp_path)
+    # Adopted, so capture is enabled (issue #17); everything else under the
+    # state root is still missing and is what `--repair` creates.
     state_root = tmp_path / "missing-state"
+    _adopt(root, state_root)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setenv("HOME", str(home))
@@ -4182,6 +4193,7 @@ def test_a_loss_that_stopped_happening_returns_the_capture_check_to_green(tmp_pa
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     (state_root / "run").mkdir(parents=True, exist_ok=True)
     (state_root / "run" / "state.json").write_text(
         json.dumps(
@@ -4210,6 +4222,7 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
@@ -4752,6 +4765,7 @@ def test_deferred_writes_are_reported_beside_lost_captures_not_as_them(tmp_path)
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
     (state_root / "run").mkdir(parents=True, exist_ok=True)
     (state_root / "run" / "state.json").write_text(
         json.dumps(
@@ -4799,3 +4813,40 @@ def test_the_claim_check_names_the_cause_the_pages_and_the_repair() -> None:
     assert "6 claim(s) cite daily bytes that no longer resolve" in result["message"]
     assert "knowledge/notes/alarm-thresholds.md, knowledge/notes/verify-first.md" in result["message"]
     assert "doctor.py --repair" in result["message"]
+
+
+def test_an_adopted_vault_owes_no_v2_queue_migration(tmp_path, monkeypatch):
+    """Adoption retires the v2 queue; the doctor must not wait for its marker.
+
+    Found by adopting a test vault for real instead of patching the answer:
+    `memory_queue` declines to migrate after adoption, so the marker never
+    appears, and the queue check called that a pending migration for ever.
+    """
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    _adopt(root, state_root)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "queue")
+
+    assert not (state_root / "run" / "queue-migrated-v2").exists()
+    assert check["details"]["migration"] == "retired"
+    assert check["status"] == "ok"
+
+
+def test_repair_on_an_adopted_vault_does_not_run_the_retired_v2_migration(tmp_path, monkeypatch):
+    """`doctor --repair` aborted on the v2 queue tombstone when the v2 marker was absent."""
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    state_root = tmp_path / "adopted-only"
+    _adopt(root, state_root)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+
+    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
+
+    runtime = _check(report, "runtime")
+    assert runtime["details"].get("repair_errors", []) == []
+    assert not (state_root / "run" / "queue-migrated-v2").exists()
+    assert all(item["action"] != "migrate_queue" for item in report["repaired"])

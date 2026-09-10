@@ -1911,6 +1911,10 @@ class ProjectCheckpointReservation:
     duplicate: bool = False
 
 
+class OperationBoundElsewhereError(ValueError):
+    """Another request already owns this operation id; the event is retried."""
+
+
 class TransactionFailure(RuntimeError):
     """An apply failure with a stable machine-readable disposition."""
 
@@ -3632,7 +3636,7 @@ def _require_committed_duplicate(
 ) -> None:
     """A duplicate may only be reused when it asked for exactly this request."""
     if _desired_hashes(relative_changes) != _persisted_hashes(existing):
-        raise ValueError("operation_id is already bound to a different request")
+        raise OperationBoundElsewhereError("operation_id is already bound to a different request")
     _require_committed_state(existing)
 
 
@@ -4065,7 +4069,7 @@ def _classify_settled_append(
     if record is None:
         return "retry"
     if not _append_request_matches(coordinator, record, relative, block):
-        raise ValueError("operation_id is already bound to a different request")
+        raise OperationBoundElsewhereError("operation_id is already bound to a different request")
     return record if record.state == "committed" else "advance"
 
 
@@ -5367,7 +5371,7 @@ class MarkdownCoordinator:
         if existing is None:
             return None
         if self._request_hash_for_operation_id(operation_id) != request_hash:
-            raise ValueError("operation_id is already bound to a different request")
+            raise OperationBoundElsewhereError("operation_id is already bound to a different request")
         return existing
 
     def _create_artifact_roots(

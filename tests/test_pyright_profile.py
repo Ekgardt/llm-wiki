@@ -227,14 +227,22 @@ def _install_prestarted_node_program(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     program: str,
+    *,
+    before_ready: str = "",
 ) -> tuple[Path, list[subprocess.Popen[bytes]], list[lsp_process_tree.ProcessTree]]:
+    """A node parent that is already running when the probe "spawns" it.
+
+    `before_ready` runs before the parent signals ready, so whatever it sets up
+    (a descendant, a pid file) exists before the probe's clock starts.
+    """
     node = tmp_path / ("node.exe" if os.name == "nt" else "node")
     node.write_bytes(b"synthetic node executable\n")
     ready = tmp_path / "node-parent-ready"
     release = tmp_path / "node-parent-release"
     gated_program = (
         "import pathlib,time\n"
-        f"pathlib.Path({str(ready)!r}).write_text('ready',encoding='ascii')\n"
+        + before_ready
+        + f"pathlib.Path({str(ready)!r}).write_text('ready',encoding='ascii')\n"
         f"release=pathlib.Path({str(release)!r})\n"
         "while not release.exists(): time.sleep(0.005)\n"
         + program
@@ -285,30 +293,8 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _spawned_pid(pid_file: Path, seconds: float = 2.0) -> int | None:
-    """The descendant's pid, or None when the probe ended before it was spawned.
-
-    On the Windows runners a 0.3 s probe deadline fired before the fake node
-    program had started Python and written the file (PR #16, four jobs), and
-    the test read a file that was never going to exist. No descendant means
-    nothing to leak, not a failure.
-    """
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        if pid_file.exists():
-            return int(pid_file.read_text(encoding="ascii"))
-        time.sleep(0.02)
-    return None
-
-
-def _descendant_is_gone(descendant_pid: int | None) -> bool:
-    if descendant_pid is None:
-        return True
-    return _pid_exits_within(descendant_pid)
-
-
-def _terminate_if_alive(descendant_pid: int | None) -> None:
-    if descendant_pid is None or not _pid_alive(descendant_pid):
+def _terminate_if_alive(descendant_pid: int) -> None:
+    if not _pid_alive(descendant_pid):
         return
     try:
         os.kill(descendant_pid, signal.SIGTERM)
@@ -322,20 +308,14 @@ def _redirection_for(inherited_stream: str) -> str:
     return "stdout=subprocess.DEVNULL, stderr=sys.stderr"
 
 
-def _inheriting_descendant_program(pid_file: Path, inherited_stream: str) -> str:
+def _inheriting_descendant_spawn(pid_file: Path, inherited_stream: str) -> str:
+    """Spawn a descendant that inherits one output stream, and record its pid."""
     return (
         "import subprocess,sys\n"
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(1.2)'],"
         f"{_redirection_for(inherited_stream)})\n"
         f"open({str(pid_file)!r},'w',encoding='ascii').write(str(child.pid))\n"
-        "print('v22.1.0',flush=True)\n"
     )
-
-
-def _installer_for(inherited_stream: str):
-    if inherited_stream == "stdout":
-        return _install_prestarted_node_program, 0.3
-    return _install_real_node_program, 1.0
 
 
 def _trees_unowned(trees) -> bool:
@@ -2610,21 +2590,27 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
     inherited_stream: str,
 ) -> None:
     pid_file = tmp_path / f"{inherited_stream}-descendant.pid"
-    installer, operation_seconds = _installer_for(inherited_stream)
-    _node, processes, trees = installer(
-        monkeypatch, tmp_path, _inheriting_descendant_program(pid_file, inherited_stream)
+    # The descendant exists before the parent is ready, so the probe's clock
+    # starts on a parent that already holds the stream open (PR #16: on a slow
+    # runner the old test read a pid file the program had not yet written).
+    _node, processes, trees = _install_prestarted_node_program(
+        monkeypatch,
+        tmp_path,
+        "print('v22.1.0',flush=True)\n",
+        before_ready=_inheriting_descendant_spawn(pid_file, inherited_stream),
     )
+    descendant_pid = int(pid_file.read_text(encoding="ascii"))
+    operation_seconds = 0.3
     started = time.monotonic()
 
     result = pyright_profile._probe_node(started + operation_seconds)
     elapsed = time.monotonic() - started
-    descendant_pid = _spawned_pid(pid_file)
     try:
         assert elapsed <= (
             operation_seconds + pyright_profile.NODE_PROBE_CLEANUP_SECONDS + 0.25
         )
         _assert_probe_gave_up(result, processes)
-        assert _descendant_is_gone(descendant_pid)
+        assert _pid_exits_within(descendant_pid)
         assert _trees_unowned(trees) or _trees_pending_cleanup(trees)
     finally:
         _terminate_if_alive(descendant_pid)
