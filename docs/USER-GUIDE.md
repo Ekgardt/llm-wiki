@@ -172,7 +172,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |
 | `find_dead_code` | Queries the active Evidence Graph first and reports source generation, graph completeness, unresolved count, and fallback. `live=true` explicitly bypasses the store. |
-| `get_architecture` | Keeps structural `summary`, `symbol`, `callers`, `callees`, `dependencies`, `path`, `community`, and `impact`; precise Python `definition`, `references`, `implementations`, `type`, `diagnostics`, and positioned call modes use the owned Pyright session. |
+| `get_architecture` | Keeps structural `summary`, `symbol`, `callers`, `callees`, `dependencies`, `path`, `community`, and `impact`; adds `search` (ranked qualified names with degree), `snippet` by `owner.name` with exact stored line ranges, `coverage` with the parse ranges the extractor could not read, `depth` on `callers`/`callees`, and `affected_symbols` on `impact` (#24, B); precise Python `definition`, `references`, `implementations`, `type`, `diagnostics`, and positioned call modes use the owned Pyright session. |
 | `doctor` | Exposes nine closed actions: `status`, queue inspect/cancel/redrive/dead-list, transaction recover/undo, archive status, and claim status. Mutation actions require `repair=true`. |
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
@@ -318,6 +318,17 @@ uv run python scripts/repository_index.py refresh-all             # every regist
 uv run python scripts/repository_index.py list
 uv run python scripts/code_graph.py /path/to/repo --callers NAME  # from the index; --live re-parses
 ```
+
+Over MCP, `get_architecture` answers the code questions an agent asks in the
+loop, all from the repository's generation (see `docs/CODE-NAVIGATION.md`):
+
+| question | call |
+|---|---|
+| which symbols are named like this, ranked | `mode=search`, `symbol="find_*"`, optional `path="scripts/"`, `limit` |
+| the exact source of one symbol | `mode=snippet`, `symbol="scripts.code_graph.find_callers"` |
+| is this file indexed, fresh, and parsed | `mode=coverage`, `path="scripts/code_graph.py"` |
+| who calls this, up to N hops | `mode=callers`, `symbol=NAME`, `depth=3` (also `callees`) |
+| what does my uncommitted diff touch | `mode=impact` — `changed_symbols` and `affected_symbols` |
 
 Structural code answers are read from a reader that is validated once per
 MCP process and reused (warm `callers` on a 1 000-file repository: ~40 ms),

@@ -100,17 +100,20 @@ class TestGitComparisons:
         _git(root, "rm", "deleted.py")
 
         changes = collect_git_changes(root, comparison="index-HEAD")
-        renamed = next(item for item in changes if item["status"] == "R")
-        deleted = next(item for item in changes if item["status"] == "D")
+        renamed = _change_with_status(changes, "R")
+        deleted = _change_with_status(changes, "D")
 
         assert (renamed["old_path"], renamed["new_path"]) == (
             "alpha.py",
             "renamed file.py",
         )
-        assert renamed["old_blob"].startswith(b"def alpha")
-        assert renamed["new_blob"].startswith(b"def alpha")
-        assert deleted["old_blob"].startswith(b"def removed")
-        assert deleted["new_blob"] is None
+        blobs = (
+            renamed["old_blob"][:9],
+            renamed["new_blob"][:9],
+            deleted["old_blob"][:11],
+            deleted["new_blob"],
+        )
+        assert blobs == (b"def alpha", b"def alpha", b"def removed", None)
 
     def test_invalid_endpoint_shapes_fail_closed(self, tmp_path):
         root = _repository(tmp_path)
@@ -216,6 +219,39 @@ class TestGitComparisons:
         assert not marker.exists()
 
 
+def _change_with_status(changes: list, status: str) -> dict:
+    return next(item for item in changes if item["status"] == status)
+
+
+def _path_selected(node: dict, path) -> bool:
+    return path is None or node["metadata"].get("path") == path
+
+
+def _kind_selected(node: dict, kinds) -> bool:
+    return kinds is None or node["kind"] in kinds
+
+
+def _node_selected(node: dict, path, kinds) -> bool:
+    return _path_selected(node, path) and _kind_selected(node, kinds)
+
+
+def _node_ids(items: list) -> list:
+    return sorted(item["node_id"] for item in items)
+
+
+def _affected_ids(result: dict) -> dict:
+    return {group: _node_ids(items) for group, items in result["affected"].items()}
+
+
+def _items_without_evidence(result: dict) -> list:
+    return [
+        item["node_id"]
+        for items in result["affected"].values()
+        for item in items
+        if not item["evidence"]
+    ]
+
+
 class _Graph:
     generation_id = "generation-24"
 
@@ -242,12 +278,7 @@ class _Graph:
         ]
 
     def find_nodes(self, *, path=None, kinds=None, **_options):
-        nodes = list(self.nodes.values())
-        if path is not None:
-            nodes = [node for node in nodes if node["metadata"].get("path") == path]
-        if kinds is not None:
-            nodes = [node for node in nodes if node["kind"] in kinds]
-        return nodes
+        return [node for node in self.nodes.values() if _node_selected(node, path, kinds)]
 
     def occurrences(self, node_id, **_options):
         if node_id == "symbol":
@@ -275,12 +306,14 @@ class TestGraphImpact:
         result = analyze_impact(root=root, graph=_Graph())
 
         assert result["classification"] == "exact"
-        assert {item["node_id"] for item in result["changed_symbols"]} == {"symbol"}
-        assert [item["node_id"] for item in result["affected"]["decisions"]] == ["decision"]
-        assert [item["node_id"] for item in result["affected"]["pages"]] == ["page"]
-        assert {item["node_id"] for item in result["affected"]["tests"]} == {"test", "importer"}
-        assert [item["node_id"] for item in result["affected"]["checkpoints"]] == ["checkpoint"]
-        assert all(item["evidence"] for group in result["affected"].values() for item in group)
+        assert _node_ids(result["changed_symbols"]) == ["symbol"]
+        assert _affected_ids(result) == {
+            "decisions": ["decision"],
+            "pages": ["page"],
+            "tests": ["importer", "test"],
+            "checkpoints": ["checkpoint"],
+        }
+        assert _items_without_evidence(result) == []
 
     def test_missing_edge_evidence_downgrades_otherwise_resolved_impact(self, tmp_path):
         class GraphWithoutEvidence(_Graph):
@@ -346,8 +379,7 @@ def test_mcp_exposes_impact_as_get_architecture_mode_without_a_thirteenth_tool(m
     monkeypatch.setattr(mcp_server, "_analyze_impact", lambda **kwargs: expected)
 
     schema = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]
-    assert "mode" in schema["properties"]
-    assert len(mcp_server.TOOL_INPUT_SCHEMAS) == 12
+    assert ("mode" in schema["properties"], len(mcp_server.TOOL_INPUT_SCHEMAS)) == (True, 12)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     response = json.loads(loop.run_until_complete(mcp_server._handle_tool_call(
@@ -355,8 +387,11 @@ def test_mcp_exposes_impact_as_get_architecture_mode_without_a_thirteenth_tool(m
         {"directory": str(Path.cwd()), "mode": "impact", "comparison": "index-HEAD"},
     )))
 
-    assert response["data"] == expected
-    assert response["components"] == {}
+    data = response["data"]
+    assert {key: data[key] for key in expected} == expected
+    # Issue #24, B5: the tool adds the code symbols the diff reaches, beside
+    # the analysis, never inside it; with no changed symbol the reach is empty.
+    assert (data["affected_symbols"], response["components"]) == ([], {})
     assert set(response) == {
         "schema_version", "generated_at", "index_timestamp", "source_commit",
         "freshness", "coverage", "confidence", "fallback", "partial", "warnings",
