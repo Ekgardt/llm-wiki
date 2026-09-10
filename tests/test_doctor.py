@@ -857,6 +857,38 @@ def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_pat
     assert codex["not_completed"] is True
 
 
+def _fake_codex_tree(monkeypatch, process_factory, observed=None):
+    """The probe spawns its peer as an owned process tree; a test stands in
+    for the tree, not for `Popen`, so the pipes and the kill go where the
+    product sends them (a Job Object on Windows, a process group on POSIX)."""
+    import lsp_process_tree
+
+    class Tree:
+        def __init__(self, process):
+            self.process = process
+
+        def terminate(self, *, deadline):
+            # Like the real tree: kill, then wait for the exit until the deadline.
+            self.process.kill()
+            try:
+                self.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+
+        def close(self):
+            return None
+
+    def spawn(command, *, cwd, env, deadline):
+        del deadline
+        kwargs = {"cwd": str(cwd), "env": env, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+        if observed is not None:
+            observed["args"] = list(command)
+            observed["kwargs"] = kwargs
+        return Tree(process_factory(list(command), **kwargs))
+
+    monkeypatch.setattr(lsp_process_tree.ProcessTree, "spawn_with_deadline", staticmethod(spawn))
+
+
 def test_codex_hooks_probe_cleanup_honors_absolute_deadline(tmp_path, monkeypatch):
     import doctor
 
@@ -880,7 +912,7 @@ def test_codex_hooks_probe_cleanup_honors_absolute_deadline(tmp_path, monkeypatc
             return None
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -916,7 +948,7 @@ def test_codex_hooks_probe_own_timeout_remains_unverified(tmp_path, monkeypatch)
             return None
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -960,7 +992,7 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         def kill(self):
             pytest.fail("bounded probe unexpectedly timed out")
 
-    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    _fake_codex_tree(monkeypatch, Process, observed)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",

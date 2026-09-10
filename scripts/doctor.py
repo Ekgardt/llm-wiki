@@ -5492,13 +5492,17 @@ def _codex_probe_payload(root: Path) -> bytes:
     ).encode("utf-8")
 
 
-def _kill_and_reap(process: Any) -> None:
-    """Kill the peer and wait for the kernel to reap it, within the cleanup budget."""
-    if process.returncode is None:
-        process.kill()
+def _kill_and_reap(tree: Any) -> None:
+    """Kill the peer's whole process tree and reap it, within the cleanup budget.
+
+    The tree, not the direct child: on Windows a venv `python.exe` is a
+    trampoline that starts the interpreter as its child, so killing the child
+    alone left the peer running (PR #16, three Windows jobs). `ProcessTree`
+    owns a Job Object there and a process group on POSIX.
+    """
     try:
-        process.wait(timeout=CODEX_HOOK_PROBE_CLEANUP_SECONDS)
-    except subprocess.TimeoutExpired:
+        tree.terminate(deadline=time.monotonic() + CODEX_HOOK_PROBE_CLEANUP_SECONDS)
+    except (OSError, TimeoutError, subprocess.SubprocessError, RuntimeError):
         pass
 
 
@@ -5569,27 +5573,28 @@ def _send_codex_payload(process, payload: bytes) -> None:
     process.stdin.flush()
 
 
-def _finish_codex_process(process: Any, probe_deadline: float) -> bool:
+def _finish_codex_process(tree: Any, probe_deadline: float) -> bool:
     try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        tree.process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        _kill_and_reap(process)
+        _kill_and_reap(tree)
         return False
     return True
 
 
-def _await_codex_process(process, payload, probe_deadline, streams) -> bool:
+def _await_codex_process(tree, payload, probe_deadline, streams) -> bool:
     """Initialize, await acknowledgement, then request hooks before closing stdin."""
     first, _, remainder = payload.partition(b"\n")
+    process = tree.process
     try:
         _send_codex_payload(process, first + b"\n")
         _await_codex_response(streams, 1, probe_deadline)
         _send_codex_payload(process, remainder)
         _await_codex_response(streams, 2, probe_deadline)
         process.stdin.close()
-        return _finish_codex_process(process, probe_deadline)
+        return _finish_codex_process(tree, probe_deadline)
     except (OSError, ValueError, subprocess.SubprocessError):
-        _kill_and_reap(process)
+        _kill_and_reap(tree)
         return False
 
 
@@ -5602,14 +5607,14 @@ def _clean_codex_exit(process: Any, streams: _CodexProbeStreams) -> bool:
 
 
 def _drained_codex_output(
-    process: Any, streams: _CodexProbeStreams, probe_deadline: float
+    tree: Any, streams: _CodexProbeStreams, probe_deadline: float
 ) -> bytes | object | None:
     for reader in streams.readers:
         reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
     if _readers_still_running(streams.readers):
-        _kill_and_reap(process)
+        _kill_and_reap(tree)
         return _PROBE_INCOMPLETE
-    if not _clean_codex_exit(process, streams):
+    if not _clean_codex_exit(tree.process, streams):
         return None
     return bytes(streams.captured["stdout"])
 
@@ -5620,25 +5625,48 @@ def _run_codex_probe(
     env = os.environ.copy()
     env["CODEX_HOME"] = str(home / ".codex")
     payload = _codex_probe_payload(root)
-    try:
-        process = subprocess.Popen(  # noqa: S603
-            command,
-            cwd=str(root),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if _codex_pipes_missing(process):
-            _kill_and_reap(process)
-            return _PROBE_INCOMPLETE
-        streams = _start_codex_readers(process)
-        if not _await_codex_process(process, payload, probe_deadline, streams):
-            _drained_codex_output(process, streams, time.monotonic() + 0.2)
-            return _PROBE_INCOMPLETE
-        return _drained_codex_output(process, streams, probe_deadline)
-    except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
+    tree = _spawned_codex_tree(command, root, env, probe_deadline)
+    if tree is None:
         return _PROBE_INCOMPLETE
+    try:
+        return _probed_codex_tree(tree, payload, probe_deadline)
+    except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
+        _kill_and_reap(tree)
+        return _PROBE_INCOMPLETE
+    finally:
+        _close_codex_tree(tree)
+
+
+def _close_codex_tree(tree: Any) -> None:
+    """Release the tree's handles; a tree still live after its cleanup budget
+    is the probe's failure to report, never a reason to raise out of health."""
+    try:
+        tree.close()
+    except (OSError, RuntimeError):
+        pass
+
+
+def _spawned_codex_tree(command: list[str], root: Path, env: dict, probe_deadline: float):
+    """The peer as an owned process tree (Job Object / process group), or None."""
+    from lsp_process_tree import ProcessTree
+
+    try:
+        return ProcessTree.spawn_with_deadline(
+            command, cwd=root, env=env, deadline=probe_deadline
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _probed_codex_tree(tree: Any, payload: bytes, probe_deadline: float) -> bytes | object | None:
+    if _codex_pipes_missing(tree.process):
+        _kill_and_reap(tree)
+        return _PROBE_INCOMPLETE
+    streams = _start_codex_readers(tree.process)
+    if not _await_codex_process(tree, payload, probe_deadline, streams):
+        _drained_codex_output(tree, streams, time.monotonic() + 0.2)
+        return _PROBE_INCOMPLETE
+    return _drained_codex_output(tree, streams, probe_deadline)
 
 
 def _codex_hooks_message(line: str) -> tuple[bool, dict | None]:
