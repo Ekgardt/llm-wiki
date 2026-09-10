@@ -1730,11 +1730,137 @@ def _with_report(key: str, value, report: dict[str, object], enabled: bool):
 
 
 def _stored_callers(
-    function_name: str, directory: Path, with_report: bool
+    function_name: str, directory: Path, with_report: bool, max_depth: int | None = None
 ) -> list[dict] | dict | None:
+    depth = _call_walk_depth(max_depth)
+    if depth > 1:
+        return _store_walk_calls(function_name, directory, "in", depth, with_report)
     if with_report:
         return _store_find_callers(function_name, directory, with_report=True)
     return _store_find_callers(function_name, directory)
+
+
+# Issue #24, B4: `callers`/`callees` with a depth walk the generation's bounded
+# CALLS closure (`EvidenceGraph.neighbors`, a recursive CTE with depth, work
+# and row ceilings). Depth 1 is the unchanged one-hop path; the walk reports
+# `depth_applied` and `depth_frontier_open` exactly as `dependencies` does.
+CALL_WALK_MAX_DEPTH = 8
+CALL_WALK_MAX_ROWS = 10_000
+CALL_WALK_MAX_WORK = 100_000
+CALL_WALK_MAX_SEEDS = 20
+_LOCATION_CHUNK = 512  # evidence_graph.MAX_NODE_FILTER
+
+
+def _call_walk_depth(max_depth: int | None) -> int:
+    if max_depth is None:
+        return 1
+    return max(1, min(int(max_depth), CALL_WALK_MAX_DEPTH))
+
+
+def _walk_seeds(graph, function_name: str) -> list[str]:
+    nodes = graph.find_nodes(
+        kinds=("function", "method"), name=function_name, max_rows=10_000
+    )
+    return sorted({str(item["node_id"]) for item in nodes})[:CALL_WALK_MAX_SEEDS]
+
+
+def _keep_shallowest(merged: dict, row: dict) -> None:
+    current = merged.get(row["node_id"])
+    if current is None or row["depth"] < current["depth"]:
+        merged[row["node_id"]] = row
+
+
+def _walked_nodes(graph, seeds: list[str], direction: str, depth: int) -> dict:
+    """The CALLS closure of every seed, breadth-first, shallowest depth kept.
+
+    `reachable` and not `neighbors`: the recursive CTE carries its visited set
+    as a string down every path, and measured 2026-09-10 on a 1 020-file
+    fixture (20 seeds) it took 801 ms at depth 3 and 4.0 s at depth 8, where
+    the breadth-first walk expands each node once.
+    """
+    merged: dict = {}
+    for seed in seeds:
+        rows = graph.reachable(
+            seed,
+            edge_types=("CALLS",),
+            reverse=direction == "in",
+            max_depth=depth,
+            max_rows=CALL_WALK_MAX_ROWS,
+            max_work=CALL_WALK_MAX_WORK,
+        )
+        for row in rows:
+            _keep_shallowest(merged, row)
+    return merged
+
+
+def _walk_locations(graph, node_ids: list[str]) -> dict:
+    found: dict = {}
+    for index in range(0, len(node_ids), _LOCATION_CHUNK):
+        found.update(graph.node_locations(node_ids[index : index + _LOCATION_CHUNK]))
+    return found
+
+
+def _walked_row(graph, node: dict, location: dict | None, function_name: str) -> dict:
+    source_root = Path(graph.repository_scope.checkout_root)
+    found = location or {}
+    relative = found.get("relative_path")
+    return {
+        "file": str(source_root / relative) if relative else "",
+        "line": found.get("line", 0),
+        "function": function_name,
+        "name": node["metadata"].get("name", node["identity_key"]),
+        "qualified_name": _stored_qualified_name(node),
+        "depth": node["depth"],
+        "symbol_id": node["node_id"],
+    }
+
+
+def _walked_rows(graph, merged: dict, function_name: str, direction: str) -> list[dict]:
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (item["depth"], _stored_qualified_name(item), item["node_id"]),
+    )
+    locations = _walk_locations(graph, [item["node_id"] for item in ordered])
+    rows = [
+        _walked_row(graph, item, locations.get(item["node_id"]), function_name)
+        for item in ordered
+    ]
+    if direction == "out":
+        for row in rows:
+            row["callee"] = row["name"]
+    return rows
+
+
+def _walk_report(graph, function_name: str, direction: str, seeds: list, rows: list, depth: int) -> dict:
+    report = {
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        **_dependency_reach(rows, depth),
+    }
+    if direction == "in":
+        report.update(_unresolved_caller_fields(graph, function_name))
+    return report
+
+
+def _store_walk_calls(
+    function_name: str, directory: Path, direction: str, depth: int, with_report: bool
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _walk_seeds(graph, function_name)
+        rows = _walked_rows(
+            graph, _walked_nodes(graph, seeds, direction, depth), function_name, direction
+        )
+        report = {
+            **_store_report(graph),
+            **_walk_report(graph, function_name, direction, seeds, rows, depth),
+        }
+        key = "callers" if direction == "in" else "callees"
+        return _with_report(key, rows, report, with_report)
+    finally:
+        graph.close()
 
 
 _SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
@@ -1894,6 +2020,7 @@ def find_callers(
     *,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
@@ -1902,9 +2029,13 @@ def find_callers(
     an empty `callers` list distinguishes "nobody calls it" from "the receiver
     could not be resolved". Both fields need `with_report=True`; the bare list
     form is kept for callers that only want confirmed edges.
+
+    `max_depth` above 1 walks the generation's CALLS closure that deep (issue
+    #24, B4); rows then carry `depth`, and the report `depth_applied` and
+    `depth_frontier_open`. The live fallback answers one hop and says so.
     """
     if not live:
-        stored = _stored_callers(function_name, directory, with_report)
+        stored = _stored_callers(function_name, directory, with_report, max_depth)
         if stored is not None:
             return stored
     callers, unresolved = _live_caller_scan(directory, function_name)
@@ -1963,8 +2094,11 @@ def _store_find_callers(
 
 
 def _stored_callees(
-    function_name: str, directory: Path, with_report: bool
+    function_name: str, directory: Path, with_report: bool, max_depth: int | None = None
 ) -> list[dict] | dict | None:
+    depth = _call_walk_depth(max_depth)
+    if depth > 1:
+        return _store_walk_calls(function_name, directory, "out", depth, with_report)
     if with_report:
         return _store_find_callees(function_name, directory, with_report=True)
     return _store_find_callees(function_name, directory)
@@ -1988,13 +2122,15 @@ def find_callees(
     *,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
     """Find all functions called BY a function (CALLS edge, forward direction).
 
-    Returns list of {file, line, callee}.
+    Returns list of {file, line, callee}. `max_depth` above 1 walks the
+    generation's CALLS closure that deep (issue #24, B4).
     """
     if not live:
-        stored = _stored_callees(function_name, directory, with_report)
+        stored = _stored_callees(function_name, directory, with_report, max_depth)
         if stored is not None:
             return stored
     callees: list[dict] = []

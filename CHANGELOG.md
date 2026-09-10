@@ -8,6 +8,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The query surface answers the whole graph (#24, B).** `get_architecture`
+  gains `mode=search` — ranked qualified names with in/out degree, exact
+  `total` and `has_more`, globs, a path prefix — and `depth` (1–8) on
+  `callers`/`callees`, a breadth-first CALLS closure reporting
+  `depth_applied` and `depth_frontier_open`. `mode=snippet` accepts
+  `owner.name` and cuts the block out of the generation's stored bytes at the
+  exact definition span (`precision: "exact"`, `freshness` against the
+  working tree). `mode=coverage` now answers `indexed` and `freshness` from
+  the generation's own source row — a foreign repository's indexed file
+  answered `indexed=false` beside a real node count — and adds a `parse`
+  block naming the `ERROR`/`MISSING` ranges (tree-sitter) or `SyntaxError`
+  line (Python) the extractor could not read. `mode=impact` adds
+  `affected_symbols`: the code symbols a dirty diff reaches within eight
+  hops, beside the unchanged `affected` groups. No new tool, no generation
+  format change. Measured warm on a 1 020-file fixture: search ~99 ms,
+  snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
+  `data_flow`/`cross_service` tracing is not feasible on the current graph
+  (no `DATA_FLOWS` or route-call edges) and is named as such. New modules
+  `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
+  `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
 - **The weights arrive with the install.** `scripts/install_models.py`
   fetches the encoder and the default reranker at their pinned commits,
   only the files the loaders read, verifies `model.safetensors` against the

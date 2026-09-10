@@ -98,6 +98,79 @@ action.
 and, when the repository has none, says so and exits 2 instead of re-parsing
 the tree; `--live` opts into the whole-tree scan.
 
+## The query surface (issue #24, section B)
+
+Every answer below reads the repository's generation through the same
+leased reader; nothing re-parses the tree, nothing is written, and no
+generation format changed, so existing generations answer without a
+reindex. Research:
+`docs/research/2026-09-10-a-query-surface-that-answers-the-whole-graph.md`.
+
+- **`mode=coverage`, `path=<relative>`** — one generation's word about one
+  file: `indexed` and `freshness` (`fresh`, `stale`, `missing_on_disk`,
+  `not_indexed`) come from the generation's own stored source row, the same
+  generation the node count comes from. Before this the manifest was read
+  relative to the repository, which only the vault has, so every foreign
+  repository answered `indexed=false` beside a real node count. The `parse`
+  block re-parses the stored bytes with the grammar the extractor used and
+  lists the `ERROR`/`MISSING` ranges (tree-sitter) or the `SyntaxError` line
+  (Python) as `{kind, line_start, line_end, byte_start, byte_end}`, at most
+  20 with `errors_truncated`; the extractor records one `parse_error`
+  observation for such a file and indexes nothing from it, so those ranges
+  are exactly where "no callers" cannot be trusted. `observations` counts
+  the file's observations by reason. `status` is `ok`, `error`,
+  `unsupported_language`, `not_parsed` (grammar missing here, or source over
+  4 MiB) or `not_indexed`.
+- **`mode=search`, `symbol=<pattern>`** — ranked qualified names over the
+  whole generation: `*` and `?` are globs, otherwise the pattern matches
+  anywhere in the name; `path` narrows to a repository-relative prefix;
+  `limit` 1–100 (default 10). Rows carry `qualified_name`, `kind`, `path`,
+  `line`, `in_degree`, `out_degree` (resolved edges of every served type —
+  not caller counts) and `match` (`exact`, `prefix`, `substring`); the
+  answer carries the exact `total` and `has_more`. Ranking: exact, prefix,
+  substring, then in-degree descending, then name. A pattern matching more
+  than 5 000 names is refused by name. Kinds are `class`, `function`,
+  `method`. Not done: BM25 identifier splitting and semantic search over
+  symbols — both need a symbol-level artifact the generation does not hold.
+- **`mode=snippet`, `symbol=<owner.name | name>`** — the definition block cut
+  from the generation's stored bytes at the exact `definition` occurrence
+  span (`precision: "exact"`), with `qualified_name`, `kind`,
+  `source_sha256` and `freshness` against the working tree. A partial owner
+  (`Widget.frob`) matches by suffix. A node without a definition occurrence
+  falls back to the definition-line recovery over the working tree
+  (`precision: "heuristic"`). Blocks are cut at 120 lines; `end_line` stays
+  the true end and `truncated` says so.
+- **`mode=callers` / `mode=callees` with `depth`** (1–8) — the CALLS closure
+  that deep, breadth-first, from at most 20 nodes of that name. Rows carry
+  `qualified_name`, `depth`, the **definition** location (`file`, `line`);
+  the one-hop answer (no `depth`, or `depth=1`) is unchanged and locates the
+  call site. The report carries `symbol_resolved`, `depth_applied` and
+  `depth_frontier_open` exactly as `dependencies` does, and `callers` keeps
+  `unresolved_callers`. `data_flow` and `cross_service` walks are **not
+  feasible** on this graph: there are no `DATA_FLOWS` edges and no edge from
+  a call site to a `route` node; both need an extractor change and a new
+  generation format.
+- **`mode=impact`** additionally answers `affected_symbols`: the functions,
+  methods and classes that call, import or inherit a changed symbol within
+  eight hops (`{qualified_name, kind, path, line, depth}`, at most 200,
+  `affected_symbols_truncated`). It walks every resolved edge, medium
+  confidence included, and says so in `affected_symbols_note`; the
+  `affected` groups (decisions, pages, tests, checkpoints) are unchanged and
+  keep their confirmed-edge rule. `mode=changes` remains the file-level diff
+  against the newest generation.
+
+Measured 2026-09-10 on a generated 1 020-file Python fixture (20 packages ×
+50 modules, 5 chained functions and one class each, one cross-package import
+per module; 35.6 MB generation; 20 warm repetitions, nearest-rank p50/p95,
+this machine under a load average of about 3): coverage 16/17 ms; search
+99/104 ms for 100 substring matches and 99/103 ms for 1 000 matches (the
+match set is scanned once and the degrees grouped over it — the correlated
+form took 8.7 s for 1 000 matches); snippet by qualified name 13/14 ms;
+callers depth 1 19/20 ms, depth 3 from 20 seeds 144/150 ms, depth 8 from 20
+seeds 484/489 ms (120 rows; the recursive-CTE form took 801 ms and 4.0 s);
+`mode=impact` with one edited file 314/335 ms (10 repetitions, 38 affected
+symbols).
+
 ## Status semantics
 
 - `ok`: completed against one unchanged revision; empty provider result is still

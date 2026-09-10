@@ -1,10 +1,17 @@
-"""Source snippet for a symbol name, resolved through the active generation.
+"""Source snippet for a symbol, resolved through the active generation.
 
 CODE-02, roadmap 2026-08-28: parity with codebase-memory-mcp's
-`get_code_snippet`. The generation's node metadata carries path/owner/signature
-but no line numbers (measured 2026-08-28), so the block is recovered from the
-file by its definition line and indentation, bounded, deterministic, no model.
-Research: `docs/research/2026-08-28-symbol-snippet-mode.md`.
+`get_code_snippet`. Issue #24, B3 (2026-09-10): the generation stores one
+`definition` occurrence per symbol with the exact line and byte span of the
+definition node, and the bytes it was cut from. So a qualified name
+(`owner.name`, or a bare name) answers with the exact block out of the
+stored source — `precision: "exact"` — and says whether the file on disk
+still has those bytes. A node without a definition occurrence, or a
+repository without a generation, falls back to the 2026-08-28 recovery by
+definition line and indentation over the working tree, marked
+`precision: "heuristic"`. Bounded, deterministic, no model.
+Research: `docs/research/2026-08-28-symbol-snippet-mode.md`,
+`docs/research/2026-09-10-a-query-surface-that-answers-the-whole-graph.md`.
 """
 
 from __future__ import annotations
@@ -12,9 +19,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from path_coverage import _current_sha, _freshness
+
 MAX_LOCATIONS = 5
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SNIPPET_LINES = 120
+MAX_NAME_MATCHES = 200
+SNIPPET_KINDS = ("class", "function", "method")
 
 
 def _definition_pattern(symbol: str) -> re.Pattern[str]:
@@ -79,46 +90,119 @@ def _file_snippets(root: Path, relative: str, symbol: str) -> list[dict]:
     ]
 
 
-def _graph_paths(directory: Path, symbol: str, deadline: float) -> list[dict]:
+def _split_symbol(symbol: str) -> tuple[str, str]:
+    owner, _, name = symbol.rpartition(".")
+    return owner, name
+
+
+def _owner_matches(owner: str, wanted: str) -> bool:
+    if not wanted:
+        return True
+    return owner == wanted or owner.endswith("." + wanted)
+
+
+def _node_fields(node: dict) -> dict:
+    metadata = node["metadata"]
+    owner = str(metadata.get("owner", ""))
+    name = str(metadata.get("name", node["identity_key"]))
+    return {
+        "qualified_name": f"{owner}.{name}" if owner else name,
+        "owner": metadata.get("owner"),
+        "kind": node["kind"],
+        "symbol_id": node["node_id"],
+    }
+
+
+def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
+    wanted, name = _split_symbol(symbol)
+    rows = graph.find_nodes(
+        kinds=SNIPPET_KINDS, name=name, max_rows=MAX_NAME_MATCHES, deadline=deadline
+    )
+    matched = [
+        row for row in rows if _owner_matches(str(row["metadata"].get("owner", "")), wanted)
+    ]
+    return matched[:MAX_LOCATIONS]
+
+
+def _definition_occurrence(graph, node_id: str, deadline: float) -> dict | None:
+    for row in graph.occurrences(node_id, max_rows=8, deadline=deadline):
+        if row["role"] == "definition":
+            return row
+    return None
+
+
+def _stored_lines(graph, relative: str, deadline: float) -> list[str] | None:
+    source = graph.source_by_path(relative, deadline=deadline)
+    if source is None or int(source["size"]) > MAX_FILE_BYTES:
+        return None
+    return source["content"].decode("utf-8", errors="ignore").splitlines()
+
+
+def _exact_block(lines: list[str], occurrence: dict) -> dict:
+    start = int(occurrence["line_start"])
+    end = int(occurrence["line_end"])
+    cut = min(end, start + MAX_SNIPPET_LINES - 1)
+    return {
+        "start_line": start,
+        "end_line": end,
+        "source": "\n".join(lines[start - 1 : cut]),
+        "truncated": cut < end,
+    }
+
+
+def _exact_snippet(graph, directory: Path, node: dict, occurrence: dict, deadline: float) -> dict:
+    relative = str(occurrence["relative_path"])
+    lines = _stored_lines(graph, relative, deadline)
+    if lines is None:
+        return {"path": relative, "error": "stored source unavailable or over 1 MiB", **_node_fields(node)}
+    recorded = str(occurrence["source_sha256"])
+    return {
+        "path": relative,
+        **_exact_block(lines, occurrence),
+        **_node_fields(node),
+        "precision": "exact",
+        "source_sha256": recorded,
+        "freshness": _freshness(recorded, _current_sha(directory, relative)),
+    }
+
+
+def _heuristic_snippets(directory: Path, node: dict, name: str) -> list[dict]:
+    relative = str(node["metadata"].get("path") or "")
+    found = _file_snippets(directory, relative, name)
+    for snippet in found:
+        snippet.update(_node_fields(node))
+        snippet["precision"] = "heuristic"
+    return found
+
+
+def _node_snippets(graph, directory: Path, node: dict, name: str, deadline: float) -> list[dict]:
+    occurrence = _definition_occurrence(graph, node["node_id"], deadline)
+    if occurrence is None:
+        return _heuristic_snippets(directory, node, name)
+    return [_exact_snippet(graph, directory, node, occurrence, deadline)]
+
+
+def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
+    answer = {"symbol": symbol, "graph": "active_generation", "generation_id": str(graph.generation_id)}
+    try:
+        nodes = _matching_nodes(graph, symbol, deadline)
+    except ValueError:
+        return {**answer, "snippets": [], "error": "too many symbols share this name; qualify it as owner.name"}
+    _, name = _split_symbol(symbol)
+    snippets: list[dict] = []
+    for node in nodes:
+        snippets.extend(_node_snippets(graph, directory, node, name, deadline))
+    return {**answer, "snippets": snippets[:MAX_LOCATIONS], "resolved_nodes": len(nodes)}
+
+
+def snippet_for_symbol(directory: Path, symbol: str, deadline: float) -> dict:
+    """Exact source blocks for every graph-known definition of the symbol."""
     from code_graph import _active_evidence_graph
 
     graph = _active_evidence_graph(directory)
     if graph is None:
-        return []
+        return {"symbol": symbol, "snippets": [], "graph": "unavailable_or_absent"}
     try:
-        rows = graph.find_nodes(name=symbol, max_rows=MAX_LOCATIONS, deadline=deadline)
+        return _graph_snippets(graph, directory, symbol, deadline)
     finally:
         graph.close()
-    return [row.get("metadata") or {} for row in rows[:MAX_LOCATIONS]]
-
-
-def _owned_snippets(directory: Path, metadata: dict, symbol: str) -> list[dict]:
-    relative = str(metadata.get("path") or "")
-    found = _file_snippets(directory, relative, symbol)
-    for snippet in found:
-        snippet["owner"] = metadata.get("owner")
-    return found
-
-
-def _unique_paths(metadata_rows: list[dict]) -> list[dict]:
-    seen: list[str] = []
-    unique: list[dict] = []
-    for metadata in metadata_rows:
-        relative = str(metadata.get("path") or "")
-        if relative and relative not in seen:
-            seen.append(relative)
-            unique.append(metadata)
-    return unique
-
-
-def snippet_for_symbol(directory: Path, symbol: str, deadline: float) -> dict:
-    """Bounded source blocks for every graph-known location of the symbol."""
-    metadata_rows = _graph_paths(directory, symbol, deadline)
-    snippets: list[dict] = []
-    for metadata in _unique_paths(metadata_rows):
-        snippets.extend(_owned_snippets(directory, metadata, symbol))
-    return {
-        "symbol": symbol,
-        "snippets": snippets[:MAX_LOCATIONS],
-        "graph": "active_generation" if metadata_rows else "unavailable_or_absent",
-    }

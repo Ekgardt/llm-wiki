@@ -51,6 +51,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── repair_installed_memory.py   proposed target: explicit check/apply migration
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
+│   ├── impact_symbols.py            #24 B5: code symbols a diff reaches, beside impact
+│   ├── symbol_search.py             #24 B2: ranked name search over the generation
+│   ├── symbol_snippet.py            CODE-02 / #24 B3: exact snippet by qualified name
+│   ├── path_coverage.py             CODE-05 / #24 B1: per-path index, freshness, parse ranges
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
 ├── tests/                         CODE — full regression suite (pytest)

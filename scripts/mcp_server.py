@@ -682,6 +682,7 @@ TOOL_INPUT_SCHEMAS = {
                     "index",
                     "repositories",
                     "changes",
+                    "search",
                 ],
                 "description": "Bounded architecture query mode",
             },
@@ -701,7 +702,12 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 1024,
-                "description": "Symbol for symbol, callers, callees, dependencies, path, provenance, and snippet modes",
+                "description": (
+                    "Symbol for symbol, callers, callees, dependencies, path, "
+                    "provenance, and snippet modes (snippet accepts owner.name); "
+                    "name pattern for search mode (* and ? are globs, otherwise "
+                    "substring)"
+                ),
             },
             "query": {
                 "type": "string",
@@ -715,8 +721,9 @@ TOOL_INPUT_SCHEMAS = {
                 "minimum": 1,
                 "maximum": ARCHITECTURE_MAX_DEPTH,
                 "description": (
-                    "dependencies mode: how many hops to walk. "
-                    "Omitted means the whole reachable set."
+                    "dependencies mode: how many hops to walk; omitted means "
+                    "the whole reachable set. callers and callees modes: walk "
+                    "the CALLS closure this deep; omitted means one hop."
                 ),
             },
             "comparison": {
@@ -736,7 +743,11 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "Repository-relative path for coverage mode and for precise or positioned calls",
+                "description": (
+                    "Repository-relative path for coverage mode and for precise "
+                    "or positioned calls; repository-relative path prefix for "
+                    "search mode"
+                ),
             },
             "line": {"type": "integer", "minimum": 1},
             "character": {"type": "integer", "minimum": 0},
@@ -1675,7 +1686,11 @@ def _architecture_callers(request: dict):
     from trace_ingest import with_trace_callers
 
     answer = find_callers(
-        request["symbol"], request["resolved"], live=request["live"], with_report=True
+        request["symbol"],
+        request["resolved"],
+        live=request["live"],
+        with_report=True,
+        max_depth=request.get("depth"),
     )
     return with_trace_callers(answer, request["symbol"], request["resolved"])
 
@@ -1684,7 +1699,11 @@ def _architecture_callees(request: dict):
     from code_graph import find_callees
 
     return find_callees(
-        request["symbol"], request["resolved"], live=request["live"], with_report=True
+        request["symbol"],
+        request["resolved"],
+        live=request["live"],
+        with_report=True,
+        max_depth=request.get("depth"),
     )
 
 
@@ -3739,13 +3758,20 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol", "live"},
     ),
+    # Issue #24, B4: `depth` walks the CALLS closure; omitted is one hop.
     "callers": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "live"},
+        {"directory", "mode", "symbol", "live", "depth"},
     ),
     "callees": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "live"},
+        {"directory", "mode", "symbol", "live", "depth"},
+    ),
+    # Issue #24, B2: ranked name search over the whole generation; `symbol`
+    # is the pattern and `path` an optional repository-relative prefix.
+    "search": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "path", "limit"},
     ),
     "dependencies": (
         {"directory", "mode", "symbol"},
@@ -5094,7 +5120,10 @@ def _precise_architecture_call(arguments: dict, deadline: float):
 
 
 def _impact_architecture_call(arguments: dict, deadline: float):
-    return _analyze_impact(
+    """Diff to graph, plus the code symbols the diff reaches (issue #24, B5)."""
+    from impact_symbols import affected_symbols
+
+    impact = _analyze_impact(
         directory=arguments.get("directory"),
         comparison=arguments.get("comparison", "dirty"),
         base=arguments.get("base"),
@@ -5102,6 +5131,13 @@ def _impact_architecture_call(arguments: dict, deadline: float):
         branch=arguments.get("branch"),
         deadline=deadline,
     )
+    if "error" in impact:
+        return impact
+    directory = Path(arguments["directory"]).resolve()
+    return {
+        **impact,
+        **affected_symbols(directory, impact.get("changed_symbols", []), deadline),
+    }
 
 
 def _summary_architecture_call(arguments: dict, deadline: float):
@@ -5152,6 +5188,21 @@ def _coverage_architecture_call(arguments: dict, deadline: float):
 
     directory = Path(arguments["directory"]).resolve()
     return coverage_for_path(directory, str(arguments["path"]), deadline)
+
+
+def _search_architecture_call(arguments: dict, deadline: float):
+    """Issue #24, B2: ranked qualified names with degree, whole generation."""
+    from symbol_search import search_symbols
+
+    directory = Path(arguments["directory"]).resolve()
+    path_prefix = arguments.get("path")
+    return search_symbols(
+        directory,
+        str(arguments["symbol"]),
+        path_prefix=None if path_prefix is None else str(path_prefix),
+        limit=arguments.get("limit"),
+        deadline=deadline,
+    )
 
 
 def _query_architecture_call(arguments: dict, deadline: float):
@@ -5241,6 +5292,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "provenance": _provenance_architecture_call,
         "snippet": _snippet_architecture_call,
         "coverage": _coverage_architecture_call,
+        "search": _search_architecture_call,
         "query": _query_architecture_call,
         "index": _index_architecture_call,
         "repositories": _repositories_architecture_call,

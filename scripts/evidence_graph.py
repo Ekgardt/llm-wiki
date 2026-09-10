@@ -3259,6 +3259,87 @@ def _require_direction(direction: str) -> None:
         raise ValueError("direction must be in or out")
 
 
+# Issue #24, section B2. A name search is a `LIKE` over the stored name, so the
+# caller's glob is translated and everything else is escaped: `_` is a wildcard
+# to LIKE and a plain character in every identifier this graph holds.
+MAX_SEARCH_PATTERN = 256
+MAX_SEARCH_MATCHES = 5_000
+_LIKE_ESCAPE = "\\"
+_GLOB_TO_LIKE = {"*": "%", "?": "_"}
+
+
+def _like_piece(character: str) -> str:
+    if character in _GLOB_TO_LIKE:
+        return _GLOB_TO_LIKE[character]
+    if character in ("%", "_", _LIKE_ESCAPE):
+        return _LIKE_ESCAPE + character
+    return character
+
+
+def _like_escaped(value: str) -> str:
+    """The text as a literal LIKE operand: no glob translation, only escaping."""
+    for character in (_LIKE_ESCAPE, "%", "_"):
+        value = value.replace(character, _LIKE_ESCAPE + character)
+    return value
+
+
+def _search_patterns(pattern: object) -> tuple[str, str, str]:
+    """(match, exact, prefix) LIKE forms of one search pattern.
+
+    Without a glob the pattern matches anywhere in the name; with one, the
+    caller placed the anchors. The exact form is compared with `=`, so it is
+    the raw text; the prefix form is the escaped text with a trailing `%`.
+    """
+    value = _text(pattern, "search pattern", maximum=MAX_SEARCH_PATTERN)
+    translated = "".join(_like_piece(character) for character in value)
+    if any(character in value for character in _GLOB_TO_LIKE):
+        return translated, value, translated
+    return f"%{translated}%", value, f"{translated}%"
+
+
+def _path_prefix_clause(
+    path_prefix: str | None, clauses: list[str], parameters: list[object]
+) -> None:
+    if path_prefix is None:
+        return
+    prefix = _text(path_prefix, "path prefix", maximum=4096)
+    clauses.append(f"json_extract(metadata_json, '$.path') LIKE ? ESCAPE '{_LIKE_ESCAPE}'")
+    parameters.append(f"{_like_escaped(prefix)}%")
+
+
+# Degrees are grouped over the matched set and joined back, not asked per row
+# in a correlated subquery: measured 2026-09-10 on a 9 061-node generation the
+# planner served the correlated form through `assertion_resolution`, a full
+# scan of every resolved edge per matched node - 8.7 s for 1 000 matches
+# against 72 ms for this form.
+_SEARCH_DEGREES = (
+    "ind AS (SELECT a.target_node_id AS node_id, COUNT(*) AS c FROM assertion a "
+    "JOIN m ON m.node_id = a.target_node_id WHERE a.resolution = 'resolved' "
+    "GROUP BY a.target_node_id), "
+    "outd AS (SELECT a.source_node_id AS node_id, COUNT(*) AS c FROM assertion a "
+    "JOIN m ON m.node_id = a.source_node_id WHERE a.resolution = 'resolved' "
+    "AND a.target_node_id IS NOT NULL GROUP BY a.source_node_id)"
+)
+_SEARCH_RANK = (
+    "CASE WHEN json_extract(metadata_json, '$.name') = ? THEN 0 "
+    f"WHEN json_extract(metadata_json, '$.name') LIKE ? ESCAPE '{_LIKE_ESCAPE}' THEN 1 "
+    "ELSE 2 END"
+)
+
+
+def _search_row(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "node_id": row["node_id"],
+        "kind": row["kind"],
+        "identity_scheme": row["identity_scheme"],
+        "identity_key": row["identity_key"],
+        "metadata": json.loads(row["metadata_json"]),
+        "rank": int(row["rank"]),
+        "in_degree": int(row["in_degree"]),
+        "out_degree": int(row["out_degree"]),
+    }
+
+
 def _edge_filter(edge_values: tuple[str, ...], parameters: list[object]) -> str:
     if not edge_values:
         return ""
@@ -4419,6 +4500,108 @@ ORDER BY depth, assertion_ids LIMIT ?
             ceiling=MAX_AGGREGATE_ROWS,
         )
         return tuple((str(row["relative_path"]), bytes(row["content"])) for row in rows)
+
+    def source_by_path(
+        self, relative_path: str, *, deadline: float | None = None
+    ) -> dict[str, object] | None:
+        """One stored source by repository-relative path, content included.
+
+        Issue #24, B1. Whether a path is indexed, whether it is fresh and how
+        many nodes it has must be one generation's word about one file, so
+        the answer reads the row the graph was built from rather than a
+        manifest that lives beside the vault's generations only.
+        """
+        rows = self._execute(
+            "SELECT source_id, relative_path, sha256, size, media_type, language, "
+            "git_oid, content FROM source WHERE relative_path = ? LIMIT ?",
+            (_text(relative_path, "relative_path", maximum=4096),),
+            max_rows=1,
+            deadline=deadline,
+        )
+        if not rows:
+            return None
+        item = dict(rows[0])
+        item["content"] = bytes(item["content"])
+        return item
+
+    def source_observations(
+        self, relative_path: str, *, deadline: float | None = None
+    ) -> dict[str, int]:
+        """Observation counts by reason for one stored source (issue #24, B1).
+
+        A `parse_error` row here means the extractor indexed nothing from the
+        file; `unsupported_semantics` means no grammar covered its language.
+        """
+        rows = self._execute(
+            "SELECT o.reason AS reason, COUNT(DISTINCT o.observation_id) AS total "
+            "FROM source s JOIN evidence e USING(source_id) "
+            "JOIN observation o ON o.observation_id = e.observation_id "
+            "WHERE s.relative_path = ? GROUP BY o.reason ORDER BY o.reason LIMIT ?",
+            (_text(relative_path, "relative_path", maximum=4096),),
+            max_rows=len(_OBSERVATION_REASONS),
+            deadline=deadline,
+        )
+        return {str(row["reason"]): int(row["total"]) for row in rows}
+
+    def search_nodes(
+        self,
+        pattern: str,
+        *,
+        kinds: Sequence[str] | None = None,
+        path_prefix: str | None = None,
+        max_rows: int = 50,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        """Ranked whole-graph name search with degree (issue #24, B2).
+
+        `*` and `?` are globs; without one the pattern matches anywhere in
+        the name. Ranking is exact name, then prefix, then substring, then
+        in-degree descending, then name. `total` is the exact match count
+        and `truncated` says whether the page was cut. A pattern matching
+        more than `MAX_SEARCH_MATCHES` names is refused by name rather than
+        ranked, because ranking costs one degree count per match.
+        """
+        match, exact, prefix = _search_patterns(pattern)
+        clauses = [f"json_extract(metadata_json, '$.name') LIKE ? ESCAPE '{_LIKE_ESCAPE}'"]
+        parameters: list[object] = [match]
+        _kind_clause(kinds, clauses, parameters)
+        _path_prefix_clause(path_prefix, clauses, parameters)
+        where = " WHERE " + " AND ".join(clauses)
+        total = self._search_total(where, parameters, deadline)
+        rows, truncated = self._execute_top(
+            "WITH m AS (SELECT node_id, kind, identity_scheme, identity_key, "
+            f"metadata_json FROM node{where}), {_SEARCH_DEGREES} "
+            "SELECT m.node_id, m.kind, m.identity_scheme, m.identity_key, "
+            f"m.metadata_json, {_SEARCH_RANK} AS rank, COALESCE(ind.c, 0) AS in_degree, "
+            "COALESCE(outd.c, 0) AS out_degree FROM m "
+            "LEFT JOIN ind USING(node_id) LEFT JOIN outd USING(node_id) "
+            "ORDER BY rank, in_degree DESC, json_extract(metadata_json, '$.name'), "
+            "m.identity_key, m.node_id LIMIT ?",
+            # Placeholders bind in textual order: the match filter sits in the
+            # first CTE, the rank tiers in the SELECT list after it.
+            [*parameters, exact, prefix],
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return {
+            "rows": [_search_row(row) for row in rows],
+            "total": total,
+            "truncated": truncated,
+        }
+
+    def _search_total(self, where: str, parameters: list[object], deadline) -> int:
+        rows = self._fetch(
+            f"SELECT COUNT(*) AS total FROM node{where} LIMIT ?",
+            parameters,
+            limit=1,
+            deadline=deadline,
+        )
+        total = int(rows[0]["total"])
+        if total > MAX_SEARCH_MATCHES:
+            raise ValueError(
+                f"search pattern matches {total} symbols, above the {MAX_SEARCH_MATCHES} ceiling; narrow it"
+            )
+        return total
 
     def unresolved_calls_naming(
         self,
