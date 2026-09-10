@@ -399,3 +399,16 @@ def _invoke_push_helper(
             cwd=repository,
         )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_windows_installer_claims_ownership_only_after_the_transaction_committed():
+    """A failed step 6 must not print "owned" in step 7 (audit OPS-05)."""
+    source = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    agents = source.split(
+        "# --- 7. Detect and wire up agents ---------------------------------", 1
+    )[1]
+    owned = agents.index("Claude settings owned by the install transaction")
+    guard = agents.index("$claudeAutomatic = -not $schedulerWarning")
+
+    assert guard < owned
+    assert "Claude settings not written: the install ownership transaction failed" in agents

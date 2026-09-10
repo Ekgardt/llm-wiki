@@ -486,8 +486,13 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
 $claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
 if ($claudeDetected) {
-    $claudeAutomatic = $true
-    Ok "Claude settings owned by the install transaction -> $claudeConfig\settings.json"
+    # Owned only when step 6 committed; a failed transaction wrote nothing.
+    $claudeAutomatic = -not $schedulerWarning
+    if ($claudeAutomatic) {
+        Ok "Claude settings owned by the install transaction -> $claudeConfig\settings.json"
+    } else {
+        Warn "Claude settings not written: the install ownership transaction failed"
+    }
     $claudeMcp = $claudeUserConfig
     $claudeEntryObject = [ordered]@{
         command = "uv"
@@ -511,7 +516,7 @@ if ($claudeDetected) {
     if ($claudeAutomatic) {
         $agents += "Claude Code: active automatic"
     } else {
-        $agents += "Claude Code: conflict or unverified"
+        $agents += "Claude Code: not wired (install transaction failed)"
     }
 }
 
