@@ -570,6 +570,28 @@ are built by a generation refresh — the nightly maintenance pass, or
 page changes. Until a refresh has run with the model installed, `doctor`
 reports `vector_state: absent` and search stays lexical. (Issue #29.)
 
+## Reranker (on by default)
+
+After the lexical and dense legs are fused, a multilingual cross-encoder,
+`BAAI/bge-reranker-v2-m3` at a pinned revision, reads the question together
+with each of the ten best candidates and reorders them. It is on by default
+since 2026-09-10: on the cross-lingual corpus it takes a Russian question over
+English pages from MRR 0.60 to 0.98, where swapping the embedding model gained
+at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`).
+
+- The MCP server loads it once at start-up (about 2 s, quantised to int8 on the
+  CPU) and keeps it resident; a question then pays only the scoring, about 2 s
+  for ten passages on four quiet cores and up to 3.5 s on loaded ones. The
+  trace reports `reranker_applied`, `reranker_depth` and `reranker_duration_ms`.
+- The CLI reranks only when asked with `--rerank`: a one-shot process cannot
+  amortise the load.
+- Weights are read from the local Hugging Face cache only, like the embedding
+  model's; without them the trace says `reranker_unavailable` and the fused
+  order stands. Nothing in the product downloads a model.
+- `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
+  40-hex `LLMWIKI_RERANKER_REVISION` name another model.
+  `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.
+
 ---
 
 ## Troubleshooting

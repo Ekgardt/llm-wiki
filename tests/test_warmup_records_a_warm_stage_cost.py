@@ -29,6 +29,16 @@ import retrieval  # noqa: E402
 import search_memory  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def reranker_loads(monkeypatch) -> list[str]:
+    """Record the reranker load instead of loading the real cross-encoder."""
+    import reranker
+
+    loads: list[str] = []
+    monkeypatch.setattr(reranker, "reranker_available", lambda: loads.append("reranker") or True)
+    return loads
+
+
 @pytest.fixture
 def recorded_passes(monkeypatch) -> list[dict]:
     calls: list[dict] = []
@@ -39,6 +49,19 @@ def recorded_passes(monkeypatch) -> list[dict]:
 
     monkeypatch.setattr(search_memory, "search", fake_search)
     return calls
+
+
+def test_the_warm_up_loads_the_reranker_before_its_passes(monkeypatch) -> None:
+    """The reranker is on by default; a resident server pays its load once, here."""
+    import reranker
+
+    order: list[str] = []
+    monkeypatch.setattr(reranker, "reranker_available", lambda: order.append("reranker") or True)
+    monkeypatch.setattr(search_memory, "search", lambda query, **kwargs: order.append("pass") or [])
+
+    mcp_server.warmup_retrieval_path(deadline_seconds=30.0)
+
+    assert order == ["reranker"] + ["pass"] * mcp_server.WARMUP_PASSES
 
 
 def test_the_warm_up_runs_the_real_path_more_than_once(recorded_passes) -> None:

@@ -38,7 +38,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── code_navigation_renderer.py   deterministic compact result windows
 │   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
-│   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
+│   ├── reranker.py                  cross-encoder reranker: bge-reranker-v2-m3, int8, on by default (2026-09-10)
 │   ├── access_tracking.py           explicit telemetry promotion + decay stats
 │   ├── retrieval_telemetry.py       private bounded retrieval event cache
 │   ├── reflection.py                v4.0: A-MEM page consolidation

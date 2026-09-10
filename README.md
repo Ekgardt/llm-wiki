@@ -84,7 +84,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
 - **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
-- **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors + graph + reranker for hybrid retrieval
+- **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, optional vectors + graph, and a multilingual cross-encoder reranker on by default for hybrid retrieval
 - **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
 
 ### Proactive intelligence

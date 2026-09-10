@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import reranker as reranker_module  # noqa: E402
 from reranker import (  # noqa: E402
     _sigmoid,
     rerank,
@@ -22,20 +23,38 @@ def _reset_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     import reranker
 
     monkeypatch.setattr(reranker, "_reranker_bundle", None)
+    monkeypatch.setattr(reranker, "_reranker_unavailable_reason", None)
 
 
-def test_no_environment_configuration_means_no_reranker_bundle(
+def test_no_environment_configuration_means_the_default_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The product ships a reranker; an environment that names none gets it."""
+    import reranker
+
+    monkeypatch.delenv("LLMWIKI_RERANKER_MODEL", raising=False)
+    monkeypatch.delenv("LLMWIKI_RERANKER_REVISION", raising=False)
+
+    assert reranker.configured_reranker_identity() == (
+        reranker.DEFAULT_RERANKER_MODEL,
+        reranker.DEFAULT_RERANKER_REVISION,
+    )
+    assert reranker.DEFAULT_RERANKER_MODEL == "BAAI/bge-reranker-v2-m3"
+    assert reranker.IMMUTABLE_REVISION.fullmatch(reranker.DEFAULT_RERANKER_REVISION)
+
+
+def test_the_off_switch_means_no_reranker_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import reranker
 
-    monkeypatch.delenv("LLMWIKI_RERANKER_MODEL", raising=False)
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "off")
     monkeypatch.delenv("LLMWIKI_RERANKER_REVISION", raising=False)
     _reset_bundle(monkeypatch)
     monkeypatch.setattr(
         reranker,
         "_have_reranker_deps",
-        lambda: pytest.fail("dependency probe ran without a configured identity"),
+        lambda: pytest.fail("dependency probe ran with the reranker switched off"),
     )
 
     assert reranker.configured_reranker_identity() is None
@@ -152,6 +171,31 @@ def test_missing_local_artifact_degrades_without_network(
     assert len(calls) == 1
     assert calls[0][2]["local_files_only"] is True
     assert calls[0][2]["trust_remote_code"] is False
+
+
+def test_a_failed_load_is_recorded_once_and_not_retried_per_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A default reranker without local weights must not cost every question a load."""
+    import reranker
+
+    monkeypatch.setenv("LLMWIKI_RERANKER_MODEL", "org/missing")
+    monkeypatch.setenv("LLMWIKI_RERANKER_REVISION", "c" * 40)
+    _reset_bundle(monkeypatch)
+    monkeypatch.setattr(reranker, "_have_reranker_deps", lambda: True)
+    calls: list[tuple] = []
+    _fake_reranker_modules(monkeypatch, calls)
+
+    def missing(model: str, **options):
+        calls.append(("missing", model, options))
+        raise OSError("not cached")
+
+    sys.modules["transformers"].AutoTokenizer.from_pretrained = missing
+
+    assert reranker._get_reranker_bundle() is None
+    assert reranker._get_reranker_bundle() is None
+    assert len(calls) == 1
+    assert reranker.reranker_unavailable_reason() == "OSError: not cached"
 
 
 class TestGracefulDegradation:
@@ -298,24 +342,22 @@ class TestShouldRerank:
             candidates=[{"rrf_score": 1.0}, {"rrf_score": 0.9}],
         )[0] is False
 
-    def test_invoke_on_disagreement_and_global(self):
-        disagree = [
-            {"rrf_score": 0.5, "bm25_rank": 1, "vector_rank": 5},
-            {"rrf_score": 0.4, "bm25_rank": 2, "vector_rank": 1},
+    def test_every_question_in_a_rerank_profile_is_reranked(self):
+        """No trigger is needed: a Russian question over English pages matched
+        none of the old ones, and that is the question the reranker is for."""
+        agreeing = [
+            {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},
+            {"rrf_score": 0.1, "bm25_rank": 2, "vector_rank": 2},
         ]
-        assert should_rerank(profile="HYBRID", candidates=disagree)[0] is True
+        assert should_rerank(profile="HYBRID", candidates=agreeing) == (True, None)
+        assert should_rerank(profile="BASE", candidates=agreeing) == (True, None)
+        assert should_rerank(profile="GLOBAL", candidates=agreeing) == (True, None)
         assert should_rerank(
-            profile="GLOBAL",
-            candidates=[{"rrf_score": 1.0}, {"rrf_score": 0.1}],
-        )[0] is True
-        # Profile alone is not enough without an explicit trigger.
-        assert should_rerank(
-            profile="HYBRID",
-            candidates=[
-                {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},
-                {"rrf_score": 0.1, "bm25_rank": 2, "vector_rank": 2},
-            ],
-        )[0] is False
+            profile="HYBRID", candidates=agreeing, rerank_enabled=False
+        ) == (False, "rerank_disabled")
+
+    def test_the_default_depth_is_ten(self):
+        assert reranker_module.DEFAULT_RERANK_DEPTH == 10
 
 
 class TestSigmoid:

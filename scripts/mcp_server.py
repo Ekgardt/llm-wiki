@@ -5542,9 +5542,25 @@ def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> Non
     starts immediately. A failure is never fatal — warming is an optimisation,
     and an unwarmed path serves exactly as it does today.
     """
+    with contextlib.suppress(BaseException):
+        _warm_reranker()
     for _ in range(WARMUP_PASSES):
         with contextlib.suppress(BaseException):
             _warmup_pass(deadline_seconds)
+
+
+def _warm_reranker() -> None:
+    """Load the default cross-encoder before a question has to wait for it.
+
+    The reranker is on by default since 2026-09-10 and reranks every
+    question, so a resident server pays its 1.8 s load and the int8
+    quantisation here, once, and never inside a question's optional-stage
+    share. A vault with nothing to rerank yet still gets a resident model;
+    the two passes below then record what a warm stage costs.
+    """
+    from reranker import reranker_available
+
+    reranker_available()
 
 
 def _start_encoder_warmup() -> None:

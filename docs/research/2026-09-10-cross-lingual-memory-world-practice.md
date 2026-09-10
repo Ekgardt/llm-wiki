@@ -156,3 +156,74 @@ stops here until a bigger fixture says otherwise.
 in the top 10, so recall metrics saturate and MRR/nDCG carry the signal.
 The owner's real pages are English with Russian questions; the fixture
 mirrors that shape, not its size.
+
+**Decided by the owner, 2026-09-10** («делай перепранжировщик»). Implemented
+the same day.
+
+**What was actually off.** Three gates kept the shipped reranker out of
+almost every answer, and none of them was the model:
+
+1. `reranker.configured_reranker_identity` returned nothing unless
+   `LLMWIKI_RERANKER_MODEL` and an immutable revision were both set in the
+   environment. On this machine `~/.claude/settings.json` sets them, so hooks
+   and the MCP server had a reranker; a fresh install, the nightly unit and
+   any shell without them had none, silently (`reranker_unavailable`).
+2. `reranker.should_rerank` ran the stage only on a trigger: the GLOBAL
+   profile, a `global_synthesis` or `cross_language` intent, the top lexical
+   and dense hits disagreeing, or the top two fused scores within 5 %. The
+   `cross_language` intent is a regex over the *question* — it fires only
+   when one question mixes two scripts. A Russian question over English
+   pages, the users' case 29.3, never matched it; the reranker answered
+   "conditions_unmet" and the fused order stood.
+3. `DEFAULT_RERANK_DEPTH` was 20, and 20 passages of up to 512 tokens cost
+   4.2 s at int8 on four loaded cores (`2026-09-07-a-reranker-that-never-
+   finished.md`); the MCP path grants an optional stage about 3.5–5 s, so
+   even a triggered rerank often hit `optional_stage_timeout`.
+
+**Change.** In `scripts/reranker.py`: the product default identity is
+`BAAI/bge-reranker-v2-m3` at the matrix-pinned revision
+`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e` when the environment names no
+reranker; `LLMWIKI_RERANKER_MODEL=off` is the explicit off switch; a
+partial or mutable identity is still refused, not repaired. `should_rerank`
+reranks every question in a rerank profile unless there is a named reason
+not to (disabled, exact profile, quoted phrase or identifier, one
+candidate); the four trigger heuristics and the `conditions_unmet` reason
+are deleted. Depth is 10 over the fused pool of 20; the tail keeps its
+fused order behind the scored head, per the 2026-08-26 tier rule. A load
+that fails is recorded once with its reason and not retried per question,
+as `search_memory._get_embedder` already does for the encoder. In
+`scripts/mcp_server.py` the warm-up loads the reranker before its two
+passes, so a resident server pays the 1.8 s load and the int8 quantisation
+once and never inside a question. The CLI is unchanged: it reranks only
+with `--rerank`, because a cold process cannot amortise the load.
+
+**Cost, honestly.** The 0.4 s per question above was measured on the
+benchmark's short passages in fp32. On this vault's passages (up to 512
+tokens) the 2026-09-07 measurement is the one that applies: about 3.5 s
+for ten pairs at int8 on four loaded cores, about 2 s quiet. Measured after
+the change on the live vault — see the figures appended below.
+
+**Not changed.** Weights are still loaded local-only; nothing in the
+product downloads a model, for the encoder either. A fresh install without
+the two models in its Hugging Face cache answers lexical-only and says so
+in the trace (`model_unavailable`, `reranker_unavailable`). Model
+acquisition at install is the next gap and is recorded in
+`docs/ISSUES-2026-09-10.md`, not fixed here.
+
+**Files.** `scripts/reranker.py`, `scripts/mcp_server.py`,
+`tests/test_reranker.py`, `tests/test_retrieval_review_blockers.py`,
+`tests/test_retrieval.py`, `tests/test_warmup_records_a_warm_stage_cost.py`,
+`docs/STRUCTURE.md`, `docs/USER-GUIDE.md`, `README.md`, `README.ru.md`,
+`README.zh-CN.md`, `CHANGELOG.md`, `docs/ISSUES-2026-09-10.md`,
+`knowledge/notes/default-reranker-decision.md` (private).
+
+**Measured on the live vault after the change (2026-09-10, one warm
+process, four cores, five questions with `rerank=True`).** Load 8.3 s once
+(fp32 load plus int8 quantisation); the rerank stage itself 166–471 ms for
+ten real passages — well under the 3.5 s the 2026-09-07 note measured for
+twelve pairs under load, because this vault's fused candidates are mostly
+short sections, not 512-token pages. Two things seen on the way are not the
+reranker's: every search took about 34 s, inside the generation catalog's
+artifact hashing (the nightly has been failing since 2026-09-07 and the
+generation is stale), and two of three Russian questions returned no rows
+at all. Both are recorded as open in `docs/ISSUES-2026-09-10.md`.

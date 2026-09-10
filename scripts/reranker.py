@@ -4,7 +4,9 @@ Re-ranks fused candidates using a cross-encoder that scores each
 (query, document) pair jointly. Runs on CPU via ONNX Runtime when available.
 
 Install: uv sync --locked --no-default-groups --inexact --extra reranker
-Configure one model ID and immutable 40-hex revision in the environment.
+The default is the approved `BAAI/bge-reranker-v2-m3` at its pinned revision;
+the environment may name another model ID with an immutable 40-hex revision,
+or `LLMWIKI_RERANKER_MODEL=off` to run without one.
 """
 from __future__ import annotations
 
@@ -17,11 +19,27 @@ from typing import Any, NamedTuple
 
 from provenance import authority_weight, type_weight
 
-# Lazy-loaded model + tokenizer cache (kept together).
+# Lazy-loaded model + tokenizer cache (kept together), and the reason the one
+# load attempt failed when it did — a load that failed once fails the same way
+# on every question, so it is not retried per question (the encoder in
+# `search_memory._get_embedder` records its reason the same way).
 _reranker_bundle: dict[str, Any] | None = None
+_reranker_unavailable_reason: str | None = None
 
 IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
-DEFAULT_RERANK_DEPTH = 20
+# The product default (owner's decision 2026-09-10): the matrix-approved
+# multilingual cross-encoder at its pinned revision. Measured on the
+# cross-lingual corpus, it takes a Russian question over English pages from
+# MRR 0.60 to 0.98 on top of the shipped encoder, where swapping the encoder
+# gained at most 0.04. See
+# `docs/research/2026-09-10-cross-lingual-memory-world-practice.md`.
+DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+DEFAULT_RERANKER_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
+RERANKER_OFF = "off"
+# Ten passages of up to 512 tokens are about 3.5 s at int8 on four loaded
+# cores; twenty were 4.2 s and overran the optional stage's share on the MCP
+# path. Depths 10, 20 and 50 ranked the cross-lingual corpus identically.
+DEFAULT_RERANK_DEPTH = 10
 # The approved matrix entry for BAAI/bge-reranker-v2-m3 declares 512 tokens.
 RERANK_MAX_TOKENS = 512
 # Pairs scored together. Small enough that a short passage does not pay for
@@ -36,9 +54,17 @@ RERANK_PROFILES = frozenset({"HYBRID", "GLOBAL", "GRAPH", "TEMPORAL", "BASE"})
 
 
 def configured_reranker_identity() -> tuple[str, str] | None:
+    """The reranker to load: the environment's, or the product default.
+
+    An environment that names nothing gets the default. `off` gets none. A
+    partial or mutable identity is refused, not repaired: a model without a
+    pinned revision is not something this product will load.
+    """
     model = os.environ.get("LLMWIKI_RERANKER_MODEL", "").strip()
     revision = os.environ.get("LLMWIKI_RERANKER_REVISION", "").strip()
     if not model and not revision:
+        return DEFAULT_RERANKER_MODEL, DEFAULT_RERANKER_REVISION
+    if model.lower() == RERANKER_OFF:
         return None
     if not model or not IMMUTABLE_REVISION.fullmatch(revision):
         return None
@@ -146,17 +172,25 @@ def _release_heap() -> None:
 
 def _get_reranker_bundle() -> dict[str, Any] | None:
     """Lazy-load model and tokenizer together. Returns None if unavailable."""
-    global _reranker_bundle
+    global _reranker_bundle, _reranker_unavailable_reason
     if _reranker_bundle is not None:
         return _reranker_bundle
+    if _reranker_unavailable_reason is not None:
+        return None
     identity = configured_reranker_identity()
     if identity is None or not _have_reranker_deps():
         return None
     try:
         _reranker_bundle = _loaded_bundle(*identity)
-    except Exception:  # noqa: BLE001 - an unloadable reranker degrades one stage
+    except Exception as exc:  # noqa: BLE001 - an unloadable reranker degrades one stage
+        _reranker_unavailable_reason = f"{type(exc).__name__}: {exc}"[:512]
         return None
     return _reranker_bundle
+
+
+def reranker_unavailable_reason() -> str | None:
+    """Why the configured reranker could not be loaded, once it was tried."""
+    return _reranker_unavailable_reason
 
 
 def _recorded_weight(item: dict, key: str, fallback: float) -> float:
@@ -216,40 +250,6 @@ def _rerank_refusal(
     return _exact_bypass_reason(profile, intents)
 
 
-def _explicitly_wanted(profile: str, intents: set[str]) -> bool:
-    """Explicit synthesis or cross-language ambiguity only, not every question."""
-    if profile == "GLOBAL" or "global_synthesis" in intents:
-        return True
-    return "cross_language" in intents
-
-
-def _ranks_disagree(top: Mapping[str, Any]) -> bool:
-    """The top lexical hit and the top dense hit are different documents."""
-    bm25_rank = top.get("bm25_rank")
-    vector_rank = top.get("vector_rank")
-    if not isinstance(bm25_rank, int) or not isinstance(vector_rank, int):
-        return False
-    return (bm25_rank == 1) != (vector_rank == 1)
-
-
-def _scores_are_close(candidates: Sequence[Mapping[str, Any]]) -> bool:
-    if len(candidates) < 2:
-        return False
-    first = _fused_score(candidates[0])
-    second = _fused_score(candidates[1])
-    return first > 0 and abs(first - second) / first <= 0.05
-
-
-def _rerank_wanted(
-    profile: str, candidates: Sequence[Mapping[str, Any]], intents: set[str]
-) -> bool:
-    if _explicitly_wanted(profile, intents):
-        return True
-    if _ranks_disagree(candidates[0]):
-        return True
-    return _scores_are_close(candidates)
-
-
 def should_rerank(
     *,
     profile: str,
@@ -257,15 +257,21 @@ def should_rerank(
     analysis_intents: tuple[str, ...] | list[str] = (),
     rerank_enabled: bool = True,
 ) -> tuple[bool, str | None]:
-    """Decide whether reranking should run. Returns (apply, skip_reason)."""
+    """Rerank every question unless there is a named reason not to.
+
+    Until 2026-09-10 the stage also needed a trigger — a synthesis profile,
+    a question mixing two scripts, the lexical and dense top hits disagreeing,
+    or the top two fused scores within 5 %. A Russian question over English
+    pages matched none of them, and that is the question the reranker is for:
+    measured on the cross-lingual corpus it takes that case from MRR 0.60 to
+    0.98, and the monolingual questions from 0.73 to 0.99 besides.
+    """
     profile_u = (profile or "BASE").upper()
     intents = set(analysis_intents or ())
     refusal = _rerank_refusal(profile_u, candidates, intents, rerank_enabled)
     if refusal is not None:
         return False, refusal
-    if _rerank_wanted(profile_u, candidates, intents):
-        return True, None
-    return False, "conditions_unmet"
+    return True, None
 
 def _limited(documents: list[dict], limit: int) -> list[dict]:
     if limit > 0:

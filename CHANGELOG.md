@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`
+  at its matrix-pinned revision is the product default when the environment
+  names no reranker (`LLMWIKI_RERANKER_MODEL=off` switches it off), it
+  reranks every question in a rerank profile instead of waiting for a
+  trigger a Russian question over English pages never matched, its depth is
+  10 over the fused pool of 20, and the MCP server loads it at start-up so no
+  question pays the load. Measured on the 45-query cross-lingual corpus:
+  cross-language MRR 0.60 → 0.98 on the shipped encoder, where swapping the
+  encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
+  once and not retried per question.
+
 ### Removed
 
 - **The repository ships no memory.** The 89 published pages under

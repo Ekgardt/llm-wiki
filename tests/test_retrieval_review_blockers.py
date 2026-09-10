@@ -301,36 +301,26 @@ def test_reranker_receives_real_title_and_content_not_stem_only():
     assert all(t != "a" for t, _ in seen)
 
 
-def test_should_rerank_requires_explicit_trigger_not_profile_alone():
+def test_should_rerank_refuses_only_for_a_named_reason():
+    """Every question in a rerank profile is reranked; a refusal names why."""
     import reranker
 
     docs = [
         {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},
         {"rrf_score": 0.2, "bm25_rank": 2, "vector_rank": 2},
     ]
-    apply, reason = reranker.should_rerank(
-        profile="HYBRID",
-        candidates=docs,
-        analysis_intents=(),
+    assert reranker.should_rerank(profile="HYBRID", candidates=docs) == (True, None)
+    assert reranker.should_rerank(
+        profile="HYBRID", candidates=docs, analysis_intents=("quoted_phrase",)
+    ) == (False, "exact_match_bypass")
+    assert reranker.should_rerank(profile="EXACT", candidates=docs) == (
+        False,
+        "profile_bypass",
     )
-    assert apply is False
-    assert reason == "conditions_unmet"
-
-    disagree = [
-        {"rrf_score": 0.5, "bm25_rank": 1, "vector_rank": 5},
-        {"rrf_score": 0.4, "bm25_rank": 2, "vector_rank": 1},
-    ]
-    assert reranker.should_rerank(profile="HYBRID", candidates=disagree)[0] is True
-    assert reranker.should_rerank(
-        profile="BASE",
-        candidates=docs,
-        analysis_intents=("global_synthesis",),
-    )[0] is True
-    assert reranker.should_rerank(
-        profile="HYBRID",
-        candidates=docs,
-        analysis_intents=("quoted_phrase",),
-    )[0] is False
+    assert reranker.should_rerank(profile="HYBRID", candidates=docs[:1]) == (
+        False,
+        "tiny_result_set",
+    )
 
 
 @pytest.mark.parametrize(
