@@ -300,6 +300,22 @@ disposable, fail-closed, bounded reads, no silent fallback).
 
 ---
 
+### M13 — Impact maps new-side byte ranges against the generation's old offsets [defect, found 2026-09-10 evening]
+- Rule: R4 (accuracy).
+- Evidence: `scripts/impact_analysis.py::_map_symbols` compares
+  `changed_range["new"]` (offsets in the working-tree bytes) with the
+  occurrences stored in the active generation (offsets in the indexed
+  bytes). Reproduced: growing `return value + 1` to `return value + 1000`
+  in `tests/test_query_surface.py` made `changed_symbols` name `caller` as
+  well as `helper`, because the grown new-side range reached the next
+  symbol's old offset.
+- What is wrong: an edit that grows a line can name the following symbol
+  as changed; an edit that shrinks one cannot miss a symbol, so the error is
+  one-sided. The test edit was made to shrink for now.
+- Fix direction: map the old side only (the generation knows those bytes),
+  or re-parse the working-tree file for the new side.
+- Status: open.
+
 ## Low
 
 ### L1 — Stale LanceDB references after the 2026-09-07 retirement [defect]

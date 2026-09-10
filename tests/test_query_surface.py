@@ -121,7 +121,12 @@ def _values(rows: list, key: str) -> list:
 def _with_edited_core(repository: Path, call, *arguments):
     """Run `call` while `pkg/core.py` differs from the indexed bytes."""
     target = repository / "pkg/core.py"
-    _write(target, CORE.replace("value + 1", "value + 2"))
+    # The edit changes the file's size: a Windows runner rewrote the file in
+    # the same second as the index with the same size, and `git diff` saw no
+    # change at all (run 34540064380, `changes: []`). It shrinks rather than
+    # grows: new-side byte ranges are matched against the generation's old
+    # offsets, so a grown line spills into the next symbol (audit M13).
+    _write(target, CORE.replace("value + 1", "value"))
     try:
         return call(*arguments)
     finally:
@@ -400,8 +405,6 @@ def _dirty_reach(repository: Path) -> tuple[dict, dict]:
 
 def test_impact_reaches_the_code_symbols_behind_a_dirty_change(indexed):
     impact, reach = _with_edited_core(indexed, _dirty_reach, indexed)
-    # The whole answer is the failure message: a Windows runner answered []
-    # twice on 2026-09-10 and the reason is in `changes`/`warnings`.
     assert _values(impact["changed_symbols"], "name") == ["helper"], impact
     assert impact["affected"] == EMPTY_AFFECTED
     rows = _pairs(reach["affected_symbols"], "qualified_name", "depth")
