@@ -212,3 +212,35 @@ def test_the_validation_retry_is_bounded(monkeypatch):
 
     assert attempt.resolve(replace(candidate)) is None
     assert len(calls) == compile_memory.VALIDATION_RETRIES + 1
+
+
+def test_a_lock_that_cannot_be_read_refuses_the_run_and_says_why(
+    isolated_compile_state, monkeypatch
+):
+    """Doubt refuses: a lock failure is not "the spawner owns it" (audit H4)."""
+    import compile_memory
+    import maybe_compile
+
+    def unreadable() -> bool:
+        raise OSError("run/compile.pid: permission denied")
+
+    monkeypatch.setattr(maybe_compile, "_try_claim_lock", unreadable)
+
+    outcome, reason = compile_memory._acquire_compile_lock()
+
+    assert (outcome, reason) == (
+        None,
+        "compile lock unavailable (OSError: run/compile.pid: permission denied)",
+    )
+
+
+def test_a_held_lock_names_its_holder(isolated_compile_state, monkeypatch):
+    import compile_memory
+    import maybe_compile
+
+    monkeypatch.setattr(maybe_compile, "_try_claim_lock", lambda: False)
+    monkeypatch.setattr(maybe_compile, "_lock_state", lambda: ("live", "running pid=7 since t"))
+
+    outcome, reason = compile_memory._acquire_compile_lock()
+
+    assert (outcome, reason) == (None, "lock held by another compile (running pid=7 since t)")

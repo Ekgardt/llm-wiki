@@ -162,16 +162,47 @@ def test_is_compile_running_with_alive_pid(fake_env, monkeypatch):
     assert "running" in reason
 
 
-def test_is_compile_running_lock_too_old(fake_env, monkeypatch):
-    """Lock older than MAX_COMPILE_DURATION_S is treated as stale."""
-    fake_env._write_lock(99999)
-    # Manually backdate the lock timestamp.
+def test_a_live_process_holds_its_lock_however_old_the_file_is(fake_env, monkeypatch):
+    """A lock is stale with its process, never by age (audit OPS-01)."""
     old = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
     fake_env.LOCK_FILE.write_text(f"99999\n{old}\n", encoding="utf-8")
     monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
+
     is_running, reason = fake_env._is_compile_running()
-    assert is_running is False
-    assert "stale" in reason.lower()
+    cleared = fake_env._clear_lock()
+    status = fake_env.status()
+
+    assert (is_running, cleared, status["compile_running"]) == (True, False, True)
+    assert reason == f"running pid=99999 since {old}"
+    assert fake_env.LOCK_FILE.exists()
+
+
+def test_a_lost_claim_names_the_lock_that_won_not_a_race(fake_env, monkeypatch):
+    """The reason after a lost claim is the lock's real state (audit OPS-01)."""
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: True)
+    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
+
+    def claimed_by_someone_else() -> bool:
+        fake_env._write_lock(4242)
+        return False
+
+    monkeypatch.setattr(fake_env, "_try_claim_lock", claimed_by_someone_else)
+
+    spawned, skipped, reason = fake_env._spawn_outcome(False)
+
+    assert (spawned, skipped, reason.startswith("skipped: running pid=4242")) == (
+        False,
+        True,
+        True,
+    )
+    assert "race" not in reason
+
+
+def test_the_exit_code_comes_from_the_outcome_not_the_text(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, "_spawn_outcome", lambda force: (False, False, "skipped by name only"))
+    monkeypatch.setattr(sys, "argv", ["maybe_compile.py"])
+
+    assert fake_env.main() == 1
 
 
 def test_spawn_skipped_when_already_running(fake_env, monkeypatch):

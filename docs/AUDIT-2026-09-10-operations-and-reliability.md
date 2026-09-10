@@ -34,6 +34,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-01 — The compile lock expires while the compile is still running, and every reader then disagrees
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md`).
+
 - Rule: L4, C (bounded, fail-closed); L3 (the reason reported is false).
 - Evidence: `scripts/maybe_compile.py:62` (`MAX_COMPILE_DURATION_S = 30*60`),
   `:206-232` (`_is_compile_running` returns "stale" by age alone),
@@ -254,6 +256,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
   exists) and allows a margin above it; one constant for the compile bound.
 
 ### OPS-11 — `maybe_compile.main` decides its exit code by a substring of the reason text
+
+- Status: fixed 2026-09-10 with OPS-01.
 
 - Rule: L4; owner's rule "no substrings in error text as control flow".
 - Evidence: `scripts/maybe_compile.py:348` (`return 0 if spawned or "skipped"

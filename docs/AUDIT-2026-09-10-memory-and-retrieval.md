@@ -94,6 +94,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   clauses) before the next selection run; do not edit selection semantics.
 
 ### H4 — The compile lock fails open, and a stuck lock is left behind silently [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md`).
 - Rule: repository contract fail-closed; R3 (docstring says "never blocks",
   code does something else: runs unlocked).
 - Evidence: `scripts/compile_memory.py:4071-4086` (`_acquire_compile_lock`,

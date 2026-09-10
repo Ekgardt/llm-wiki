@@ -8,8 +8,9 @@ Lock mechanism:
 - Writes a PID file at $LLM_WIKI_STATE_ROOT/run/compile.pid
 - On startup, checks if the PID is still alive (psutil-free, uses os.kill
   with signal 0 on POSIX or OpenProcess on Windows).
-- Stale lock (process dead OR older than MAX_COMPILE_DURATION_S) is
-  stolen automatically.
+- A stale lock (process dead, or a PID-0 placeholder past its spawn
+  window) is cleared automatically; a live process holds its lock however
+  old the file is.
 
 This is the ONLY entry point that should be called from hooks/wrappers/
 schedulers. It guarantees:
@@ -57,9 +58,12 @@ LOCK_FILE = STATE_ROOT / "run" / "compile.pid"
 LOG_OUT = STATE_ROOT / "logs" / "maybe-compile-last.log"
 LOG_ERR = STATE_ROOT / "logs" / "maybe-compile-last.err.log"
 
-# If a compile runs longer than this, assume it died and steal the lock.
-# 30 minutes is generous — typical compile is 5-15 minutes for 25 daily logs.
-MAX_COMPILE_DURATION_S = 30 * 60
+# A compile holds its lock for as long as its process lives. A lock is stale
+# when its process is dead, when the PID-0 placeholder outlived the spawn
+# window, or when the file cannot be parsed — never because it is old
+# (PostgreSQL's postmaster.pid and flock(2) decide the same way). Research:
+# docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
+_PID0_TTL_SECONDS = 10.0
 
 # Owner token for the lock we most recently claimed/spawned. Used by
 # `_clear_lock()` to refuse deleting a live lock owned by another caller.
@@ -67,41 +71,34 @@ _current_owner: str | None = None
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Cross-platform 'is this PID still running?' check.
-
-    PID 0 is a pre-spawn placeholder. It gets a short TTL (10s): if the
-    lock still has PID 0 after that, the spawn failed and the lock is
-    treated as stale. This prevents eternal lockout if the process
-    crashes between _try_claim_lock() and _write_lock(real_pid).
-    """
+    """Cross-platform 'is this PID still running?' check; PID 0 is the placeholder."""
     if pid == 0:
-        # Caller must check age separately — PID 0 is "conditionally alive"
         return True
     return _os_pid_alive(pid)
 
 
-_PID0_TTL_SECONDS = 10.0
-
-
 def _read_lock() -> dict | None:
-    """Read the compile lock. Returns {pid, started_at, owner} or None.
+    """The lock as {pid, started_at, owner}, or None when absent or unreadable.
 
     The optional third line is a random owner token written by
     `_write_lock`/`_try_claim_lock`; older 2-line lock files have owner=None.
     """
-    if not LOCK_FILE.exists():
-        return None
     try:
         text = LOCK_FILE.read_text(encoding="utf-8").strip()
-        if not text:
-            return None
-        lines = text.splitlines()
-        if len(lines) < 2:
-            return None
-        owner = lines[2].strip() if len(lines) >= 3 and lines[2].strip() else None
-        return {"pid": int(lines[0]), "started_at": lines[1], "owner": owner}
-    except (OSError, ValueError):
+    except OSError:
         return None
+    return _parse_lock(text.splitlines())
+
+
+def _parse_lock(lines: list[str]) -> dict | None:
+    if len(lines) < 2:
+        return None
+    try:
+        pid = int(lines[0])
+    except ValueError:
+        return None
+    owner = lines[2].strip() if len(lines) >= 3 else ""
+    return {"pid": pid, "started_at": lines[1], "owner": owner or None}
 
 
 def _write_lock(pid: int) -> None:
@@ -118,8 +115,6 @@ def _try_claim_lock() -> bool:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
         fd = os.open(str(LOCK_FILE), flags)
-    except FileExistsError:
-        return False
     except OSError:
         return False
     try:
@@ -130,106 +125,77 @@ def _try_claim_lock() -> bool:
     return True
 
 
-def _clear_lock() -> bool:
-    """Clear the lock if we own it, it's stale, or it's unreadable.
-
-    Returns True if the lock is gone (cleared or absent). Refuses to delete
-    a LIVE lock owned by another caller — returns False so the caller can
-    treat the lock as held.
-    """
-    global _current_owner
-    if not LOCK_FILE.exists():
-        return True
-    lock = _read_lock()
-    if lock is None:
-        # Unreadable/corrupt — safe to remove.
-        try:
-            LOCK_FILE.unlink()
-        except OSError:
-            pass
-        return True
-    owner = lock.get("owner")
-    # We own this lock → safe to clear.
-    if _current_owner and owner and _current_owner == owner:
-        try:
-            LOCK_FILE.unlink()
-        except OSError:
-            pass
-        _current_owner = None
-        return True
-    # Stale lock (dead PID) → safe to clear regardless of owner.
-    pid = lock.get("pid", 0)
-    if pid == 0:
-        # PID-0 placeholder: check if it's expired
-        try:
-            started = datetime.fromisoformat(lock.get("started_at", ""))
-            age = (datetime.now() - started).total_seconds()
-            if age > _PID0_TTL_SECONDS:
-                try:
-                    LOCK_FILE.unlink()
-                except OSError:
-                    pass
-                return True
-        except (ValueError, TypeError):
-            pass
-        # PID-0 within TTL → treat as live
-        return False
-    if not _is_pid_alive(pid):
-        try:
-            LOCK_FILE.unlink()
-        except OSError:
-            pass
-        return True
-    # Stale lock (too old) → steal only if the PID is actually dead.
+def _lock_age(lock: dict) -> float | None:
     try:
         started = datetime.fromisoformat(lock.get("started_at", ""))
-        age = (datetime.now() - started).total_seconds()
-        if age > MAX_COMPILE_DURATION_S:
-            if _is_pid_alive(pid):
-                return False
-            try:
-                LOCK_FILE.unlink()
-            except OSError:
-                pass
-            return True
     except (ValueError, TypeError):
-        # Bad timestamp — treat as stale.
-        try:
-            LOCK_FILE.unlink()
-        except OSError:
-            pass
+        return None
+    return (datetime.now() - started).total_seconds()
+
+
+def _placeholder_state(lock: dict) -> tuple[str, str]:
+    """A PID-0 placeholder is live only inside its spawn window."""
+    age = _lock_age(lock)
+    if age is None:
+        return ("stale", "stale lock (pid-0, bad timestamp)")
+    if age > _PID0_TTL_SECONDS:
+        return ("stale", f"stale lock (pid-0 placeholder expired, age {int(age)}s)")
+    return ("live", f"spawning since {lock['started_at']}")
+
+
+def _owner_state(lock: dict) -> tuple[str, str]:
+    pid = lock["pid"]
+    if pid == 0:
+        return _placeholder_state(lock)
+    if not _is_pid_alive(pid):
+        return ("stale", f"stale lock (pid {pid} dead)")
+    return ("live", f"running pid={pid} since {lock['started_at']}")
+
+
+def _lock_state() -> tuple[str, str]:
+    """One verdict for every reader: ('absent'|'stale'|'live', reason)."""
+    if not LOCK_FILE.exists():
+        return ("absent", "no lock file")
+    lock = _read_lock()
+    if lock is None:
+        return ("stale", "stale lock (unreadable)")
+    return _owner_state(lock)
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _lock_is_ours() -> bool:
+    lock = _read_lock()
+    owner = None if lock is None else lock.get("owner")
+    return bool(_current_owner) and owner == _current_owner
+
+
+def _clear_lock() -> bool:
+    """Remove the lock unless a live process we do not own holds it.
+
+    Returns True when the lock is gone (cleared or absent), False when a
+    live lock belongs to another caller.
+    """
+    global _current_owner
+    state, _reason = _lock_state()
+    if state == "absent":
         return True
-    # Live lock owned by another caller → refuse.
-    return False
+    if state == "live" and not _lock_is_ours():
+        return False
+    _unlink_quietly(LOCK_FILE)
+    _current_owner = None
+    return True
 
 
 def _is_compile_running() -> tuple[bool, str]:
     """Check the lock. Returns (is_running, reason)."""
-    lock = _read_lock()
-    if not lock:
-        return (False, "no lock file")
-    pid = lock["pid"]
-    if pid == 0:
-        # PID-0 placeholder: check TTL
-        try:
-            started = datetime.fromisoformat(lock["started_at"])
-            age = (datetime.now() - started).total_seconds()
-            if age > _PID0_TTL_SECONDS:
-                return (False, f"stale lock (pid-0 placeholder expired, age {int(age)}s)")
-        except (ValueError, TypeError):
-            return (False, "stale lock (pid-0, bad timestamp)")
-    elif not _is_pid_alive(pid):
-        return (False, f"stale lock (pid {pid} dead)")
-    # Check timeout.
-    try:
-        started = datetime.fromisoformat(lock["started_at"])
-        age = (datetime.now() - started).total_seconds()
-        if age > MAX_COMPILE_DURATION_S:
-            return (False, f"stale lock (age {int(age)}s > {MAX_COMPILE_DURATION_S}s)")
-    except (ValueError, TypeError):
-        # Bad timestamp — treat as stale.
-        return (False, "stale lock (bad timestamp)")
-    return (True, f"running pid={pid} since {lock['started_at']}")
+    state, reason = _lock_state()
+    return (state == "live", reason)
 
 
 def _has_pending_work() -> bool:
@@ -250,57 +216,65 @@ def _has_pending_work() -> bool:
 
 
 def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:
-    """Spawn detached compile if no other compile is running.
+    """Spawn a detached compile unless one is running or nothing is pending.
 
-    Returns (spawned, reason). Never raises.
-
-    ``force`` bypasses the "no pending work" gate but does NOT steal a
-    live lock — force-stealing a running compile causes races. The lock
-    is only seized when it is stale (dead PID or past max duration).
+    Returns (spawned, reason). Never raises. ``force`` bypasses the
+    "no pending work" gate but never steals a live lock.
     """
-    global _current_owner
+    spawned, _skipped, reason = _spawn_outcome(force)
+    return (spawned, reason)
+
+
+def _spawn_outcome(force: bool) -> tuple[bool, bool, str]:
+    """(spawned, skipped, reason): a skip is a named refusal, not a failure."""
+    refusal = _refusal_before_claim(force)
+    if refusal is not None:
+        return (False, True, refusal)
+    if not _claim_lock():
+        # Another caller took the lock between our check and our claim; name
+        # what holds it now rather than a race the reader cannot verify.
+        _state, reason = _lock_state()
+        return (False, True, f"skipped: {reason}")
+    return _spawn_claimed()
+
+
+def _refusal_before_claim(force: bool) -> str | None:
     is_running, reason = _is_compile_running()
     if is_running:
-        if force:
-            print(
-                "maybe_compile: WARNING — force-stealing a live lock can "
-                "cause races; refusing to proceed.",
-                file=sys.stderr,
-            )
-            return (False, f"skipped: live lock (force refused): {reason}")
-        return (False, f"skipped: {reason}")
-
+        return _live_lock_refusal(force, reason)
     if not force and not _has_pending_work():
-        return (False, "skipped: no pending work (all daily logs compiled)")
+        return "skipped: no pending work (all daily logs compiled)"
+    return None
 
-    # If lock exists but process is dead/stale, clear before exclusive claim.
-    if not is_running and LOCK_FILE.exists():
+
+def _live_lock_refusal(force: bool, reason: str) -> str:
+    if not force:
+        return f"skipped: {reason}"
+    print(
+        "maybe_compile: WARNING — force-stealing a live lock can "
+        "cause races; refusing to proceed.",
+        file=sys.stderr,
+    )
+    return f"skipped: live lock (force refused): {reason}"
+
+
+def _claim_lock() -> bool:
+    """Clear a stale lock, then claim atomically; only one caller can create it."""
+    if LOCK_FILE.exists():
         _clear_lock()
+    return _try_claim_lock()
 
-    # Atomic claim: only one concurrent caller can create the lock file.
-    if not _try_claim_lock():
-        # Another process claimed between our check and create.
-        is_running2, reason2 = _is_compile_running()
-        if is_running2:
-            if force:
-                print(
-                    "maybe_compile: WARNING — force-stealing a live lock can "
-                    "cause races; refusing to proceed.",
-                    file=sys.stderr,
-                )
-                return (False, f"skipped: live lock (force refused): {reason2}")
-            return (False, f"skipped: {reason2}")
-        if not force:
-            return (False, "skipped: lock race lost")
-        _clear_lock()
-        if not _try_claim_lock():
-            return (False, "skipped: could not claim lock")
 
-    # Read back the placeholder owner so we can clear if the spawn fails.
+def _remember_owner() -> None:
+    global _current_owner
     lock = _read_lock()
     if lock:
         _current_owner = lock.get("owner")
 
+
+def _spawn_claimed() -> tuple[bool, bool, str]:
+    # Remember the placeholder owner so we can clear it if the spawn fails.
+    _remember_owner()
     pid = spawn_detached(
         [sys.executable, str(COMPILE_SCRIPT), "--trigger", "auto"],
         stdout_path=LOG_OUT,
@@ -308,15 +282,11 @@ def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:
     )
     if pid is None:
         _clear_lock()
-        return (False, "spawn failed")
-
-    # Update placeholder PID (0) with real spawned PID.
+        return (False, False, "spawn failed")
+    # Replace the placeholder PID (0) with the real one and keep its token.
     _write_lock(pid)
-    # Read back the real owner token for later ownership-checked clearing.
-    lock = _read_lock()
-    if lock:
-        _current_owner = lock.get("owner")
-    return (True, f"spawned compile pid={pid}")
+    _remember_owner()
+    return (True, False, f"spawned compile pid={pid}")
 
 
 def status() -> dict:
@@ -343,9 +313,9 @@ def main() -> int:
         print(f"pending_work: {s['pending_work']}")
         return 0
 
-    spawned, reason = spawn_compile_if_idle(force=args.force)
+    spawned, skipped, reason = _spawn_outcome(args.force)
     print(f"maybe_compile: {reason}")
-    return 0 if spawned or "skipped" in reason else 1
+    return 0 if spawned or skipped else 1
 
 
 if __name__ == "__main__":

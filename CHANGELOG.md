@@ -56,6 +56,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A compile lock lives as long as its process, not thirty minutes.** The
+  legacy lock declared a live compile stale after 30 minutes, so the nightly
+  ran lint, backlink repair and the index rebuild on top of it and the next
+  trigger reported a race that never happened (audit OPS-01, OPS-11, H4).
+  One predicate now answers absent, stale or live for every reader; a lost
+  claim names the lock that won; `maybe_compile` decides its exit code from
+  the outcome and not from the reason text; `compile_memory` refuses to run
+  when the lock cannot be taken or read and says why. Research:
+  `docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md`.
 - **Warm structural answers on every supported Python, and the tests that
   prove them pass on every runner.** PR30 run 34500804888 was red in 13 of 50
   jobs. The reader cache demanded a serialized sqlite3 build (`threadsafety

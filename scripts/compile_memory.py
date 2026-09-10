@@ -3958,10 +3958,8 @@ def _mark_finished(
             s.pop("last_compile_error", None)
 
     update_state(_mutate)
-    # Clear the maybe_compile lock so the next trigger knows we're done.
-    # Without this, the lock auto-expires after MAX_COMPILE_DURATION_S
-    # (30 min) — clearing it explicitly means the next session-end can
-    # spawn compile immediately instead of waiting for stale-lock timeout.
+    # Clear the maybe_compile lock so the next trigger knows we're done; a
+    # lock never expires by age, only with its process.
     _clear_compile_lock()
 
 
@@ -4050,13 +4048,10 @@ def main() -> int:
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
     _mark_started(args.trigger)
-    lock_acquired = _acquire_compile_lock()
+    lock_acquired, refusal = _acquire_compile_lock()
     if lock_acquired is None:
-        print(
-            "compile_memory: another compile is running (lock held). Exiting.",
-            file=sys.stderr,
-        )
-        _mark_finished(args.trigger, "error", "lock held by another compile")
+        print(f"compile_memory: not running: {refusal}", file=sys.stderr)
+        _mark_finished(args.trigger, "error", refusal)
         return 1
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
@@ -4068,22 +4063,26 @@ def main() -> int:
         _release_compile_lock(lock_acquired)
 
 
-def _acquire_compile_lock() -> bool | None:
-    """Claim the compile lock for a direct run.
+def _acquire_compile_lock() -> tuple[bool | None, str]:
+    """Claim the compile lock for a direct run: (outcome, reason).
 
-    True when this run owns the lock, False when the spawner owns it and must
-    keep it, None when another compile holds it. A lock failure never blocks a
-    direct run: the check is best effort.
+    True when this run owns the lock, False when the spawner wrote it for us
+    and keeps its lifecycle, None when the run is refused — another compile
+    holds the lock, or the lock could not be taken or read. Doubt refuses:
+    two compiles writing one daily log is worse than one late compile.
+    Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import maybe_compile
 
         if maybe_compile._try_claim_lock():
-            return _claim_direct_lock(maybe_compile)
-        return False if _spawned_lock_is_ours(maybe_compile) else None
-    except Exception:
-        return False
+            return (_claim_direct_lock(maybe_compile), "claimed")
+        if _spawned_lock_is_ours(maybe_compile):
+            return (False, "spawned")
+        return (None, f"lock held by another compile ({maybe_compile._lock_state()[1]})")
+    except Exception as exc:  # noqa: BLE001 - any lock failure refuses the run
+        return (None, f"compile lock unavailable ({type(exc).__name__}: {exc})")
 
 
 def _claim_direct_lock(maybe_compile: object) -> bool:
@@ -4108,8 +4107,8 @@ def _release_compile_lock(lock_acquired: bool) -> None:
         import maybe_compile
 
         maybe_compile._clear_lock()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        print(f"compile_memory: compile lock not released ({exc})", file=sys.stderr)
 
 
 def _run(
