@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,14 +23,18 @@ def test_the_two_waits_are_ordered_and_the_pause_outlives_them() -> None:
 @pytest.mark.parametrize(("scale", "expected"), [("2", 600.0), ("0.5", 150.0)])
 def test_a_loaded_machine_scales_every_wait_at_the_invocation(scale, expected) -> None:
     code = "from tests import slow_machine; print(slow_machine.LONG_TIMEOUT)"
+    # The child inherits the environment: a Windows Python started without
+    # SYSTEMROOT dies before its first import (python/cpython#105436).
+    env = {**os.environ, "LLM_WIKI_TEST_TIMEOUT_SCALE": scale, "PYTHONPATH": str(ROOT)}
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=ROOT,
-        env={"PATH": "", "LLM_WIKI_TEST_TIMEOUT_SCALE": scale, "PYTHONPATH": str(ROOT)},
+        env=env,
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
+    assert result.returncode == 0, result.stderr
     assert float(result.stdout.strip()) == expected
 
 

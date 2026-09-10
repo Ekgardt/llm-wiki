@@ -56,6 +56,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Warm structural answers on every supported Python, and the tests that
+  prove them pass on every runner.** PR30 run 34500804888 was red in 13 of 50
+  jobs. The reader cache demanded a serialized sqlite3 build (`threadsafety
+  == 3`), which Python 3.10 never reports, so on 3.10 every answer reopened
+  its generation and the MCP answer lost its `freshness` block; a lease
+  already hands the reader to one thread at a time, which is all SQLite's
+  multi-thread mode asks, so only a single-thread build is refused now.
+  Three Windows-only test defects were fixed at the class: the idle-reader
+  test drives the cache's clock instead of trusting a 15.6 ms monotonic step,
+  a test removes a Git checkout through `tests/filesystem.py::remove_tree`
+  (read-only objects), and the timeout-scale test no longer starts a child
+  Python without `SYSTEMROOT`. Research:
+  `docs/research/2026-09-10-a-cached-reader-needs-one-thread-at-a-time-not-a-serialized-build.md`.
 - **The compile commits again; a project journal is no longer a claim page.**
   No compile had committed since 2026-09-07: the claim index read
   `knowledge/projects/*/journal.md` and refused the 4.2 MB `no-hands`

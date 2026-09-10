@@ -4470,9 +4470,10 @@ ORDER BY depth, assertion_ids LIMIT ?
 class SharedEvidenceGraph(EvidenceGraph):
     """A reader `evidence_reader_cache` may lend to several worker threads.
 
-    The generation is immutable and every statement is a read, so the only
-    thing a shared connection needs is a serialized sqlite3 build; the cache
-    checks `sqlite3.threadsafety` before it opens one of these.
+    The generation is immutable and every statement is a read; the cache's
+    lease lock hands the connection to one thread at a time, which is all
+    SQLite's multi-thread mode asks. Only a single-thread build refuses it,
+    and the cache checks `sqlite3.threadsafety` for that before opening one.
     """
 
     _check_same_thread = False

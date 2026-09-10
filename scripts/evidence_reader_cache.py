@@ -55,9 +55,19 @@ _COMMON_DIR_STATE = ("packed-refs",)
 
 
 
+# The cache's clock. Tests set it; the product reads monotonic time.
+_now = time.monotonic
+
+
 def shared_readers_supported() -> bool:
-    """Only a serialized sqlite3 build may hand one connection to many threads."""
-    return sqlite3.threadsafety == 3
+    """A lease holds the entry lock, so one thread uses the reader at a time.
+
+    That is SQLite's multi-thread condition, met by every build except a
+    single-thread one (`threadsafety == 0`). Python 3.10 reports a hard-coded
+    1 whatever the library was built with; the serialized build (3) is not
+    required. Research: `docs/research/2026-09-10-a-cached-reader-needs-one-thread-at-a-time-not-a-serialized-build.md`.
+    """
+    return sqlite3.threadsafety != 0
 
 
 def _stat_identity(path: Path):
@@ -131,7 +141,7 @@ class _Entry:
     git_identity: tuple
     leases: int = 0
     retired: bool = False
-    last_used: float = field(default_factory=time.monotonic)
+    last_used: float = field(default_factory=lambda: _now())
     memo: dict = field(default_factory=dict)
     # Held for the lifetime of every lease. Python's sqlite3 interleaves the
     # statements of one connection used from two threads — measured 2026-09-10:
@@ -233,7 +243,7 @@ def _borrow(entry: _Entry) -> bool:
         if entry.retired:
             return False
         entry.leases += 1
-        entry.last_used = time.monotonic()
+        entry.last_used = _now()
         _ENTRIES.move_to_end(entry.key)
         return True
 
@@ -341,7 +351,7 @@ def leased_graph(
     run only on a miss or after the checkout's Git state moved. `None` means
     the catalog holds no generation for this repository right now.
     """
-    _expire_idle(time.monotonic())
+    _expire_idle(_now())
     with _LOCK:
         entry = _ENTRIES.get(key)
     reusable = _reusable(entry, catalog_path, resolve_scope)

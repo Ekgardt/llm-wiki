@@ -114,9 +114,9 @@ def _assert_second_holder_is_refused(repository_index, repository, state, rebuil
 
 
 def _assert_a_missing_checkout_is_named_not_deleted(repository_index, repository, state) -> None:
-    import shutil
+    from tests.filesystem import remove_tree
 
-    shutil.rmtree(repository)
+    remove_tree(repository)
     answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=60)
     statuses = {row["status"] for row in answer["repositories"]}
     listed = repository_index.list_repositories(state_root=state)["repositories"]
