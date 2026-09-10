@@ -183,19 +183,19 @@ def test_all_readmes_mention_current_version():
         "README.md": (
             "12 task-shaped",
             "full regression suite",
-            "Historical current 112",
+            "retrieval-v2.json",
             "optional Obsidian viewer",
         ),
         "README.ru.md": (
             "12 task-shaped",
             "полный регрессионный набор",
-            "Исторические текущие 112",
+            "retrieval-v2.json",
             "Obsidian как опциональный viewer",
         ),
         "README.zh-CN.md": (
             "12 个 task-shaped",
             "完整回归套件",
-            "历史当前 112",
+            "retrieval-v2.json",
             "Obsidian 为可选 viewer",
         ),
     }

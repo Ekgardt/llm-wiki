@@ -15,6 +15,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   instead of another person's guard rails and "89 curated pages" (issue #19).
   The owner's pages stay where they are, private. `knowledge/index.md` and
   `knowledge/log.md` ship as empty skeletons the runtime fills.
+- **The memory index no longer holds the product's own code.** The vault
+  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
+  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
+  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
+  repository, the checkout included when its owner asks.
+- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
+  --legacy-only` and the generated-query run measured recall over the pages
+  the repository used to ship; with no pages shipped there is nothing to
+  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
+  and `benchmark/legacy-60-v1.json` are gone.
+- **The vault-application stand is retired.** Its seven cases named the
+  owner's decision pages as gold pages and quoted their tokens; with those
+  pages private there is nothing public to run it on. The LongMemEval stand
+  measures applied memory on a public dataset.
 - **Cursor and Antigravity are no longer supported platforms.** The owner uses
   neither, and carrying two hosts nobody exercises meant two managed hook
   formats, two doctor checks, two installer detections, and two event

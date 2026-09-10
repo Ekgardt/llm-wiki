@@ -1392,21 +1392,14 @@ def _answer_of_surviving_claims(
 def _answer_corpus(vault: Path, deadline: float) -> object:
     """Capture the same corpus the candidates were retrieved from.
 
-    Retrieval searches a published generation, and that generation is built
-    over the approved code roots as well as the vault. Capturing the narrower
-    default here meant every candidate under `docs/` or `scripts/` failed to
-    resolve into a source, and the answer refused itself for lack of evidence
-    while search had just returned the right page. One corpus definition, read
-    from the same place the builder reads it.
+    Retrieval searches a published generation; capturing a different corpus
+    here once meant candidates failed to resolve into a source and the answer
+    refused itself while search had just returned the right page. One corpus
+    definition, read from the same place the builder reads it.
     """
-    from corpus_snapshot import APPROVED_CODE_ROOTS, collect_corpus
+    from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
 
-    roots = tuple(
-        relative
-        for relative in sorted(APPROVED_CODE_ROOTS)
-        if (vault / relative).is_dir()
-    )
-    return collect_corpus(vault, code_roots=roots, deadline=deadline)
+    return collect_corpus(vault, code_roots=VAULT_CODE_ROOTS, deadline=deadline)
 
 
 def _default_candidates(

@@ -548,7 +548,9 @@ or nonzero active state remains fail-closed.
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
 - `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
-  telemetry generation state. The implemented v2 layout is:
+  telemetry generation state, built over `knowledge/` only (the checkout's own
+  code and docs are not memory; repositories have their own generations).
+  The implemented v2 layout is:
 
 ```text
 cache/evidence-graph/catalog.sqlite3

@@ -183,44 +183,104 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
     )
 
 
+def _hook_commands_and_timeouts(data: dict) -> tuple[list[str], list[object]]:
+    cmds: list[str] = []
+    timeouts: list[object] = []
+    for blocks in data.get("hooks", {}).values():
+        for block in blocks:
+            assert "timeout" not in block, "timeout belongs on each hook, not the matcher block"
+            _collect_hooks(block.get("hooks", []), cmds, timeouts)
+    return cmds, timeouts
+
+
+def _collect_hooks(hooks: list, cmds: list[str], timeouts: list[object]) -> None:
+    for hook in hooks:
+        cmd = hook.get("command", "")
+        if cmd:
+            cmds.append(cmd)
+        if hook.get("timeout") is not None:
+            timeouts.append(hook.get("timeout"))
+        _assert_hook_script_exists(cmd)
+
+
+def _assert_hook_script_exists(cmd: str) -> None:
+    """The script a hook command names must exist; a rename would otherwise pass."""
+    import re as _re
+
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    match = _re.search(r"scripts/([A-Za-z_][A-Za-z0-9_-]*\.py)", cmd)
+    assert match, f"hook command has no scripts/*.py reference: {cmd!r}"
+    assert (scripts_dir / match.group(1)).is_file(), (
+        f"hook references missing script: scripts/{match.group(1)}"
+    )
+
+
 def test_settings_hooks_use_llm_wiki_root():
     """All Claude Code hook commands pin the vault via $LLM_WIKI_ROOT, the
     referenced scripts exist on disk, every hook block has a numeric timeout,
     and the matcher set is the expected one. A rename of any hooked script
     would otherwise leave this green and break Claude Code at runtime.
     """
-    import re as _re
-
     settings = Path(__file__).resolve().parent.parent / "integrations" / "claude-code" / "settings.json"
-    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
     data = json.loads(settings.read_text(encoding="utf-8"))
-    cmds = []
-    timeouts = []
-    for event, blocks in data.get("hooks", {}).items():
-        for block in blocks:
-            assert "timeout" not in block, "timeout belongs on each hook, not the matcher block"
-            for h in block.get("hooks", []):
-                cmd = h.get("command", "")
-                if cmd:
-                    cmds.append(cmd)
-                t = h.get("timeout")
-                if t is not None:
-                    timeouts.append(t)
-                # Script referenced in the command must exist.
-                m = _re.search(r"scripts/([A-Za-z_][A-Za-z0-9_-]*\.py)", cmd)
-                assert m, f"hook command has no scripts/*.py reference: {cmd!r}"
-                script_name = m.group(1)
-                assert (scripts_dir / script_name).is_file(), (
-                    f"hook references missing script: scripts/{script_name}"
-                )
+
+    cmds, timeouts = _hook_commands_and_timeouts(data)
+
     assert cmds, "settings.json wires no hooks"
-    assert all("$LLM_WIKI_ROOT" in c for c in cmds)
-    assert all(
-        c.startswith("uv run ") and '--directory "$LLM_WIKI_ROOT"' in c for c in cmds
-    )
-    assert timeouts and all(isinstance(t, int) and t > 0 for t in timeouts), (
+    assert all(_pins_the_vault(c) for c in cmds)
+    assert timeouts and all(_positive_timeout(t) for t in timeouts), (
         "every hook must declare a positive numeric timeout"
     )
+
+
+def _pins_the_vault(command: str) -> bool:
+    if "$LLM_WIKI_ROOT" not in command:
+        return False
+    return command.startswith("uv run ") and '--directory "$LLM_WIKI_ROOT"' in command
+
+
+def _positive_timeout(value: object) -> bool:
+    return isinstance(value, int) and value > 0
+
+
+# Forbidden literal substrings in LIVE code paths (docstrings/historical
+# comments are skipped via a per-line filter).
+FORBIDDEN_LEGACY_TOKENS = (
+    'ROOT / "memory"',
+    'ROOT / "wiki"',
+    'ROOT / "outputs"',
+    'MEMORY / "knowledge"',  # double-knowledge phantom
+    'vault / "wiki"',
+    'D:\\LLM-wiki',
+    'D:\\projects\\llm-wiki',
+    'D:\\tools-agent',
+)
+
+
+def _is_live_code_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    # Skip docstring lines (cheap heuristic: a """ block).
+    return '"""' not in line and "'''" not in line
+
+
+def _names_a_legacy_path(line: str) -> bool:
+    if not _is_live_code_line(line):
+        return False
+    return any(token in line for token in FORBIDDEN_LEGACY_TOKENS)
+
+
+def _legacy_token_offenders(py: Path) -> list[str]:
+    try:
+        lines = py.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [
+        f"{py.name}:{number}: {line.strip()}"
+        for number, line in enumerate(lines, 1)
+        if _names_a_legacy_path(line)
+    ]
 
 
 def test_no_forbidden_legacy_paths_in_scripts():
@@ -228,37 +288,12 @@ def test_no_forbidden_legacy_paths_in_scripts():
     inside scripts/. Catching them here is cheaper than waiting for a runtime
     bug report from an operator whose env var layout differs from the author's.
     """
-
     scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
-    # Forbidden literal substrings in LIVE code paths (docstrings/historical
-    # comments are skipped via a per-line filter).
-    forbidden = [
-        'ROOT / "memory"',
-        'ROOT / "wiki"',
-        'ROOT / "outputs"',
-        'MEMORY / "knowledge"',   # double-knowledge phantom
-        'vault / "wiki"',
-        'D:\\LLM-wiki',
-        'D:\\projects\\llm-wiki',
-        'D:\\tools-agent',
+    offenders = [
+        offender
+        for py in sorted(scripts_dir.glob("*.py"))
+        for offender in _legacy_token_offenders(py)
     ]
-    offenders = []
-    for py in sorted(scripts_dir.glob("*.py")):
-        try:
-            lines = py.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            # Skip docstring lines (cheap heuristic: a """ block).
-            if '"""' in line or "'''" in line:
-                continue
-            for token in forbidden:
-                if token in line:
-                    offenders.append(f"{py.name}:{i}: {line.strip()}")
-                    break
     assert not offenders, "forbidden legacy path tokens in scripts/:\n  " + "\n  ".join(offenders)
 
 

@@ -41,11 +41,6 @@ def test_a_heading_without_a_date_is_refused() -> None:
     assert _matched("# knowledge/daily/\n") is None
 
 
-def _daily_logs() -> list[Path]:
-    daily = Path(__file__).resolve().parent.parent / "knowledge" / "daily"
-    return sorted(path for path in daily.glob("*.md") if path.name != "README.md")
-
-
 def _heading_of(path: Path) -> str:
     first = path.read_text(encoding="utf-8", errors="ignore").partition("\n")[0]
     return first + "\n"
@@ -55,8 +50,19 @@ def _refused_names(logs: list[Path]) -> list[str]:
     return [path.name for path in logs if _matched(_heading_of(path)) is None]
 
 
-def test_every_daily_log_in_this_vault_is_readable() -> None:
-    """The measure the decision names: no daily refused on its date."""
-    logs = _daily_logs()
-    assert logs, "the vault must hold daily logs for this to mean anything"
-    assert _refused_names(logs) == []
+def test_the_daily_the_producer_writes_is_readable(tmp_path, monkeypatch) -> None:
+    """The measure the decision names: a daily written by the one producer is
+    not refused on its date. The repository ships no daily logs, so the
+    producer writes one into a temporary vault here."""
+    import daily_log_append
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "daily").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    daily = vault / "knowledge" / "daily" / "2026-08-28.md"
+
+    daily_log_append.locked_append(daily, "- `[10:00:00] session | abc` one line\n")
+
+    assert _heading_of(daily) == "# Daily Session Memory — 2026-08-28\n"
+    assert _refused_names([daily]) == []

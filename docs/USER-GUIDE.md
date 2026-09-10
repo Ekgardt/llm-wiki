@@ -303,6 +303,11 @@ instead of claiming triple-fusion.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 
+The memory index holds `knowledge/` only. The product's own `scripts/`,
+`docs/` and `tests/` are not in it (they once were 92 % of an installed
+vault's chunks and outranked the user's pages). Code questions go through
+`get_architecture`, which reads a directory or a repository index.
+
 ### Compiling knowledge manually
 
 ```bash

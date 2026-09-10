@@ -40,3 +40,17 @@ decision pages from the repository are removed; tests of the contracts in
 
 **Not done here.** The corpus of the memory index (issue #29.2, the product's
 own code in `recall`) is a separate decision and note.
+
+**Follow-up found by CI.** `benchmark/run_benchmark.py --legacy-only` ran in
+CI over `git ls-files knowledge/notes` with a Recall@5 = 100 % gate on the
+sixty frozen queries; with only the README tracked it would have measured
+nothing and failed. The legacy-60 and current-generated gates are retired
+(the README's historical table with them; the numbers stay in
+`benchmark/baseline-2026-07-16.md`), and `run_benchmark.py` is now only the
+retrieval-v2 entry point. The synthetic `retrieval-v2.json` corpus and the
+LongMemEval stand are the measurements that remain, and both are
+self-contained.
+The vault-application stand (`benchmark/run_vault_application.py`, seven
+cases whose gold pages and expected tokens were the owner's decision pages)
+goes the same way, and the daily-heading reader test now exercises the
+producer in a temporary vault instead of reading this repository's daily logs.

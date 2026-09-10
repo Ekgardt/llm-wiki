@@ -581,13 +581,11 @@ def test_an_unspaced_script_still_matches_on_bigrams() -> None:
     _require_citation_touches_claim("守卫重复拒绝直到义务完成", "守卫重复拒绝")
 
 
-def test_the_answer_corpus_covers_the_roots_retrieval_searches(vault: Path) -> None:
-    """A candidate under `docs/` has to resolve, or the answer refuses itself.
+def test_the_answer_corpus_is_the_corpus_retrieval_searches(vault: Path) -> None:
+    """One corpus definition: what the builder indexes is what the answer reads.
 
-    Retrieval searches a generation built over the approved code roots. When
-    the answer captured only the vault default, every candidate from `docs/`
-    or `scripts/` fell out of the snapshot and the manifest came back empty —
-    on a question search had just answered correctly.
+    The vault's generation holds memory only (#29.2), so a page under `docs/`
+    is neither retrieved nor captured, and a knowledge page is both.
     """
     from query_memory import _answer_corpus
 
@@ -602,7 +600,8 @@ def test_the_answer_corpus_covers_the_roots_retrieval_searches(vault: Path) -> N
 
     captured = _answer_corpus(vault, time.monotonic() + 60)
     paths = {source.record.relative_path for source in captured.sources}
-    assert "docs/research/why-the-lease-expires.md" in paths
+    assert "knowledge/notes/unrelated.md" in paths
+    assert "docs/research/why-the-lease-expires.md" not in paths
 
 
 def test_long_pages_shed_the_weakest_span_instead_of_refusing_the_answer(vault: Path) -> None:
