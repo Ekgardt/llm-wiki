@@ -77,11 +77,15 @@ def indexed(tmp_path_factory):
     patch.setenv("LLM_WIKI_ROOT", str(root))
     patch.setenv("MEMORY_LLM_PROVIDER", "fake")
     import evidence_reader_cache
+    import impact_analysis
     import memory_state
     import repository_index
 
     patch.setattr(memory_state, "ROOT", root, raising=False)
     patch.setattr(memory_state, "STATE_ROOT", state, raising=False)
+    # `impact_analysis` binds STATE_ROOT at import; in the full suite it is
+    # imported long before this fixture runs, so it is rebound here too.
+    patch.setattr(impact_analysis, "STATE_ROOT", state, raising=False)
     evidence_reader_cache.clear()
     repository = _make_repository(base / "repo")
     answer = repository_index.index_repository(repository, state_root=state)
