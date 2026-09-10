@@ -53,6 +53,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The shipped Claude Code allowlist grants only read-only forms.** `Bash(sed *)`,
+  `Bash(xargs *)`, `Bash(sort *)` and `Bash(uv run --directory *)` let an
+  agent rewrite files or run any Python without a prompt under a
+  read-only-looking name; they are gone, `sed -n *` stays, and the built-in
+  read-only commands (`ls`, `cat`, `grep`, `find`, …) need no entry. The
+  settings merge retires exactly those four strings from an installed
+  `~/.claude/settings.json` on the next install or sync (audit OPS-12).
+  Research: `docs/research/2026-09-10-an-allowlist-that-reads-as-read-only-must-be-read-only.md`.
 - **The nightly and weekly passes take the canonical fence.** On an adopted
   vault they hold the registry's `nightly`/`weekly` lease with a heartbeat,
   so the doctor and the `run/` deletion contract see a running pass; a lost

@@ -5,10 +5,13 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import integration_config_backup as icb
 import merge_claude_settings as mcs
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_merge_keeps_user_hooks_and_replaces_ours(tmp_path):
@@ -40,7 +43,7 @@ def test_merge_keeps_user_hooks_and_replaces_ours(tmp_path):
     template = {
         "autoMemoryEnabled": True,
         "permissions": {
-            "allow": ["Bash(uv run --directory *)"],
+            "allow": ["Bash(sed -n *)"],
             "deny": ["Read(./.env)"],
         },
         "hooks": {
@@ -63,7 +66,7 @@ def test_merge_keeps_user_hooks_and_replaces_ours(tmp_path):
     assert merged["env"]["LLM_WIKI_ROOT"] == "/vault"
     assert merged["env"]["LLM_WIKI_STATE_ROOT"] == "/state"
     assert "Bash(echo *)" in merged["permissions"]["allow"]
-    assert "Bash(uv run --directory *)" in merged["permissions"]["allow"]
+    assert "Bash(sed -n *)" in merged["permissions"]["allow"]
     assert "Read(./.env)" in merged["permissions"]["deny"]
 
     ss = merged["hooks"]["SessionStart"]
@@ -223,3 +226,39 @@ def test_apply_merge_rejects_malformed_user_settings_without_writing(tmp_path):
 
     assert user_path.read_bytes() == original
     assert list(tmp_path.glob("settings.json.bak-llm-wiki-*")) == []
+
+
+def test_the_merge_retires_the_four_over_broad_grants_we_shipped():
+    """Audit OPS-12: `sed *`, `xargs *`, `sort *` and `uv run --directory *` were ours."""
+    user = {
+        "permissions": {
+            "allow": ["Bash(git log *)", "Bash(sed *)", "Bash(xargs *)", "Bash(uv run --directory *)"],
+            "deny": ["Read(./.env)"],
+        }
+    }
+    template = {"permissions": {"allow": ["Bash(sed -n *)", "Bash(sort *)"], "deny": []}}
+
+    merged = mcs.merge_settings(user, template, "/vault", "/state")
+
+    assert merged["permissions"]["allow"] == ["Bash(git log *)", "Bash(sed -n *)"]
+    assert merged["permissions"]["deny"] == ["Read(./.env)"]
+
+
+def test_the_shipped_allowlist_grants_only_read_only_forms():
+    """Every shipped allow entry either names a read-only invocation or one of our
+    two read-only scripts; nothing that writes or executes arbitrary code."""
+    settings = json.loads(
+        (ROOT / "integrations" / "claude-code" / "settings.json").read_text(encoding="utf-8")
+    )
+    allow = settings["permissions"]["allow"]
+
+    assert allow == [
+        "Bash(git status)",
+        "Bash(git diff *)",
+        "Bash(sed -n *)",
+        "Bash(python scripts/search_memory.py *)",
+        "Bash(python scripts/lookup_mode.py *)",
+        "Bash(uv run python scripts/search_memory.py *)",
+        "Bash(uv run python scripts/lookup_mode.py *)",
+    ]
+    assert not (mcs.RETIRED_ALLOW & set(allow))

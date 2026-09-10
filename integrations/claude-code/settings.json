@@ -12,24 +12,11 @@
     "allow": [
       "Bash(git status)",
       "Bash(git diff *)",
-      "Bash(uv run python scripts/search_memory.py *)",
-      "Bash(uv run python scripts/lookup_mode.py *)",
-      "Bash(ls *)",
-      "Bash(find *)",
-      "Bash(cat *)",
-      "Bash(grep *)",
-      "Bash(wc *)",
-      "Bash(sort *)",
-      "Bash(sed *)",
-      "Bash(head *)",
-      "Bash(basename *)",
-      "Bash(xargs *)",
-      "Bash(echo *)",
+      "Bash(sed -n *)",
       "Bash(python scripts/search_memory.py *)",
       "Bash(python scripts/lookup_mode.py *)",
       "Bash(uv run python scripts/search_memory.py *)",
-      "Bash(uv run python scripts/lookup_mode.py *)",
-      "Bash(uv run --directory *)"
+      "Bash(uv run python scripts/lookup_mode.py *)"
     ]
   },
   "hooks": {

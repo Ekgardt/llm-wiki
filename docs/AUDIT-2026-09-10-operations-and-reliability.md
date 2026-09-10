@@ -279,6 +279,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-12 — The shipped Claude Code allowlist grants write and execute through "read-only" helpers
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-an-allowlist-that-reads-as-read-only-must-be-read-only.md`); note the `find -delete` case was already covered by Claude Code itself.
+
 - Rule: L4 (reliability, security of the integration).
 - Evidence: `integrations/claude-code/settings.json:12-33`: `Bash(sed *)`
   (`sed -i` rewrites files), `Bash(xargs *)` (runs any command),

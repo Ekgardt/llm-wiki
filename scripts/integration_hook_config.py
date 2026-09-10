@@ -490,15 +490,12 @@ def _without_owned_blocks(config: Mapping[str, object], family: _HookFamily) -> 
     return remaining
 
 
-def _unioned(existing: object, incoming: object) -> list[str]:
+def _unioned(key: str, existing: object, incoming: object) -> list[str]:
+    from merge_claude_settings import merged_permission_list
+
     values = list(existing) if isinstance(existing, list) else []
     additions = list(incoming) if isinstance(incoming, list) else []
-    merged: list[str] = []
-    for item in values + additions:
-        text = str(item)
-        if text not in merged:
-            merged.append(text)
-    return merged
+    return merged_permission_list(key, values, additions)
 
 
 def _mapping_or_empty(value: object) -> dict[str, object]:
@@ -510,7 +507,9 @@ def _mapping_or_empty(value: object) -> dict[str, object]:
 def _permission_lists(
     permissions: Mapping[str, object], incoming: Mapping[str, object]
 ) -> dict[str, list[str]]:
-    merged = {key: _unioned(permissions.get(key), incoming.get(key)) for key in ("allow", "deny")}
+    merged = {
+        key: _unioned(key, permissions.get(key), incoming.get(key)) for key in ("allow", "deny")
+    }
     return {key: value for key, value in merged.items() if value}
 
 
@@ -666,7 +665,9 @@ def _hook_family_resource(
 # ours, and the two environment keys. Permissions are deliberately not owned —
 # `deny` and `allow` entries are unioned into lists the user also edits, and we
 # cannot tell our copy of an entry from theirs, so taking them back at uninstall
-# would remove a setting we never added.
+# would remove a setting we never added. The one exception is the four
+# over-broad allow strings we shipped before 2026-09-10, retired at merge
+# (`merge_claude_settings.RETIRED_ALLOW`).
 
 
 def _claude_command_is_ours(handler: object) -> bool:
