@@ -96,6 +96,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A maintenance step that times out takes its children with it.** The
+  nightly and weekly runner killed only the direct child at the bound; a
+  step's own workers (queue processors, repository refresh, model download)
+  kept writing while the pass moved on. Steps now run through the tree
+  runner the sync already used, and the log says whether the tree ended
+  (audit OPS-06). Research:
+  `docs/research/2026-09-10-a-step-that-times-out-takes-its-children-with-it.md`.
 - **A failed MCP warm-up is in the health answer.** The retrieval warm-up
   swallowed every failure, including `KeyboardInterrupt` and `MemoryError`,
   and the first answers of a session silently fell back to the lexical leg.

@@ -171,6 +171,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-06 — A nightly step that times out leaves its process tree running
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-step-that-times-out-takes-its-children-with-it.md`).
+
 - Rule: C (bounded, no daemon), L4.
 - Evidence: `scripts/maintenance_helpers.py:53-63, 144-158` (`subprocess.run(
   timeout=...)`; on `TimeoutExpired` Python kills the direct child only);

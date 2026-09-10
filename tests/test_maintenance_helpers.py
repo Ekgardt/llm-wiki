@@ -98,7 +98,7 @@ def test_run_step_redacts_os_error_before_logging(artifacts, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError(f"failed with token={token}")
 
-    monkeypatch.setattr(maintenance_helpers.subprocess, "run", fail)
+    monkeypatch.setattr(maintenance_helpers, "_run_tree", fail)
     logs: list[str] = []
 
     assert maintenance_helpers.run_step(["tool"], logs.append, "scan") == 2
@@ -171,3 +171,35 @@ def test_prune_maintenance_output_covers_reports_and_artifacts(tmp_path, monkeyp
 
     assert removed == 4
     assert (reports / "nightly-new.md").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the grandchild probe uses POSIX signals")
+def test_a_step_past_its_bound_takes_its_grandchild_with_it(artifacts, tmp_path):
+    """Audit OPS-06: `run()` killed the child only; the tree runner ends the tree."""
+    from tests.slow_machine import SHORT_TIMEOUT
+
+    pid_file = tmp_path / "grandchild.pid"
+    step = "\n".join(
+        [
+            "import subprocess, sys, time",
+            f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({SHORT_TIMEOUT * 4})'])",
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))",
+            f"time.sleep({SHORT_TIMEOUT * 4})",
+        ]
+    )
+    logs: list[str] = []
+
+    status = _run_python(step, logs, "worker", timeout=1)
+
+    grandchild = int(pid_file.read_text())
+    deadline = time.monotonic() + SHORT_TIMEOUT
+    alive = True
+    while alive and time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            alive = False
+        else:
+            time.sleep(0.05)
+    assert (status, alive) == (2, False)
+    assert any("TIMEOUT after 1s — process tree ended" in line for line in logs)
