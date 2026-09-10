@@ -1792,8 +1792,15 @@ def _require_stable_scan(
 # cost 1.95 s and one query ran five of them, which put the 10-second MCP budget
 # out of reach. See docs/research/2026-08-24-verify-the-same-bytes-once.md.
 _MAX_REMEMBERED_VALIDATIONS = 8
-_VALIDATED_GENERATIONS: OrderedDict[tuple, bool] = OrderedDict()
+# Verdicts by hashed identity: None is "valid", a string is the refusal the
+# same bytes earned once. Remembering the refusal too is what keeps a
+# generation that fails its content check from being re-derived on every
+# question of every process — measured 2026-09-10 on the live vault, six
+# validations and 40 s per search. See
+# `docs/research/2026-09-10-a-generation-outlives-its-extractor.md`.
+_VALIDATED_GENERATIONS: OrderedDict[tuple, str | None] = OrderedDict()
 _VALIDATION_MEMORY_LOCK = threading.Lock()
+_NOT_REMEMBERED = object()
 
 
 def _validation_key(
@@ -1815,19 +1822,30 @@ def _validation_key(
     )
 
 
-def _already_validated(key: tuple) -> bool:
+def _remembered_verdict(key: tuple) -> object:
+    """None (valid), the remembered refusal, or `_NOT_REMEMBERED`."""
     with _VALIDATION_MEMORY_LOCK:
         if key not in _VALIDATED_GENERATIONS:
-            return False
+            return _NOT_REMEMBERED
         _VALIDATED_GENERATIONS.move_to_end(key)
-        return True
+        return _VALIDATED_GENERATIONS[key]
 
 
-def _remember_validated(key: tuple) -> None:
+def _remember_verdict(key: tuple, refusal: str | None) -> None:
     with _VALIDATION_MEMORY_LOCK:
-        _VALIDATED_GENERATIONS[key] = True
+        _VALIDATED_GENERATIONS[key] = refusal
         while len(_VALIDATED_GENERATIONS) > _MAX_REMEMBERED_VALIDATIONS:
             _VALIDATED_GENERATIONS.popitem(last=False)
+
+
+def _already_validated(key: tuple) -> bool:
+    """True for bytes proven valid; re-raises the refusal for bytes proven not."""
+    verdict = _remembered_verdict(key)
+    if verdict is _NOT_REMEMBERED:
+        return False
+    if verdict is None:
+        return True
+    raise ValueError(str(verdict))
 
 
 def _validate_databases_once(
@@ -1841,21 +1859,30 @@ def _validate_databases_once(
     monotonic: Callable[[], float],
     cancelled: Callable[[], bool] | None,
 ) -> None:
-    """The expensive half, skipped only for bytes already proven identical."""
+    """The expensive half, skipped for bytes already answered either way.
+
+    A semantic refusal is remembered under the same hashed identity as a
+    success and re-raised; a deadline or a cancellation is not a verdict on
+    the bytes and is not remembered.
+    """
     if _already_validated(key):
         return
-    _validate_artifact_databases(
-        generation_path,
-        normalized,
-        graph_schema,
-        state_root,
-        deadline=deadline,
-        monotonic=monotonic,
-        cancelled=cancelled,
-    )
-    if "code_capture" in normalized:
-        _validate_code_capture_membership(generation_path, normalized, state_root)
-    _remember_validated(key)
+    try:
+        _validate_artifact_databases(
+            generation_path,
+            normalized,
+            graph_schema,
+            state_root,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
+        if "code_capture" in normalized:
+            _validate_code_capture_membership(generation_path, normalized, state_root)
+    except ValueError as exc:
+        _remember_verdict(key, str(exc))
+        raise
+    _remember_verdict(key, None)
 
 
 def _validate_generation(

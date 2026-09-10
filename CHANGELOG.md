@@ -19,6 +19,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
   once and not retried per question.
 
+### Fixed
+
+- **A generation built by an older extractor is served, not refused.** The
+  FTS content check re-derived every chunk with the current chunker and
+  compared; after the 2026-09-08 chunker change every generation built
+  before it was "semantically invalid", retrieval fell to the legacy BM25
+  index (`generation_unavailable`, lexical-only, empty for Russian) and the
+  six failing validations cost 40 s on every search of every process. The
+  content check now applies only to generations this extractor built; an
+  older one is validated structurally and served until the nightly rebuilds
+  it, and a refusal is remembered under the same hashed identity as a success.
+
 ### Removed
 
 - **The repository ships no memory.** The 89 published pages under

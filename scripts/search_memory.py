@@ -2947,6 +2947,13 @@ def _generation_authoritative_sources(
     return sources
 
 
+def _reproducible_by_this_extractor(manifest: Mapping[str, object]) -> bool:
+    """Only this extractor's own chunks can be re-derived and compared."""
+    import corpus_snapshot
+
+    return manifest.get("extractor_version") == corpus_snapshot.EXTRACTOR_VERSION
+
+
 def validate_generation_fts_artifact(
     generation_path: Path,
     manifest: dict[str, object],
@@ -2955,17 +2962,29 @@ def validate_generation_fts_artifact(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Fail closed unless a generation-local FTS artifact is semantically valid."""
+    """Fail closed unless a generation-local FTS artifact is semantically valid.
+
+    The content check re-derives every chunk from the stored sources and
+    compares; it can only be asked of a generation this extractor built.
+    An older extractor's rows are not reproducible here — the 2026-09-07
+    generation checked by the v3 chunker failed at row 9,272 and the vault
+    answered lexical-only for two days — so for those the artifact is
+    validated structurally and served, and the nightly rebuilds it on the
+    version mismatch. See
+    `docs/research/2026-09-10-a-generation-outlives-its-extractor.md`.
+    """
     _check_generation_stop(deadline, cancelled)
     generation_path = Path(generation_path)
     state_root = Path(state_root)
-    authoritative_sources = _generation_authoritative_sources(
-        generation_path,
-        manifest,
-        state_root=state_root,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
+    authoritative_sources = None
+    if _reproducible_by_this_extractor(manifest):
+        authoritative_sources = _generation_authoritative_sources(
+            generation_path,
+            manifest,
+            state_root=state_root,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     artifact = Path(generation_path) / GENERATION_FTS_ARTIFACT
     validate_runtime_file(artifact, state_root, max_bytes=16 * 1024 * 1024 * 1024)
     uri = f"{artifact.resolve(strict=True).as_uri()}?mode=ro&immutable=1"

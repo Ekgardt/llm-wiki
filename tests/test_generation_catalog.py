@@ -314,6 +314,71 @@ def test_v2_rejects_semantically_invalid_search_after_hash_recomputed(tmp_path):
         catalog.register("v2-invalid-search")
 
 
+def test_a_remembered_refusal_is_reraised_without_revalidating(tmp_path, monkeypatch):
+    """The same bytes get the same verdict; the derivation is paid once."""
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-invalid-search-twice")
+    with sqlite3.connect(directory / "search.sqlite3") as database:
+        database.execute(
+            "UPDATE generation_metadata SET value='wrong-tokenizer' "
+            "WHERE key='tokenizer_version'"
+        )
+        database.commit()
+    _refresh_artifact(directory, manifest, "search.sqlite3")
+    with pytest.raises(ValueError, match="FTS|search") as first:
+        catalog.register("v2-invalid-search-twice")
+
+    monkeypatch.setattr(
+        generation_catalog,
+        "_validate_artifact_databases",
+        lambda *args, **kwargs: pytest.fail("a remembered refusal was re-derived"),
+    )
+
+    with pytest.raises(ValueError) as second:
+        catalog.register("v2-invalid-search-twice")
+    assert str(second.value) == str(first.value)
+
+
+def test_an_older_extractors_generation_is_served_without_the_content_check(
+    tmp_path, monkeypatch
+):
+    """Its rows cannot be re-derived by this extractor; it is validated structurally."""
+    import corpus_snapshot
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    _directory, manifest = _publish_v2(catalog, "v2-older-extractor")
+    assert manifest["extractor_version"] == corpus_snapshot.EXTRACTOR_VERSION
+    monkeypatch.setattr(corpus_snapshot, "EXTRACTOR_VERSION", "markdown-heading-extractor/v99")
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_authoritative_sources",
+        lambda *args, **kwargs: pytest.fail("an older extractor's chunks were re-derived"),
+    )
+
+    assert catalog.register("v2-older-extractor") == manifest
+
+
+def test_this_extractors_generation_still_has_its_content_checked(tmp_path, monkeypatch):
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    _directory, manifest = _publish_v2(catalog, "v2-this-extractor")
+    derived: list[str] = []
+    original = search_memory._generation_authoritative_sources
+
+    def spying(generation_path, *args, **kwargs):
+        derived.append(generation_path.name)
+        return original(generation_path, *args, **kwargs)
+
+    monkeypatch.setattr(search_memory, "_generation_authoritative_sources", spying)
+
+    assert catalog.register("v2-this-extractor") == manifest
+    assert derived == ["v2-this-extractor"]
+
+
 def test_v2_complete_generation_registers(tmp_path):
     catalog = _catalog(tmp_path)
     _directory, manifest = _publish_v2(catalog, "v2-complete")
