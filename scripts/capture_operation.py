@@ -25,6 +25,14 @@ def _operation_id(prefix: str, key: str, source_event_id: str | None) -> str:
     return f"{prefix}:{digest}"
 
 
+def _count_dropped_write(error: BaseException) -> None:
+    """A lost race is not a hook failure, but it is a dropped write: count it."""
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure("capture_operation_state", describe_error(error), error=error)
+
+
 def _fallback_operation_id(
     prefix: str, key: str, source_event_id: str | None
 ) -> str:
@@ -94,7 +102,8 @@ def claim_operation(
 
     try:
         update(mutate)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_write(exc)
         return _fallback_operation_id(prefix, key, source_event_id)
     if not observed:
         return _fallback_operation_id(prefix, key, source_event_id)
@@ -123,5 +132,5 @@ def complete_operation(
 
     try:
         update(mutate)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_write(exc)

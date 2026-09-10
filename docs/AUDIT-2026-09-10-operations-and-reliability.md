@@ -253,6 +253,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-10 — The same bound is declared twice and the outer copy can pre-empt the inner one
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-dropped-best-effort-write-is-counted-and-one-bound-is-declared-once.md`).
+
 - Rule: L4 (contradictory or duplicated constants).
 - Evidence: `scripts/scheduled_nightly.py:55` (`REPOSITORY_REFRESH_BUDGET_SECONDS
   = 15*60`, used as the subprocess kill timeout at `:297-301`) and
@@ -421,6 +423,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 - Fix direction: capture stderr to the install log and print its head.
 
 ### OPS-21 — Best-effort capture paths drop failures with no counter
+
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-dropped-best-effort-write-is-counted-and-one-bound-is-declared-once.md`).
 
 - Rule: L4 (observable capture contract).
 - Evidence: `scripts/capture_operation.py:95-101, 124-127` (`except

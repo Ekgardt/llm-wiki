@@ -315,3 +315,17 @@ def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) ->
     scheduled_nightly._write_health_report(lines.append)
 
     assert lines == ["  health report skipped: RuntimeError: no"]
+
+
+def test_the_repository_refresh_step_hands_its_budget_to_the_child_and_waits_longer():
+    """Audit OPS-10: the child's deadline runs before the parent's kill."""
+    import repository_index
+    import scheduled_nightly
+
+    step = next(s for s in scheduled_nightly._post_compile_steps() if s.label == "repositories")
+
+    assert step.command[-2:] == ["--budget-seconds", str(repository_index.REFRESH_ALL_BUDGET_SECONDS)]
+    assert step.timeout == (
+        repository_index.REFRESH_ALL_BUDGET_SECONDS + scheduled_nightly.STEP_START_MARGIN_SECONDS
+    )
+    assert scheduled_nightly.STEP_START_MARGIN_SECONDS > 0

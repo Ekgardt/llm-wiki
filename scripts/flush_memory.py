@@ -1522,8 +1522,15 @@ def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:
             slug="unknown",
             trigger=args.event,
         )
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_capture("feedback_capture", exc, args.session_id)
+
+
+def _count_dropped_capture(kind: str, error: BaseException, session_id: str | None) -> None:
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure(kind, describe_error(error), error=error, session_id=session_id)
 
 
 def _record_empty_state(state: dict, args: argparse.Namespace) -> None:

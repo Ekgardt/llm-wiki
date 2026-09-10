@@ -1082,8 +1082,16 @@ def _record_page_reads(slug: str, evidence: list) -> None:
         events = _page_read_events(best_effort_make_event, kinds)
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
+
+
+def _count_dropped_telemetry(error: BaseException) -> None:
+    """A telemetry event that could not be written is counted, not forgotten."""
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure("telemetry_event", describe_error(error), error=error)
 
 
 def _wiki_overview(*, deadline: float | None = None) -> dict:
@@ -1213,8 +1221,8 @@ def _record_decision_impressions(effective_query: str, results: list) -> None:
         )
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
 
 
 def _get_context(
@@ -1422,8 +1430,8 @@ def _record_context_injections(selected_paths: set) -> None:
         events = _context_injection_events(best_effort_make_event, selected_paths)
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
 
 
 def _assess_contradiction_text(

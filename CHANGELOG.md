@@ -96,6 +96,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A dropped best-effort write is counted, and one bound is declared once.**
+  Six best-effort writes (capture-operation state, feedback capture, the
+  three MCP telemetry emitters) now count their failure in the
+  capture-failure trail instead of `pass`; the nightly hands the repository
+  refresh its own budget (`--budget-seconds`) and waits a margin longer, so
+  the child's graceful deferral runs before the parent's kill (audit OPS-21,
+  OPS-10). Research:
+  `docs/research/2026-09-10-a-dropped-best-effort-write-is-counted-and-one-bound-is-declared-once.md`.
 - **A silent fallback names its cause.** An encode that raised, a corrupt
   `vectors.npy` or catalog, an unusable graph all looked like "no vectors
   yet"; the eight sites now record `Class: redacted message` by kind
