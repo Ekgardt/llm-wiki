@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -1223,7 +1225,7 @@ def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
             reads += 1
             if reads == 1:
                 hashing.set()
-                assert release_hash.wait(timeout=5)
+                assert release_hash.wait(timeout=SHORT_TIMEOUT)
         return chunk
 
     def tracked_acquire(*args, **kwargs):
@@ -1244,7 +1246,7 @@ def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
     monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
     worker = threading.Thread(target=register)
     worker.start()
-    assert hashing.wait(timeout=5)
+    assert hashing.wait(timeout=SHORT_TIMEOUT)
 
     try:
         with other._write_transaction(time.monotonic() + 0.25) as database:
@@ -1254,7 +1256,7 @@ def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
             )
     finally:
         release_hash.set()
-        worker.join(timeout=5)
+        worker.join(timeout=SHORT_TIMEOUT)
 
     assert worker.is_alive() is False
     assert errors == []
@@ -2006,7 +2008,7 @@ def test_discard_fences_prevalidated_concurrent_registration(tmp_path, monkeypat
         result = real_acquire(*args, **kwargs)
         if threading.current_thread().name == "racing-registration":
             prevalidated.set()
-            assert allow_registration.wait(timeout=5)
+            assert allow_registration.wait(timeout=SHORT_TIMEOUT)
         return result
 
     def release_registration_then_remove(path):
@@ -2025,10 +2027,10 @@ def test_discard_fences_prevalidated_concurrent_registration(tmp_path, monkeypat
     )
     worker = threading.Thread(target=register_again, name="racing-registration")
     worker.start()
-    assert prevalidated.wait(timeout=5)
+    assert prevalidated.wait(timeout=SHORT_TIMEOUT)
 
     assert catalog.discard_unactivated("gen-1") is True
-    worker.join(timeout=5)
+    worker.join(timeout=SHORT_TIMEOUT)
 
     assert worker.is_alive() is False
     assert errors and isinstance(errors[0], (FileNotFoundError, ValueError))
@@ -2058,7 +2060,7 @@ def test_discard_serializes_with_activation_and_leaves_no_dangling_reference(
         result = real_acquire(*args, **kwargs)
         if threading.current_thread().name == "racing-activation":
             activation_waiting.set()
-            assert allow_activation.wait(timeout=5)
+            assert allow_activation.wait(timeout=SHORT_TIMEOUT)
         return result
 
     def activate():
@@ -2077,10 +2079,10 @@ def test_discard_serializes_with_activation_and_leaves_no_dangling_reference(
     monkeypatch.setattr(generation_catalog.shutil, "rmtree", race_then_remove)
     worker = threading.Thread(target=activate, name="racing-activation")
     worker.start()
-    assert activation_waiting.wait(timeout=5)
+    assert activation_waiting.wait(timeout=SHORT_TIMEOUT)
 
     assert catalog.discard_unactivated("gen-1") is True
-    worker.join(timeout=5)
+    worker.join(timeout=SHORT_TIMEOUT)
 
     assert worker.is_alive() is False
     assert activation_errors and isinstance(
@@ -3113,7 +3115,7 @@ def test_a_reader_waits_out_an_exclusive_lock_instead_of_failing(tmp_path):
     worker = threading.Thread(target=hold_exclusive)
     worker.start()
     try:
-        assert locked.wait(10)
+        assert locked.wait(SHORT_TIMEOUT)
         assert not released.is_set()
         active = catalog.get_active()
     finally:

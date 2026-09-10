@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
 
@@ -1344,7 +1346,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
         # Each beat writes through the coordinator, so two of them cost far
         # more than the 10 ms interval on a loaded machine. The wait ends as
         # soon as the second beat lands; the budget is only its upper bound.
-        assert second_beat.wait(timeout=120)
+        assert second_beat.wait(timeout=LONG_TIMEOUT)
 
     with doctor._MaintenanceHeartbeat(
         coordinator, lease, deadline=time.monotonic() + 180
@@ -2004,17 +2006,17 @@ def test_concurrent_stale_lock_reclaimers_cannot_both_acquire(tmp_path, monkeypa
                 first = False
         if pause:
             first_locked.set()
-            assert release_first.wait(timeout=2)
+            assert release_first.wait(timeout=SHORT_TIMEOUT)
         return acquired
 
     monkeypatch.setattr(doctor, "_lock_file_nonblocking", controlled_os_lock)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(doctor._acquire_lock, lock, queue, now)
-        assert first_locked.wait(timeout=2)
+        assert first_locked.wait(timeout=SHORT_TIMEOUT)
         second_future = pool.submit(doctor._acquire_lock, lock, queue, now)
-        second_token = second_future.result(timeout=2)
+        second_token = second_future.result(timeout=SHORT_TIMEOUT)
         release_first.set()
-        first_token = first_future.result(timeout=2)
+        first_token = first_future.result(timeout=SHORT_TIMEOUT)
 
     assert sum(token is not None for token in (first_token, second_token)) == 1
     token = first_token or second_token
@@ -2272,7 +2274,7 @@ def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(
     worker = threading.Thread(target=hold_briefly)
     worker.start()
     try:
-        assert locked.wait(10)
+        assert locked.wait(SHORT_TIMEOUT)
         check = doctor._index_check(
             state_root,
             datetime.now(timezone.utc),

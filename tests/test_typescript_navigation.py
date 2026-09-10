@@ -31,6 +31,8 @@ import lsp_profiles
 import pytest
 from pyright_session import LspLocation, _location_key, _lsp_range
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 FIXTURE = Path(__file__).parent / "fixtures" / "typescript_navigation"
 
 # The state root holding the managed TypeScript artifact. Deliberately its own
@@ -225,7 +227,7 @@ class _Client:
         try:
             self.wait(self.request("shutdown", {}), 10.0)
             self.notify("exit", {})
-            self.proc.wait(timeout=10.0)
+            self.proc.wait(timeout=SHORT_TIMEOUT)
         except Exception:
             self.proc.kill()
 

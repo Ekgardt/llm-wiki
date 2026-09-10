@@ -38,6 +38,7 @@ from lsp_protocol import (
 )
 
 from tests.fake_lsp_server import FakeLspPeer, FakeLspServer
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
 @pytest.fixture
@@ -114,7 +115,7 @@ def test_cancellation_source_has_stable_read_only_sticky_token() -> None:
     cancelled_at = token.cancelled_at
     assert cancelled_at is not None
     assert token.is_cancelled() is True
-    assert token.wait(0) is True
+    assert token.wait(SHORT_TIMEOUT) is True
     assert source.cancel() is False
     assert token.cancelled_at == cancelled_at
 
@@ -371,7 +372,7 @@ def test_fatal_callback_runs_once_and_fails_all_pending_once(
     protocol = fake_server.start(handler, fatal_callback=callbacks.append)
     with pytest.raises(ProtocolViolation):
         _request(protocol)
-    assert peer_ready.wait(1)
+    assert peer_ready.wait(SHORT_TIMEOUT)
     time.sleep(0.02)
     assert len(callbacks) == 1
     assert callbacks[0]
@@ -411,18 +412,18 @@ def test_exactly_32_requests_can_be_active_and_request_33_is_rejected(
         for _ in range(MAX_PENDING_REQUESTS):
             received.append(peer.read())
         all_received.set()
-        assert release.wait(2)
+        assert release.wait(SHORT_TIMEOUT)
         for request in reversed(received):
             peer.send({"jsonrpc": "2.0", "id": request["id"], "result": request["id"]})
 
     protocol = fake_server.start(handler)
     with ThreadPoolExecutor(max_workers=MAX_PENDING_REQUESTS) as pool:
         futures = [pool.submit(_request, protocol, "example", 3) for _ in range(32)]
-        assert all_received.wait(2)
+        assert all_received.wait(SHORT_TIMEOUT)
         with pytest.raises(PendingRequestLimitExceeded):
             _request(protocol, timeout=1)
         release.set()
-        assert sorted(future.result(timeout=2) for future in futures) == list(range(1, 33))
+        assert sorted(future.result(timeout=SHORT_TIMEOUT) for future in futures) == list(range(1, 33))
     assert protocol.pending_count == 0
 
 
@@ -438,7 +439,7 @@ def test_concurrent_writes_remain_whole_frames(fake_server: FakeLspServer) -> No
     protocol = fake_server.start(handler)
     with ThreadPoolExecutor(max_workers=32) as pool:
         futures = [pool.submit(_request, protocol) for _ in range(32)]
-        assert [future.result(timeout=2) for future in futures] == [None] * 32
+        assert [future.result(timeout=SHORT_TIMEOUT) for future in futures] == [None] * 32
     assert sorted(seen) == list(range(1, 33))
 
 
@@ -464,7 +465,7 @@ def test_cancellation_sends_cancel_and_drops_late_response(fake_server: FakeLspS
     timer.start()
     with pytest.raises(RequestCancelled):
         protocol.request("slow", {}, deadline=time.monotonic() + 1, cancellation=source.token)
-    assert cancel_seen.wait(1)
+    assert cancel_seen.wait(SHORT_TIMEOUT)
     assert _request(protocol) == "fresh"
     assert protocol.fatal is False
     timer.join()
@@ -582,7 +583,7 @@ def test_timeout_keeps_sent_drain_without_waiting_past_original_deadline(
         protocol.request("slow", {}, deadline=started + 0.05)
     assert time.monotonic() - started < 0.25
     assert protocol.pending_count == 1
-    assert cancel_seen.wait(1)
+    assert cancel_seen.wait(SHORT_TIMEOUT)
 
 
 def test_close_fails_an_active_request_instead_of_returning_a_result(
@@ -597,7 +598,7 @@ def test_close_fails_an_active_request_instead_of_returning_a_result(
     protocol = fake_server.start(handler)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(_request, protocol, "slow", 2)
-        assert request_seen.wait(1)
+        assert request_seen.wait(SHORT_TIMEOUT)
         protocol.close()
         with pytest.raises(ProtocolViolation, match="closed"):
             future.result(timeout=1)
@@ -779,7 +780,7 @@ def test_late_response_from_another_generation_is_dropped(fake_server: FakeLspSe
 
     protocol = fake_server.start(handler, generation_nonce="generation-current")
     assert _request(protocol) == "current"
-    assert response_sent.wait(1)
+    assert response_sent.wait(SHORT_TIMEOUT)
     assert protocol.fatal is False
 
 
@@ -858,7 +859,7 @@ def test_diagnostic_ceiling_accepts_10000_and_rejects_10001(
         handler,
         server_notification_handlers={"textDocument/publishDiagnostics": received.append},
     )
-    assert first_sent.wait(1)
+    assert first_sent.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 1
     while not received and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -906,7 +907,7 @@ def test_all_allowlisted_server_requests_execute_registered_handlers(
         for method in SERVER_REQUESTS
     }
     protocol = fake_server.start(handler, server_request_handlers=handlers)
-    assert completed.wait(2)
+    assert completed.wait(SHORT_TIMEOUT)
     assert {method for method, _params in calls} == SERVER_REQUESTS
     assert protocol.fatal is False
 
@@ -929,7 +930,7 @@ def test_unknown_and_mutating_server_requests_receive_method_not_found(
         completed.set()
 
     protocol = fake_server.start(handler)
-    assert completed.wait(1)
+    assert completed.wait(SHORT_TIMEOUT)
     assert protocol.fatal is False
 
 
@@ -950,7 +951,7 @@ def test_all_allowlisted_notifications_execute_registered_handlers(
         for method in SERVER_NOTIFICATIONS
     }
     protocol = fake_server.start(handler, server_notification_handlers=handlers)
-    assert completed.wait(1)
+    assert completed.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 1
     while len(calls) < len(SERVER_NOTIFICATIONS) and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -971,7 +972,7 @@ def test_unknown_notifications_are_dropped_with_one_bounded_stable_warning(
         completed.set()
 
     protocol = fake_server.start(handler, warning_callback=warnings.append)
-    assert completed.wait(1)
+    assert completed.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 1
     while not warnings and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -1115,7 +1116,7 @@ def test_constructor_accepts_registration_recorded_before_delayed_event_publicat
         owner_name: str,
         _deadline: float,
     ) -> None:
-        assert registrations[owner_name].wait(1)
+        assert registrations[owner_name].wait(SHORT_TIMEOUT)
         assert event.is_set() is False
         raise TimeoutError(f"LSP {owner_name} owner did not start before deadline")
 
@@ -1730,7 +1731,7 @@ def _cancellation_threads() -> tuple[threading.Thread, ...]:
 def test_deadline_cleanup_reports_blocked_protocol_owner(cleanup: str) -> None:
     reader = _UninterruptibleReader()
     protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
-    assert reader.started.wait(1)
+    assert reader.started.wait(SHORT_TIMEOUT)
 
     try:
         with pytest.raises(TimeoutError, match="protocol owner"):
@@ -1749,7 +1750,7 @@ def test_queued_cancellation_writes_neither_request_nor_cancel() -> None:
     writer = _BlockingWriter()
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     source = CancellationSource()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1780,7 +1781,7 @@ def test_writer_observes_queued_cancellation_before_requester() -> None:
     writer = _BlockingWriter()
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     source = CancellationSource()
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1813,7 +1814,7 @@ def test_writer_observes_queued_expiry_without_writing_or_becoming_fatal(
     writer = _BlockingWriter()
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 0.04
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1862,7 +1863,7 @@ def test_fatal_dispatch_stops_before_later_notification_handler(
         handler,
         server_notification_handlers={"$/progress": handled.append},
     )
-    assert sent.wait(1)
+    assert sent.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 1
     while not protocol.fatal and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -1889,7 +1890,7 @@ def test_initial_blocked_write_is_bounded_by_request_deadline_and_fatal() -> Non
         protocol.request("blocked", {}, deadline=deadline)
 
     assert time.monotonic() < deadline + 0.2
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     assert protocol.fatal is True
     assert protocol.pending_count == 0
     assert len(callbacks) == 1
@@ -1914,7 +1915,7 @@ def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
         protocol.request("cancel", {}, deadline=deadline, cancellation=source.token)
 
     assert time.monotonic() < deadline + 0.2
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     assert protocol.pending_count == 1
     writer.released.set()
     delivery_deadline = time.monotonic() + 1
@@ -1940,7 +1941,7 @@ def test_sending_cancellation_preserves_original_before_exactly_one_cancel() -> 
             deadline=time.monotonic() + 1,
             cancellation=source.token,
         )
-        assert writer.started.wait(1)
+        assert writer.started.wait(SHORT_TIMEOUT)
         key = protocol.pending_keys[0]
         assert protocol._pending[key].write_phase == "sending"
         source.cancel()
@@ -2033,7 +2034,7 @@ def test_close_during_blocked_initial_write_cleans_request_and_owners() -> None:
             {},
             deadline=time.monotonic() + 2,
         )
-        assert writer.started.wait(1)
+        assert writer.started.wait(SHORT_TIMEOUT)
         protocol.close()
         with pytest.raises(ProtocolViolation, match="closed"):
             future.result(timeout=1)
@@ -2078,9 +2079,9 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
         server_notification_handlers={"$/progress": notification_handler},
     )
     fake_server.peers[-1].send({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
-    assert handler_returned.wait(60), "close() never returned from the reader handler"
+    assert handler_returned.wait(LONG_TIMEOUT), "close() never returned from the reader handler"
     assert not handler_failure, f"close() raised {handler_failure[0]!r}"
-    protocol.reader_thread.join(60)
+    protocol.reader_thread.join(LONG_TIMEOUT)
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
 
@@ -2281,7 +2282,7 @@ def test_response_committed_before_fatal_remains_caller_outcome() -> None:
         )
         protocol._become_fatal("after response")
         original_wakeup.set()
-        assert future.result(timeout=1) == "response-won"
+        assert future.result(timeout=SHORT_TIMEOUT) == "response-won"
     protocol.close()
 
 
@@ -2498,7 +2499,7 @@ def test_ordinary_writes_cannot_consume_reserved_control_capacity() -> None:
     writer = _BlockingWriter()
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
 
     for index in range(ordinary_limit):
@@ -2531,7 +2532,7 @@ def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
         _await_frames(writer, MAX_PENDING_REQUESTS)
         assert len(writer.frames) == MAX_PENDING_REQUESTS
         protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
-        assert writer.started.wait(1)
+        assert writer.started.wait(SHORT_TIMEOUT)
         ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
         for index in range(ordinary_limit):
             protocol._write_message(
@@ -2584,7 +2585,7 @@ def test_request_ids_are_not_reused_after_drain_release() -> None:
             {"jsonrpc": "2.0", "id": 2, "result": "fresh"},
             generation_nonce="stream-probe",
         )
-        assert fresh.result(timeout=1) == "fresh"
+        assert fresh.result(timeout=SHORT_TIMEOUT) == "fresh"
     assert protocol._next_request_id == 3
     protocol.close()
 
@@ -2705,7 +2706,7 @@ def test_finish_after_process_exit_completes_pending_immediately_and_clears_it()
 def test_protocol_cleanup_timeout_is_retryable_after_blocked_owner_releases() -> None:
     reader = _UninterruptibleReader()
     protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
-    assert reader.started.wait(1)
+    assert reader.started.wait(SHORT_TIMEOUT)
 
     with pytest.raises(TimeoutError, match="protocol owner"):
         protocol.close(time.monotonic() + 0.02)
@@ -2722,7 +2723,7 @@ def test_protocol_close_clears_all_queued_write_ownership_after_join() -> None:
     writer = _BlockingWriter(block_after=0)
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "queued/one"})
-    assert writer.started.wait(1)
+    assert writer.started.wait(SHORT_TIMEOUT)
     protocol._write_message({"jsonrpc": "2.0", "method": "queued/two"})
     protocol._write_message({"jsonrpc": "2.0", "method": "queued/three"})
 
@@ -2740,7 +2741,7 @@ def test_process_cleanup_stop_wakes_pending_before_blocked_owners_release() -> N
     reader = _UninterruptibleReader()
     writer = _BlockingWriter(block_after=0)
     protocol = _protocol_with_streams(reader, writer)
-    assert reader.started.wait(1)
+    assert reader.started.wait(SHORT_TIMEOUT)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         pending = pool.submit(
@@ -2749,7 +2750,7 @@ def test_process_cleanup_stop_wakes_pending_before_blocked_owners_release() -> N
             {},
             deadline=time.monotonic() + 5,
         )
-        assert writer.started.wait(1)
+        assert writer.started.wait(SHORT_TIMEOUT)
         protocol._stop_io_for_process_cleanup()
 
         with pytest.raises(ProtocolViolation, match="closed"):
@@ -2796,7 +2797,7 @@ def test_windows_owner_handles_are_retained_cancelled_and_closed_once(
     )
     monkeypatch.setattr(lsp_protocol, "_KERNEL32", FakeKernel32())
     protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
-    assert reader.started.wait(1)
+    assert reader.started.wait(SHORT_TIMEOUT)
 
     assert {
         protocol._reader_os_handle,

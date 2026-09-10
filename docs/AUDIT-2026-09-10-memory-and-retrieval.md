@@ -112,6 +112,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   report a failed release to stderr and `_mark_finished`.
 
 ### H5 — Session evidence loss is still silent [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-lost-session-record-is-written-down.md`).
 - Rule: R3/R4; contract "a failed write never breaks capture" does not say
   "and leaves no trace".
 - Evidence: `scripts/session_evidence.py:241-249` (`except Exception:
@@ -170,6 +171,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   only rebuilds the legacy index.
 
 ### M4 — The one-page ceiling still disagrees between readers of the same directory [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md`).
 - Rule: R4; the 2026-09-10 note fixed one pair, not the family.
 - Evidence: 8 MiB — `claim_tree_manifest.py:17` (claim tree),
   `claims.py:45`, `corpus_snapshot.py:29`, `search_memory.py:79`,

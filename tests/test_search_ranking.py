@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -471,7 +473,7 @@ def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
         connection = real_connect(database, *args, **kwargs)
         with opened_lock:
             opened.append(Path(database))
-        barrier.wait(timeout=2)
+        barrier.wait(timeout=SHORT_TIMEOUT)
         return connection
 
     with monkeypatch.context() as context:
@@ -513,7 +515,7 @@ def test_stale_legacy_builder_cannot_replace_newer_source_index(
     def ordered_lock(*args, **kwargs):
         if threading.current_thread().name.startswith("old-builder"):
             old_ready.set()
-            assert release_old.wait(10)
+            assert release_old.wait(SHORT_TIMEOUT)
         with real_lock(*args, **kwargs):
             yield
 
@@ -521,12 +523,12 @@ def test_stale_legacy_builder_cannot_replace_newer_source_index(
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="old-builder") as pool:
         old = pool.submit(search_memory._build_index, [page])
-        assert old_ready.wait(10)
+        assert old_ready.wait(SHORT_TIMEOUT)
         page.write_text("# Page\nnew generation\n", encoding="utf-8")
         with ThreadPoolExecutor(max_workers=1) as newer_pool:
-            newer_pool.submit(search_memory._build_index, [page]).result(timeout=10)
+            newer_pool.submit(search_memory._build_index, [page]).result(timeout=SHORT_TIMEOUT)
         release_old.set()
-        old.result(timeout=10)
+        old.result(timeout=SHORT_TIMEOUT)
 
     with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
         assert "new generation" in database.execute(
@@ -693,7 +695,7 @@ def test_repeated_thread_and_process_index_builds_leave_valid_index(
                 executor.submit(_build_search_index_worker, str(tmp_path), 4)
                 for _ in range(4)
             ]
-            assert [future.result(timeout=30) for future in futures] == [True] * 4
+            assert [future.result(timeout=SHORT_TIMEOUT) for future in futures] == [True] * 4
 
         with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
             assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
@@ -2526,7 +2528,7 @@ def test_publication_holds_one_writer_gate_through_validate_register_and_activat
                 name="cooperating-writer",
             )
             writer.start()
-            assert writer_attempted.wait(timeout=1)
+            assert writer_attempted.wait(timeout=SHORT_TIMEOUT)
             assert writer_entered.is_set() is False
 
         def activate(self, generation_id, *, expected_active):
@@ -2546,7 +2548,7 @@ def test_publication_holds_one_writer_gate_through_validate_register_and_activat
         coordinator=coordinator,
     )
     assert writer is not None
-    writer.join(timeout=1)
+    writer.join(timeout=SHORT_TIMEOUT)
     assert writer.is_alive() is False
     assert coordinator.gate_calls == 2
     assert events == [

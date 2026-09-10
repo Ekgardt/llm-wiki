@@ -18,6 +18,8 @@ import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
+from tests.slow_machine import LONG_TIMEOUT
+
 
 class _LockedClock:
     def __init__(self) -> None:
@@ -994,14 +996,14 @@ def test_archive_heartbeats_source_fence_past_original_lease(
         clock.advance(interval)
         if len(waits) == 4:
             four_heartbeats.set()
-            return stop.wait(180)
+            return stop.wait(LONG_TIMEOUT)
         return False
 
     queue = MemoryQueue(state_root, clock=clock, heartbeat_wait=wait)
 
     def hold_build(point: str) -> None:
         if point == "after_build":
-            assert four_heartbeats.wait(120)
+            assert four_heartbeats.wait(LONG_TIMEOUT)
 
     archived = _archiver(
         root,
@@ -1056,7 +1058,7 @@ def test_archive_stops_before_publish_when_source_heartbeat_loses_takeover(
 
     def hold_build(point: str) -> None:
         if point == "after_build":
-            assert heartbeat_lost.wait(120)
+            assert heartbeat_lost.wait(LONG_TIMEOUT)
 
     with pytest.raises(RuntimeError) as raised:
         _archiver(
@@ -1093,7 +1095,7 @@ def test_failure_winning_finalization_race_preserves_flat_source(
 
     def pause_record(*args) -> None:
         failure_holds_lock.set()
-        assert continue_failure.wait(180)
+        assert continue_failure.wait(LONG_TIMEOUT)
         original_record(*args)
 
     monkeypatch.setattr(
@@ -1103,7 +1105,7 @@ def test_failure_winning_finalization_race_preserves_flat_source(
     def killpoint(point: str) -> None:
         if point == "after_revalidate":
             archive_at_revalidate.set()
-            assert continue_archive.wait(180)
+            assert continue_archive.wait(LONG_TIMEOUT)
 
     def archive() -> None:
         try:
@@ -1118,7 +1120,7 @@ def test_failure_winning_finalization_race_preserves_flat_source(
     # short on purpose: they assert that something did not happen.
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
-    assert archive_at_revalidate.wait(120)
+    assert archive_at_revalidate.wait(LONG_TIMEOUT)
 
     failure_thread = threading.Thread(
         target=lambda: MemoryQueue(state_root).record_source_failure(
@@ -1129,12 +1131,12 @@ def test_failure_winning_finalization_race_preserves_flat_source(
         )
     )
     failure_thread.start()
-    assert failure_holds_lock.wait(120)
+    assert failure_holds_lock.wait(LONG_TIMEOUT)
     continue_archive.set()
     archive_completed_while_failure_locked = archive_done.wait(0.25)
     continue_failure.set()
-    archive_thread.join(120)
-    failure_thread.join(120)
+    archive_thread.join(LONG_TIMEOUT)
+    failure_thread.join(LONG_TIMEOUT)
 
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not archive_completed_while_failure_locked
@@ -1163,7 +1165,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
         record = archiver.coordinator._record(transaction_id)
         if record is not None and record.operation_id.startswith("archive-remove:"):
             deletion_started.set()
-            assert continue_deletion.wait(180)
+            assert continue_deletion.wait(LONG_TIMEOUT)
         return original_apply(transaction_id)
 
     monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
@@ -1194,17 +1196,17 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
-    assert deletion_started.wait(120)
+    assert deletion_started.wait(LONG_TIMEOUT)
     failure_thread = threading.Thread(
         target=record_failure, name="archive-failure-writer"
     )
     failure_thread.start()
-    assert failure_started.wait(120)
-    assert failure_connected.wait(120)
+    assert failure_started.wait(LONG_TIMEOUT)
+    assert failure_connected.wait(LONG_TIMEOUT)
     failure_completed_while_delete_paused = failure_done.wait(0.25)
     continue_deletion.set()
-    archive_thread.join(120)
-    failure_thread.join(120)
+    archive_thread.join(LONG_TIMEOUT)
+    failure_thread.join(LONG_TIMEOUT)
 
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not failure_completed_while_delete_paused

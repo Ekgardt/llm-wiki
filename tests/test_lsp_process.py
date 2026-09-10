@@ -37,6 +37,8 @@ from lsp_protocol import (
     RequestCancelled,
 )
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 OWNER_NONCE = "a" * 32
 
@@ -298,7 +300,7 @@ def _stop_heartbeat_thread(coordinator) -> None:
     coordinator.heartbeat_wake.set()
     heartbeat = coordinator.heartbeat_thread
     if heartbeat is not None:
-        heartbeat.join(1)
+        heartbeat.join(SHORT_TIMEOUT)
 
 
 def _release_owner_directory(coordinator) -> None:
@@ -1028,7 +1030,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
     thread = threading.Thread(target=start)
     thread.start()
     try:
-        assert bootstrap_entered.wait(120)
+        assert bootstrap_entered.wait(LONG_TIMEOUT)
         coordinator = coordinators[0]
         owner_exists_during_bootstrap = (owner_root / "owner.json").is_file()
         lease_exists_during_bootstrap = lease_path.is_file()
@@ -1039,7 +1041,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
         )
         transition_snapshot = _transition_snapshot(coordinator)
         release_bootstrap.set()
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         assert not thread.is_alive()
         assert start_errors == []
         assert len(started) == 1
@@ -1058,7 +1060,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
         assert started[0].state is ProcessState.PROTOCOL_INITIALIZED
     finally:
         release_bootstrap.set()
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         _close_owned(started)
         _retry_cleanup_errors(start_errors)
 
@@ -1206,7 +1208,7 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
     owner_root = tmp_path / OWNER_NONCE
     thread = threading.Thread(target=start)
     thread.start()
-    assert bootstrap_entered.wait(120)
+    assert bootstrap_entered.wait(LONG_TIMEOUT)
     coordinator = coordinators[0]
     heartbeat = coordinator.heartbeat_thread
     assert heartbeat is not None
@@ -1221,7 +1223,7 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
         assert coordinator.phase is lsp_process._LifecyclePhase.STOPPING_FAILURE
 
     release_bootstrap.set()
-    thread.join(5)
+    thread.join(SHORT_TIMEOUT)
     try:
         assert not thread.is_alive()
         assert started == []
@@ -1233,7 +1235,7 @@ def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
         assert not (owner_root / "lease.json").exists()
     finally:
         release_bootstrap.set()
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         _close_owned(started)
         _retry_cleanup_errors(start_errors)
 
@@ -2432,7 +2434,7 @@ def test_restart_bootstrap_failure_gives_every_waiter_a_fresh_sanitized_error(
         cancellation: object = None,
     ) -> object:
         if method == "initialized/query":
-            request_barrier.wait(timeout=2)
+            request_barrier.wait(timeout=SHORT_TIMEOUT)
         return protocol_request(
             method,
             params,
@@ -2455,7 +2457,7 @@ def test_restart_bootstrap_failure_gives_every_waiter_a_fresh_sanitized_error(
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(capture_failure, index) for index in range(2)]
-            errors = [future.result(timeout=5) for future in futures]
+            errors = [future.result(timeout=SHORT_TIMEOUT) for future in futures]
     finally:
         if lsp_process._coordinator_has_ownership(process._coordinator):
             process.close(time.monotonic() + 5)
@@ -2553,13 +2555,13 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
     monkeypatch.setattr(lsp_process, "_write_failure_record", consume_failure_deadline)
     try:
         process.protocol._become_fatal("trigger autonomous configured restart")
-        assert replacement_bootstrap_started.wait(2)
-        assert first_cleanup_failed.wait(2)
+        assert replacement_bootstrap_started.wait(SHORT_TIMEOUT)
+        assert first_cleanup_failed.wait(SHORT_TIMEOUT)
 
         replacement_started, replacement_deadline, _pid = bootstraps[1]
         assert 0 < replacement_deadline - replacement_started <= configured_budget
         assert cleanup_deadline_margins[0] >= 0.05
-        assert cleanup_retry_started.wait(2)
+        assert cleanup_retry_started.wait(SHORT_TIMEOUT)
         assert coordinator.phase in {
             lsp_process._LifecyclePhase.CLEANUP_PENDING,
             lsp_process._LifecyclePhase.STOPPING_FAILURE,
@@ -2575,8 +2577,8 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        recovery.join(1)
-        heartbeat.join(1)
+        recovery.join(SHORT_TIMEOUT)
+        heartbeat.join(SHORT_TIMEOUT)
         assert not recovery.is_alive()
         assert not heartbeat.is_alive()
         assert coordinator.recovery_thread is None
@@ -2660,9 +2662,9 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     caller = threading.Thread(target=restart)
     caller.start()
     try:
-        assert evidence_started.wait(120)
-        assert cleanup_started.wait(120)
-        assert caller_finished.wait(20)
+        assert evidence_started.wait(LONG_TIMEOUT)
+        assert cleanup_started.wait(LONG_TIMEOUT)
+        assert caller_finished.wait(SHORT_TIMEOUT)
         assert not caller.is_alive()
         assert len(restart_errors) == 1
         assert type(restart_errors[0]) is OSError
@@ -2671,7 +2673,7 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
         assert cleanup_threads[0] is caller
         assert cleanup_deadlines[0] == caller_deadline
 
-        assert autonomous_cleanup_started.wait(120)
+        assert autonomous_cleanup_started.wait(LONG_TIMEOUT)
         assert recovery in cleanup_threads[1:]
         assert recovery.is_alive()
         assert lsp_process._coordinator_has_ownership(coordinator)
@@ -2682,12 +2684,12 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=120,
         )
-        recovery.join(120)
+        recovery.join(LONG_TIMEOUT)
         assert not recovery.is_alive()
         assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
         allow_autonomous_cleanup.set()
-        caller.join(120)
+        caller.join(LONG_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 120)
 
@@ -2806,15 +2808,15 @@ def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
     explicit_threads.append(restart_thread)
     restart_thread.start()
     try:
-        assert explicit_paused.wait(3)
+        assert explicit_paused.wait(SHORT_TIMEOUT)
         first_protocol._become_fatal("fatal while explicit restart is pending")
         coordinator.recovery_wake.set()
-        assert autonomous_entered.wait(120)
+        assert autonomous_entered.wait(LONG_TIMEOUT)
         if autonomous_replacement_entered.wait(0.25):
-            assert autonomous_replacement_finished.wait(5)
+            assert autonomous_replacement_finished.wait(SHORT_TIMEOUT)
 
         release_explicit.set()
-        restart_thread.join(10)
+        restart_thread.join(SHORT_TIMEOUT)
 
         assert not restart_thread.is_alive()
         assert explicit_errors == []
@@ -2831,7 +2833,7 @@ def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
         assert coordinator.terminal_outcome is None
     finally:
         release_explicit.set()
-        restart_thread.join(10)
+        restart_thread.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 
@@ -2869,13 +2871,13 @@ def test_bootstrap_raw_protocol_and_handler_complete_while_driver_is_held(
         with ThreadPoolExecutor(max_workers=3) as pool:
             driver_available = pool.submit(
                 lock_is_available, coordinator.driver
-            ).result(timeout=1)
+            ).result(timeout=SHORT_TIMEOUT)
             lifecycle_available = pool.submit(
                 lock_is_available, coordinator.lock
-            ).result(timeout=1)
+            ).result(timeout=SHORT_TIMEOUT)
             lease_available = pool.submit(
                 lock_is_available, coordinator.lease_lock
-            ).result(timeout=1)
+            ).result(timeout=SHORT_TIMEOUT)
         lock_observations.append(
             (driver_available, lifecycle_available, lease_available)
         )
@@ -3276,12 +3278,12 @@ def test_close_serializes_behind_restart_bootstrap_and_commits_success(
     restart_thread = threading.Thread(target=restart)
     close_thread = threading.Thread(target=close)
     restart_thread.start()
-    assert bootstrap_entered.wait(120)
+    assert bootstrap_entered.wait(LONG_TIMEOUT)
     close_thread.start()
     close_returned_before_bootstrap = close_finished.wait(0.2)
     release_bootstrap.set()
-    restart_thread.join(8)
-    close_thread.join(8)
+    restart_thread.join(SHORT_TIMEOUT)
+    close_thread.join(SHORT_TIMEOUT)
     try:
         assert close_returned_before_bootstrap is False
         assert not restart_thread.is_alive()
@@ -3302,8 +3304,8 @@ def test_close_serializes_behind_restart_bootstrap_and_commits_success(
         assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
         release_bootstrap.set()
-        restart_thread.join(8)
-        close_thread.join(8)
+        restart_thread.join(SHORT_TIMEOUT)
+        close_thread.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 
@@ -3345,7 +3347,7 @@ def test_delayed_failure_selection_cannot_mutate_committed_close_success(
 
     callback = threading.Thread(target=delayed_failure_callback)
     callback.start()
-    callback.join(2)
+    callback.join(SHORT_TIMEOUT)
 
     assert not callback.is_alive()
     assert callback_errors == []
@@ -3382,7 +3384,7 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
         bootstraps.append(generation_nonce)
         if len(bootstraps) == 2:
             bootstrap_entered.set()
-            assert release_bootstrap.wait(3)
+            assert release_bootstrap.wait(SHORT_TIMEOUT)
         return _initialize_generation(protocol, pid, generation_nonce, deadline)
 
     process = LspProcess.start_configured(
@@ -3427,7 +3429,7 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
     thread = threading.Thread(target=restart)
     thread.start()
     try:
-        assert bootstrap_entered.wait(120)
+        assert bootstrap_entered.wait(LONG_TIMEOUT)
         candidate_nonce = bootstraps[1]
         process._coordinator.heartbeat_wake.set()
         assert heartbeat_wrote.wait(_BARRIER_SECONDS)
@@ -3460,13 +3462,13 @@ def test_restart_lease_names_candidate_before_bootstrap_commit_without_activatio
         assert candidate_nonce != first_nonce
 
         release_bootstrap.set()
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         assert not thread.is_alive()
         assert restart_errors == []
         assert process.generation_nonce == candidate_nonce
     finally:
         release_bootstrap.set()
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         process.close(time.monotonic() + 5)
 
 
@@ -3672,7 +3674,7 @@ def test_windows_normal_close_joins_all_users_before_releasing_retained_process_
     assert _windows_handle_status(handle) == (False, 6)
     assert retained.returncode is not None
     assert retained.poll() == retained.returncode
-    assert retained.wait(timeout=0) == retained.returncode
+    assert retained.wait(timeout=SHORT_TIMEOUT) == retained.returncode
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process handle retry")
@@ -4065,8 +4067,8 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        recovery.join(1)
-        heartbeat.join(1)
+        recovery.join(SHORT_TIMEOUT)
+        heartbeat.join(SHORT_TIMEOUT)
         assert not recovery.is_alive()
         assert not heartbeat.is_alive()
         assert process.restart_count == 1
@@ -4177,7 +4179,7 @@ def test_observed_second_generation_exit_dominates_overlapping_shutdown(
         if current is coordinator and target is generation:
             if threading.current_thread() is generation.exit_thread:
                 exit_observed.set()
-            assert release_callbacks.wait(5)
+            assert release_callbacks.wait(SHORT_TIMEOUT)
         return real_queue_failure(current, target, reason)
 
     def gated_become_fatal(
@@ -4187,7 +4189,7 @@ def test_observed_second_generation_exit_dominates_overlapping_shutdown(
     ) -> None:
         if threading.current_thread() is generation.exit_thread:
             exit_observed.set()
-        assert release_callbacks.wait(5)
+        assert release_callbacks.wait(SHORT_TIMEOUT)
         real_become_fatal(reason, cause=cause)
 
     def record_enqueue(
@@ -4215,7 +4217,7 @@ def test_observed_second_generation_exit_dominates_overlapping_shutdown(
     closer = threading.Thread(target=shutdown)
     try:
         process.process.kill()
-        assert exit_observed.wait(3)
+        assert exit_observed.wait(SHORT_TIMEOUT)
         closer.start()
         assert _coordinator_wait(
             process,
@@ -4229,7 +4231,7 @@ def test_observed_second_generation_exit_dominates_overlapping_shutdown(
             },
         )
         release_callbacks.set()
-        closer.join(5)
+        closer.join(SHORT_TIMEOUT)
 
         assert not closer.is_alive()
         assert shutdown_errors == []
@@ -4286,7 +4288,7 @@ def test_expected_second_generation_exit_precedes_death_and_shutdown_succeeds(
         if method == "shutdown":
             assert generation.expected_exit.is_set()
             expected_exit_marked.set()
-            assert release_shutdown_request.wait(5)
+            assert release_shutdown_request.wait(SHORT_TIMEOUT)
         return real_request(
             method,
             params,
@@ -4318,11 +4320,11 @@ def test_expected_second_generation_exit_precedes_death_and_shutdown_succeeds(
     closer = threading.Thread(target=shutdown)
     try:
         closer.start()
-        assert expected_exit_marked.wait(3)
+        assert expected_exit_marked.wait(SHORT_TIMEOUT)
         process.process.kill()
-        process.process.wait(timeout=3)
+        process.process.wait(timeout=SHORT_TIMEOUT)
         release_shutdown_request.set()
-        closer.join(5)
+        closer.join(SHORT_TIMEOUT)
 
         assert not closer.is_alive()
         assert shutdown_errors == []
@@ -4334,7 +4336,7 @@ def test_expected_second_generation_exit_precedes_death_and_shutdown_succeeds(
     finally:
         release_shutdown_request.set()
         if closer.ident is not None:
-            closer.join(5)
+            closer.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 
@@ -4701,7 +4703,7 @@ def test_zero_stderr_and_concurrent_snapshots_never_block(tmp_path: Path) -> Non
     _wait(process)
     stop.set()
     for thread in threads:
-        thread.join(1)
+        thread.join(SHORT_TIMEOUT)
         assert not thread.is_alive()
     assert process.stderr_bytes() == b""
     process.close(time.monotonic() + 5)
@@ -4724,7 +4726,7 @@ def _join_recovery_threads(processes: tuple[LspProcess, ...]) -> None:
     for process in processes:
         recovery = process._recovery_thread
         if recovery is not None:
-            recovery.join(3)
+            recovery.join(SHORT_TIMEOUT)
 
 
 def _assert_lowercase_hex_nonce(nonce: str) -> None:
@@ -4967,7 +4969,7 @@ def test_startup_failure_terminates_child_and_retains_bounded_evidence(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
     if os.name == "nt":
         assert _windows_handle_status(int(children[0]._handle)) == (False, 6)
@@ -5518,7 +5520,7 @@ def test_owner_json_failure_terminates_child_and_retains_failure_only(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
     assert owner.is_dir()
     assert not (owner / "owner.json").exists()
@@ -5550,7 +5552,7 @@ def test_exit_monitor_thread_start_failure_retains_process_owner_evidence(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
     assert owner.is_dir()
     assert json.loads((owner / "owner.json").read_bytes())["state"] == "process_running"
@@ -5629,7 +5631,7 @@ def test_recovery_cannot_run_before_startup_final_fence_completes(
         captured.append(instance)
         instance.protocol._become_fatal("fatal during startup final fence")
         workers_started.set()
-        assert release_startup.wait(3)
+        assert release_startup.wait(SHORT_TIMEOUT)
 
     def start() -> None:
         try:
@@ -5644,7 +5646,7 @@ def test_recovery_cannot_run_before_startup_final_fence_completes(
     )
     start_thread = threading.Thread(target=start)
     start_thread.start()
-    assert workers_started.wait(3)
+    assert workers_started.wait(SHORT_TIMEOUT)
     instance = captured[0]
     coordinator = instance._coordinator
     recovery_ran_before_final_fence = _coordinator_wait(
@@ -5654,7 +5656,7 @@ def test_recovery_cannot_run_before_startup_final_fence_completes(
         timeout=0.2,
     )
     release_startup.set()
-    start_thread.join(5)
+    start_thread.join(SHORT_TIMEOUT)
 
     assert recovery_ran_before_final_fence is False
     assert not start_thread.is_alive()
@@ -6175,7 +6177,7 @@ def test_parent_identity_change_after_spawn_terminates_child_and_rolls_back(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
     assert owner.is_dir()
 
@@ -6405,7 +6407,7 @@ def test_initial_owner_publish_never_overwrites_racing_owner_record(
     assert (owner / "owner.json").read_bytes() == attacker
     assert owner.is_dir()
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
 
 
@@ -6490,7 +6492,7 @@ def test_parent_swap_during_owner_write_rejects_and_preserves_replacement(
         assert json.loads((moved / "failure.json").read_bytes())["code"] == "startup_failed"
         assert not (owner / "failure.json").exists()
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
 
 
@@ -6540,7 +6542,7 @@ def test_final_fence_rejects_post_protocol_owner_swap_without_deleting_replaceme
         assert owner_record.read_bytes() == b"attacker-owner"
         assert json.loads((moved / "failure.json").read_bytes())["code"] == "startup_failed"
     assert len(children) == 1
-    children[0].wait(timeout=5)
+    children[0].wait(timeout=SHORT_TIMEOUT)
     assert children[0].poll() is not None
 
 
@@ -6637,7 +6639,7 @@ def test_child_exit_during_final_startup_window_fails_start_and_retains_evidence
 
     def start_after_child_exit(thread: threading.Thread) -> None:
         if thread.name.startswith("lsp-exit-"):
-            children[0].wait(timeout=5)
+            children[0].wait(timeout=SHORT_TIMEOUT)
         real_start(thread)
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
@@ -7383,7 +7385,7 @@ def test_shutdown_waits_for_restart_candidate_ownership_to_be_attached(
         tree = real_spawn(cls, *args, **kwargs)
         candidate_trees.append(tree)
         spawned.set()
-        assert release_spawn.wait(3)
+        assert release_spawn.wait(SHORT_TIMEOUT)
         return tree
 
     def restart() -> None:
@@ -7408,12 +7410,12 @@ def test_shutdown_waits_for_restart_candidate_ownership_to_be_attached(
     restart_thread = threading.Thread(target=restart)
     shutdown_thread = threading.Thread(target=shutdown)
     restart_thread.start()
-    assert spawned.wait(3)
+    assert spawned.wait(SHORT_TIMEOUT)
     shutdown_thread.start()
     shutdown_returned_before_candidate_attachment = shutdown_finished.wait(0.2)
     release_spawn.set()
-    restart_thread.join(5)
-    shutdown_thread.join(5)
+    restart_thread.join(SHORT_TIMEOUT)
+    shutdown_thread.join(SHORT_TIMEOUT)
 
     assert shutdown_returned_before_candidate_attachment is False
     assert not restart_thread.is_alive()
@@ -7731,7 +7733,7 @@ def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
 
     monkeypatch.setattr(lsp_process, "_write_current_lease", fail_pending_heartbeat)
     coordinator.heartbeat_wake.set()
-    heartbeat.join(60)
+    heartbeat.join(LONG_TIMEOUT)
     assert not heartbeat.is_alive()
     assert lease_path.read_bytes() == stale_lease
     assert coordinator.background_cleanup_error is not None
@@ -7826,7 +7828,7 @@ def test_periodic_heartbeat_write_failure_cannot_leave_running_without_owner(
 
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
     coordinator.heartbeat_wake.set()
-    assert attempted.wait(1)
+    assert attempted.wait(SHORT_TIMEOUT)
     assert _coordinator_wait(
         process,
         lambda: coordinator.phase is not lsp_process._LifecyclePhase.RUNNING,
@@ -7872,16 +7874,16 @@ def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
         deadline: float,
     ) -> None:
         recovery_entered.set()
-        assert release_recovery.wait(3)
+        assert release_recovery.wait(SHORT_TIMEOUT)
         real_process_intent(current, intent, deadline)  # type: ignore[arg-type]
 
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
     monkeypatch.setattr(lsp_process, "_process_failure_intent", block_recovery)
     coordinator.heartbeat_wake.set()
     try:
-        assert write_attempted.wait(1)
-        assert recovery_entered.wait(120)
-        heartbeat.join(1)
+        assert write_attempted.wait(SHORT_TIMEOUT)
+        assert recovery_entered.wait(LONG_TIMEOUT)
+        heartbeat.join(SHORT_TIMEOUT)
         assert not heartbeat.is_alive()
         assert coordinator.phase is not lsp_process._LifecyclePhase.RUNNING
         assert process.state is ProcessState.DEGRADED
@@ -7919,8 +7921,8 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
     coordinator.heartbeat_wake.set()
 
     try:
-        assert attempted.wait(5)
-        heartbeat.join(5)
+        assert attempted.wait(SHORT_TIMEOUT)
+        heartbeat.join(SHORT_TIMEOUT)
         assert not heartbeat.is_alive()
         assert coordinator.pending_failure_intents >= 1
         # The bounded TimeoutError is recorded by the recovery loop, and only
@@ -7930,7 +7932,7 @@ def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
         assert _poll_until(lambda: coordinator.background_cleanup_error is not None)
     finally:
         release.set()
-        holder.join(5)
+        holder.join(SHORT_TIMEOUT)
 
     assert _coordinator_wait(
         process,
@@ -7991,8 +7993,8 @@ def test_expired_drain_inspection_is_bounded_when_transition_lock_is_held(
         assert coordinator.background_cleanup_error.error_type == "TimeoutError"
     finally:
         release.set()
-        holder.join(1)
-        inspector.join(1)
+        holder.join(SHORT_TIMEOUT)
+        inspector.join(SHORT_TIMEOUT)
 
     assert _coordinator_wait(
         process,
@@ -8025,10 +8027,10 @@ def test_background_terminal_cleanup_error_is_observed_after_cleanup_retry(
     monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", fail_background_stop)
     lsp_process._queue_owner_failure(coordinator, "injected owner failure")
 
-    assert failed.wait(2)
+    assert failed.wait(SHORT_TIMEOUT)
     recovery = coordinator.recovery_thread
     assert recovery is not None
-    recovery.join(2)
+    recovery.join(SHORT_TIMEOUT)
     assert not recovery.is_alive()
     assert coordinator.cleanup_result.ownership_pending is False
     monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", stop_io)
@@ -8066,7 +8068,7 @@ def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
             and record["generation_nonce"] == first_generation
         ):
             heartbeat_writing.set()
-            assert release_heartbeat.wait(3)
+            assert release_heartbeat.wait(SHORT_TIMEOUT)
         real_write_lease(current, record, **kwargs)  # type: ignore[arg-type]
 
     def restart() -> None:
@@ -8098,13 +8100,13 @@ def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
     )
     monkeypatch.setattr(lsp_process, "_acquire_lease", observe_lease_acquisition)
     coordinator.heartbeat_wake.set()
-    assert heartbeat_writing.wait(2)
+    assert heartbeat_writing.wait(SHORT_TIMEOUT)
     restart_thread = threading.Thread(target=restart)
     restart_thread.start()
-    assert restart_acquiring_lease.wait(2)
+    assert restart_acquiring_lease.wait(SHORT_TIMEOUT)
     assert not restart_finished.is_set()
     release_heartbeat.set()
-    restart_thread.join(5)
+    restart_thread.join(SHORT_TIMEOUT)
 
     assert not restart_thread.is_alive()
     assert restart_errors == []
@@ -8179,10 +8181,10 @@ def test_windows_lease_refresh_waits_for_a_temporary_reader(
     worker = threading.Thread(target=refresh)
     try:
         worker.start()
-        assert sharing_blocked.wait(1)
+        assert sharing_blocked.wait(SHORT_TIMEOUT)
         assert worker.is_alive()
         reader.close()
-        worker.join(3)
+        worker.join(SHORT_TIMEOUT)
         assert not worker.is_alive()
         assert errors == []
         assert attempts >= 2
@@ -8190,7 +8192,7 @@ def test_windows_lease_refresh_waits_for_a_temporary_reader(
         assert not list(process.owner_root.glob(".lease-*.tmp"))
     finally:
         reader.close()
-        worker.join(3)
+        worker.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 
@@ -8333,7 +8335,7 @@ def test_failed_state_and_waiter_notification_follow_durable_failure_evidence(
 
     def block_evidence(*args: object, **kwargs: object) -> None:
         evidence_started.set()
-        assert release_evidence.wait(3)
+        assert release_evidence.wait(SHORT_TIMEOUT)
         write_failure(*args, **kwargs)  # type: ignore[arg-type]
 
     def observe_heartbeat(current: object, record: object, **kwargs: object) -> None:
@@ -8368,10 +8370,10 @@ def test_failed_state_and_waiter_notification_follow_durable_failure_evidence(
     waiter = threading.Thread(target=wait_for_failed)
     cleanup = threading.Thread(target=fail_terminally)
     waiter.start()
-    assert waiter_ready.wait(1)
+    assert waiter_ready.wait(SHORT_TIMEOUT)
     cleanup.start()
     try:
-        assert evidence_started.wait(2), cleanup_errors
+        assert evidence_started.wait(SHORT_TIMEOUT), cleanup_errors
         assert coordinator.phase is lsp_process._LifecyclePhase.STOPPING_FAILURE
         assert process.state is ProcessState.DEGRADED
         assert waiter_finished.wait(0.2) is False
@@ -8381,8 +8383,8 @@ def test_failed_state_and_waiter_notification_follow_durable_failure_evidence(
         assert heartbeat_wrote.wait(_BARRIER_SECONDS)
     finally:
         release_evidence.set()
-        cleanup.join(5)
-        waiter.join(5)
+        cleanup.join(SHORT_TIMEOUT)
+        waiter.join(SHORT_TIMEOUT)
         monkeypatch.setattr(lsp_process, "_write_failure_record", write_failure)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
@@ -8547,7 +8549,7 @@ def test_existing_failure_evidence_must_match_terminal_identity_and_stays_sticky
         lsp_process._queue_owner_failure(coordinator, "injected owner failure")
         recovery = coordinator.recovery_thread
         assert recovery is not None
-        recovery.join(5)
+        recovery.join(SHORT_TIMEOUT)
 
         assert not recovery.is_alive()
         assert coordinator.failure_evidence_identity is not None
@@ -8908,7 +8910,7 @@ def test_startup_rollback_kills_descendant_after_direct_leader_exits(
 
     def fail_after_leader_exit(*_args: object, **_kwargs: object) -> None:
         assert children
-        children[0].wait(timeout=2)
+        children[0].wait(timeout=SHORT_TIMEOUT)
         raise RuntimeError("startup publication failed")
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen)
@@ -9029,7 +9031,7 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
             attempts += 1
             if attempts == 1:
                 encoding.set()
-                assert release_encoding.wait(3)
+                assert release_encoding.wait(SHORT_TIMEOUT)
         return real_encode(message)
 
     def request_invalid() -> None:
@@ -9045,11 +9047,11 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
     monkeypatch.setattr(lsp_protocol, "encode_frame", block_invalid_encoding)
     request_thread = threading.Thread(target=request_invalid)
     request_thread.start()
-    assert encoding.wait(2)
+    assert encoding.wait(SHORT_TIMEOUT)
     process.restart(time.monotonic() + 5)
     assert process.generation_nonce != first_generation
     release_encoding.set()
-    request_thread.join(3)
+    request_thread.join(SHORT_TIMEOUT)
 
     assert not request_thread.is_alive()
     assert len(request_errors) == 1
@@ -9090,7 +9092,7 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
 
     holder = threading.Thread(target=hold_transition)
     holder.start()
-    assert acquired.wait(1)
+    assert acquired.wait(SHORT_TIMEOUT)
     deadline = time.monotonic() + 0.03
     try:
         with pytest.raises(TimeoutError, match="lifecycle|transition"):
@@ -9110,7 +9112,7 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
         assert coordinator.candidate is None
     finally:
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         process.close(time.monotonic() + 5)
 
 
@@ -9170,7 +9172,7 @@ def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
         assert prepared_by == []
 
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
 
         assert _coordinator_wait(process, lambda: process.restart_count == 1, timeout=5)
         assert coordinator.phase is lsp_process._LifecyclePhase.RUNNING
@@ -9181,7 +9183,7 @@ def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
         }
     finally:
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
     monkeypatch.setattr(lsp_process, "_release_lifecycle", release_lifecycle)
@@ -9250,7 +9252,7 @@ def _exercise_explicit_restart_retirement_deadline_finishes_without_caller_retry
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        recovery.join(1)
+        recovery.join(SHORT_TIMEOUT)
 
         assert process.restart_count == 0
         assert process.state is ProcessState.FAILED
@@ -9299,7 +9301,7 @@ def _exercise_explicit_restart_candidate_cleanup_replaces_stopped_recovery_owner
                 raise OSError("restart cleanup lease removal failed")
             retry_threads.append(threading.current_thread())
             retry_started.set()
-            assert allow_retry.wait(5)
+            assert allow_retry.wait(SHORT_TIMEOUT)
         remove_lease(current)
 
     monkeypatch.setattr(
@@ -9317,7 +9319,7 @@ def _exercise_explicit_restart_candidate_cleanup_replaces_stopped_recovery_owner
             process.restart(time.monotonic() + 5)
 
         assert coordinator.recovery_request_pending.is_set()
-        assert retry_started.wait(2)
+        assert retry_started.wait(SHORT_TIMEOUT)
         assert len(retry_threads) == 1
         replacement = retry_threads[0]
         assert replacement is not original_recovery
@@ -9329,7 +9331,7 @@ def _exercise_explicit_restart_candidate_cleanup_replaces_stopped_recovery_owner
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        replacement.join(1)
+        replacement.join(SHORT_TIMEOUT)
 
         assert remove_calls == 2
         assert not replacement.is_alive()
@@ -9387,7 +9389,7 @@ def _exercise_recovery_owned_candidate_failure_retains_worker_for_terminal_retry
                 raise OSError("recovery cleanup lease removal failed")
             retry_threads.append(threading.current_thread())
             retry_started.set()
-            assert allow_retry.wait(5)
+            assert allow_retry.wait(SHORT_TIMEOUT)
         remove_lease(current)
 
     monkeypatch.setattr(lsp_process, "_restart_generation", expire_caller_restart)
@@ -9405,7 +9407,7 @@ def _exercise_recovery_owned_candidate_failure_retains_worker_for_terminal_retry
         with pytest.raises(TimeoutError, match="explicit restart caller deadline expired"):
             process.restart(time.monotonic() + 0.05)
 
-        assert retry_started.wait(2)
+        assert retry_started.wait(SHORT_TIMEOUT)
         assert retry_threads == [recovery]
         assert recovery.is_alive()
 
@@ -9415,7 +9417,7 @@ def _exercise_recovery_owned_candidate_failure_retains_worker_for_terminal_retry
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        recovery.join(1)
+        recovery.join(SHORT_TIMEOUT)
 
         assert remove_calls == 2
         assert not recovery.is_alive()
@@ -9615,7 +9617,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         assert not _pid_alive(descendant)
 
         release.set()
-        holders[0].join(1)
+        holders[0].join(SHORT_TIMEOUT)
         raised.value.retry_cleanup(time.monotonic() + 5)
 
         failure = json.loads((owner_root / "failure.json").read_bytes())
@@ -9633,7 +9635,7 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
     finally:
         release.set()
         for holder in holders:
-            holder.join(1)
+            holder.join(SHORT_TIMEOUT)
         if coordinator is None and captured:
             coordinator = captured[0]._coordinator
         _retry_owned_cleanup(coordinator, cleanup_error)
@@ -9693,7 +9695,7 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
         assert lsp_process._queue_generation_failure(
             coordinator, generation, "injected autonomous restart failure"
         )
-        assert terminal_attempted.wait(2)
+        assert terminal_attempted.wait(SHORT_TIMEOUT)
 
         assert len(holders) == 1
         assert coordinator.mandatory_failure_intent == lsp_process._FailureEvidenceIdentity(
@@ -9711,15 +9713,15 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
         assert heartbeat.is_alive()
 
         release.set()
-        holders[0].join(1)
+        holders[0].join(SHORT_TIMEOUT)
 
         assert _coordinator_wait(
             process,
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=5,
         )
-        recovery.join(1)
-        heartbeat.join(1)
+        recovery.join(SHORT_TIMEOUT)
+        heartbeat.join(SHORT_TIMEOUT)
 
         failure = json.loads((process.owner_root / "failure.json").read_bytes())
         lsp_process._validate_failure_record(
@@ -9738,7 +9740,7 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
     finally:
         release.set()
         for holder in holders:
-            holder.join(1)
+            holder.join(SHORT_TIMEOUT)
         _close_owned_process(process, coordinator)
     monkeypatch.setattr(
         lsp_process, "_GRACEFUL_CLEANUP_SECONDS", graceful_cleanup_seconds
@@ -9803,7 +9805,7 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
         assert lsp_process._queue_generation_failure(
             coordinator, generation, "injected persistent restart failure"
         )
-        assert first_cleanup.wait(1)
+        assert first_cleanup.wait(SHORT_TIMEOUT)
         # Retries are spaced by the recovery interval, so a fixed wait counts
         # how fast the machine is rather than how the retry behaves. Wait for
         # the second attempt instead, and bound the count by the time actually
@@ -9822,7 +9824,7 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
         assert (process.owner_root / "lease.json").is_file()
 
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         assert _coordinator_wait(
             process,
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
@@ -9831,7 +9833,7 @@ def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
         assert not (process.owner_root / "lease.json").exists()
     finally:
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         # The injected fault and the 0.02 s cleanup budget are the subject of
         # the test, not of its teardown. Undo them first, and tolerate the
         # background failure the coordinator already recorded — on a slow
@@ -9889,7 +9891,7 @@ def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(
         assert lsp_process._coordinator_has_ownership(coordinator)
 
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         process.close(time.monotonic() + 5)
 
         failure = json.loads((process.owner_root / "failure.json").read_bytes())
@@ -9905,7 +9907,7 @@ def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(
         assert not (process.owner_root / "lease.json").exists()
     finally:
         release.set()
-        holder.join(1)
+        holder.join(SHORT_TIMEOUT)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
 
@@ -9968,7 +9970,7 @@ def test_heartbeat_refreshes_lease_while_tree_cleanup_driver_is_blocked(
     coordinator.heartbeat_wake.set()
     cleanup = threading.Thread(target=fail_terminally)
     cleanup.start()
-    assert entered.wait(120), cleanup_errors
+    assert entered.wait(LONG_TIMEOUT), cleanup_errors
     _await_records(heartbeat_records, 2, 120)
     lsp_process._acquire_lease(coordinator, time.monotonic() + 1)
     try:
@@ -9988,7 +9990,7 @@ def test_heartbeat_refreshes_lease_while_tree_cleanup_driver_is_blocked(
         assert coordinator.cleanup_result.ownership_pending is True
     finally:
         release.set()
-        cleanup.join(2)
+        cleanup.join(SHORT_TIMEOUT)
         monkeypatch.setattr(lsp_process.ProcessTree, "terminate", terminate)
         monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", write_lease)
         process.close(time.monotonic() + 5)
@@ -10321,8 +10323,8 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
     )
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
     coordinator.heartbeat_wake.set()
-    assert attempted.wait(1)
-    heartbeat.join(2)
+    assert attempted.wait(SHORT_TIMEOUT)
+    heartbeat.join(SHORT_TIMEOUT)
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", real_write_lease)
     process.close(time.monotonic() + 5)
 

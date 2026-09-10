@@ -23,7 +23,7 @@ from markdown_transaction import (
 from project_journal import ProjectStore
 from reliable_memory import OperationalDatabaseContractError, sha256_bytes
 
-from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT, SHORT_TIMEOUT
 
 
 @pytest.fixture
@@ -1550,13 +1550,13 @@ def test_settle_rereads_terminal_state_after_concurrent_apply(
 
     def pause_before_conflict(*args, **kwargs):
         applying.set()
-        assert release.wait(timeout=10)
+        assert release.wait(timeout=SHORT_TIMEOUT)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(first, "_check_preconditions", pause_before_conflict)
     with ThreadPoolExecutor(max_workers=2) as pool:
         conflicting = pool.submit(first.apply, transaction.id)
-        assert applying.wait(timeout=10)
+        assert applying.wait(timeout=SHORT_TIMEOUT)
         settling = pool.submit(
             markdown_transaction._settle_operation,
             second,
@@ -1566,7 +1566,7 @@ def test_settle_rereads_terminal_state_after_concurrent_apply(
         release.set()
         with pytest.raises(markdown_transaction.TransactionFailure):
             conflicting.result(timeout=10)
-        settled = settling.result(timeout=10)
+        settled = settling.result(timeout=SHORT_TIMEOUT)
 
     assert settled is not None
     assert (settled.state, settled.error_code) == (

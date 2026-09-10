@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
 # handoff or waiting for the Markdown writer gate. A four-core hosted Windows
@@ -1717,7 +1719,7 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         holder = pool.submit(hold_writer)
-        assert held.wait(2)
+        assert held.wait(SHORT_TIMEOUT)
         started = time.perf_counter()
         result = integration_adapter.ingest_event(envelope)
         elapsed = time.perf_counter() - started
@@ -1775,7 +1777,7 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
     def hold_writer():
         with store.coordinator.writer_gate():
             held.set()
-            assert release_writer.wait(timeout=10)
+            assert release_writer.wait(timeout=SHORT_TIMEOUT)
 
     env = os.environ.copy()
     env["LLM_WIKI_ROOT"] = str(vault)
@@ -1795,7 +1797,7 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         holder = pool.submit(hold_writer)
-        assert held.wait(2)
+        assert held.wait(SHORT_TIMEOUT)
         try:
             result = subprocess.run(
                 command,
@@ -1811,7 +1813,7 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
             )
         finally:
             release_writer.set()
-        holder.result(timeout=5)
+        holder.result(timeout=SHORT_TIMEOUT)
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)

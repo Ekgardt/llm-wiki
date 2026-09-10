@@ -123,6 +123,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-04 — `tests/slow_machine.py` says no test carries a literal wait; 395 do
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`); the 36 negative bounds stay literal by design.
+
 - Rule: L3; L4 (Windows-runner flakes were the motivation, commit `9c88bbf`).
 - Evidence: `tests/slow_machine.py:10-11` ("Every wait comes from here; no
   test carries a literal"); grep `timeout=[0-9]|time.sleep([0-9]` over
@@ -145,6 +147,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 ## Medium
 
 ### OPS-05 — The Windows installer reports Claude settings as owned after the ownership transaction failed
+
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-the-installer-says-owned-only-after-the-transaction-committed.md`); verified at source level here (no pwsh), by the Windows installer job in CI.
 
 - Rule: L3; installer fail-closed claim.
 - Evidence: `install.ps1:387-409` (transaction failure is caught, a warning is

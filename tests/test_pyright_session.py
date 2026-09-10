@@ -57,6 +57,7 @@ from tests.code_kernel_helpers import (
     create_python_repository,
     create_semantic_pyright_fixture,
 )
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 @pytest.fixture
@@ -1992,7 +1993,7 @@ def test_keyboard_interrupt_resets_starting_and_notifies_waiting_start(
         calls += 1
         if calls == 1:
             entered.set()
-            assert release.wait(2)
+            assert release.wait(SHORT_TIMEOUT)
             raise KeyboardInterrupt("interrupted startup")
         return CapturedProcess()
 
@@ -2012,14 +2013,14 @@ def test_keyboard_interrupt_resets_starting_and_notifies_waiting_start(
     first = threading.Thread(target=first_start)
     second = threading.Thread(target=second_start)
     first.start()
-    assert entered.wait(1)
+    assert entered.wait(SHORT_TIMEOUT)
     second.start()
     try:
         time.sleep(0.05)
         assert second.is_alive()
         release.set()
-        first.join(3)
-        second.join(3)
+        first.join(SHORT_TIMEOUT)
+        second.join(SHORT_TIMEOUT)
         assert not first.is_alive()
         assert not second.is_alive()
         assert len(first_errors) == 1
@@ -2029,8 +2030,8 @@ def test_keyboard_interrupt_resets_starting_and_notifies_waiting_start(
         assert session._process is not None
     finally:
         release.set()
-        first.join(3)
-        second.join(3)
+        first.join(SHORT_TIMEOUT)
+        second.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -2051,7 +2052,7 @@ def test_concurrent_start_waits_for_process_publication(
     def delay_publication(*args: object, **kwargs: object) -> LspProcess:
         process = start_configured(*args, **kwargs)  # type: ignore[arg-type]
         bootstrap_finished.set()
-        assert publish_process.wait(5)
+        assert publish_process.wait(SHORT_TIMEOUT)
         return process
 
     def start_first() -> None:
@@ -2073,16 +2074,16 @@ def test_concurrent_start_waits_for_process_publication(
     first = threading.Thread(target=start_first)
     second = threading.Thread(target=start_second)
     first.start()
-    assert bootstrap_finished.wait(5), errors
+    assert bootstrap_finished.wait(SHORT_TIMEOUT), errors
     assert session.readiness == "protocol_initialized"
     second.start()
-    assert second_entered.wait(1)
+    assert second_entered.wait(SHORT_TIMEOUT)
     try:
         assert not second_finished.wait(0.1)
     finally:
         publish_process.set()
-        first.join(5)
-        second.join(5)
+        first.join(SHORT_TIMEOUT)
+        second.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
     assert not first.is_alive()
@@ -2758,7 +2759,7 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         args=(session, held, released, release_request),
     )
     holder.start()
-    assert held.wait(1)
+    assert held.wait(SHORT_TIMEOUT)
     before_state = (
         session._readiness,
         session._readiness_evidence,
@@ -2803,7 +2804,7 @@ def test_open_document_lock_contention_obeys_deadline_without_mutation(
         assert not (state_root / "run/lsp").exists()
     finally:
         release_request.set()
-        holder.join(30)
+        holder.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
@@ -2826,7 +2827,7 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         args=(session, held, released, release_request),
     )
     holder.start()
-    assert held.wait(1)
+    assert held.wait(SHORT_TIMEOUT)
     before_state = (
         session._readiness,
         session._readiness_evidence,
@@ -2868,7 +2869,7 @@ def test_synchronize_lock_contention_obeys_deadline_without_mutation(
         assert not (state_root / "run/lsp").exists()
     finally:
         release_request.set()
-        holder.join(30)
+        holder.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
 
@@ -4339,7 +4340,7 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
         assert session.readiness == "query_ready"
         assert time.monotonic() - observed < 0.1
         assert session.last_used_monotonic >= before
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         assert not thread.is_alive()
         assert errors == []
         assert len(results) == 1
@@ -4351,7 +4352,7 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
             session.definition(invalid, deadline=time.monotonic() + 5)
         assert session.active_operations == 0
     finally:
-        thread.join(5)
+        thread.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -4411,7 +4412,7 @@ def test_definition_drops_response_after_same_generation_document_change(
 
         worker = threading.Thread(target=query)
         worker.start()
-        assert response_ready.wait(5), errors
+        assert response_ready.wait(SHORT_TIMEOUT), errors
 
         (repository / "pkg/service.py").write_bytes(
             document.content + b"\nchanged = True\n"
@@ -4428,7 +4429,7 @@ def test_definition_drops_response_after_same_generation_document_change(
         assert session._generation_nonce == generation
 
         release_response.set()
-        worker.join(5)
+        worker.join(SHORT_TIMEOUT)
 
         assert not worker.is_alive()
         assert errors == []
@@ -4436,7 +4437,7 @@ def test_definition_drops_response_after_same_generation_document_change(
     finally:
         release_response.set()
         if worker is not None:
-            worker.join(5)
+            worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -4615,7 +4616,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
             name=f"pre-synchronize-{feature}",
         )
         first_worker.start()
-        assert first_response_ready.wait(5), errors
+        assert first_response_ready.wait(SHORT_TIMEOUT), errors
 
         (repository / "pkg/service.py").write_bytes(
             document.content + b"\nchanged = True\n"
@@ -4635,7 +4636,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
             name=f"synchronize-{feature}",
         )
         sync_worker.start()
-        assert wire_delivered.wait(5), errors
+        assert wire_delivered.wait(SHORT_TIMEOUT), errors
         assert session._documents[document.source.uri] is document
 
         during_worker = threading.Thread(
@@ -4644,19 +4645,19 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
             name=f"during-synchronize-{feature}",
         )
         during_worker.start()
-        assert during_done.wait(1), "semantic query waited for synchronize commit"
+        assert during_done.wait(SHORT_TIMEOUT), "semantic query waited for synchronize commit"
         assert errors == []
         not_ready = _synchronize_fence_not_ready(feature)
         assert during_results == [not_ready]
         assert semantic_requests == 1
 
         release_first_response.set()
-        assert first_done.wait(5), errors
+        assert first_done.wait(SHORT_TIMEOUT), errors
         assert first_results == [not_ready]
         assert semantic_requests == 1
 
         release_commit.set()
-        sync_worker.join(5)
+        sync_worker.join(SHORT_TIMEOUT)
         assert not sync_worker.is_alive()
         assert errors == []
         assert len(sync_results) == 1
@@ -4675,7 +4676,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
         release_commit.set()
         for worker in (first_worker, during_worker, sync_worker):
             if worker is not None:
-                worker.join(5)
+                worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -4738,7 +4739,7 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
 
         worker = threading.Thread(target=query)
         worker.start()
-        assert prepare_ready.wait(5), errors
+        assert prepare_ready.wait(SHORT_TIMEOUT), errors
 
         (repository / "pkg/service.py").write_bytes(
             document.content + b"\nchanged = True\n"
@@ -4749,7 +4750,7 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
         )
         session.synchronize(revision, deadline=time.monotonic() + 10)
         release_prepare.set()
-        worker.join(5)
+        worker.join(SHORT_TIMEOUT)
 
         assert not worker.is_alive()
         assert errors == []
@@ -4758,7 +4759,7 @@ def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
     finally:
         release_prepare.set()
         if worker is not None:
-            worker.join(5)
+            worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -4815,7 +4816,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
 
         worker = threading.Thread(target=query)
         worker.start()
-        assert response_ready.wait(5), errors
+        assert response_ready.wait(SHORT_TIMEOUT), errors
 
         process.restart(time.monotonic() + 10)
         assert session._process is process
@@ -4824,7 +4825,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
         assert session.readiness == "query_ready"
 
         release_response.set()
-        worker.join(5)
+        worker.join(SHORT_TIMEOUT)
 
         assert not worker.is_alive()
         assert errors == []
@@ -4832,7 +4833,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
     finally:
         release_response.set()
         if worker is not None:
-            worker.join(5)
+            worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -4885,7 +4886,7 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
 
         worker = threading.Thread(target=query, name="stale-diagnostics-wait")
         worker.start()
-        assert waiting.wait(1), errors
+        assert waiting.wait(SHORT_TIMEOUT), errors
 
         (repository / "pkg/service.py").write_bytes(
             document.content + b"\nchanged = True\n"
@@ -4896,12 +4897,12 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
         )
         session.synchronize(revision, deadline=time.monotonic() + 10)
 
-        assert done.wait(0.25), "diagnostics wait retained a replaced document"
+        assert done.wait(SHORT_TIMEOUT), "diagnostics wait retained a replaced document"
         assert errors == []
         assert results == [ProviderDiagnostics((), None, True)]
     finally:
         if worker is not None:
-            worker.join(2)
+            worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -5649,7 +5650,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
 
         worker = threading.Thread(target=synchronize)
         worker.start()
-        assert wire_entered.wait(5)
+        assert wire_entered.wait(SHORT_TIMEOUT)
         session._publish_diagnostics(
             {
                 "uri": service.source.uri,
@@ -5660,7 +5661,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
             }
         )
         release_wire.set()
-        worker.join(5)
+        worker.join(SHORT_TIMEOUT)
 
         assert not worker.is_alive()
         assert sync_errors == []
@@ -5674,7 +5675,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
     finally:
         release_wire.set()
         if worker is not None:
-            worker.join(5)
+            worker.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -6736,7 +6737,7 @@ def test_session_close_reserves_before_waiting_for_active_operation(
     def hold_operation() -> None:
         with session._operation():
             active.set()
-            assert release.wait(2)
+            assert release.wait(SHORT_TIMEOUT)
 
     def close_session() -> None:
         try:
@@ -6747,7 +6748,7 @@ def test_session_close_reserves_before_waiting_for_active_operation(
     operation = threading.Thread(target=hold_operation)
     closer = threading.Thread(target=close_session)
     operation.start()
-    assert active.wait(1)
+    assert active.wait(SHORT_TIMEOUT)
     closer.start()
     try:
         deadline = time.monotonic() + 1
@@ -6760,8 +6761,8 @@ def test_session_close_reserves_before_waiting_for_active_operation(
                 pytest.fail("operation started after close reservation")
     finally:
         release.set()
-        operation.join(2)
-        closer.join(2)
+        operation.join(SHORT_TIMEOUT)
+        closer.join(SHORT_TIMEOUT)
 
     assert not operation.is_alive()
     assert not closer.is_alive()
@@ -6844,7 +6845,7 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
 
     holder = threading.Thread(target=hold_state_lock)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(SHORT_TIMEOUT)
     started = time.monotonic()
     try:
         with pytest.raises(TimeoutError, match="state lock"):
@@ -6853,7 +6854,7 @@ def test_session_close_state_lock_wait_obeys_absolute_deadline(
         assert session._closed is False
     finally:
         release_request.set()
-        holder.join(30)
+        holder.join(SHORT_TIMEOUT)
         session.close(deadline=time.monotonic() + 30)
     assert not holder.is_alive()
     assert session._closed is True
@@ -7114,13 +7115,13 @@ def test_manager_global_lock_wait_obeys_absolute_deadline(
         manager._lock.acquire()
         try:
             held.set()
-            assert release.wait(2)
+            assert release.wait(SHORT_TIMEOUT)
         finally:
             manager._lock.release()
 
     holder = threading.Thread(target=hold_manager_lock)
     holder.start()
-    assert held.wait(1)
+    assert held.wait(SHORT_TIMEOUT)
     started = time.monotonic()
     try:
         with pytest.raises(TimeoutError, match="manager lock"):
@@ -7132,7 +7133,7 @@ def test_manager_global_lock_wait_obeys_absolute_deadline(
         assert time.monotonic() - started < 0.3
     finally:
         release.set()
-        holder.join(2)
+        holder.join(SHORT_TIMEOUT)
         manager.close_all(deadline=time.monotonic() + 2)
     assert not holder.is_alive()
 
@@ -7173,7 +7174,7 @@ def test_manager_get_rechecks_closed_after_per_key_wait(
 
     waiter = threading.Thread(target=get_waiting)
     waiter.start()
-    assert discovered.wait(1)
+    assert discovered.wait(SHORT_TIMEOUT)
     try:
         def close_manager() -> None:
             try:
@@ -7190,9 +7191,9 @@ def test_manager_get_rechecks_closed_after_per_key_wait(
     finally:
         key_lock_state.lock.release()
         manager._release_key_lock_reference(key, key_lock_state)
-        waiter.join(2)
+        waiter.join(SHORT_TIMEOUT)
         if closer.ident is not None:
-            closer.join(2)
+            closer.join(SHORT_TIMEOUT)
 
     assert not waiter.is_alive()
     assert not closer.is_alive()
@@ -7275,7 +7276,7 @@ def test_manager_close_all_waits_for_get_retained_before_per_key_lock(
     closer = threading.Thread(target=close_manager, name="retained-key-closer")
     try:
         getter.start()
-        assert reference_retained.wait(1)
+        assert reference_retained.wait(SHORT_TIMEOUT)
         with manager._lock:
             assert len(manager._key_locks) == 1
             assert next(iter(manager._key_locks.values())).references == 1
@@ -7283,13 +7284,13 @@ def test_manager_close_all_waits_for_get_retained_before_per_key_lock(
         closer.start()
         assert close_done.wait(0.2) is False
         release_get.set()
-        assert get_done.wait(2)
-        assert close_done.wait(2)
+        assert get_done.wait(SHORT_TIMEOUT)
+        assert close_done.wait(SHORT_TIMEOUT)
     finally:
         release_get.set()
-        getter.join(3)
+        getter.join(SHORT_TIMEOUT)
         if closer.ident is not None:
-            closer.join(3)
+            closer.join(SHORT_TIMEOUT)
         with manager._lock:
             manager._prune_key_locks_locked()
 
@@ -7349,7 +7350,7 @@ def test_manager_close_all_deadline_retains_key_reference_for_retry(
     reference_lock: threading.Lock | None = None
     try:
         getter.start()
-        assert key_acquired.wait(1)
+        assert key_acquired.wait(SHORT_TIMEOUT)
         with manager._lock:
             assert len(manager._key_locks) == 1
             state = next(iter(manager._key_locks.values()))
@@ -7357,7 +7358,7 @@ def test_manager_close_all_deadline_retains_key_reference_for_retry(
         reference_lock.acquire()
 
         closer.start()
-        assert close_done.wait(1)
+        assert close_done.wait(SHORT_TIMEOUT)
         assert len(close_errors) == 1
         assert isinstance(close_errors[0], TimeoutError)
         with manager._lock:
@@ -7365,7 +7366,7 @@ def test_manager_close_all_deadline_retains_key_reference_for_retry(
             assert state.references == 1
         release_get.set()
 
-        assert get_done.wait(0.2), "key reference release ignored its closed manager"
+        assert get_done.wait(SHORT_TIMEOUT), "key reference release ignored its closed manager"
         assert len(get_errors) == 1
         assert isinstance(get_errors[0], RuntimeError)
         assert "manager is closed" in str(get_errors[0])
@@ -7373,9 +7374,9 @@ def test_manager_close_all_deadline_retains_key_reference_for_retry(
         release_get.set()
         if reference_lock is not None and reference_lock.locked():
             reference_lock.release()
-        getter.join(2)
+        getter.join(SHORT_TIMEOUT)
         if closer.ident is not None:
-            closer.join(2)
+            closer.join(SHORT_TIMEOUT)
         manager.close_all(deadline=time.monotonic() + 2)
         with manager._lock:
             manager._prune_key_locks_locked()
@@ -7427,7 +7428,7 @@ def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters
     reference_lock: threading.Lock | None = None
     try:
         keeper.start()
-        assert keeper_entered.wait(1)
+        assert keeper_entered.wait(SHORT_TIMEOUT)
         with manager._lock:
             assert len(manager._key_locks) == 1
             state = next(iter(manager._key_locks.values()))
@@ -7451,8 +7452,8 @@ def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters
                 name=f"key-reference-contender-{index}",
             )
             contender.start()
-            assert done.wait(0.5), f"reference contender {index} exceeded its deadline"
-            contender.join(1)
+            assert done.wait(SHORT_TIMEOUT), f"reference contender {index} exceeded its deadline"
+            contender.join(SHORT_TIMEOUT)
             assert not contender.is_alive()
             assert len(errors) == 1
             assert isinstance(errors[0], TimeoutError)
@@ -7461,7 +7462,7 @@ def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters
         if reference_lock is not None and reference_lock.locked():
             reference_lock.release()
         release_keeper.set()
-        keeper.join(3)
+        keeper.join(SHORT_TIMEOUT)
         manager.close_all(deadline=time.monotonic() + 3)
 
     assert not keeper.is_alive()
@@ -7504,10 +7505,10 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
         acquire_key_lock(lock, deadline)
         if call == 1:
             first_acquired.set()
-            assert release_first.wait(3)
+            assert release_first.wait(SHORT_TIMEOUT)
         elif call == 2:
             second_acquired.set()
-            assert release_second.wait(3)
+            assert release_second.wait(SHORT_TIMEOUT)
 
     def get_session(*, third: bool = False) -> None:
         try:
@@ -7524,20 +7525,20 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
     third = threading.Thread(target=get_session, kwargs={"third": True})
     try:
         first.start()
-        assert first_acquired.wait(1)
+        assert first_acquired.wait(SHORT_TIMEOUT)
         second.start()
-        assert second_waiting.wait(1)
+        assert second_waiting.wait(SHORT_TIMEOUT)
         release_first.set()
-        first.join(2)
+        first.join(SHORT_TIMEOUT)
         assert not first.is_alive()
-        assert second_acquired.wait(1)
+        assert second_acquired.wait(SHORT_TIMEOUT)
 
         third.start()
-        assert third_waiting.wait(1)
+        assert third_waiting.wait(SHORT_TIMEOUT)
         assert third_done.wait(0.05) is False
         release_second.set()
-        second.join(2)
-        third.join(2)
+        second.join(SHORT_TIMEOUT)
+        third.join(SHORT_TIMEOUT)
 
         assert not second.is_alive()
         assert not third.is_alive()
@@ -7550,7 +7551,7 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
         release_second.set()
         for worker in (first, second, third):
             if worker.ident is not None:
-                worker.join(2)
+                worker.join(SHORT_TIMEOUT)
         manager.close_all(deadline=time.monotonic() + 2)
 
     assert manager._key_locks == {}
@@ -7620,7 +7621,7 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
         with monkeypatch.context() as patch:
             _patch_blocked_closes(patch, retained[:2], blocked_close)
             getters = _started_threads(get_new, scopes[4:])
-            assert all(event.wait(2) for event in close_entered)
+            assert all(event.wait(SHORT_TIMEOUT) for event in close_entered)
             _assert_evictions_reserved(manager, retained[:2])
             release_close.set()
             _join_all(getters)

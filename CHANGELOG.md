@@ -56,6 +56,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **One page ceiling for every reader of `knowledge/`.** The guardrails
+  snapshot, the compile after-image, the index rebuild and access telemetry
+  refused a page at 4 MiB, backlink repair at 512 KiB, while the journal,
+  claim tree, corpus and search accepted 8 MiB — the family of the journal
+  incident (audit M4). `bounded_io.MAX_KNOWLEDGE_PAGE_BYTES` is now the one
+  declaration and eleven readers alias it; a test holds them equal. Research:
+  `docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md`.
+- **The Windows installer says "owned" only after the transaction committed.**
+  A failed install-ownership transaction no longer prints
+  `Claude settings owned by the install transaction` or lists Claude Code as
+  active automatic (audit OPS-05). Research:
+  `docs/research/2026-09-10-the-installer-says-owned-only-after-the-transaction-committed.md`.
+- **A lost session record is written down.** `write_session_evidence`
+  still never raises, and a refused write now lands in the capture-failure
+  trail and counters with its reason and session (audit H5). Research:
+  `docs/research/2026-09-10-a-lost-session-record-is-written-down.md`.
+- **Every hang bound in the tests comes from one place.** 330 literal
+  bounds on `join`, `result`, `get` and `wait` across 26 test files now
+  name `SHORT_TIMEOUT` or `LONG_TIMEOUT` from `tests/slow_machine.py`; a
+  bound the test expects to elapse, or a pause whose result the test
+  discards, stays literal by design, and
+  `test_no_test_carries_a_literal_hang_bound` keeps the count at zero
+  (audit OPS-04). Research:
+  `docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.
 - **A compile lock lives as long as its process, not thirty minutes.** The
   legacy lock declared a live compile stale after 30 minutes, so the nightly
   ran lint, backlink repair and the index rebuild on top of it and the next

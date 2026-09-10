@@ -41,6 +41,7 @@ from reliable_memory import canonical_json_bytes, sha256_bytes
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_pyright_fixture
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 class _FakeNodeProcess:
@@ -3129,7 +3130,7 @@ def test_repeated_timed_out_real_node_probes_are_reaped_before_return(
         for process in processes:
             if process.poll() is None:
                 process.kill()
-                process.wait(timeout=5)
+                process.wait(timeout=SHORT_TIMEOUT)
 
     assert len(processes) == 3
     assert all(process.poll() is not None for process in processes)
