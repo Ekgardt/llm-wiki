@@ -96,6 +96,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A failing in-process step says why, not only its class.** The nightly's
+  health report, three doctor repair paths and the self-update reported a
+  failure as `RuntimeError` alone; they now report
+  `Class: redacted message` through one helper, and the tests assert the
+  message (audit OPS-09, the rest of OPS-17). Research:
+  `docs/research/2026-09-10-a-failing-step-says-why-not-only-its-class.md`.
 - **A stale lock is moved aside and checked before it is removed.** The
   three legacy lock stealers (`run/compile.pid`, `run/state.json.lock`, the
   legacy `run/maintenance.lock`) decided "stale" from one read and then

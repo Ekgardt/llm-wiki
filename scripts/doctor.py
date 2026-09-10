@@ -34,6 +34,7 @@ from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
 )
+from secret_redact import describe_error
 
 try:
     import tomllib as STDLIB_TOML
@@ -8541,7 +8542,7 @@ def _guarded_index_rebuild(guard: Any, context, index_lock: Path, lock_token) ->
         _rebuild_and_verify_index(guard, context)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("index", []).append(
-            f"Index repair failed: {type(exc).__name__}"
+            f"Index repair failed: {describe_error(exc)}"
         )
     finally:
         guard.cleanup(
@@ -8669,7 +8670,7 @@ def _release_unentered_maintenance(
         _release_maintenance_owner(*maintenance)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
-            f"Maintenance owner release failed: {type(exc).__name__}"
+            f"Maintenance owner release failed: {describe_error(exc)}"
         )
 
 
@@ -8693,7 +8694,7 @@ def _run_repairs(context: _RepairContext) -> None:
                 _repair_derived_actions(guard, context, queue_v2_ready)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
-            f"Repair failed: {type(exc).__name__}"
+            f"Repair failed: {describe_error(exc)}"
         )
     finally:
         _release_unentered_maintenance(maintenance, guard_entered, context)

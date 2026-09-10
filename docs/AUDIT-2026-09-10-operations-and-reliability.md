@@ -230,6 +230,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-09 — Several failures are reported as an exception class name and nothing else
 
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-failing-step-says-why-not-only-its-class.md`).
+
 - Rule: L3, L4 ("does every failing step say why").
 - Evidence: `scripts/scheduled_nightly.py:450-451` (`health report skipped:
   {type(exc).__name__}`); `scripts/doctor.py:8542-8545` (`Index repair failed:
@@ -371,7 +373,7 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-17 — Two tests assert the defect rather than the intent
 
-- Status: the maybe_compile assertion retargeted 2026-09-10 with OPS-01; the nightly health-line assertion and the end-to-end nightly test remain open.
+- Status: the maybe_compile assertion retargeted with OPS-01, the health-line assertion with OPS-09 (2026-09-10); the end-to-end nightly test with a failing subprocess step remains open.
 
 - Rule: L4 (tests that do not test what their name claims).
 - Evidence: `tests/test_maybe_compile.py:165-174` (alive PID plus old

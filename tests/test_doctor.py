@@ -1562,7 +1562,7 @@ def test_failed_index_repair_is_attributed_only_to_index(tmp_path, monkeypatch):
     index = _check(report, "index")
 
     assert index["status"] == "error"
-    assert index["details"]["repair_errors"] == ["Index repair failed: RuntimeError"]
+    assert index["details"]["repair_errors"] == ["Index repair failed: RuntimeError: failed"]
     assert "repair_errors" not in runtime["details"]
     assert "repair_errors" not in queue["details"]
 

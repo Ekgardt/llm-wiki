@@ -314,4 +314,4 @@ def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) ->
 
     scheduled_nightly._write_health_report(lines.append)
 
-    assert lines == ["  health report skipped: RuntimeError"]
+    assert lines == ["  health report skipped: RuntimeError: no"]

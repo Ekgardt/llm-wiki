@@ -251,6 +251,18 @@ def _redact_high_entropy(text: str) -> str:
     return out
 
 
+def describe_error(error: BaseException) -> str:
+    """`Class: redacted message` — what a log needs to act on a failure.
+
+    The class is the shape of the failure and the message the fact; a
+    class alone (`RuntimeError`) let nobody act (audit OPS-09,
+    docs/research/2026-09-10-a-failing-step-says-why-not-only-its-class.md).
+    """
+    message = redact_secrets(str(error)).strip()
+    name = type(error).__name__
+    return f"{name}: {message}" if message else name
+
+
 def redact_secrets(text: str) -> str:
     """Return text with common secret patterns replaced."""
     if not text or not isinstance(text, str):

@@ -50,6 +50,7 @@ from operational_ownership import (  # noqa: E402
     heartbeat_owner,
     release_marker_owner,
 )
+from secret_redact import describe_error  # noqa: E402
 
 # How long the nightly pass will spend rebuilding the evidence generation.
 # The interactive default is one minute, which is the right bound for a doctor
@@ -447,7 +448,7 @@ def _write_health_report(log) -> None:
         )
         log(f"  health: {report.get('overall_status', 'unknown')}")
     except Exception as exc:  # noqa: BLE001 - a report is never a reason to fail
-        log(f"  health report skipped: {type(exc).__name__}")
+        log(f"  health report skipped: {describe_error(exc)}")
 
 
 def _update_code(log) -> None:

@@ -133,3 +133,13 @@ def test_a_path_whose_entropy_comes_from_joining_words_is_left_alone():
 
     for shape, text in _URLS_THAT_ARE_NOT_SECRETS.items():
         assert redact_secrets(text) == text, shape
+
+
+def test_describe_error_names_the_class_and_the_redacted_message():
+    from secret_redact import describe_error
+
+    assert describe_error(RuntimeError("no")) == "RuntimeError: no"
+    assert describe_error(ValueError()) == "ValueError"
+    described = describe_error(OSError("token=sk-abcdefghijklmnopqrstuvwxyz012345 refused"))
+    assert described.startswith("OSError: token=[REDACTED")
+    assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in described
