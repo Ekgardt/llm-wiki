@@ -599,6 +599,32 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
+# ─── 8b. Reliability V3 adoption ───────────────────────────────────
+# Session capture writes through the V3 queue, and a vault that has not
+# adopted V3 refuses every capture with `legacy_protocol_unquiesced` (issue
+# #17). A fresh vault, or one whose legacy pair the check finds quiescent,
+# is adopted here; any other state is named with the command to run.
+
+info "Checking Reliability V3 adoption..."
+ADOPTION_STATE="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>/dev/null || echo unknown)"
+case "$ADOPTION_STATE" in
+  adopted) ok "Reliability V3 adopted" ;;
+  fresh|upgrade-required)
+    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >/dev/null 2>&1; then
+      ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
+    else
+      SYNC_WARNING=1
+      warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
+      warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+    fi
+    ;;
+  *)
+    SYNC_WARNING=1
+    warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
+    warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    ;;
+esac
+
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────
 
 info "Optional: install hybrid search (BM25 + vector + reranker)?"

@@ -25,6 +25,38 @@ GENEROUS_BUDGET_SECONDS = 120.0
 
 
 @pytest.fixture(autouse=True)
+def _test_vaults_count_as_adopted(monkeypatch):
+    """A hermetic vault here has no Reliability V3 records, so its capture check
+    would say "disabled until adoption" (issue #17) in every test about
+    something else. The one test about that message uses the real check.
+    """
+    import doctor
+
+    real = doctor._adoption_state
+    monkeypatch.setattr(doctor, "_adoption_state", lambda state_root: "adopted")
+    return real
+
+
+def test_a_vault_that_has_not_adopted_v3_says_capture_is_disabled_and_names_the_command(
+    tmp_path, monkeypatch, _test_vaults_count_as_adopted
+):
+    """Issue #17: every capture failed silently until the adoption was run by hand."""
+    import doctor
+    import time
+
+    root, state_root, _home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_adoption_state", _test_vaults_count_as_adopted)
+    monkeypatch.setattr("memory_state.ROOT", root)
+
+    result = doctor._capture_check(state_root, time.monotonic() + 30)
+
+    assert result["status"] == "degraded"
+    assert "Session capture is disabled" in result["message"]
+    assert "--adopt-ownership-v3" in result["message"]
+    assert result["details"]["adoption_state"] in {"fresh", "upgrade-required", "conflict", "unknown"}
+
+
+@pytest.fixture(autouse=True)
 def _budget_that_survives_a_slow_runner(monkeypatch):
     """Give every doctor run in this file enough time to reach its findings.
 

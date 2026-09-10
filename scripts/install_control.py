@@ -454,6 +454,7 @@ def profile_resource(
             PROFILE_START,
             f"export LLM_WIKI_ROOT={shlex.quote(str(Path(vault_root).resolve()))}".encode(),
             f"export LLM_WIKI_STATE_ROOT={shlex.quote(str(Path(state_root).resolve()))}".encode(),
+            *(f"export {key}={shlex.quote(value)}".encode() for key, value in _provider_items()),
             PROFILE_END,
         )
     )
@@ -505,6 +506,13 @@ def _scheduled_arguments(root: Path, uv_path: Path, kind: str) -> list[str]:
     ]
 
 
+def _provider_items() -> tuple[tuple[str, str], ...]:
+    """The provider variables the installing process carries, as ordered pairs (#22)."""
+    from integration_hook_config import provider_environment
+
+    return tuple(sorted(provider_environment().items()))
+
+
 def _launchd_calendar(kind: str) -> dict[str, int]:
     if kind == "nightly":
         return {"Hour": 3, "Minute": 0}
@@ -518,6 +526,7 @@ def _launchd_job(root: Path, state_root: Path, uv_path: Path, kind: str) -> byte
         "EnvironmentVariables": {
             "LLM_WIKI_ROOT": str(Path(root).resolve()),
             "LLM_WIKI_STATE_ROOT": str(Path(state_root).resolve()),
+            **dict(_provider_items()),
         },
         "Label": label,
         "ProcessType": "Background",
@@ -586,6 +595,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "Type=oneshot",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
+        *(f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in _provider_items()),
         f"Environment={_systemd_quote(f'PATH={_scheduled_path(uv_path)}')}",
         f"WorkingDirectory={_systemd_literal(str(Path(root).resolve()))}",
         f"ExecStart={arguments}",
@@ -1609,6 +1619,7 @@ def windows_environment_resources(
     values = (
         ("LLM_WIKI_ROOT", str(Path(root).resolve())),
         ("LLM_WIKI_STATE_ROOT", str(Path(state_root).resolve())),
+        *_provider_items(),
     )
     return [_environment_resource(name, value, read_value, write_value) for name, value in values]
 

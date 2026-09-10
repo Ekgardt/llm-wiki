@@ -175,8 +175,11 @@ state, including everything found and fixed during the audit week.
 - Added a nonmutating installed-vault Reliability V3 inspector and redacted CLI,
   deterministic fresh/upgrade cutover validation, retained byte-identical v2 evidence,
   tombstone and crash-resume checks, and read-only SQLite validation. Public apply/adoption
-  remains fail-closed with `reliability_v3_runtime_activation_incomplete` until compatible
-  v3 queue writers and canonical ownership are complete; no runtime state is deleted.
+  performs the offline v3 cutover on a fresh or quiescent vault (the earlier
+  `reliability_v3_runtime_activation_incomplete` refusal was lifted once the v3 queue
+  writers and canonical ownership landed); no runtime state is deleted. Since
+  2026-09-10 the installer runs it, because session capture is refused until it has
+  (issue #17).
 - Bounded Claude and Codex integration configuration backups to 10 files, 90 days,
   and 100 MiB per integration. Changed merges now verify a byte-exact sibling
   preimage before atomic publication, preserve the newest restore point, prune only

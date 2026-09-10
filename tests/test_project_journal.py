@@ -2079,6 +2079,32 @@ def test_a_generated_state_page_quotes_a_slug_that_would_parse_as_a_list() -> No
 
 def test_the_vault_root_is_never_a_project(vault: Path) -> None:
     """Issue #20: a hook run from the vault minted a project named after it."""
+    from session_start_project_state import _compute_slug
+
     with pytest.raises(ValueError, match="vault root is not a project"):
         _compute_slug(vault, vault / "knowledge/projects")
     assert _compute_slug(vault / "sub-project", vault / "knowledge/projects") == "sub-project"
+
+
+def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
+    vault: Path, state_root: Path
+) -> None:
+    """Issue #20: the journal is a projection of the store; the store rebuilds it."""
+    import shutil
+
+    store = ProjectStore(vault, state_root)
+    for index in range(1, 4):
+        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"rb:event-{index}"), "agent-a")
+    journal = vault / "knowledge/projects/demo/journal.md"
+    before = project_journal.parse_journal_events("demo", journal.read_bytes())
+    expected_state = store.render_state(before, _validated=True)
+    shutil.rmtree(vault / "knowledge/projects/demo")
+
+    report = store.rebuild_journal("demo")
+
+    rebuilt = project_journal.parse_journal_events("demo", journal.read_bytes())
+    assert [event["sequence"] for event in rebuilt] == [1, 2, 3]
+    assert report["events"] == 3 and report["last_sequence"] == 3
+    assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
+    store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
+    assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4

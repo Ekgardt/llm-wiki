@@ -202,10 +202,11 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 
 The repair command is read-only by default and reports fresh, upgrade-required,
 partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
-Mutating adoption is intentionally not activated yet: even with the offline apply
-flags, the backend fails closed with `reliability_v3_runtime_activation_incomplete`
-until the v3 queue writers and canonical ownership protocol are complete. It never
-deletes `run/`, knowledge, retired databases, legacy caches, or compatibility markers.
+With the offline apply flags (`--apply --adopt-ownership-v3
+--confirm-all-agents-stopped`) it performs the v3 cutover on a fresh or quiescent
+vault; the installer runs it, because session capture is refused until adoption
+has happened (issue #17). It never deletes `run/`, knowledge, retired databases,
+legacy caches, or compatibility markers.
 
 Optional extras are additive and preserve packages already selected by the operator:
 

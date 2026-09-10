@@ -4869,7 +4869,32 @@ def _capture_check(state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
+    adoption = _adoption_state(state_root)
+    details["adoption_state"] = adoption
+    if adoption not in {"adopted", "unknown"}:
+        return _result("capture", "degraded", _capture_disabled_message(adoption), details)
     return _capture_loss_result(lost, live, details)
+
+
+def _adoption_state(state_root: Path) -> str:
+    """The Reliability V3 adoption state, from the two records under run/, or unknown."""
+    from installed_memory_repair import inspect_installed_vault
+    from memory_state import ROOT
+
+    try:
+        report = inspect_installed_vault(root=ROOT, state_root=state_root)
+    except Exception:  # noqa: BLE001 - a health check never raises
+        return "unknown"
+    return str(report.get("details", {}).get("adoption_state") or "unknown")
+
+
+def _capture_disabled_message(adoption: str) -> str:
+    """Plain words for what issue #17 found buried in a failure log: no capture until adoption."""
+    return (
+        f"Session capture is disabled: Reliability V3 state is '{adoption}'. Run "
+        "uv run --locked --no-sync python scripts/repair_installed_memory.py "
+        "--apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+    )
 
 
 # The hook error trail nothing ever read. Measured 2026-08-29: 5 682 failures

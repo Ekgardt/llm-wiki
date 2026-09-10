@@ -206,9 +206,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 
 Команда repair по умолчанию работает только на чтение и сообщает о fresh,
 upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
-`run/`. Изменяющая adoption пока намеренно не активирована: даже с offline apply-флагами
-backend завершается fail-closed с `reliability_v3_runtime_activation_incomplete`, пока не
-готовы v3 queue writers и канонический ownership protocol. Команда никогда не удаляет
+`run/`. С offline apply-флагами (`--apply --adopt-ownership-v3
+--confirm-all-agents-stopped`) команда выполняет переход на v3 для свежего или
+неактивного хранилища; установщик делает это сам, потому что до перехода захват сессий
+отклоняется (issue #17). Команда никогда не удаляет
 `run/`, knowledge, retired databases, legacy caches или compatibility markers.
 
 Опциональные extras добавляются без удаления уже выбранных оператором пакетов:

@@ -376,7 +376,28 @@ class _HookFamily(NamedTuple):
     env_keys: tuple[str, ...] = ()
 
 
-CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT")
+CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
+# The provider and model chosen at install time, persisted wherever the code
+# runs unattended: the hooks' env block and the scheduler units. Issue #22: an
+# install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
+# auto-detect OpenCode and compile on a different account.
+PROVIDER_ENV_KEYS = ("MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
+
+
+# The test provider is never persisted: it exists so a suite can run without
+# a backend, and a hook that inherited it would answer every capture with a
+# canned string.
+_UNPERSISTED_PROVIDERS = frozenset({"fake"})
+
+
+def provider_environment() -> dict[str, str]:
+    """The provider variables set in the installing process, verbatim."""
+    import os
+
+    found = {key: os.environ.get(key, "").strip() for key in PROVIDER_ENV_KEYS}
+    if found.get("MEMORY_LLM_PROVIDER", "").casefold() in _UNPERSISTED_PROVIDERS:
+        return {}
+    return {key: value for key, value in found.items() if value}
 
 
 def _family_error(family: _HookFamily, suffix: str) -> InstallControlError:
@@ -688,6 +709,7 @@ def claude_settings_resource(
     env = {
         "LLM_WIKI_ROOT": str(_absolute_destination(vault_root)),
         "LLM_WIKI_STATE_ROOT": str(_absolute_destination(state_root)),
+        **provider_environment(),
     }
     return _hook_family_resource(
         resource_id="claude-user-settings",

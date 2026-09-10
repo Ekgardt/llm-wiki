@@ -197,10 +197,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 ```
 
 repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
-partial、adopted 或 conflicting 状态，并且不会创建 `run/`。变更性 adoption 目前有意
-未启用：即使提供完整 offline apply 参数，backend 也会以
-`reliability_v3_runtime_activation_incomplete` fail closed，直到 v3 queue writers 与
-canonical ownership protocol 完成。该命令绝不会删除 `run/`、knowledge、retired
+partial、adopted 或 conflicting 状态，并且不会创建 `run/`。提供 offline apply 参数
+（`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`）时，该命令会在全新或
+静止的 vault 上执行 v3 切换；安装程序会自动运行它，因为切换前会话捕获会被拒绝
+（issue #17）。该命令绝不会删除 `run/`、knowledge、retired
 databases、legacy caches 或 compatibility markers。
 
 可选 extras 以 additive 方式安装，并保留操作员已选择的包：
