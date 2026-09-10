@@ -2221,8 +2221,8 @@ def test_the_provider_and_model_chosen_at_install_travel_with_the_roots(tmp_path
 
     unit = install_control._systemd_service(tmp_path, tmp_path / "state", tmp_path / "uv", "nightly").decode()
 
-    assert "Environment=MEMORY_LLM_PROVIDER=claude" in unit
-    assert "Environment=MEMORY_CLAUDE_MODEL=claude-sonnet-5" in unit
+    assert 'Environment="MEMORY_LLM_PROVIDER=claude"' in unit
+    assert 'Environment="MEMORY_CLAUDE_MODEL=claude-sonnet-5"' in unit
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
     assert "MEMORY_LLM_PROVIDER" not in install_control._systemd_service(
         tmp_path, tmp_path / "state", tmp_path / "uv", "nightly"

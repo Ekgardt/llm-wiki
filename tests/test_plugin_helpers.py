@@ -554,7 +554,8 @@ def test_delegate_timeout_is_bounded_and_secret_free(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "integration_adapter: capture skipped\n"
+    assert captured.err.startswith("integration_adapter: capture skipped: ")
+    assert "secret" not in captured.err
 
 
 def test_failed_delegate_does_not_forward_valid_hook_json(monkeypatch, capsys):

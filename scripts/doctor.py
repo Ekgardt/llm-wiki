@@ -2888,7 +2888,7 @@ def _pyright_check(
     return _result(
         "pyright",
         "degraded",
-        "Pyright identity is degraded or mismatched.",
+        _pyright_degraded_message(codes),
         details,
     )
 
@@ -2897,6 +2897,12 @@ def _extend_unique(codes: list[str], extra) -> None:
     for code in extra:
         if code not in codes:
             codes.append(code)
+
+
+def _pyright_degraded_message(codes: list[str]) -> str:
+    """Name which lookup failed (issue #23): `node_major: null` alone said nothing."""
+    named = ", ".join(codes) if codes else "unspecified"
+    return f"Pyright identity is degraded or mismatched: {named}."
 
 
 def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> None:
@@ -4418,6 +4424,36 @@ def _require_positive_source_limit(max_sources: object) -> None:
         raise ValueError("max_sources must be a positive integer")
 
 
+def _quick_vector_state(state_root: Path) -> dict | None:
+    """The active generation's vector fields from its manifest, or None."""
+    from generation_catalog import GenerationCatalog
+
+    try:
+        active = GenerationCatalog(state_root).get_active() or {}
+        generation = str(active.get("generation_id") or "")
+        path = Path(state_root) / "cache" / "evidence-graph" / "generations" / generation / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a hint, never a failure
+        return None
+    return {key: manifest.get(key) for key in ("vector_state", "embedding_model_id", "vector_dimensions")}
+
+
+def _vector_hint(vector: dict | None) -> str:
+    if not vector or vector.get("vector_state") != "absent":
+        return ""
+    return " Vectors are absent: run `uv run python scripts/doctor.py --repair` after installing the semantic extra."
+
+
+def _vector_fields(vector: dict | None) -> dict:
+    if not vector:
+        return {}
+    return {
+        "vector_state": vector.get("vector_state") or "unknown",
+        "vector_model": vector.get("embedding_model_id"),
+        "vector_dimensions": vector.get("vector_dimensions"),
+    }
+
+
 def _generation_check(
     root: Path,
     state_root: Path,
@@ -4465,13 +4501,19 @@ def _generation_check(
             state,
         )
     except TimeoutError:
+        # The full check did not fit, but the active manifest is one small
+        # file: its vector state is reported regardless of the budget (issue
+        # #29 found "vector_state: unknown" hiding absent vectors for a day).
+        vector = _quick_vector_state(state_root)
         return _generation_result(
             "degraded",
-            "Evidence generation check was deferred by its time bound.",
+            "Evidence generation check was deferred by its time bound."
+            + _vector_hint(vector),
             catalog="valid",
-            budget_exhausted=True,
+            budget_exhausted=vector is None,
             partial=True,
             repairable=False,
+            **_vector_fields(vector),
         )
     except (
         KeyError,

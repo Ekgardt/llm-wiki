@@ -3102,6 +3102,22 @@ def _failed_operation(args: argparse.Namespace | None) -> str:
     return next(iter(named), getattr(args, "event", None) or "unknown")
 
 
+def _skip_reason(error: BaseException) -> str:
+    """The error's class, and its text only for our own refusals.
+
+    A provider timeout carries the command it ran; the allowlist refusal
+    carries a fixed sentence. The first must stay off stderr, the second is
+    what the operator needs to read (issue #23).
+    """
+    name = type(error).__name__
+    if isinstance(error, PermissionError):
+        return f"{name}: {error}"[:MAX_SKIP_REASON_CHARS]
+    return name
+
+
+MAX_SKIP_REASON_CHARS = 240
+
+
 def _record_cli_capture_failure(
     args: argparse.Namespace | None, error: BaseException
 ) -> None:
@@ -3145,7 +3161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = _run_cli_event(args)
     except (Exception, SystemExit) as error:  # noqa: BLE001
         _record_cli_capture_failure(args, error)
-        print("integration_adapter: capture skipped", file=sys.stderr)
+        # The reason on the hook's own stderr, not only in the failure log:
+        # issue #23 found "capture skipped" alone said nothing about the
+        # transcript allowlist that refused the path.
+        print(f"integration_adapter: capture skipped: {_skip_reason(error)}", file=sys.stderr)
         output = None
     if output is not None:
         print(json.dumps(output, ensure_ascii=False))

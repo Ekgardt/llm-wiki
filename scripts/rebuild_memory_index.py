@@ -316,10 +316,12 @@ def main() -> int:
     for _ in range(MAX_REBUILD_ATTEMPTS):
         plan = _rebuild_plan(repair_lineage)
         if plan is None:
+            print("rebuild_memory_index: knowledge/index.md is current")
             return 0
         operation_id, content, preconditions = plan
         try:
             mutate_knowledge(operation_id, {out: content}, preconditions=preconditions)
+            print(f"rebuild_memory_index: knowledge/index.md rebuilt ({len(content)} bytes)")
             return 0
         except TransactionDriftError as exc:
             repair_lineage = exc.transaction_id

@@ -90,8 +90,8 @@ def test_readmes_share_locked_install_and_read_only_repair_commands():
     for path, text in _readmes():
         for command in SHARED_COMMANDS:
             assert command in text, f"{path.name}: missing shared command {command!r}"
-        assert "reliability_v3_runtime_activation_incomplete" in text, (
-            f"{path.name}: must state that mutating v3 adoption is not activated"
+        assert "--adopt-ownership-v3" in text, (
+            f"{path.name}: must name the v3 adoption command the installer runs (issue #17)"
         )
 
 

@@ -41,8 +41,9 @@ def test_a_vault_that_has_not_adopted_v3_says_capture_is_disabled_and_names_the_
     tmp_path, monkeypatch, _test_vaults_count_as_adopted
 ):
     """Issue #17: every capture failed silently until the adoption was run by hand."""
-    import doctor
     import time
+
+    import doctor
 
     root, state_root, _home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_adoption_state", _test_vaults_count_as_adopted)

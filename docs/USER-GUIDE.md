@@ -548,9 +548,12 @@ uv sync --extra semantic
 ```
 
 This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
-Embeddings are cached in `cache/vectors.npy` with metadata in
-`cache/vectors_meta.json` (both gitignored) and rebuilt automatically when
-pages change.
+Vectors live inside the active evidence generation
+(`cache/evidence-graph/generations/<id>/`, beside its search index), and
+are built by a generation refresh — the nightly maintenance pass, or
+`uv run python scripts/doctor.py --repair` — not at install and not when a
+page changes. Until a refresh has run with the model installed, `doctor`
+reports `vector_state: absent` and search stays lexical. (Issue #29.)
 
 ---
 

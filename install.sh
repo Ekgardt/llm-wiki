@@ -539,7 +539,7 @@ if command -v codex &>/dev/null; then
       warn "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed."
       ;;
     *)
-      warn "Codex hooks were not changed; review the existing hooks configuration manually."
+      warn "Codex hooks were not changed: the existing $CODEX_HOOKS state is '${CODEX_HOOKS_STATE}'. Compare it with integrations/codex/hooks.json and merge the LLM-Wiki entries by hand, then open /hooks in Codex to trust them."
       ;;
   esac
   if [ "$CODEX_MCP_READY" -eq 1 ] && [ "$CODEX_HOOKS_READY" -eq 1 ]; then

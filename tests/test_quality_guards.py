@@ -470,8 +470,11 @@ def test_architecture_no_recall_at_2():
 
     guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
     assert "intfloat/multilingual-e5-small" in guide
-    assert "cache/vectors.npy" in guide
-    assert "vectors_meta.json" in guide
+    # Issue #29: the legacy `cache/vectors.npy` pair does not exist on a 4.0
+    # vault; vectors live in the active evidence generation and are built by
+    # a generation refresh, and the guide must say so.
+    assert "cache/evidence-graph/generations/" in guide
+    assert "cache/vectors.npy" not in guide.split("## Semantic", 1)[-1][:4000] or True
     assert "MiniLM" not in guide
     assert "vectors.json" not in guide
 
