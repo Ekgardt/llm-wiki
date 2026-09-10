@@ -2858,3 +2858,42 @@ def test_status_says_when_there_is_no_generation(monkeypatch, capsys):
     assert capsys.readouterr().out.splitlines()[0] == (
         "Active generation: none (search falls back to the legacy index)"
     )
+
+
+class TestASilentFallbackNamesItsCause:
+    """Audit M5/M6: a vector or generation stage that raises records why."""
+
+    def test_an_encode_that_raises_is_named(self, monkeypatch, capsys):
+        import search_memory
+
+        class _Broken:
+            def encode(self, *_a, **_k):
+                raise RuntimeError("tokenizer exploded")
+
+        monkeypatch.setattr(search_memory, "_get_embedder", lambda: _Broken())
+        search_memory._DEGRADATIONS.clear()
+
+        assert search_memory._embed_texts(["a question"]) is None
+
+        assert search_memory.degradation_reasons() == {
+            "vector_encode": "RuntimeError: tokenizer exploded"
+        }
+        assert "vector_encode degraded — RuntimeError: tokenizer exploded" in capsys.readouterr().err
+
+    def test_an_unreadable_catalog_is_named(self, monkeypatch):
+        import retrieval
+        import search_memory
+
+        class _Catalog:
+            def get_active_for_repository(self, *_a, **_k):
+                raise ValueError("catalog.sqlite3: file is not a database")
+
+        search_memory._DEGRADATIONS.clear()
+        answer = retrieval._active_manifest_for(
+            _Catalog(), search_memory, deadline=None, cancelled=None, stop={}
+        )
+
+        assert answer is None
+        assert search_memory.degradation_reasons()["generation_manifest"].startswith(
+            "ValueError: catalog.sqlite3"
+        )

@@ -2859,12 +2859,19 @@ def _generation_dense_hits(
         )
     except (GenerationSealChanged, TimeoutError):
         raise
-    except Exception:  # noqa: BLE001 - unreadable vectors degrade one signal
+    except Exception as exc:  # noqa: BLE001 - unreadable vectors degrade one signal
+        _note_degradation("generation_vectors", exc)
         require_seal()
         context["dense_fallback"] = "generation_vectors_unavailable"
         return None
     finally:
         _close_quietly(owned)
+
+
+def _note_degradation(kind: str, error: BaseException) -> None:
+    import search_memory
+
+    search_memory.note_degradation(kind, error)
 
 
 def _close_quietly(handle: Any) -> None:
@@ -3802,7 +3809,8 @@ def _active_manifest_for(
         manifest = catalog.get_active_for_repository(scope, **stop)
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - no usable generation is not an error
+    except Exception as exc:  # noqa: BLE001 - no usable generation is not an error
+        search_memory.note_degradation("generation_manifest", exc)
         return None
     if not isinstance(manifest, dict):
         return None
@@ -3836,7 +3844,8 @@ def _generation_lexical_or_raise(
         raise
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - the label reaches the trace, the cause the log
+        _note_degradation("generation_lexical", exc)
         note("generation_corrupt")
         raise GenerationSealChanged
 
@@ -4062,7 +4071,8 @@ def retrieve_via_search_memory(
         except TimeoutError:
             _drop_generation_connection(generation_ctx, connection)
             raise
-        except Exception:  # noqa: BLE001 - an unusable graph drops the generation
+        except Exception as exc:  # noqa: BLE001 - an unusable graph drops the generation
+            _note_degradation("generation_graph", exc)
             _drop_generation_connection(generation_ctx, connection)
             generation_ctx["graph"] = None
             return False

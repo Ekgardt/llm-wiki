@@ -191,6 +191,29 @@ def _embedder_failure_kind(exc: BaseException) -> str:
     return "load_failed"
 
 
+# One reason per kind of degraded retrieval stage, said once on stderr and
+# readable by the health resource; the model-load reason above was the first
+# of these. Research: docs/research/2026-09-10-a-silent-fallback-names-its-cause.md
+_DEGRADATIONS: dict[str, str] = {}
+_degradations_announced: set[str] = set()
+
+
+def note_degradation(kind: str, error: BaseException) -> None:
+    """Record why a retrieval stage fell back, as `Class: redacted message`."""
+    from secret_redact import describe_error
+
+    reason = describe_error(error)[:EMBEDDER_REASON_MAX_CHARS]
+    _DEGRADATIONS[kind] = reason
+    if kind in _degradations_announced:
+        return
+    _degradations_announced.add(kind)
+    print(f"search_memory: {kind} degraded — {reason}", file=sys.stderr)
+
+
+def degradation_reasons() -> dict[str, str]:
+    return dict(_DEGRADATIONS)
+
+
 def _note_embedder_unavailable(kind: str, detail: str) -> None:
     """Record why there is no dense signal, and say it once, not per call."""
     global _embedder_unavailable_reason
@@ -1273,7 +1296,8 @@ def _embed_texts(
         return vectors.tolist()
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_encode", exc)
         return None
 
 
@@ -5044,7 +5068,8 @@ def _cached_vectors(
         return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_cache", exc)
         return None
 
 
@@ -5165,7 +5190,8 @@ def _encoded_page_vectors(
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_encode", exc)
         return None
     if not _usable_vector_block(vectors, len(texts)):
         return None
@@ -5205,7 +5231,8 @@ def _persisted_vector_metadata(vectors, live: dict) -> dict | None:
         )
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_persist", exc)
         return None
     return metadata
 

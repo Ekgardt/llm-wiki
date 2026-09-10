@@ -1114,7 +1114,15 @@ def _vault_status(*, deadline: float | None = None) -> dict:
         "last_compile_status": state.get("last_compile_status", "unknown"),
         "compile_backlog": _compile_backlog(ROOT, file_hash, compiled, deadline),
         "warmup": warmup_state(),
+        "retrieval_degradations": _retrieval_degradations(),
     }
+
+
+def _retrieval_degradations() -> dict[str, str]:
+    """Why a retrieval stage fell back in this process, by kind (audit M5/M6)."""
+    from search_memory import degradation_reasons
+
+    return degradation_reasons()
 
 
 def _daily_files(root: Path) -> list[Path]:

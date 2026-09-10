@@ -96,6 +96,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A silent fallback names its cause.** An encode that raised, a corrupt
+  `vectors.npy` or catalog, an unusable graph all looked like "no vectors
+  yet"; the eight sites now record `Class: redacted message` by kind
+  (`search_memory.degradation_reasons()`), say it once on stderr, and the
+  health resource carries `retrieval_degradations` (audit M5, M6). Research:
+  `docs/research/2026-09-10-a-silent-fallback-names-its-cause.md`.
 - **A page that cannot be flushed is named.** `access_tracking.py` was the
   one module under `scripts/` the complexity gate refused (four functions
   up to CCN 15, six bare excepts); a page whose frontmatter export failed

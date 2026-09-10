@@ -196,6 +196,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   reader of `knowledge/`; test that the constants are equal.
 
 ### M5 — Vector encoding failures are swallowed with no reason, unlike the model load [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-silent-fallback-names-its-cause.md`).
 - Rule: R3/R4 (the fix in `_get_embedder` was not carried through).
 - Evidence: `scripts/search_memory.py:1274-1277` (`_embed_texts`),
   `6063-6066` (`_encoded_page_vectors`), `5942-5945` (`_cached_vectors`),
@@ -209,6 +210,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   reason recording.
 
 ### M6 — Corrupt catalog or vectors artifacts degrade with a label and no diagnostic [defect]
+- Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-silent-fallback-names-its-cause.md`).
 - Rule: R4 (doctor blind), contract "silent fallback".
 - Evidence: `scripts/retrieval.py:3803-3806` (`_active_manifest_for`,
   any exception → `None` → `generation_unavailable`), `2860-2865`
