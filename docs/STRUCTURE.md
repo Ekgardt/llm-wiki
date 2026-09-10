@@ -307,9 +307,16 @@ canonical admission registry. Queue workers project the same token and epoch int
 `queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
 Expiry permits takeover only with positive process-death proof; unknown liveness
 blocks.
-Legacy `compile.pid` and `maintenance.lock` remain compatibility evidence and
-deletion blockers until a separately approved installed-vault migration removes
-them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
+Since 2026-09-10 the nightly and weekly passes take the `nightly`/`weekly`
+lease through the adopted coordinator's registry (`acquire_scheduled_owner`),
+refresh it with a heartbeat, stop between steps when the fence is lost, and
+record that loss instead of success; `run/maintenance.lock` left by a dead
+owner is reclaimed only with the registry's proof, never by age
+(`knowledge/notes/nightly-takes-the-canonical-fence-decision.md`). On a vault
+without a V3 coordinator the legacy PID marker remains the only fence, and
+`compile.pid` stays the compile's legacy lock: both remain compatibility
+evidence and deletion blockers until a separately approved installed-vault
+migration removes them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
 replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
 adoption disables v3 mutation and requires the vault to remain offline. After complete
 adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor

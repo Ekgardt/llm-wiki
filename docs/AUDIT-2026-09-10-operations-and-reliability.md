@@ -68,6 +68,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-02 — The production nightly never takes the canonical fence; the lease plumbing it carries is dead
 
+- Status: fixed 2026-09-10 with OPS-03 (owner's yes; `knowledge/notes/nightly-takes-the-canonical-fence-decision.md`).
+
 - Rule: C (one canonical fenced admission registry; `run/` deletion contract
   protects live maintenance owners); L4; owner's "no shortcuts, use the
   mechanism".
@@ -98,6 +100,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
   fallback are removed and the contract text is corrected.
 
 ### OPS-03 — A lost owner fence is invisible to the body until it exits, and success is recorded before the loss surfaces
+
+- Status: fixed 2026-09-10 with OPS-02.
 
 - Rule: C (fail-closed), L4.
 - Evidence: `scripts/operational_ownership.py:1414-1444` (`heartbeat_owner`:

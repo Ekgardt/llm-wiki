@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scheduled_nightly  # noqa: E402
-from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
 from memory_state import REPORTS_DIR, ROOT  # noqa: E402
 from operational_ownership import (  # noqa: E402
@@ -80,15 +80,9 @@ def _require_weekly_owner(ownership: OwnerLease | None) -> None:
         raise ValueError("weekly work requires a weekly global owner")
 
 
-def _step_runner(ownership: OwnerLease | None):
-    """Run one subprocess step, carrying the lease when the helper takes one."""
-
-    def run_step(command, log, name, *, timeout):
-        if ownership is not None and scheduled_nightly._accepts_ownership(_run_step):
-            return _run_step(command, log, name, timeout=timeout, ownership=ownership)
-        return _run_step(command, log, name, timeout=timeout)
-
-    return run_step
+def _step_runner(fence: threading.Event | None):
+    """Run one subprocess step; a lost fence stops the pass before the next."""
+    return scheduled_nightly._fenced_step_runner(fence)
 
 
 def _logger(log_file: Path):
@@ -151,9 +145,11 @@ def _build_tiers(log) -> None:
         log(f"  tiers: failed ({error}) — skipping")
 
 
-def _run_weekly_body(*, ownership: OwnerLease | None) -> int:
+def _run_weekly_body(
+    *, ownership: OwnerLease | None, fence: threading.Event | None = None
+) -> int:
     _require_weekly_owner(ownership)
-    run_step = _step_runner(ownership)
+    run_step = _step_runner(fence)
     today = datetime.now().strftime("%Y-%m-%d")
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     log = _logger(REPORTS_DIR / f"weekly-{today}.md")
@@ -161,7 +157,7 @@ def _run_weekly_body(*, ownership: OwnerLease | None) -> int:
     log(f"=== Weekly deep maintenance — {today} ===")
     _wait_for_compile_idle(log)
     log("Step 1: work queue + compile + structural lint...")
-    failures = int(bool(scheduled_nightly.run_nightly(ownership=ownership)))
+    failures = int(bool(scheduled_nightly.run_nightly(ownership=ownership, fence=fence)))
     failures += _run_script_steps(run_step, log)
     failures += _run_contradictions(run_step, log)
     _reflect(log)
@@ -170,22 +166,32 @@ def _run_weekly_body(*, ownership: OwnerLease | None) -> int:
     return 1 if failures else 0
 
 
-def run_weekly(*, ownership: OwnerLease | None) -> int:
+def run_weekly(
+    *, ownership: OwnerLease | None, registry: object | None = None
+) -> int:
     if ownership is None:
         return _run_weekly_body(ownership=None)
-    with heartbeat_owner(ownership):
-        return _run_weekly_body(ownership=ownership)
+    lost = threading.Event()
+    with heartbeat_owner(ownership, registry=registry, lost=lost):
+        return _run_weekly_body(ownership=ownership, fence=lost)
 
 
 def main() -> int:
-    marker = scheduled_nightly._acquire_legacy_maintenance_marker()
-    if marker is None:
+    """The weekly fence: canonical on an adopted vault, the legacy marker otherwise."""
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        fence = scheduled_nightly.take_scheduled_fence("weekly")
+    except OperationalOwnershipError as exc:
+        print(f"scheduled_weekly: maintenance already running ({exc.code}), skipping.", file=sys.stderr)
+        return 0
+    if fence is None:
         print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
         return 0
     try:
-        return run_weekly(ownership=None)
+        return run_weekly(ownership=fence.lease, registry=fence.registry)
     finally:
-        scheduled_nightly._release_legacy_maintenance_marker(marker)
+        fence.release()
 
 
 if __name__ == "__main__":

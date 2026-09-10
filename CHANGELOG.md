@@ -53,6 +53,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The nightly and weekly passes take the canonical fence.** On an adopted
+  vault they hold the registry's `nightly`/`weekly` lease with a heartbeat,
+  so the doctor and the `run/` deletion contract see a running pass; a lost
+  fence stops the pass before its next step and is recorded as
+  `owner_fence_lost` instead of success; a marker a dead owner left behind
+  is reclaimed only with the registry's proof (expired lease and a provably
+  dead process, or an ownerless marker naming a PID that no longer exists),
+  never by age. A vault without a V3 coordinator keeps the legacy marker. The
+  `inspect.signature` ownership plumbing that no step ever received is gone
+  (audit OPS-02, OPS-03; owner's yes 2026-09-10). Decision:
+  `knowledge/notes/nightly-takes-the-canonical-fence-decision.md`; research:
+  `docs/research/2026-09-10-the-nightly-and-the-fence-it-never-takes.md`.
 - **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`
   at its matrix-pinned revision is the product default when the environment
   names no reranker (`LLMWIKI_RERANKER_MODEL=off` switches it off), it

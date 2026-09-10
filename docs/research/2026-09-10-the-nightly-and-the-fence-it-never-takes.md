@@ -1,10 +1,13 @@
 # The nightly and the fence it never takes
 
-Date: 2026-09-10. Trigger: audit findings OPS-02 and OPS-03. This note is a
-proposal; it changes no code. The change it describes touches the ownership
-control plane the owner approved on 2026-08-15 and 2026-08-27, so it waits
-for the owner's yes (CLAUDE.md, "Architecture changes require explicit
-sign-off").
+Date: 2026-09-10. Trigger: audit findings OPS-02 and OPS-03. Written as a
+proposal; the owner said yes the same evening («хорошо делай»), and the
+proposal below was implemented as stated, plus the marker reclaim it
+required (`OwnershipRegistry.reclaim_dead_marker_owner`). Decision page:
+`knowledge/notes/nightly-takes-the-canonical-fence-decision.md`. The change
+touches the ownership control plane the owner approved on 2026-08-15 and
+2026-08-27, which is why it needed the yes (CLAUDE.md, "Architecture
+changes require explicit sign-off").
 
 ## What is true today (2026-09-10)
 
@@ -70,10 +73,11 @@ sign-off").
 4. The `inspect.signature` plumbing goes: steps that need the lease take it
    explicitly, the rest take none.
 
-Files this would touch: `scripts/scheduled_nightly.py`,
-`scripts/scheduled_weekly.py`, `scripts/operational_ownership.py`,
-`tests/test_scheduled_nightly.py`, `tests/test_operational_ownership.py`,
-`docs/STRUCTURE.md`, and a decision page under `knowledge/notes/`.
+Files: `scripts/scheduled_nightly.py`, `scripts/scheduled_weekly.py`,
+`scripts/operational_ownership.py`, `tests/test_scheduled_fence.py`,
+`tests/test_scheduled_weekly.py`, `docs/STRUCTURE.md`, `CHANGELOG.md`,
+`docs/ISSUES-2026-09-10.md`, `docs/AUDIT-2026-09-10-operations-and-reliability.md`,
+and the decision page under `knowledge/notes/`.
 
 ## What is not settled
 

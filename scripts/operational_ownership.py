@@ -1011,6 +1011,38 @@ class OwnershipRegistry:
         """
         return self._expired_owner_is_dead(row, _as_utc(self._clock()))
 
+    def reclaim_dead_marker_owner(
+        self, role: OwnerRole, *, scope: str, relative_path: str
+    ) -> str:
+        """Release the marker a dead owner left behind, with the registry's proof.
+
+        A row for (role, scope) is reclaimed only when its lease lapsed and its
+        process is provably dead, and only while the file still matches what
+        the row recorded; a marker with no row is removed only when the PID it
+        names no longer exists. A live owner refuses by name. No age is read.
+        Decision: knowledge/notes/nightly-takes-the-canonical-fence-decision.md
+        """
+        selected_role = _validate_role(role)
+        with contextlib.closing(self._connect()) as database, begin_immediate(database):
+            row = database.execute(
+                "SELECT * FROM maintenance_owners WHERE role=? AND scope=?",
+                (selected_role, scope),
+            ).fetchone()
+            if row is None:
+                return self._remove_orphan_marker(relative_path)
+            _require_marker_path_of_row(row, relative_path)
+            self._reclaim_or_refuse(database, row, _as_utc(self._clock()), "owner_busy")
+            _remove_marker_file(self.state_root / relative_path)
+            return "reclaimed"
+
+    def _remove_orphan_marker(self, relative_path: str) -> str:
+        path = self.state_root / relative_path
+        pid = _marker_pid(path, self.state_root)
+        if _pid_exists(pid):
+            raise OperationalOwnershipError("owner_busy")
+        _remove_marker_file(path)
+        return "orphan_removed"
+
     def acquire(
         self,
         role: OwnerRole,
@@ -1319,6 +1351,60 @@ def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> Mar
     )
 
 
+def _require_marker_path_of_row(row: sqlite3.Row, relative_path: str) -> None:
+    marker = _marker_from_row(row)
+    if marker is None or marker.relative_path != relative_path:
+        raise OperationalOwnershipError("marker_identity_invalid")
+
+
+def _marker_pid(path: Path, state_root: Path) -> int:
+    """The PID an ownerless marker names; anything else refuses by name."""
+    try:
+        payload = read_runtime_bytes(
+            path, state_root, max_bytes=_MAX_MARKER_BYTES, owner_only=False
+        )
+        return int(payload.splitlines()[0].decode("ascii").strip())
+    except (OSError, ValueError, IndexError, UnicodeDecodeError) as exc:
+        raise OperationalOwnershipError("marker_identity_invalid") from exc
+
+
+def _pid_exists(pid: int) -> bool:
+    """Whether a process with this PID exists; doubt refuses by name."""
+    try:
+        return process_start_identity(pid) is not None
+    except (OSError, PermissionError) as exc:
+        raise OperationalOwnershipError("owner_liveness_unknown") from exc
+
+
+def _remove_marker_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise OperationalOwnershipError("marker_not_removed") from exc
+
+
+def _publish_marker_reclaiming(
+    state_root: Path,
+    relative_path: str,
+    payload: bytes,
+    *,
+    registry: OwnershipRegistry,
+    role: OwnerRole,
+    scope: str,
+) -> MarkerIdentity:
+    """Publish a marker; a marker left by a dead owner is reclaimed first."""
+    try:
+        return _publish_marker(state_root, relative_path, payload)
+    except FileExistsError:
+        registry.reclaim_dead_marker_owner(role, scope=scope, relative_path=relative_path)
+    try:
+        return _publish_marker(state_root, relative_path, payload)
+    except FileExistsError as exc:
+        raise OperationalOwnershipError("owner_busy") from exc
+
+
 def _remove_exact_marker(state_root: Path, marker: MarkerIdentity) -> None:
     path = Path(state_root) / marker.relative_path
     try:
@@ -1335,6 +1421,20 @@ def _remove_exact_marker(state_root: Path, marker: MarkerIdentity) -> None:
     ):
         raise OperationalOwnershipError("marker_identity_invalid")
     path.unlink()
+
+
+def adopted_ownership_registry(vault: Path, state_root: Path) -> OwnershipRegistry | None:
+    """The adopted coordinator's registry, or None on a vault without V3 adoption.
+
+    The same rule the doctor applies: an adopted vault holds its owners in the
+    active `markdown-transactions-v3.sqlite3`, not in the pre-adoption candidate.
+    """
+    coordinator = markdown_transaction.active_or_legacy_coordinator(
+        Path(vault), Path(state_root)
+    )
+    if getattr(coordinator, "_database_contract", None) is None:
+        return None
+    return coordinator._ownership_registry()  # noqa: SLF001 - the coordinator's own rule
 
 
 def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdentity]:
@@ -1361,16 +1461,32 @@ def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdenti
 
 
 def acquire_scheduled_owner(
-    role: Literal["nightly", "weekly"], *, state_root: Path
+    role: Literal["nightly", "weekly"],
+    *,
+    state_root: Path,
+    registry: OwnershipRegistry | None = None,
 ) -> tuple[OwnerLease, MarkerIdentity]:
+    """Take the nightly or weekly fence; `registry` is the adopted vault's own.
+
+    Without one the candidate database is used, as before adoption. A marker
+    a dead owner left behind is reclaimed with the registry's proof first.
+    """
     if role not in {"nightly", "weekly"}:
         raise ValueError("scheduled owner role must be nightly or weekly")
     now = utc_now().replace(microsecond=0)
     actor_id = ownership_actor_identity(role, "global")
     token = secrets.token_hex(16)
     payload = str(os.getpid()).encode("ascii")
-    marker = _publish_marker(Path(state_root), "run/maintenance.lock", payload)
-    registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+    if registry is None:
+        registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+    marker = _publish_marker_reclaiming(
+        Path(state_root),
+        "run/maintenance.lock",
+        payload,
+        registry=registry,
+        role=role,
+        scope="global",
+    )
     try:
         lease = registry.acquire(
             role,
@@ -1412,8 +1528,20 @@ def _require_heartbeat_finished(
 
 
 @contextlib.contextmanager
-def heartbeat_owner(lease: OwnerLease) -> Iterator[OwnerLease]:
-    registry = OwnershipRegistry(Path(lease.state_root))
+def heartbeat_owner(
+    lease: OwnerLease,
+    *,
+    registry: OwnershipRegistry | None = None,
+    lost: threading.Event | None = None,
+) -> Iterator[OwnerLease]:
+    """Refresh the lease until the body returns.
+
+    `lost` is set the moment a refresh fails, so a body that checks it between
+    steps stops while the loss is fresh instead of learning of it in `finally`
+    (client-go's `OnStoppedLeading`; the doctor's own heartbeat does the same).
+    """
+    if registry is None:
+        registry = OwnershipRegistry(Path(lease.state_root))
     stop = threading.Event()
     failure: list[BaseException] = []
 
@@ -1424,6 +1552,7 @@ def heartbeat_owner(lease: OwnerLease) -> Iterator[OwnerLease]:
                 current = registry.heartbeat(current)
             except BaseException as exc:
                 failure.append(exc)
+                _signal_lost(lost)
                 return
 
     thread = threading.Thread(
@@ -1444,8 +1573,16 @@ def heartbeat_owner(lease: OwnerLease) -> Iterator[OwnerLease]:
         _require_heartbeat_finished(thread, failure, body_error)
 
 
-def current_owner_lease(lease: OwnerLease) -> OwnerLease:
-    registry = OwnershipRegistry(Path(lease.state_root))
+def _signal_lost(lost: threading.Event | None) -> None:
+    if lost is not None:
+        lost.set()
+
+
+def current_owner_lease(
+    lease: OwnerLease, *, registry: OwnershipRegistry | None = None
+) -> OwnerLease:
+    if registry is None:
+        registry = OwnershipRegistry(Path(lease.state_root))
     with contextlib.closing(registry._connect()) as database:
         row = database.execute(
             """SELECT * FROM maintenance_owners
@@ -1472,8 +1609,14 @@ def current_owner_lease(lease: OwnerLease) -> OwnerLease:
     )
 
 
-def release_marker_owner(lease: OwnerLease, marker: MarkerIdentity) -> None:
-    current = current_owner_lease(lease)
-    registry = OwnershipRegistry(Path(current.state_root))
+def release_marker_owner(
+    lease: OwnerLease,
+    marker: MarkerIdentity,
+    *,
+    registry: OwnershipRegistry | None = None,
+) -> None:
+    if registry is None:
+        registry = OwnershipRegistry(Path(lease.state_root))
+    current = current_owner_lease(lease, registry=registry)
     registry.release(current)
     _remove_exact_marker(Path(lease.state_root), marker)
