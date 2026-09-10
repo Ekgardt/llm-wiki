@@ -398,7 +398,16 @@ def _valid_group(group: object) -> dict[str, Any]:
     return group
 
 
+def _state_metadata_groups(state: object) -> list[dict[str, Any]]:
+    """Codex owns persisted hook trust state; it is not an event group."""
+    if not isinstance(state, dict):
+        raise _invalid_hooks_config()
+    return []
+
+
 def _valid_groups(event_name: object, groups: object) -> list[dict[str, Any]]:
+    if event_name == "state":
+        return _state_metadata_groups(groups)
     if not isinstance(event_name, str) or not isinstance(groups, list):
         raise _invalid_hooks_config()
     return [_valid_group(group) for group in groups]

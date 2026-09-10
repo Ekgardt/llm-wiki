@@ -11,6 +11,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -5420,7 +5421,7 @@ def _codex_probe_payload(root: Path) -> bytes:
 def _kill_and_reap(process: Any, probe_deadline: float) -> None:
     process.kill()
     try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        process.wait(timeout=max(0.1, min(1.0, probe_deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         pass
 
@@ -5431,21 +5432,26 @@ def _codex_pipes_missing(process: Any) -> bool:
     )
 
 
+def _capture_codex_chunk(name, chunk, process, captured, overflow) -> bool:
+    remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
+    captured[name].extend(chunk[: max(0, remaining)])
+    if len(chunk) > remaining:
+        overflow.set()
+        process.kill()
+        return False
+    return True
+
+
 def _start_codex_readers(process: Any) -> _CodexProbeStreams:
-    """Drain both pipes into bounded buffers so the child cannot block on us."""
+    """Drain available chunks while the peer waits for the next request."""
     overflow = threading.Event()
     captured = {"stdout": bytearray(), "stderr": bytearray()}
 
     def drain(name: str, stream: Any) -> None:
         try:
-            while chunk := stream.read(8192):
-                remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
-                if len(chunk) > remaining:
-                    captured[name].extend(chunk[: max(0, remaining)])
-                    overflow.set()
-                    process.kill()
+            while chunk := stream.read1(8192):
+                if not _capture_codex_chunk(name, chunk, process, captured, overflow):
                     return
-                captured[name].extend(chunk)
         except OSError:
             overflow.set()
             process.kill()
@@ -5459,22 +5465,56 @@ def _start_codex_readers(process: Any) -> _CodexProbeStreams:
     return _CodexProbeStreams(readers, captured, overflow)
 
 
-def _await_codex_process(
-    process: Any, payload: bytes, probe_deadline: float
-) -> bool:
-    """True when the probe process finished within its own deadline."""
-    if _deadline_reached(probe_deadline):
-        _kill_and_reap(process, probe_deadline)
+def _codex_response_line(line: bytes, request_id: int) -> bool:
+    response = json.loads(line)
+    if not isinstance(response, dict) or response.get("id") != request_id:
         return False
+    if "error" in response:
+        raise ValueError("Codex probe request failed")
+    return "result" in response
+
+
+def _codex_response_received(streams: _CodexProbeStreams, request_id: int) -> bool:
+    complete = bytes(streams.captured["stdout"]).split(b"\n")[:-1]
+    return any(_codex_response_line(line, request_id) for line in complete)
+
+
+def _await_codex_response(streams, request_id: int, probe_deadline: float) -> None:
+    while not _codex_response_received(streams, request_id):
+        if streams.overflow.is_set() or not _readers_still_running(streams.readers):
+            raise ValueError("Codex probe ended before its response")
+        if _deadline_reached(probe_deadline):
+            raise subprocess.TimeoutExpired("Codex hooks probe", 0)
+        time.sleep(min(0.01, max(0.0, probe_deadline - time.monotonic())))
+
+
+def _send_codex_payload(process, payload: bytes) -> None:
     process.stdin.write(payload)
     process.stdin.flush()
-    process.stdin.close()
+
+
+def _finish_codex_process(process: Any, probe_deadline: float) -> bool:
     try:
         process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         _kill_and_reap(process, probe_deadline)
         return False
     return True
+
+
+def _await_codex_process(process, payload, probe_deadline, streams) -> bool:
+    """Initialize, await acknowledgement, then request hooks before closing stdin."""
+    first, _, remainder = payload.partition(b"\n")
+    try:
+        _send_codex_payload(process, first + b"\n")
+        _await_codex_response(streams, 1, probe_deadline)
+        _send_codex_payload(process, remainder)
+        _await_codex_response(streams, 2, probe_deadline)
+        process.stdin.close()
+        return _finish_codex_process(process, probe_deadline)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _kill_and_reap(process, probe_deadline)
+        return False
 
 
 def _readers_still_running(readers: list) -> bool:
@@ -5518,7 +5558,8 @@ def _run_codex_probe(
             _kill_and_reap(process, probe_deadline)
             return _PROBE_INCOMPLETE
         streams = _start_codex_readers(process)
-        if not _await_codex_process(process, payload, probe_deadline):
+        if not _await_codex_process(process, payload, probe_deadline, streams):
+            _drained_codex_output(process, streams, time.monotonic() + 0.2)
             return _PROBE_INCOMPLETE
         return _drained_codex_output(process, streams, probe_deadline)
     except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
@@ -5705,12 +5746,41 @@ def _expected_codex_hooks(root: Path, ours: list) -> tuple[list | None, str]:
     return expected, ""
 
 
-def _matching_hooks(wanted: dict, ours: list) -> list:
-    return [
-        hook
-        for hook in ours
-        if all(hook.get(field) == value for field, value in wanted.items())
-    ]
+def _rendered_codex_hook_command(root: Path, command: str) -> str:
+    """Recognize one explicit POSIX installation, without executing its shell."""
+    root = root.resolve()
+    prefix = shlex.join([
+        "env", f"LLM_WIKI_ROOT={root}", f"LLM_WIKI_STATE_ROOT={root}",
+        str(Path.home() / ".local" / "bin" / "uv"),
+    ])
+    rendered = command.removeprefix("uv ")
+    rendered = rendered.replace('"$LLM_WIKI_ROOT"', shlex.quote(str(root)))
+    script = root / "scripts" / "codex_memory.py"
+    rendered = rendered.replace('"$LLM_WIKI_ROOT/scripts/codex_memory.py"', shlex.quote(str(script)))
+    return f"{prefix} {rendered}"
+
+
+def _codex_hook_commands(root: Path, command: str) -> set[str]:
+    if os.name == "nt" or not command.startswith("uv "):
+        return {command}
+    return {command, _rendered_codex_hook_command(root, command)}
+
+
+def _canonical_codex_event(event: object) -> object:
+    return {"sessionStart": "SessionStart", "preCompact": "PreCompact",
+            "postCompact": "PostCompact", "stop": "Stop"}.get(str(event), event)
+
+
+def _codex_hook_matches(wanted: dict, hook: dict, root: Path) -> bool:
+    if hook.get("command") not in _codex_hook_commands(root, wanted["command"]):
+        return False
+    comparable = dict(hook, command=wanted["command"],
+                      eventName=_canonical_codex_event(hook.get("eventName")))
+    return all(comparable.get(field) == value for field, value in wanted.items())
+
+
+def _matching_hooks(wanted: dict, ours: list, root: Path) -> list:
+    return [hook for hook in ours if _codex_hook_matches(wanted, hook, root)]
 
 
 def _codex_hook_trust_code(trust: object) -> str:
@@ -5719,8 +5789,8 @@ def _codex_hook_trust_code(trust: object) -> str:
     return "runtime_hooks_trust_unknown"
 
 
-def _codex_hook_problem(wanted: dict, ours: list) -> str:
-    matches = _matching_hooks(wanted, ours)
+def _codex_hook_problem(wanted: dict, ours: list, root: Path) -> str:
+    matches = _matching_hooks(wanted, ours, root)
     if len(matches) != 1:
         return "runtime_hooks_mismatch"
     hook = matches[0]
@@ -5736,7 +5806,7 @@ def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
     if expected is None:
         return False, problem
     for wanted in expected:
-        problem = _codex_hook_problem(wanted, ours)
+        problem = _codex_hook_problem(wanted, ours, root)
         if problem:
             return False, problem
     return True, "runtime_hooks_active"

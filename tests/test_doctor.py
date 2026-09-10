@@ -942,7 +942,7 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
                 "result": _runtime_hooks(root),
             }
             self.stdin = Input()
-            self.stdout = io.BytesIO((json.dumps(response) + "\n").encode())
+            self.stdout = io.BytesIO((' {"id":1,"result":{}}\n' + json.dumps(response) + "\n").encode())
             self.stderr = io.BytesIO()
 
         def wait(self, timeout=None):
@@ -966,18 +966,32 @@ def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
         deadline=time.monotonic() + doctor.CODEX_HOOK_PROBE_SECONDS,
     )
 
-    requests = [json.loads(line) for line in observed["input"].splitlines()]
+    _assert_codex_probe_identity(observed, root, home)
+    _assert_codex_probe_limits(observed)
+    _assert_codex_probe_requests(observed, root)
+    assert response == _runtime_hooks(root)
+
+
+def _assert_codex_probe_identity(observed, root, home):
     assert observed["args"] == ["codex", "app-server", "--listen", "stdio://"]
     assert observed["kwargs"]["cwd"] == str(root)
     assert observed["kwargs"]["env"]["CODEX_HOME"] == str(home / ".codex")
+
+
+def _assert_codex_probe_limits(observed):
+    import doctor
+
     assert observed["kwargs"]["stdout"] is subprocess.PIPE
     assert observed["kwargs"]["stderr"] is subprocess.PIPE
     assert observed["timeout"] <= doctor.CODEX_HOOK_PROBE_SECONDS
+
+
+def _assert_codex_probe_requests(observed, root):
+    requests = list(map(json.loads, observed["input"].splitlines()))
     assert requests[0]["method"] == "initialize"
     assert requests[1]["method"] == "initialized"
     assert requests[2] == {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}}
     assert "bypass" not in observed["input"].casefold()
-    assert response == _runtime_hooks(root)
 
 
 def test_codex_app_server_command_supports_windows_cmd_shim(monkeypatch):
