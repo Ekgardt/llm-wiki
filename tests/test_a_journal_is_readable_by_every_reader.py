@@ -31,6 +31,27 @@ def test_every_reader_of_a_journal_accepts_what_the_journal_may_be() -> None:
     assert too_small == {}, f"readers below the journal ceiling {ceiling}: {too_small}"
 
 
-def test_the_journal_names_every_file_the_readers_scan() -> None:
-    assert claim_tree_manifest.PROJECT_CLAIM_FILES == {"context.md", "journal.md", "state.md"}
-    assert "journal.md" in claim_tree_manifest.PROJECT_CLAIM_FILES
+def test_the_claim_readers_share_one_file_set_and_it_has_no_journal(tmp_path: Path) -> None:
+    """The journal is the event log the state is projected from, not a page
+    that carries claims; three readers name the same two files from one place."""
+    assert claim_tree_manifest.PROJECT_CLAIM_FILES == {"context.md", "state.md"}
+    project = tmp_path / "knowledge" / "projects" / "demo"
+    project.mkdir(parents=True)
+    for name in ("context.md", "journal.md", "state.md", "other.md"):
+        (project / name).write_text("---\ntype: project-state\n---\n# X\n", encoding="utf-8")
+    projects = tmp_path / "knowledge" / "projects"
+    assert [p.name for p in lint_memory._project_claim_pages(projects)] == ["context.md", "state.md"]
+    assert sorted(p.name for p in claims._project_pages(projects)) == ["context.md", "state.md"]
+
+
+def test_a_journal_past_every_cap_no_longer_stops_a_claim_rebuild(tmp_path: Path) -> None:
+    """The live failure: a 4.2 MB journal refused the whole compile for three days."""
+    vault = tmp_path / "vault"
+    project = vault / "knowledge" / "projects" / "demo"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    project.mkdir(parents=True)
+    (project / "state.md").write_text("---\ntype: project-state\n---\n# S\n", encoding="utf-8")
+    (project / "journal.md").write_bytes(b"#" + b"x" * (claims.MAX_CLAIM_PAGE_BYTES + 1))
+    index = claims.ClaimIndex(tmp_path / "state", vault=vault)
+    index.rebuild()
+    assert index.path.is_file()

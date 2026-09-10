@@ -34,6 +34,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The compile commits again; a project journal is no longer a claim page.**
+  No compile had committed since 2026-09-07: the claim index read
+  `knowledge/projects/*/journal.md` and refused the 4.2 MB `no-hands`
+  journal at a 4 MiB cap the journal itself did not have, so every draft
+  was recorded as a validation error. The claim tree, the claim index and
+  lint now share one file set, `context.md` and `state.md`: the journal is
+  the event log the state is projected from, carries no claim ledger, and
+  is not scanned. Every reader that can still meet a project page accepts
+  the journal's own 8 MiB ceiling, and one test holds the bounds together.
+- **Tests wait as long as the slowest supported machine needs.** Two
+  Windows jobs went red on waits sized for a fast disk. Every wait in the
+  tests now comes from `tests/slow_machine.py` as CPython's
+  `SHORT_TIMEOUT`/`LONG_TIMEOUT`, scaled by `LLM_WIKI_TEST_TIMEOUT_SCALE`,
+  and a generation build reports the seconds each phase cost in its
+  outcome, built or deferred, which the nightly log prints.
 - **A generation built by an older extractor is served, not refused.** The
   FTS content check re-derived every chunk with the current chunker and
   compared; after the 2026-09-08 chunker change every generation built

@@ -700,5 +700,5 @@ def test_lint_candidate_location_and_project_claim_page_selection(
         for item in lint_memory.check_claim_schemas([misplaced])
     )
     selected = lint_memory._project_claim_pages(tmp_path / "knowledge/projects")
-    assert [item.name for item in selected] == ["context.md", "journal.md", "state.md"]
-    assert len(lint_memory.check_claim_schemas(selected)) == 3
+    assert [item.name for item in selected] == ["context.md", "state.md"]
+    assert len(lint_memory.check_claim_schemas(selected)) == 2

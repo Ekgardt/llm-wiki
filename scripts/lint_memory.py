@@ -41,7 +41,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES  # noqa: E402
+from claim_tree_manifest import (  # noqa: E402
+    MAX_CLAIM_TREE_FILE_BYTES,
+    PROJECT_CLAIM_FILES,
+)
 from claims import (  # noqa: E402
     CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
@@ -673,11 +676,10 @@ def _project_claim_pages(projects_root: Path) -> list[Path]:
     """Return bounded-lint project documents that may carry claim ledgers."""
     if not projects_root.exists():
         return []
-    names = {"context.md", "journal.md", "state.md"}
     return sorted(
         page
         for page in projects_root.rglob("*.md")
-        if page.is_file() and page.name in names
+        if page.is_file() and page.name in PROJECT_CLAIM_FILES
     )
 
 

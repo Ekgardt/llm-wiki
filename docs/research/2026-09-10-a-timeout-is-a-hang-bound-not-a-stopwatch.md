@@ -92,11 +92,15 @@ content index that scans the raw log is exactly that coupling.
    so tonight's 15-minute deferral (task #10) and the next Windows
    deferral both say where the time went. The test budget stops being the
    only instrument.
-3. **Journals stay out of the claim readers — proposed, not applied.**
-   `PROJECT_CLAIM_FILES` naming `journal.md` is a contract
-   (`2026-09-09-a-journal-rolls-by-size-too.md`); dropping it changes what
-   the claim tree hashes and needs the owner's yes. Until then the three
-   ceilings stay equal (d9f5fa0), which is consistent, not a crutch.
+3. **Journals stay out of the claim readers — applied.** The owner
+   delegated the decision to the rules on 2026-09-10. Rule 2: a read model
+   does not scan the raw event log. Rule 4: the index read 4.2 MB per
+   compile and found nothing, because a journal is JSON events after a
+   header and its own parser admits no ledger. `PROJECT_CLAIM_FILES` is
+   `{context.md, state.md}` in one place, and the claim tree, the claim
+   index and lint all take the set from there instead of restating it.
+   The three ceilings stay equal (0fb435f): a page a reader may meet is
+   still never larger than the reader accepts.
 
 Not chosen: retrying flaky tests (hides the class); a per-test timeout
 plugin (a new dependency; the job timeout already bounds a hang);
@@ -109,7 +113,9 @@ alone; with `LONG_TIMEOUT` it is bounded, not explained.
 
 ## Applied
 
-Files: `tests/slow_machine.py`, `tests/test_memory_queue_migration.py`,
+Files: `scripts/claim_tree_manifest.py`, `scripts/claims.py`,
+`scripts/lint_memory.py`, `tests/test_a_journal_is_readable_by_every_reader.py`,
+`CHANGELOG.md`, `tests/slow_machine.py`, `tests/test_memory_queue_migration.py`,
 `tests/test_claims.py`, `tests/test_markdown_transaction_recovery.py`,
 `tests/test_code_graph.py`, `tests/test_queue_v3_capture_links.py`,
 `tests/test_generation_maintenance.py`, `tests/test_memory_queue_races.py`,

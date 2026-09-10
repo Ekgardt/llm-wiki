@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
-from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES
+from claim_tree_manifest import MAX_CLAIM_TREE_FILE_BYTES, PROJECT_CLAIM_FILES
 from compile_cache import _restrict_owner_only, _verify_owner_only
 from evidence_resolver import (
     EvidenceRef,
@@ -895,7 +895,7 @@ def _project_pages(resolved: Path) -> list[Path]:
     return [
         page
         for page in resolved.rglob("*.md")
-        if page.name in {"context.md", "journal.md", "state.md"}
+        if page.name in PROJECT_CLAIM_FILES
     ]
 
 
