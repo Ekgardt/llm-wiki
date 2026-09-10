@@ -117,3 +117,42 @@ product's own encoder is an arm). `run_retrieval_v2.py` accepts both frozen
 corpus ids. Arms run: BM25 only (L4); e5-small; bge-m3; Qwen3-Embedding-0.6B;
 e5-large-instruct; e5-small and bge-m3 each with bge-reranker-v2-m3. The
 query-expansion arm (Haiku) is not in the runner and is not measured here.
+
+**Measured 2026-09-10 (4 cores, CPU, float32; reports in
+`benchmark/results/crosslingual-2026-09-10/`).** MRR@10 on the 27
+cross-language queries (xMRR), on all 45 (allMRR), and on the RU and EN
+slices; model load and warm p50 latency per query.
+
+| arm | xMRR | xNDCG | allMRR | RU | EN | load s | p50 ms |
+|---|---|---|---|---|---|---|---|
+| BM25 only (L4) | 0.348 | 0.501 | 0.581 | 0.529 | 0.536 | – | 1.7 |
+| e5-small (ours) | 0.601 | 0.701 | 0.732 | 0.749 | 0.625 | 6.7 | 12.5 |
+| Qwen3-Embedding-0.6B | 0.608 | 0.706 | 0.748 | 0.656 | 0.821 | 6.2 | 193 |
+| e5-large-instruct | 0.638 | 0.729 | 0.767 | 0.691 | 0.824 | 7.2 | 132 |
+| bge-m3 | 0.524 | 0.640 | 0.682 | 0.630 | 0.629 | 6.0 | 100 |
+| e5-small + bge-reranker-v2-m3, depth 10 | **0.981** | 0.986 | 0.988 | 0.977 | 1.000 | 6.7 + 1.7 | 12.5 + 404 |
+| bge-m3 + bge-reranker-v2-m3, depth 10 | 0.981 | 0.986 | 0.988 | 0.977 | 1.000 | 6.0 + 1.8 | 100 + 408 |
+
+Reranker depths 10, 20 and 50 give the same numbers on this corpus (28
+spans); depth 10 is the cheapest. Peak RSS with the reranker: 2.5 GB.
+
+**Reading.** Swapping the encoder moves the cross-language MRR by at most
++0.04 (e5-large-instruct) and bge-m3 is *worse* than e5-small here, at
+8–15× the query latency. The lever is the multilingual cross-encoder: on top
+of our own e5-small it takes cross-language MRR from 0.60 to 0.98 and the
+whole corpus to 0.99, for about 0.4 s per query and 1.7 s to load once.
+The literature's "embeddings beat translation" holds against BM25, but the
+gain that matters came from reranking, which the WSDM 2026 pipeline also
+puts last. Not measured: the Haiku query-expansion arm (no runner support).
+
+**Decision proposed to the owner.** Keep `multilingual-e5-small` as the
+encoder; make `BAAI/bge-reranker-v2-m3` the product's default reranker at
+depth 10, resident in the MCP server so the 1.7 s load is paid once, and
+give its stage a budget that fits a cold CLI (the stand recorded
+`optional_stage_timeout` for the reranker on every question). Encoder work
+stops here until a bigger fixture says otherwise.
+
+**Limits.** 45 queries over 14 synthetic documents; every candidate fits
+in the top 10, so recall metrics saturate and MRR/nDCG carry the signal.
+The owner's real pages are English with Russian questions; the fixture
+mirrors that shape, not its size.

@@ -1,0 +1,2136 @@
+{
+  "acquisition_mode": null,
+  "adapter_kind": "sqlite-fts5-bm25",
+  "benchmark_contract_sha256": "ca748d13eb7a727627fcc6268c1e19e603b6ad164a8e69705a8a137e4a68cb27",
+  "benchmark_runner_sha256": "687939d3ef8b9573ab152ababca37a62e7e47f1c8519989915873318d3cfcb79",
+  "candidate": null,
+  "corpus_id": "public-synthetic-retrieval-v2-crosslingual",
+  "corpus_sha256": "20498e82244eadfd670dd2bcce0c26f5ea5c0f7492707b29afba56315f7ba729",
+  "effective_mode": "deterministic-fake",
+  "fallback_reason": null,
+  "gates": {
+    "interpretation": "orchestration-only",
+    "language_results": {
+      "EN": false,
+      "RU": false,
+      "ZH": false
+    },
+    "metric_results": {
+      "all_required_evidence_recall_at_20": true,
+      "mrr_at_10": false,
+      "ndcg_at_10": false,
+      "no_answer_false_answer_rate": false,
+      "parent_recall_at_10": true
+    },
+    "passed_for_orchestration": false,
+    "qa_contract_passed": false,
+    "release_evidence": false
+  },
+  "macro_average": {
+    "all_required_evidence_recall_at_20": 1.0,
+    "evidence_recall_at_10": 1.0,
+    "evidence_recall_at_20": 1.0,
+    "evidence_recall_at_50": 1.0,
+    "mrr_at_10": 0.5719183043587805,
+    "ndcg_at_10": 0.6700091525703776,
+    "no_answer_false_answer_rate": 1.0,
+    "parent_recall_at_10": 1.0
+  },
+  "matrix_sha256": "8fdfdb4f8773aa6485caa290961c400f89216ea6c7218b4bb87bf36fc9eb0d28",
+  "measurements": {
+    "build_time_ms": 702.3030170239508,
+    "cold_first_query_latency_ms": 2.115147653967142,
+    "index_size_bytes": 155648,
+    "indexing_throughput_chunks_per_second": 39.86893734898945,
+    "latency_p50_ms": 1.6927788965404034,
+    "latency_p95_ms": 1.8406598828732967,
+    "lexical_build_ms": 702.3011362180114,
+    "measurement_status": {
+      "build_time_ms": "measured",
+      "cold_first_query_latency_ms": "measured",
+      "index_size_bytes": "measured",
+      "indexing_throughput_chunks_per_second": "measured",
+      "latency_p50_ms": "measured",
+      "latency_p95_ms": "measured",
+      "lexical_build_ms": "measured",
+      "peak_rss_bytes": "measured",
+      "warm_latency_p50_ms": "measured",
+      "warm_latency_p95_ms": "measured"
+    },
+    "peak_rss_bytes": 104951808,
+    "peak_rss_status": "measured-posix-ru-maxrss",
+    "warm_latency_p50_ms": 1.6922063659876585,
+    "warm_latency_p95_ms": 1.8342589028179646
+  },
+  "methodology": {
+    "all_required": "one only when every required evidence span is in top 20",
+    "confidence": {
+      "fusion": "RRF divided by its theoretical maximum; bounded to [0,1]",
+      "qa_threshold": 0.54,
+      "reranker": null
+    },
+    "environment_provenance": {
+      "packages": {
+        "numpy": "2.5.1",
+        "sentence-transformers": "5.6.0",
+        "torch": "2.13.0",
+        "transformers": "5.13.0",
+        "usearch": null
+      },
+      "runner_sha256": "687939d3ef8b9573ab152ababca37a62e7e47f1c8519989915873318d3cfcb79",
+      "uv_lock_sha256": "1c4013b521b4940155ef536962f75c346849031bd8cb7162ae889c63a7e52f81"
+    },
+    "false_answer_denominator": "unanswerable queries only",
+    "lexical_configuration": {
+      "fallback": "unicode",
+      "fusion": {
+        "k": 60,
+        "method": "reciprocal-rank-fusion"
+      },
+      "id": "L4",
+      "indexes": {
+        "chinese_jieba": "unicode61 remove_diacritics 2",
+        "chinese_trigram": "trigram",
+        "english_porter": "porter unicode61 remove_diacritics 2",
+        "unicode": "unicode61 remove_diacritics 2"
+      },
+      "routing": {
+        "candidate_universe": "all-eligible",
+        "strategy": "all-indexes"
+      },
+      "segmentation": {
+        "HMM": false,
+        "dependency": "jieba",
+        "version": "0.42.1"
+      }
+    },
+    "mrr": "reciprocal rank of first relevant evidence span through rank 10",
+    "ndcg": "graded gain with log2 discount normalized by ideal ranking through rank 10",
+    "phase_peak_rss": "process peak RSS is run-level; per-phase peaks are unavailable",
+    "positive_retrieval_denominator": "answerable queries only",
+    "recall": "fraction of all known relevant candidates retrieved",
+    "resource_unavailable": "unavailable measurements use JSON null plus measurement_status",
+    "retrieval_order": "BM25-only lexical ablation; dense models not invoked",
+    "segmentation_runtime": {
+      "cache_path": "/home/user/.claude/jobs/80be9db9/tmp/bench-cache/jieba/jieba-0.42.1.cache",
+      "dictionary_sha256": "7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8",
+      "provenance": "pinned-installed",
+      "quality_evidence": true,
+      "version": "0.42.1"
+    },
+    "source": "https://ir-measur.es/en/latest/measures.html",
+    "timing_and_rss": "measured and non-canonical",
+    "unavailable_metrics": "empty-denominator rates are represented as JSON null and excluded from macro means"
+  },
+  "model_id": null,
+  "overall": {
+    "all_required_evidence_recall_at_20": 1.0,
+    "evidence_recall_at_10": 1.0,
+    "evidence_recall_at_20": 1.0,
+    "evidence_recall_at_50": 1.0,
+    "mrr_at_10": 0.5806689342403628,
+    "ndcg_at_10": 0.6745255548753296,
+    "no_answer_false_answer_rate": 1.0,
+    "no_answer_query_count": 3,
+    "parent_recall_at_10": 1.0,
+    "positive_query_count": 42,
+    "query_count": 45
+  },
+  "quality_claim": false,
+  "release_evidence": false,
+  "requested_mode": "deterministic-fake",
+  "reranker": null,
+  "revision": null,
+  "schema_version": "retrieval-report/v2",
+  "slices": {
+    "EN": {
+      "all_required_evidence_recall_at_20": 1.0,
+      "evidence_recall_at_10": 1.0,
+      "evidence_recall_at_20": 1.0,
+      "evidence_recall_at_50": 1.0,
+      "mrr_at_10": 0.5363945578231293,
+      "ndcg_at_10": 0.6402409106074163,
+      "no_answer_false_answer_rate": 1.0,
+      "no_answer_query_count": 1,
+      "parent_recall_at_10": 1.0,
+      "positive_query_count": 14,
+      "query_count": 15
+    },
+    "RU": {
+      "all_required_evidence_recall_at_20": 1.0,
+      "evidence_recall_at_10": 1.0,
+      "evidence_recall_at_20": 1.0,
+      "evidence_recall_at_50": 1.0,
+      "mrr_at_10": 0.5285714285714286,
+      "ndcg_at_10": 0.63345563628121,
+      "no_answer_false_answer_rate": 1.0,
+      "no_answer_query_count": 1,
+      "parent_recall_at_10": 1.0,
+      "positive_query_count": 22,
+      "query_count": 23
+    },
+    "ZH": {
+      "all_required_evidence_recall_at_20": 1.0,
+      "evidence_recall_at_10": 1.0,
+      "evidence_recall_at_20": 1.0,
+      "evidence_recall_at_50": 1.0,
+      "mrr_at_10": 0.875,
+      "ndcg_at_10": 0.9051127596788988,
+      "no_answer_false_answer_rate": 1.0,
+      "no_answer_query_count": 1,
+      "parent_recall_at_10": 1.0,
+      "positive_query_count": 6,
+      "query_count": 7
+    },
+    "cross-language": {
+      "all_required_evidence_recall_at_20": 1.0,
+      "evidence_recall_at_10": 1.0,
+      "evidence_recall_at_20": 1.0,
+      "evidence_recall_at_50": 1.0,
+      "mrr_at_10": 0.34770723104056434,
+      "ndcg_at_10": 0.5012273037139854,
+      "no_answer_false_answer_rate": null,
+      "no_answer_query_count": 0,
+      "parent_recall_at_10": 1.0,
+      "positive_query_count": 27,
+      "query_count": 27
+    }
+  },
+  "thresholds": {
+    "all_required_evidence_recall_at_20": 0.85,
+    "max_language_gate_gap": 0.03,
+    "mrr_at_10": 0.85,
+    "ndcg_at_10": 0.8,
+    "no_answer_false_answer_rate": 0.03,
+    "parent_recall_at_10": 0.95
+  },
+  "traces": [
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 2.115148,
+      "query_id": "q-en-cross",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.725615,
+      "query_id": "q-en-exact",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.91044776
+        }
+      ],
+      "ranked_parents": [
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-decision-current",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.609125,
+      "query_id": "q-en-injection",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.98387097
+        }
+      ],
+      "ranked_parents": [
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": false,
+      "abstention_reason": null,
+      "latency_ms": 1.613795,
+      "query_id": "q-en-no-answer",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.91044776
+        }
+      ],
+      "ranked_parents": [
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-decision-current",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.692779,
+      "query_id": "q-en-path",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.9786653
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.97345963
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.92424242
+        }
+      ],
+      "ranked_parents": [
+        "aurora-paths",
+        "aurora-runtime",
+        "aurora-decision-current",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.636494,
+      "query_id": "q-en-synthesis",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.9786653
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.97345963
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.93372183
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.92898213
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-paths",
+        "aurora-injection-decoy",
+        "aurora-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.709697,
+      "query_id": "q-en-temporal",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-old-wal",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-old-replaced",
+          "score": 0.98387097
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-old"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.755473,
+      "query_id": "q-ru-command",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.97948718
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.95897436
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95816799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.94452225
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.93492216
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.623535,
+      "query_id": "q-ru-contradiction",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.99462366
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.33333333
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.32275132
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.31770833
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.31282051
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.30808081
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.30348259
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.29901961
+        }
+      ],
+      "ranked_parents": [
+        "beacon-decision",
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.684337,
+      "query_id": "q-ru-cross",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": false,
+      "abstention_reason": null,
+      "latency_ms": 1.50244,
+      "query_id": "q-ru-no-answer",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-decision",
+        "beacon-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.616293,
+      "query_id": "q-ru-paraphrase",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.32795699
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.32275132
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.31770833
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.31282051
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.30808081
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.30348259
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.29901961
+        }
+      ],
+      "ranked_parents": [
+        "beacon-decision",
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.751823,
+      "query_id": "q-ru-path",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.32795699
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.32275132
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.31770833
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.30808081
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.30348259
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.29901961
+        }
+      ],
+      "ranked_parents": [
+        "beacon-paths",
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.742754,
+      "query_id": "q-ru-symbol",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.99462366
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.33333333
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.32275132
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.31770833
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.30808081
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.30348259
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.29901961
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-decision",
+        "beacon-distractor",
+        "beacon-paths"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.638583,
+      "query_id": "q-zh-command",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.9786653
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.32795699
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.31770833
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.31282051
+        }
+      ],
+      "ranked_parents": [
+        "cedar-runtime",
+        "cedar-decision-current",
+        "cedar-distractor"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.596859,
+      "query_id": "q-zh-cross",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.691634,
+      "query_id": "q-zh-name",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 0.9786653
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.95358345
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.94823718
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9259962
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91044776
+        }
+      ],
+      "ranked_parents": [
+        "cedar-runtime",
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": false,
+      "abstention_reason": null,
+      "latency_ms": 1.438213,
+      "query_id": "q-zh-no-answer",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.98387097
+        }
+      ],
+      "ranked_parents": [
+        "cedar-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.432058,
+      "query_id": "q-zh-paraphrase",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.93846154
+        }
+      ],
+      "ranked_parents": [
+        "cedar-decision-current",
+        "cedar-distractor",
+        "cedar-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.657174,
+      "query_id": "q-zh-path",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96399479
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94839235
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.91574755
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91044776
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.520407,
+      "query_id": "q-zh-supersession",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.93846154
+        }
+      ],
+      "ranked_parents": [
+        "cedar-decision-current",
+        "cedar-distractor",
+        "cedar-runtime"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.706138,
+      "query_id": "x-en-ru-01",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.754063,
+      "query_id": "x-en-ru-02",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.64687,
+      "query_id": "x-en-ru-03",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.711498,
+      "query_id": "x-en-ru-04",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.656655,
+      "query_id": "x-en-ru-05",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.97883598
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.97411084
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.96477291
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.94839235
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.93386995
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.710456,
+      "query_id": "x-en-ru-06",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.9786653
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.96321098
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.94823718
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.93492216
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.93372183
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-paths",
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.705479,
+      "query_id": "x-en-ru-07",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.98941799
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.97362231
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.95832316
+        },
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 0.95359801
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.94349747
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.94029851
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-runtime",
+        "beacon-distractor",
+        "beacon-paths",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.767934,
+      "query_id": "x-en-ru-08",
+      "ranked_evidence": [
+        {
+          "evidence_id": "beacon-queue-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "beacon-amber",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "beacon-not-queue",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "beacon-worker-symbol",
+          "score": 0.94823718
+        },
+        {
+          "evidence_id": "beacon-cache-policy",
+          "score": 0.93372183
+        },
+        {
+          "evidence_id": "beacon-doctor-command",
+          "score": 0.92467351
+        },
+        {
+          "evidence_id": "beacon-at-least-once",
+          "score": 0.9196442
+        },
+        {
+          "evidence_id": "beacon-exactly-once-conflict",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "beacon-paths",
+        "beacon-distractor",
+        "beacon-runtime",
+        "beacon-decision"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.84066,
+      "query_id": "x-ru-en-01",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.834259,
+      "query_id": "x-ru-en-02",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.729635,
+      "query_id": "x-ru-en-03",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.744186,
+      "query_id": "x-ru-en-04",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.674149,
+      "query_id": "x-ru-en-05",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.703739,
+      "query_id": "x-ru-en-06",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.830557,
+      "query_id": "x-ru-en-07",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.653139,
+      "query_id": "x-ru-en-08",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-old-replaced",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-old-wal",
+          "score": 0.98387097
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-old"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.672082,
+      "query_id": "x-ru-en-09",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-old-wal",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-old-replaced",
+          "score": 0.98387097
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-old"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.772405,
+      "query_id": "x-ru-en-10",
+      "ranked_evidence": [
+        {
+          "evidence_id": "aurora-rollback-current",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "aurora-coordinator-symbol",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "aurora-collector-symbol",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "aurora-catalog-path",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "aurora-wal-unsupported",
+          "score": 0.93846154
+        },
+        {
+          "evidence_id": "aurora-sync-command",
+          "score": 0.92424242
+        },
+        {
+          "evidence_id": "aurora-untrusted-rule",
+          "score": 0.91044776
+        },
+        {
+          "evidence_id": "aurora-injection-text",
+          "score": 0.89705882
+        }
+      ],
+      "ranked_parents": [
+        "aurora-decision-current",
+        "aurora-runtime",
+        "aurora-paths",
+        "aurora-injection-decoy"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.919234,
+      "query_id": "x-ru-zh-01",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 0.98387097
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.95358345
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.953125
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.94839235
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.92898213
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.90598478
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-runtime",
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.749102,
+      "query_id": "x-ru-zh-02",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.672699,
+      "query_id": "x-ru-zh-03",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.75939,
+      "query_id": "x-ru-zh-04",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.657938,
+      "query_id": "x-ru-zh-05",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    },
+    {
+      "abstained": false,
+      "abstention_contract_valid": true,
+      "abstention_reason": null,
+      "latency_ms": 1.66798,
+      "query_id": "x-ru-zh-06",
+      "ranked_evidence": [
+        {
+          "evidence_id": "cedar-state-path",
+          "score": 1.0
+        },
+        {
+          "evidence_id": "cedar-not-runtime",
+          "score": 0.96873449
+        },
+        {
+          "evidence_id": "cedar-water",
+          "score": 0.96825397
+        },
+        {
+          "evidence_id": "cedar-logs-path",
+          "score": 0.96337366
+        },
+        {
+          "evidence_id": "cedar-context-symbol",
+          "score": 0.94334936
+        },
+        {
+          "evidence_id": "cedar-current-delete-rule",
+          "score": 0.91518122
+        },
+        {
+          "evidence_id": "cedar-doctor-before-cleanup",
+          "score": 0.91504598
+        },
+        {
+          "evidence_id": "cedar-doctor-command",
+          "score": 0.9015218
+        }
+      ],
+      "ranked_parents": [
+        "cedar-paths",
+        "cedar-distractor",
+        "cedar-runtime",
+        "cedar-decision-current"
+      ]
+    }
+  ],
+  "variant_id": null,
+  "vector_backend": null
+}
