@@ -2075,3 +2075,10 @@ def test_a_generated_state_page_quotes_a_slug_that_would_parse_as_a_list() -> No
     assert _yaml_scalar("[redacted-api-key]") == '"[redacted-api-key]"'
     assert _yaml_scalar('has "quotes"') == '"has \\"quotes\\""'
     assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
+
+
+def test_the_vault_root_is_never_a_project(vault: Path) -> None:
+    """Issue #20: a hook run from the vault minted a project named after it."""
+    with pytest.raises(ValueError, match="vault root is not a project"):
+        _compute_slug(vault, vault / "knowledge/projects")
+    assert _compute_slug(vault / "sub-project", vault / "knowledge/projects") == "sub-project"

@@ -1805,7 +1805,7 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
         _dailies_for_evidence(inputs, date), timestamp, quote_bytes
     )
     quote_offset = _sole_quote_offset(block, quote_bytes)
-    _require_complete_line(block, quote_offset, quote_bytes, quote)
+    quote, quote_bytes, quote_offset = _completed_line(block, quote_offset, quote_bytes, quote)
     quote_start = marker_at + quote_offset
     reference = EvidenceRef(
         date,
@@ -1827,13 +1827,34 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     }
 
 
+# Every claim dropped in this process, so the compile can report the count
+# where "ok" used to hide it (#28): in the state mirror and the changelog.
+DROPPED_CLAIMS: list[dict[str, str]] = []
+
+
 def _report_dropped_claim(slug: str, detail: str) -> None:
-    """A claim that cannot bind is dropped, and never dropped silently."""
+    """A claim that cannot bind is dropped, never silently, and always counted."""
+    DROPPED_CLAIMS.append({"slug": slug, "detail": detail[:MAX_FAILURE_DETAIL_CHARS]})
     print(
         f"compile_memory: claim dropped on {slug}: "
         f"{detail[:MAX_FAILURE_DETAIL_CHARS]}",
         file=sys.stderr,
     )
+    _append_drop_record(slug, detail)
+
+
+def _append_drop_record(slug: str, detail: str) -> None:
+    """One JSON line per drop under logs/, best effort, never fatal."""
+    from memory_state import REPORTS_DIR
+
+    day = datetime.now().strftime("%Y-%m-%d")
+    record = {"at": datetime.now().isoformat(timespec="seconds"), "slug": slug, "detail": detail[:MAX_FAILURE_DETAIL_CHARS]}
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with (REPORTS_DIR / f"compile-drops-{day}.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _with_derived_claims(
@@ -2076,17 +2097,52 @@ def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
     return offsets[0]
 
 
-def _require_complete_line(
-    block: bytes, quote_offset: int, quote_bytes: bytes, quote: str
-) -> None:
-    """A quote must be a whole line, so half a sentence cannot be cited."""
+def _line_bounds(block: bytes, quote_offset: int, quote_length: int) -> tuple[int, int]:
     line_start = block.rfind(b"\n", 0, quote_offset) + 1
-    line_end = block.find(b"\n", quote_offset + len(quote_bytes))
+    line_end = block.find(b"\n", quote_offset + quote_length)
     if line_end < 0:
         line_end = len(block)
+    return line_start, line_end
+
+
+def _completed_line(
+    block: bytes, quote_offset: int, quote_bytes: bytes, quote: str
+) -> tuple[str, bytes, int]:
+    """The quote as one whole line, so half a sentence cannot be cited.
+
+    A quote that is part of one line is widened to that line rather than
+    dropped: the anchor is still exact bytes of the immutable source, only the
+    whole line of them. Issue #28 counted sixteen claims dropped in one compile
+    for quoting less than a line, each fact lost for good, with the compile
+    reporting ok.
+    """
+    line_start, line_end = _line_bounds(block, quote_offset, len(quote_bytes))
     source_line = block[line_start:line_end].decode("utf-8", errors="strict").strip()
-    if quote != _without_bullet(source_line):
-        raise ValueError("compile evidence must quote one complete source line")
+    whole = _without_bullet(source_line)
+    if quote == whole:
+        return quote, quote_bytes, quote_offset
+    whole_bytes = whole.encode("utf-8")
+    whole_offset = block.find(whole_bytes, line_start, line_end)
+    if whole_offset < 0:
+        raise ValueError(
+            "compile evidence must quote one complete source line: "
+            f"quoted {quote[:MAX_QUOTE_REPORT_CHARS]!r}, line {source_line[:MAX_QUOTE_REPORT_CHARS]!r}"
+        )
+    _report_widened_quote(quote, whole)
+    return whole, whole_bytes, whole_offset
+
+
+# What a dropped or widened quote's report shows of the text: enough to find
+# the line, never the whole entry.
+MAX_QUOTE_REPORT_CHARS = 160
+
+
+def _report_widened_quote(quote: str, whole: str) -> None:
+    print(
+        "compile_memory: claim quote widened to its line: "
+        f"{quote[:MAX_QUOTE_REPORT_CHARS]!r} -> {whole[:MAX_QUOTE_REPORT_CHARS]!r}",
+        file=sys.stderr,
+    )
 
 
 def _without_bullet(source_line: str) -> str:
@@ -3832,6 +3888,7 @@ def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
         s["last_compile_finished_at"] = finished_iso
         s["last_compile_finished_trigger"] = trigger
         s["last_compile_status"] = status
+        s["last_compile_dropped_claims"] = len(DROPPED_CLAIMS)
         if error is not None:
             s["last_compile_error"] = error[:500]
         else:

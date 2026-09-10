@@ -162,6 +162,19 @@ def _sanitize(text: str) -> str:
     return s
 
 
+def _require_not_the_vault(project_dir: Path, projects_dir: Path) -> None:
+    """The vault is never a project of its own.
+
+    Hooks whose working directory is the vault — the installer's smoke, the
+    nightly pass, an operator's `cd` — minted a project named after the vault
+    and checkpointed into it; deleting that directory then blocked every later
+    checkpoint of the slug (issue #20). A vault has no handoff to project.
+    """
+    vault = Path(projects_dir).resolve().parent.parent
+    if Path(project_dir).resolve() == vault:
+        raise ValueError("the vault root is not a project")
+
+
 def _base_slug(project_dir: Path) -> str:
     """Preferred slug — parent folder name only. Fallback to `root`."""
     return _sanitize(project_dir.name) or "root"
@@ -291,6 +304,7 @@ def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     belongs to `project_dir` (same recorded Project root).
     """
     project_dir = owning_checkout(project_dir)
+    _require_not_the_vault(project_dir, projects_dir)
     base = _base_slug(project_dir)
     for cand in _slug_candidates(project_dir, base)[:MAX_SLUG_CANDIDATES]:
         if _slug_owns_dir(cand, project_dir, projects_dir):

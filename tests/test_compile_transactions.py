@@ -1623,7 +1623,8 @@ def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):
         compile_memory.validate_compile_plan(_semantic_plan(), inputs)
 
 
-def test_evidence_quote_rejects_substring_of_complete_bullet(vault):
+def test_evidence_quote_that_is_part_of_a_bullet_is_widened_to_the_bullet(vault, capsys):
+    """Issue #28: a partial quote is widened to its line, not dropped."""
     root, _state_root = vault
     daily = root / "knowledge/daily/2026-07-14.md"
     daily.write_text(
@@ -1639,8 +1640,8 @@ def test_evidence_quote_rejects_substring_of_complete_bullet(vault):
     semantic["evidence"][0]["quoted_text"] = "reject substring citations"
     plan["operations"][0]["content"] = canonical_json_bytes(semantic).decode()
 
-    with pytest.raises(ValueError, match="complete source line"):
-        compile_memory.validate_compile_plan(plan, inputs)
+    compile_memory.validate_compile_plan(plan, inputs)
+    assert "widened to its line" in capsys.readouterr().err
 
     semantic["evidence"][0]["quoted_text"] = (
         "Always reject substring citations before durable publication."

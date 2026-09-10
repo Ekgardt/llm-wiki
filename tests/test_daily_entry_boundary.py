@@ -108,10 +108,15 @@ def test_a_captured_bullet_is_quotable_as_one_complete_line() -> None:
     quote = "`[17:00:00] prompt | s1` a durable fact"
     quote_bytes = quote.encode("utf-8")
     offset = compile_memory._sole_quote_offset(block, quote_bytes)
-    compile_memory._require_complete_line(block, offset, quote_bytes, quote)
+    assert compile_memory._completed_line(block, offset, quote_bytes, quote) == (
+        quote,
+        quote_bytes,
+        offset,
+    )
 
 
-def test_half_a_captured_bullet_is_not_a_complete_line() -> None:
+def test_half_a_captured_bullet_is_widened_to_its_whole_line(capsys) -> None:
+    """Issue #28: a partial quote used to drop the claim; the line is the anchor."""
     import compile_memory
 
     log = "# Daily\n" + _capture("ab", "18:00:00", "a durable fact")
@@ -119,8 +124,12 @@ def test_half_a_captured_bullet_is_not_a_complete_line() -> None:
     quote = "a durable fact"
     quote_bytes = quote.encode("utf-8")
     offset = compile_memory._sole_quote_offset(block, quote_bytes)
-    with pytest.raises(ValueError, match="one complete source line"):
-        compile_memory._require_complete_line(block, offset, quote_bytes, quote)
+
+    whole, whole_bytes, whole_offset = compile_memory._completed_line(block, offset, quote_bytes, quote)
+
+    assert whole == "`[18:00:00] prompt | s1` a durable fact"
+    assert block[whole_offset : whole_offset + len(whole_bytes)] == whole_bytes
+    assert "widened to its line" in capsys.readouterr().err
 
 
 @pytest.fixture
