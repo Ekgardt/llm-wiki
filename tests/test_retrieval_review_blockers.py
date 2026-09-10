@@ -63,11 +63,6 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(retrieval, "retrieve", wrap)
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *a, **k: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
 
     results = search_memory.search(
         "corrupt needle",

@@ -8,7 +8,7 @@ Example: query "JWT auth" → finds decisions/auth-jwt.md → that page
 links to patterns/token-refresh.md → refresh page gets boosted even
 though "JWT" doesn't appear in its text.
 
-Integrates into search_memory.py's _rrf_fuse_triple() as a 3rd signal.
+Feeds retrieval.py's fuse_rrf() as a third signal.
 """
 from __future__ import annotations
 

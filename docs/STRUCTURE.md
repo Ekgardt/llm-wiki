@@ -478,7 +478,7 @@ or nonzero active state remains fail-closed.
 - `scripts/` — Python pipeline and host helpers. Central hub:
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
-  `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
+  `maybe_compile.py` (PID-locked spawn), `search_memory.py` (entry point; fusion lives in `retrieval.py`),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
 - `tests/` — full regression suite. Hermetic via `conftest.py` (pins

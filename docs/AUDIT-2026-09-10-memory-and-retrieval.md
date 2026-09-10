@@ -35,6 +35,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
 ## High
 
 ### H1 — A second, unreachable retrieval pipeline lives inside `search_memory.py` [defect]
+- Status: removed 2026-09-10 (`docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`).
 - Rule: R4 (maintainability), R3 (docs describe it as the product).
 - Evidence: `scripts/search_memory.py:5256-5326` (`_search_backends`),
   `5490-5535` (`_legacy_search`), `5538-5575` (`_legacy_ranked`),

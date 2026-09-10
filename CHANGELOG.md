@@ -105,6 +105,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
+  had no caller; 40 functions reachable only from it (legacy triple RRF, its
+  own reranker call, its own generation search) and the tests that existed
+  only for them are gone — 897 lines. The live path is unchanged:
+  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
+  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
 - **The repository ships no memory.** The 89 published pages under
   `knowledge/notes/` (the owner's architecture decisions and the
   demonstration pages), the two synthetic daily logs and the vault's log

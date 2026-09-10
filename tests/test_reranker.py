@@ -373,12 +373,3 @@ class TestSigmoid:
     def test_sigmoid_symmetry(self):
         for x in [0.5, 1.0, 2.0, 5.0]:
             assert abs(_sigmoid(x) + _sigmoid(-x) - 1.0) < 0.001
-
-
-class TestSearchMemoryRerankerIntegration:
-    def test_maybe_rerank_passthrough(self):
-        from search_memory import _maybe_rerank
-
-        docs = [{"slug": f"p{i}"} for i in range(5)]
-        result = _maybe_rerank("query", docs, limit=3)
-        assert len(result) == 3

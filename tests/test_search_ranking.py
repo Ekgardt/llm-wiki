@@ -45,61 +45,6 @@ def _build_search_index_worker(root: str, builds: int) -> bool:
     return True
 
 
-def test_rrf_fuse_triple_weights():
-    """Weighted RRF: BM25 weight=2 should dominate Vector weight=1."""
-    import search_memory
-
-    bm25 = [
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 10, "project": "", "timestamp": ""},
-        {"path": "page_b.md", "title": "B", "summary": "", "score": 5, "project": "", "timestamp": ""},
-    ]
-    vector = [
-        {"path": "page_b.md", "title": "B", "summary": "", "score": 8, "project": "", "timestamp": ""},
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 3, "project": "", "timestamp": ""},
-    ]
-
-    result = search_memory._rrf_fuse_triple(bm25, vector, None)
-
-    # BM25 rank=1 for A should dominate Vector rank=2 for A
-    assert result[0]["path"] == "page_a.md"
-    assert result[0]["fused_score"] > result[1]["fused_score"]
-
-
-def test_rrf_fuse_triple_graph_boost():
-    """Graph boost adds score but doesn't overtake BM25 rank=1."""
-    import search_memory
-
-    bm25 = [
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 10, "project": "", "timestamp": ""},
-    ]
-    graph = [
-        {"path": "page_b.md", "graph_boost": 0.15},
-    ]
-
-    result = search_memory._rrf_fuse_triple(bm25, None, graph)
-    assert result[0]["path"] == "page_a.md"  # BM25 wins over graph-only
-
-
-def test_rrf_fuse_triple_empty_inputs():
-    """Empty inputs don't crash."""
-    import search_memory
-
-    result = search_memory._rrf_fuse_triple([], None, None)
-    assert result == []
-
-
-def test_rrf_fuse_basic_two_signals():
-    """Basic 2-signal RRF (BM25 + Vector) via triple-fusion with no graph."""
-    import search_memory
-
-    bm25 = [{"path": "a.md", "title": "A", "summary": "", "score": 5, "project": "", "timestamp": ""}]
-    vector = [{"path": "b.md", "title": "B", "summary": "", "score": 3, "project": "", "timestamp": ""}]
-
-    result = search_memory._rrf_fuse_triple(bm25, vector, None)
-    assert len(result) == 2
-    assert result[0]["path"] == "a.md"
-
-
 def test_extract_title_and_summary():
     """Title from H1, summary from 'One-sentence summary:' line."""
     import search_memory
@@ -448,11 +393,6 @@ def test_search_rejects_invalid_limit_before_dispatch(limit, monkeypatch):
         "_active_generation_catalog",
         lambda: pytest.fail("invalid limit reached generation selection"),
     )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("invalid limit reached legacy search"),
-    )
 
     with pytest.raises(ValueError, match="limit"):
         search_memory.search("needle", limit=limit)
@@ -461,11 +401,6 @@ def test_search_rejects_invalid_limit_before_dispatch(limit, monkeypatch):
 def test_search_rejects_limit_above_ceiling_before_dispatch(monkeypatch):
     import search_memory
 
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("oversized limit reached SQL"),
-    )
 
     with pytest.raises(ValueError, match="limit"):
         search_memory.search("needle", limit=search_memory.MAX_SEARCH_LIMIT + 1)
@@ -918,11 +853,6 @@ def _orchestrated_legacy_marker(monkeypatch, search_memory):
     )
     monkeypatch.setattr(
         search_memory, "_legacy_dense_hits", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("public search bypassed retrieve()"),
     )
 
 
@@ -1775,11 +1705,6 @@ def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
     monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
     monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
     monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     results = search_memory.search(
         "Needle content",
         catalog=Catalog(),
@@ -2144,11 +2069,6 @@ def test_corrupt_active_generation_falls_back_without_querying_it(tmp_path, monk
     artifact = generation / "search.sqlite3"
     content = artifact.read_bytes()
     artifact.write_bytes(b"X" + content[1:])
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     # Provide a real legacy lexical path for recovery.
     vault = tmp_path / "vault"
     if not (vault / "knowledge" / "notes").exists():
@@ -2208,11 +2128,6 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
                 "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
             }
 
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     # Point ROOT at the snapshot vault so legacy lexical can recover.
     vault = _vault
     monkeypatch.setattr(search_memory, "ROOT", vault)
