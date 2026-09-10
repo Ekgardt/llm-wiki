@@ -4851,40 +4851,9 @@ def _validate_worker_payload(
     corpus and schema the worker was given; validating against the defaults
     refused every candidate only a non-default matrix names and every trace
     set of a non-default corpus (2026-09-10, the cross-lingual run)."""
-    if raw != _canonical_report_bytes(report):
-        raise ValueError("worker report is not canonical")
-    _require_exact_keys(report, REPORT_FIELDS, "worker report")
-    if report["quality_claim"] is not False or report["release_evidence"] is not False:
-        raise ValueError("worker payload attempted to self-attest")
-    if report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND:
-        raise ValueError("degraded worker payload cannot become quality evidence")
-    reranker_target = report.get("candidate", {}).get("reranker")
-    selection = load_model_selection(
-        matrix_path,
-        corpus_path,
-        model_id=report.get("model_id"),
-        variant_id=report.get("variant_id"),
-        reranker_id=reranker_target.get("id") if isinstance(reranker_target, dict) else None,
-    )
-    expected_candidate = {
-        "embedding": _matrix_target(selection.embedding, selection.variant),
-        "reranker": (
-            _matrix_target(selection.reranker, selection.reranker_variant)
-            if selection.reranker is not None
-            else None
-        ),
-    }
-    if (
-        report["candidate"] != expected_candidate
-        or report["matrix_sha256"] != selection.matrix_sha256
-        or report["corpus_sha256"] != selection.corpus_sha256
-        or report["benchmark_contract_sha256"]
-        != _sha256_json(selection.matrix["benchmark_contract"])
-        or report["benchmark_runner_sha256"] != _sha256_file(Path(__file__))
-        or report["acquisition_mode"] != "offline-local-files-only"
-        or report["fallback_reason"] is not None
-        or report["thresholds"] != THRESHOLDS
-    ):
+    _require_worker_report_shape(report, raw)
+    selection = _worker_selection(report, matrix_path, corpus_path)
+    if _worker_provenance(report) != _expected_worker_provenance(selection):
         raise ValueError("worker payload provenance is incomplete")
     environment = report["methodology"].get("environment_provenance")
     if environment != _environment_provenance(report["vector_backend"]):
@@ -4894,6 +4863,65 @@ def _validate_worker_payload(
     _recompute_reranker_depth_metrics(corpus, report)
     lexical = report["methodology"].get("lexical_configuration", {}).get("id")
     _verify_locked_environment(report["vector_backend"], lexical_config=lexical)
+
+
+def _require_worker_report_shape(report: dict, raw: bytes) -> None:
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("worker report is not canonical")
+    _require_exact_keys(report, REPORT_FIELDS, "worker report")
+    if report["quality_claim"] is not False or report["release_evidence"] is not False:
+        raise ValueError("worker payload attempted to self-attest")
+    if report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND:
+        raise ValueError("degraded worker payload cannot become quality evidence")
+
+
+def _worker_selection(report: dict, matrix_path: Path | str, corpus_path: Path | str):
+    reranker_target = report.get("candidate", {}).get("reranker")
+    reranker_id = None
+    if isinstance(reranker_target, dict):
+        reranker_id = reranker_target.get("id")
+    return load_model_selection(
+        matrix_path,
+        corpus_path,
+        model_id=report.get("model_id"),
+        variant_id=report.get("variant_id"),
+        reranker_id=reranker_id,
+    )
+
+
+def _expected_worker_provenance(selection: ModelSelection) -> dict:
+    reranker = None
+    if selection.reranker is not None:
+        reranker = _matrix_target(selection.reranker, selection.reranker_variant)
+    return {
+        "candidate": {
+            "embedding": _matrix_target(selection.embedding, selection.variant),
+            "reranker": reranker,
+        },
+        "matrix_sha256": selection.matrix_sha256,
+        "corpus_sha256": selection.corpus_sha256,
+        "benchmark_contract_sha256": _sha256_json(selection.matrix["benchmark_contract"]),
+        "benchmark_runner_sha256": _sha256_file(Path(__file__)),
+        "acquisition_mode": "offline-local-files-only",
+        "fallback_reason": None,
+        "thresholds": THRESHOLDS,
+    }
+
+
+def _worker_provenance(report: dict) -> dict:
+    return {
+        key: report[key]
+        for key in (
+            "candidate",
+            "matrix_sha256",
+            "corpus_sha256",
+            "benchmark_contract_sha256",
+            "benchmark_runner_sha256",
+            "acquisition_mode",
+            "fallback_reason",
+            "thresholds",
+        )
+    }
 
 
 def _run_bounded_model_worker(
