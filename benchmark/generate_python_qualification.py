@@ -381,7 +381,10 @@ def _padding_users(entry_names: list[str], user_operation_lines: int, operation_
 def _require_padding_exact(sources: dict[str, bytes]) -> None:
     if _line_count(sources) != FIXTURE_LINES:
         raise AssertionError("qualification line padding is not exact")
-    source_bytes = sum(map(len, sources.values()))
+    _require_byte_budget(sum(map(len, sources.values())))
+
+
+def _require_byte_budget(source_bytes: int) -> None:
     if source_bytes < FIXTURE_MIN_PYTHON_BYTES:
         raise AssertionError("qualification Python sources are below the byte floor")
     if source_bytes > FIXTURE_MAX_PYTHON_BYTES:

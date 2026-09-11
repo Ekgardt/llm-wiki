@@ -33,6 +33,10 @@ def _require_coordinate(value: object, label: str, *, minimum: int = 0) -> int:
 def _require_path(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("path must be a string")
+    return _require_nonempty_path_text(value)
+
+
+def _require_nonempty_path_text(value: str) -> str:
     if not value:
         raise ValueError("path must not be empty")
     if "\0" in value:
@@ -143,14 +147,11 @@ def _clear_line_boundary_cache() -> None:
         _LINE_BOUNDARY_INDEXES.clear()
 
 
+_UTF8_LEAD_LIMITS = ((0x80, 1), (0xE0, 2), (0xF0, 3))
+
+
 def _utf8_code_point_width(first_byte: int) -> int:
-    if first_byte < 0x80:
-        return 1
-    if first_byte < 0xE0:
-        return 2
-    if first_byte < 0xF0:
-        return 3
-    return 4
+    return next((width for limit, width in _UTF8_LEAD_LIMITS if first_byte < limit), 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +166,9 @@ class SourceDocument:
         if not isinstance(self.content, bytes):
             raise TypeError("content must be bytes")
         self.content.decode("utf-8", errors="strict")
+        self._require_derived_fields()
+
+    def _require_derived_fields(self) -> None:
         if self.source_sha256 != hashlib.sha256(self.content).hexdigest():
             raise ValueError("source_sha256 does not match content")
         if self.line_spans != self._scan_line_spans(self.content):
@@ -212,12 +216,15 @@ class SourceDocument:
         self.content[start : start + character].decode("utf-8", errors="strict")
         return SourceAnchor(self.path, line, character, start + character)
 
-    def to_lsp(self, anchor: SourceAnchor, encoding: PositionEncoding) -> LspPosition:
+    def _require_own_anchor(self, anchor: object, encoding: PositionEncoding) -> None:
         if not isinstance(anchor, SourceAnchor):
             raise TypeError("anchor must be SourceAnchor")
         _require_encoding(encoding)
         if anchor.path != self.path:
             raise TypeError("anchor belongs to a different document")
+
+    def to_lsp(self, anchor: SourceAnchor, encoding: PositionEncoding) -> LspPosition:
+        self._require_own_anchor(anchor, encoding)
         validated = self.validate_anchor(
             line=anchor.line, character=anchor.utf8_character
         )
@@ -312,16 +319,24 @@ def _walk_to_character(
 
 def path_to_file_uri(path: PurePath) -> str:
     """Convert an absolute POSIX, drive, or UNC path to a normalized file URI."""
+    raw = _require_absolute_pathlib(path)
+    if isinstance(path, PureWindowsPath):
+        return _windows_file_uri(path, raw)
+    return "file://" + quote(path.as_posix(), safe="/")
+
+
+def _require_absolute_pathlib(path: object) -> str:
     if not isinstance(path, (PurePosixPath, PureWindowsPath)):
         raise TypeError("path must be a pathlib path")
-    raw = str(path)
+    return _require_absolute_path_text(path, str(path))
+
+
+def _require_absolute_path_text(path: PurePath, raw: str) -> str:
     if "\0" in raw:
         raise ValueError("path must not contain NUL")
     if not path.is_absolute():
         raise ValueError("path must be absolute")
-    if isinstance(path, PureWindowsPath):
-        return _windows_file_uri(path, raw)
-    return "file://" + quote(path.as_posix(), safe="/")
+    return raw
 
 
 def _windows_file_uri(path: PureWindowsPath, raw: str) -> str:
@@ -329,6 +344,10 @@ def _windows_file_uri(path: PureWindowsPath, raw: str) -> str:
         raise ValueError("Windows device namespaces are not supported")
     if path.drive.startswith("\\\\"):
         return _unc_file_uri(path)
+    return _drive_file_uri(path)
+
+
+def _drive_file_uri(path: PureWindowsPath) -> str:
     if not _WINDOWS_DRIVE.fullmatch(path.drive):
         raise ValueError("Windows path must use a drive letter or UNC share")
     normalized = path.as_posix()
@@ -381,13 +400,18 @@ def _has_encoded_separator(path: str, target_platform: str) -> bool:
 
 
 def _parsed_file_uri(uri: str, target_platform: str):
-    parsed = urlsplit(uri)
-    if parsed.scheme.lower() != "file":
-        raise ValueError("uri must use the file scheme")
+    parsed = _file_scheme_uri(uri)
     if parsed.query or parsed.fragment:
         raise ValueError("file uri must not contain a query or fragment")
     if _has_encoded_separator(parsed.path, target_platform):
         raise ValueError("file uri path must not contain encoded separators")
+    return parsed
+
+
+def _file_scheme_uri(uri: str):
+    parsed = urlsplit(uri)
+    if parsed.scheme.lower() != "file":
+        raise ValueError("uri must use the file scheme")
     return parsed
 
 

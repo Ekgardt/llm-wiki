@@ -1688,18 +1688,16 @@ def _unsettled_count(states: dict[str, int]) -> int:
 
 
 def _attention_parts(states: dict[str, int], invalid_state: bool, details: dict) -> list[str]:
-    parts = []
     unsettled = _unsettled_count(states)
-    if unsettled:
-        parts.append(f"{unsettled} transaction(s) still unsettled")
-    if details["quarantined_unresolved"]:
-        parts.append(
-            f"{details['quarantined_unresolved']} refused attempt(s) whose work "
-            "never happened"
-        )
-    if invalid_state:
-        parts.append("a transaction in a state this runtime does not define")
-    return parts
+    candidates = (
+        (unsettled, f"{unsettled} transaction(s) still unsettled"),
+        (
+            details["quarantined_unresolved"],
+            f"{details['quarantined_unresolved']} refused attempt(s) whose work never happened",
+        ),
+        (invalid_state, "a transaction in a state this runtime does not define"),
+    )
+    return [text for present, text in candidates if present]
 
 
 def _transaction_message(

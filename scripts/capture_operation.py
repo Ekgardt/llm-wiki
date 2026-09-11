@@ -58,14 +58,21 @@ def _pending_retry(existing: dict, source_event_id: str | None, recent: bool) ->
     return existing.get("status") == "pending" and source_event_id is None and recent
 
 
-def _replayed_operation(
-    existing: object, source_event_id: str | None, recent: bool
-) -> str | None:
-    """The operation an existing reservation already answers, or None."""
+def _reserved_operation(existing: object) -> str | None:
     if not isinstance(existing, dict):
         return None
     operation = existing.get("operation_id")
     if not isinstance(operation, str):
+        return None
+    return operation
+
+
+def _replayed_operation(
+    existing: object, source_event_id: str | None, recent: bool
+) -> str | None:
+    """The operation an existing reservation already answers, or None."""
+    operation = _reserved_operation(existing)
+    if operation is None:
         return None
     if _same_event(existing, source_event_id) or _pending_retry(existing, source_event_id, recent):
         return operation

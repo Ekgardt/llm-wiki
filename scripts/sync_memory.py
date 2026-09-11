@@ -183,12 +183,17 @@ def _planned_changes(stdout: str) -> list | None:
     return changes
 
 
-def _dependency_plan(run_uv, root: Path, remaining) -> tuple[list | None, dict | None]:
-    """The planned changes, or the error result of the step that failed."""
+def _locked_plan(run_uv, root: Path, remaining) -> tuple[object | None, dict | None]:
+    """The completed plan step after a current lock, or the error of the step that failed."""
     _completed, error = _run_uv_step(_LOCK_STEP, run_uv, root=root, remaining=remaining)
     if error is not None:
         return None, error
-    planned, error = _run_uv_step(_PLAN_STEP, run_uv, root=root, remaining=remaining)
+    return _run_uv_step(_PLAN_STEP, run_uv, root=root, remaining=remaining)
+
+
+def _dependency_plan(run_uv, root: Path, remaining) -> tuple[list | None, dict | None]:
+    """The planned changes, or the error result of the step that failed."""
+    planned, error = _locked_plan(run_uv, root, remaining)
     if error is not None:
         return None, error
     changes = _planned_changes(planned.stdout)
@@ -234,15 +239,19 @@ def _dependency_action(
     deadline: float | None = None,
 ) -> dict:
     remaining = _remaining_clock(_dependency_deadline(deadline, timeout))
-    inputs_error = _dependency_inputs_error(root)
-    if inputs_error is not None:
-        return inputs_error
-    changes, error = _dependency_plan(run_uv, root, remaining)
+    changes, error = _checked_dependency_plan(run_uv, root, remaining)
     if error is not None:
         return error
     if changes and apply:
         return _apply_dependency_sync(run_uv, root, remaining)
     return _planned_but_not_applied(changes)
+
+
+def _checked_dependency_plan(run_uv, root: Path, remaining) -> tuple[list | None, dict | None]:
+    inputs_error = _dependency_inputs_error(root)
+    if inputs_error is not None:
+        return None, inputs_error
+    return _dependency_plan(run_uv, root, remaining)
 
 
 def _planned_but_not_applied(changes: list) -> dict:
@@ -509,6 +518,10 @@ def _mapped_status(status: str) -> str:
 def _subset_status(statuses: set[str], repaired: bool) -> str:
     if "error" in statuses:
         return "error"
+    return _unfailed_subset_status(statuses, repaired)
+
+
+def _unfailed_subset_status(statuses: set[str], repaired: bool) -> str:
     if repaired:
         return "changed"
     if statuses - {"ok"}:

@@ -5093,11 +5093,15 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         raise KeyError(task_id)
+    _require_redrivable(row)
+    return row
+
+
+def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
     if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
         raise QueueOperationError("redrive_generations_exhausted")
-    return row
 
 
 _SQLITE_FILE_MAGIC = b"SQLite format 3\x00"
