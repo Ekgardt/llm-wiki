@@ -323,7 +323,7 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-14 — CI never exercises the macOS installer or a clean install on Windows and macOS
 
-- Status: the installer job runs on macOS since 2026-09-11 (`docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`); clean-install jobs on Windows/macOS remain open.
+- Status: closed 2026-09-11. The installer job runs on macOS (`docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`) and `clean-production` runs on Windows and macOS as well (`docs/research/2026-09-11-a-clean-install-runs-on-every-platform-the-contract-names.md`); the first green run of those two entries is the evidence, not this line.
 
 - Rule: L4; `CLAUDE.md` names launchd, Task Scheduler and systemd as supported.
 - Evidence: `.github/workflows/tests.yml:248-279` (installer job: `ubuntu-24.04`

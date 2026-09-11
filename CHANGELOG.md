@@ -8,6 +8,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- CI installs the production profile into a clean environment on Windows and macOS too, and runs the install smoke there (audit OPS-14).
 - One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
 - **The query surface answers the whole graph (#24, B).** `get_architecture`
   gains `mode=search` — ranked qualified names with in/out degree, exact
@@ -54,6 +55,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
 - `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
 - `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
 - `lsp_security` obeys the complexity gate: the no-follow walk, the provider URI check and the path redaction scanners are pipelines of named steps; every containment message and refusal order is unchanged (audit OPS-15).

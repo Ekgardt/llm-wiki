@@ -334,37 +334,30 @@ def _line_count(sources: dict[str, bytes]) -> int:
     return sum(content.count(b"\n") for content in sources.values())
 
 
-def _with_padding(sources: dict[str, bytes]) -> tuple[str, ...]:
-    fixed_user_lines = 3 + PADDING_MODULES + 1 + 1 + PADDING_MODULES + 1
-    remaining = FIXTURE_LINES - _line_count(sources) - 1 - fixed_user_lines
-    if remaining < PADDING_MODULES * PADDING_BLOCK_LINES:
-        raise RuntimeError("semantic qualification sources exceed the line budget")
-    sources["padding/__init__.py"] = b'"""Executable qualification padding."""\n'
-    user_operation_lines = remaining % PADDING_BLOCK_LINES
-    total_blocks = (remaining - user_operation_lines) // PADDING_BLOCK_LINES
-    module_blocks, extra_blocks = divmod(total_blocks, PADDING_MODULES)
-    operation_index = 0
-    entry_names: list[str] = []
-    for module_index in range(PADDING_MODULES):
-        block_count = module_blocks + int(module_index < extra_blocks)
-        lines: list[str] = []
-        for block_index in range(block_count):
-            function_name = f"padding_{module_index:02d}_{block_index:03d}"
-            lines.append(f"def {function_name}(accumulator: int) -> int:")
-            if block_index:
-                previous_name = f"padding_{module_index:02d}_{block_index - 1:03d}"
-                lines.append(f"    accumulator = {previous_name}(accumulator)")
-            operation_lines = PADDING_BLOCK_LINES - 2 - int(block_index > 0)
-            for _index in range(operation_lines):
-                value = FIXTURE_SEED * 10_000_000 + operation_index
-                lines.append(f"    accumulator += {value}")
-                operation_index += 1
-            lines.append("    return accumulator")
-        entry_names.append(f"padding_{module_index:02d}_{block_count - 1:03d}")
-        sources[f"padding/module_{module_index:02d}.py"] = (
-            "\n".join(lines) + "\n"
-        ).encode("ascii")
+def _padding_block(module_index: int, block_index: int, operation_index: int) -> tuple[list[str], int]:
+    """The lines of one padding function; the operation counter after it."""
+    function_name = f"padding_{module_index:02d}_{block_index:03d}"
+    lines = [f"def {function_name}(accumulator: int) -> int:"]
+    if block_index:
+        previous_name = f"padding_{module_index:02d}_{block_index - 1:03d}"
+        lines.append(f"    accumulator = {previous_name}(accumulator)")
+    operation_lines = PADDING_BLOCK_LINES - 2 - int(block_index > 0)
+    for _index in range(operation_lines):
+        lines.append(f"    accumulator += {FIXTURE_SEED * 10_000_000 + operation_index}")
+        operation_index += 1
+    lines.append("    return accumulator")
+    return lines, operation_index
 
+
+def _padding_module(module_index: int, block_count: int, operation_index: int) -> tuple[bytes, int]:
+    lines: list[str] = []
+    for block_index in range(block_count):
+        block_lines, operation_index = _padding_block(module_index, block_index, operation_index)
+        lines.extend(block_lines)
+    return ("\n".join(lines) + "\n").encode("ascii"), operation_index
+
+
+def _padding_users(entry_names: list[str], user_operation_lines: int, operation_index: int) -> bytes:
     user_lines = [
         '"""Statically reachable qualification padding entry points."""',
         "from __future__ import annotations",
@@ -379,12 +372,13 @@ def _with_padding(sources: dict[str, bytes]) -> tuple[str, ...]:
         f"    accumulator = {entry_name}(accumulator)" for entry_name in entry_names
     )
     for _index in range(user_operation_lines):
-        value = FIXTURE_SEED * 10_000_000 + operation_index
-        user_lines.append(f"    accumulator += {value}")
+        user_lines.append(f"    accumulator += {FIXTURE_SEED * 10_000_000 + operation_index}")
         operation_index += 1
     user_lines.append("    return accumulator")
-    sources["qual/padding_users.py"] = ("\n".join(user_lines) + "\n").encode("ascii")
+    return ("\n".join(user_lines) + "\n").encode("ascii")
 
+
+def _require_padding_exact(sources: dict[str, bytes]) -> None:
     if _line_count(sources) != FIXTURE_LINES:
         raise AssertionError("qualification line padding is not exact")
     source_bytes = sum(map(len, sources.values()))
@@ -392,6 +386,26 @@ def _with_padding(sources: dict[str, bytes]) -> tuple[str, ...]:
         raise AssertionError("qualification Python sources are below the byte floor")
     if source_bytes > FIXTURE_MAX_PYTHON_BYTES:
         raise AssertionError("qualification Python sources exceed the byte budget")
+
+
+def _with_padding(sources: dict[str, bytes]) -> tuple[str, ...]:
+    fixed_user_lines = 3 + PADDING_MODULES + 1 + 1 + PADDING_MODULES + 1
+    remaining = FIXTURE_LINES - _line_count(sources) - 1 - fixed_user_lines
+    if remaining < PADDING_MODULES * PADDING_BLOCK_LINES:
+        raise RuntimeError("semantic qualification sources exceed the line budget")
+    sources["padding/__init__.py"] = b'"""Executable qualification padding."""\n'
+    user_operation_lines = remaining % PADDING_BLOCK_LINES
+    total_blocks = (remaining - user_operation_lines) // PADDING_BLOCK_LINES
+    module_blocks, extra_blocks = divmod(total_blocks, PADDING_MODULES)
+    operation_index = 0
+    entry_names: list[str] = []
+    for module_index in range(PADDING_MODULES):
+        block_count = module_blocks + int(module_index < extra_blocks)
+        module_source, operation_index = _padding_module(module_index, block_count, operation_index)
+        sources[f"padding/module_{module_index:02d}.py"] = module_source
+        entry_names.append(f"padding_{module_index:02d}_{block_count - 1:03d}")
+    sources["qual/padding_users.py"] = _padding_users(entry_names, user_operation_lines, operation_index)
+    _require_padding_exact(sources)
     return tuple(entry_names)
 
 
