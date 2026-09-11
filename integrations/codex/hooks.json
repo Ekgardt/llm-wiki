@@ -39,6 +39,31 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/graph_hint.py\" --source codex",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\graph_hint.py\" --source codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/graph_hint.py\" --source codex",
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\graph_hint.py\" --source codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

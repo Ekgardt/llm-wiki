@@ -274,8 +274,8 @@ def _require_exact_keys(value: dict, expected: set[str], label: str) -> None:
         raise ValueError(f"{label} is not a closed canonical matrix object")
 
 
-def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) -> None:
-    fields = {
+_CANDIDATE_FIELDS = frozenset(
+    {
         "architecture",
         "batch_size",
         "benchmark_max_tokens",
@@ -294,109 +294,311 @@ def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) ->
         "trust_remote_code",
         "variants",
     }
+)
+_EMBEDDING_FORMATTING_KEYS = frozenset({"document", "instruction", "query"})
+_EMBEDDING_INFERENCE_KEYS = frozenset(
+    {"l2_normalize", "max_length_tokens", "padding_side", "pooling", "truncation_side"}
+)
+_RERANKER_FORMATTING_KEYS = frozenset(
+    {
+        "assistant_suffix",
+        "contract_type",
+        "document_template",
+        "instruction",
+        "max_length_tokens",
+        "query_template",
+        "score_tokens",
+        "scoring",
+        "system_prefix",
+        "truncation",
+        "user_template",
+    }
+)
+_VARIANT_FIELDS = frozenset({"dimensions", "precision", "quality", "resource_measurements", "variant_id"})
+_QUALITY_KEYS = frozenset({"claim", "overall", "per_language", "status"})
+_RESOURCE_KEYS = frozenset(
+    {
+        "cold_first_query_ms",
+        "index_bytes",
+        "indexing_throughput_documents_per_second",
+        "model_load_ms",
+        "peak_rss_bytes",
+        "status",
+        "vector_bytes_per_document",
+        "warm_p50_ms",
+        "warm_p95_ms",
+    }
+)
+_MRL_KEYS = frozenset({"enabled", "renormalize_after_truncation", "truncate_to_dimensions"})
+
+
+def _candidate_fields(kind: str) -> set[str]:
+    fields = set(_CANDIDATE_FIELDS)
     if kind == "embedding":
         fields.add("inference")
-    _require_exact_keys(candidate, fields, f"{kind} candidate")
+    return fields
+
+
+def _require_candidate_identity(candidate: dict, kind: str) -> None:
     if candidate["kind"] != kind:
         raise ValueError(f"matrix {kind} kind mismatch")
+    _require_pinned_local_code(candidate, kind)
+
+
+def _require_pinned_local_code(candidate: dict, kind: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", candidate["revision"]):
         raise ValueError(f"matrix {kind} revision is not pinned")
     if candidate["trust_remote_code"] is not False:
         raise ValueError(f"matrix {kind} requires remote code")
+
+
+def _require_candidate_contract(candidate: dict, kind: str, contract: dict) -> None:
     if candidate["cache_policy"] != contract["cache_policy"]:
         raise ValueError(f"matrix {kind} cache policy mismatch")
     if candidate["batch_size"] != contract["batch_size"]:
         raise ValueError(f"matrix {kind} batch size mismatch")
-    if candidate["license"] not in {"Apache-2.0", "Gemma", "MIT"}:
-        raise ValueError(f"matrix {kind} license is unknown")
+
+
+def _require_shipping_policy(candidate: dict, kind: str) -> None:
     if candidate["shipping_eligible"]:
         if candidate["license"] not in {"Apache-2.0", "MIT"} or candidate["exclusion_reasons"]:
             raise ValueError(f"matrix {kind} shipping policy is inconsistent")
-    elif not candidate["exclusion_reasons"]:
+        return
+    if not candidate["exclusion_reasons"]:
         raise ValueError(f"matrix {kind} exclusion lacks a reason")
+
+
+def _require_candidate_license(candidate: dict, kind: str, contract: dict) -> None:
+    if candidate["license"] not in {"Apache-2.0", "Gemma", "MIT"}:
+        raise ValueError(f"matrix {kind} license is unknown")
+    _require_shipping_policy(candidate, kind)
     if not candidate["languages"] or not set(candidate["languages"]) <= set(contract["languages"]):
         raise ValueError(f"matrix {kind} language coverage is invalid")
-    _require_exact_keys(candidate["native_library"], {"name", "support"}, "native library")
-    if (
-        candidate["native_library"]["name"] not in {"sentence-transformers", "transformers"}
-        or candidate["native_library"]["support"] != "native"
-    ):
+
+
+def _require_native_library(candidate: dict, kind: str) -> None:
+    library = candidate["native_library"]
+    _require_exact_keys(library, {"name", "support"}, "native library")
+    if library["name"] not in {"sentence-transformers", "transformers"} or library["support"] != "native":
         raise ValueError(f"matrix {kind} lacks native library support")
-    if candidate["source_url"] != (
-        f"https://huggingface.co/{candidate['id']}/tree/{candidate['revision']}"
-    ):
+
+
+def _require_candidate_source(candidate: dict, kind: str) -> None:
+    if candidate["source_url"] != f"https://huggingface.co/{candidate['id']}/tree/{candidate['revision']}":
         raise ValueError(f"matrix {kind} source is not revision pinned")
     if not candidate["variants"]:
         raise ValueError(f"matrix {kind} has no explicit variants")
+
+
+def _require_candidate_formatting(candidate: dict, kind: str) -> None:
+    if kind != "embedding":
+        _require_exact_keys(candidate["formatting"], set(_RERANKER_FORMATTING_KEYS), "reranker formatting")
+        return
+    _require_exact_keys(candidate["formatting"], set(_EMBEDDING_FORMATTING_KEYS), "embedding formatting")
+    _require_exact_keys(candidate["inference"], set(_EMBEDDING_INFERENCE_KEYS), "embedding inference")
+    if not candidate["formatting"]["query"] or not candidate["formatting"]["document"]:
+        raise ValueError("embedding candidate lacks explicit formatting defaults")
+
+
+def _variant_fields(kind: str) -> set[str]:
     if kind == "embedding":
-        _require_exact_keys(
-            candidate["formatting"], {"document", "instruction", "query"}, "embedding formatting"
-        )
-        _require_exact_keys(
-            candidate["inference"],
-            {"l2_normalize", "max_length_tokens", "padding_side", "pooling", "truncation_side"},
-            "embedding inference",
-        )
-        if not candidate["formatting"]["query"] or not candidate["formatting"]["document"]:
-            raise ValueError("embedding candidate lacks explicit formatting defaults")
-    else:
-        _require_exact_keys(
-            candidate["formatting"],
-            {
-                "assistant_suffix",
-                "contract_type",
-                "document_template",
-                "instruction",
-                "max_length_tokens",
-                "query_template",
-                "score_tokens",
-                "scoring",
-                "system_prefix",
-                "truncation",
-                "user_template",
-            },
-            "reranker formatting",
-        )
+        return {*_VARIANT_FIELDS, "mrl"}
+    return set(_VARIANT_FIELDS)
+
+
+def _require_variant(variant: dict, kind: str, contract: dict) -> None:
+    _require_exact_keys(variant, _variant_fields(kind), f"{kind} variant")
+    _require_exact_keys(variant["quality"], set(_QUALITY_KEYS), "variant quality")
+    _require_exact_keys(variant["quality"]["per_language"], {"EN", "RU", "ZH"}, "variant languages")
+    _require_exact_keys(variant["resource_measurements"], set(_RESOURCE_KEYS), "variant resource measurements")
+    if variant["precision"] != contract["precision"]:
+        raise ValueError(f"matrix {kind} variant precision mismatch")
+    if kind == "embedding":
+        _require_exact_keys(variant["mrl"], set(_MRL_KEYS), "embedding MRL")
+
+
+def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) -> None:
+    _require_exact_keys(candidate, _candidate_fields(kind), f"{kind} candidate")
+    _require_candidate_identity(candidate, kind)
+    _require_candidate_contract(candidate, kind, contract)
+    _require_candidate_license(candidate, kind, contract)
+    _require_native_library(candidate, kind)
+    _require_candidate_source(candidate, kind)
+    _require_candidate_formatting(candidate, kind)
     for variant in candidate["variants"]:
-        expected = {
-            "dimensions",
-            "precision",
-            "quality",
-            "resource_measurements",
-            "variant_id",
-        }
-        if kind == "embedding":
-            expected.add("mrl")
-        _require_exact_keys(variant, expected, f"{kind} variant")
-        _require_exact_keys(
-            variant["quality"], {"claim", "overall", "per_language", "status"}, "variant quality"
-        )
-        _require_exact_keys(
-            variant["quality"]["per_language"], {"EN", "RU", "ZH"}, "variant languages"
-        )
-        _require_exact_keys(
-            variant["resource_measurements"],
-            {
-                "cold_first_query_ms",
-                "index_bytes",
-                "indexing_throughput_documents_per_second",
-                "model_load_ms",
-                "peak_rss_bytes",
-                "status",
-                "vector_bytes_per_document",
-                "warm_p50_ms",
-                "warm_p95_ms",
-            },
-            "variant resource measurements",
-        )
-        if variant["precision"] != contract["precision"]:
-            raise ValueError(f"matrix {kind} variant precision mismatch")
-        if kind == "embedding":
-            _require_exact_keys(
-                variant["mrl"],
-                {"enabled", "renormalize_after_truncation", "truncate_to_dimensions"},
-                "embedding MRL",
-            )
+        _require_variant(variant, kind, contract)
+
+
+_MATRIX_KEYS = frozenset(
+    {"artifact_kind", "benchmark_contract", "embeddings", "lexical", "rerankers", "schema_version", "selection"}
+)
+_CONTRACT_KEYS = frozenset(
+    {"batch_size", "cache_policy", "corpus", "languages", "precision", "quality_claims_allowed", "reranker_depths"}
+)
+_SELECTION_KEYS = frozenset(
+    {
+        "aggregation_evidence_contract",
+        "baseline",
+        "default_embedding",
+        "default_reranker",
+        "limits",
+        "material_improvement",
+        "pareto_objectives",
+        "predetermined_winner",
+        "required_gates",
+        "requires_pareto_efficient",
+        "requires_raw_benchmark_result",
+        "result_evidence",
+        "result_evidence_contract",
+        "selection_target_fields",
+        "status",
+    }
+)
+_AGGREGATION_CONTRACT_KEYS = frozenset(
+    {"artifact_schema", "complete_candidate_set", "output_path_policy", "required_fields", "schema_version"}
+)
+_BASELINE_KEYS = frozenset(
+    {
+        "overall_basis_points",
+        "parent_recall_at_10_basis_points",
+        "policy_sha256",
+        "raw_report_path",
+        "raw_report_sha256",
+    }
+)
+_LEXICAL_POLICY_KEYS = frozenset(
+    {
+        "dictionary_sha256",
+        "dictionary_sha256_status",
+        "exclusion_reasons",
+        "hmm",
+        "id",
+        "kind",
+        "license",
+        "package_sha256",
+        "quality",
+        "query_document_configuration_identical",
+        "resource_measurements",
+        "shipping_eligible",
+        "source_url",
+        "version",
+    }
+)
+_BENCHMARK_CACHE_POLICY = {"network_access": "prefetch_only", "offline_required": True, "revision_scoped": True}
+
+
+def _parsed_matrix(raw: bytes) -> dict:
+    try:
+        matrix = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"cannot load model matrix: {exc}") from exc
+    if canonical_json_bytes(matrix) + b"\n" != raw:
+        raise ValueError("model matrix bytes are not canonical and frozen")
+    return matrix
+
+
+def _require_matrix_shape(matrix: dict) -> None:
+    _require_exact_keys(matrix, set(_MATRIX_KEYS), "model matrix")
+    if matrix["artifact_kind"] != "model-policy-matrix" or matrix["schema_version"] != 1:
+        raise ValueError("unsupported model matrix")
+
+
+def _require_contract_shape(contract: dict) -> None:
+    _require_exact_keys(contract, set(_CONTRACT_KEYS), "benchmark contract")
+    _require_exact_keys(
+        contract["cache_policy"], {"network_access", "offline_required", "revision_scoped"}, "benchmark cache policy"
+    )
+    _require_exact_keys(contract["corpus"], {"path", "sha256"}, "benchmark corpus")
+
+
+def _require_aggregation_contract(aggregation_contract: dict) -> None:
+    _require_exact_keys(aggregation_contract, set(_AGGREGATION_CONTRACT_KEYS), "aggregation evidence contract")
+    if set(aggregation_contract["required_fields"]) != SELECTION_ARTIFACT_FIELDS:
+        raise ValueError("aggregation evidence fields do not match runner contract")
+    if (
+        aggregation_contract["schema_version"] != 1
+        or aggregation_contract["artifact_schema"] != "retrieval-selection/v1"
+        or aggregation_contract["output_path_policy"] != "normalized_repo_relative_json_under_benchmark_results"
+    ):
+        raise ValueError("unsupported aggregation evidence contract")
+
+
+def _require_selection_shape(selection: dict) -> None:
+    _require_exact_keys(selection, set(_SELECTION_KEYS), "matrix selection")
+    _require_aggregation_contract(selection["aggregation_evidence_contract"])
+    _require_exact_keys(selection["baseline"], set(_BASELINE_KEYS), "selection baseline")
+    _require_exact_keys(selection["limits"], {"peak_rss_bytes", "warm_p95_ms"}, "selection limits")
+    _require_exact_keys(
+        selection["material_improvement"],
+        {"metric", "minimum_absolute_gain_basis_points"},
+        "selection material improvement",
+    )
+
+
+def _require_contract_values(contract: dict) -> None:
+    if contract["precision"] != "float32" or contract["batch_size"] != 8:
+        raise ValueError("unsupported benchmark precision or batch size")
+    if contract["quality_claims_allowed"] is not True:
+        raise ValueError("matrix does not permit provenance-bound candidate quality claims")
+
+
+def _require_contract_policy(contract: dict) -> None:
+    if contract["cache_policy"] != _BENCHMARK_CACHE_POLICY:
+        raise ValueError("unsupported benchmark cache policy")
+    if contract["reranker_depths"] != [10, 20, 50]:
+        raise ValueError("unsupported reranker depths")
+
+
+def _verified_corpus_hash(corpus_path: Path, contract: dict) -> str:
+    corpus_hash = _sha256_file(corpus_path)
+    if corpus_hash != contract["corpus"]["sha256"]:
+        raise ValueError("benchmark corpus SHA256 does not match matrix")
+    return corpus_hash
+
+
+def _require_matrix_candidates(matrix: dict, contract: dict) -> None:
+    for candidate in matrix["embeddings"]:
+        _validate_matrix_candidate(candidate, kind="embedding", contract=contract)
+    for candidate in matrix["rerankers"]:
+        _validate_matrix_candidate(candidate, kind="reranker", contract=contract)
+
+
+def _selected_embedding(matrix: dict, model_id: str) -> dict:
+    embedding = next((item for item in matrix["embeddings"] if item["id"] == model_id), None)
+    if embedding is None:
+        raise ValueError(f"unknown embedding model: {model_id}")
+    return embedding
+
+
+def _require_pinned_variant(variant: dict) -> None:
+    if variant["precision"] != "float32" or not isinstance(variant["dimensions"], int):
+        raise ValueError("embedding variant is not pinned to float32 dimensions")
+
+
+def _selected_variant(embedding: dict, variant_id: str) -> dict:
+    variant = next((item for item in embedding["variants"] if item["variant_id"] == variant_id), None)
+    if variant is None:
+        raise ValueError(f"unknown embedding variant: {variant_id}")
+    _require_pinned_variant(variant)
+    return variant
+
+
+def _reranker_variant(reranker: dict) -> dict:
+    if len(reranker["variants"]) != 1:
+        raise ValueError("reranker lacks one explicit matrix variant")
+    reranker_variant = reranker["variants"][0]
+    if reranker_variant["precision"] != "float32":
+        raise ValueError("reranker variant is not pinned to float32")
+    return reranker_variant
+
+
+def _selected_reranker(matrix: dict, reranker_id: str | None) -> tuple[dict | None, dict | None]:
+    if reranker_id is None:
+        return None, None
+    reranker = next((item for item in matrix["rerankers"] if item["id"] == reranker_id), None)
+    if reranker is None:
+        raise ValueError(f"unknown reranker model: {reranker_id}")
+    return reranker, _reranker_variant(reranker)
 
 
 def load_model_selection(
@@ -407,163 +609,20 @@ def load_model_selection(
     variant_id: str,
     reranker_id: str | None = None,
 ) -> ModelSelection:
-    matrix_path = Path(matrix_path)
-    raw = read_stable_bytes(matrix_path, MAX_CORPUS_BYTES, label="model matrix")
-    try:
-        matrix = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"cannot load model matrix: {exc}") from exc
-    if canonical_json_bytes(matrix) + b"\n" != raw:
-        raise ValueError("model matrix bytes are not canonical and frozen")
-    _require_exact_keys(
-        matrix,
-        {"artifact_kind", "benchmark_contract", "embeddings", "lexical", "rerankers", "schema_version", "selection"},
-        "model matrix",
-    )
-    if matrix["artifact_kind"] != "model-policy-matrix" or matrix["schema_version"] != 1:
-        raise ValueError("unsupported model matrix")
+    raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
+    matrix = _parsed_matrix(raw)
+    _require_matrix_shape(matrix)
     contract = matrix["benchmark_contract"]
-    _require_exact_keys(
-        contract,
-        {
-            "batch_size",
-            "cache_policy",
-            "corpus",
-            "languages",
-            "precision",
-            "quality_claims_allowed",
-            "reranker_depths",
-        },
-        "benchmark contract",
-    )
-    _require_exact_keys(
-        contract["cache_policy"],
-        {"network_access", "offline_required", "revision_scoped"},
-        "benchmark cache policy",
-    )
-    _require_exact_keys(contract["corpus"], {"path", "sha256"}, "benchmark corpus")
-    _require_exact_keys(
-        matrix["selection"],
-        {
-            "aggregation_evidence_contract",
-            "baseline",
-            "default_embedding",
-            "default_reranker",
-            "limits",
-            "material_improvement",
-            "pareto_objectives",
-            "predetermined_winner",
-            "required_gates",
-            "requires_pareto_efficient",
-            "requires_raw_benchmark_result",
-            "result_evidence",
-            "result_evidence_contract",
-            "selection_target_fields",
-            "status",
-        },
-        "matrix selection",
-    )
-    aggregation_contract = matrix["selection"]["aggregation_evidence_contract"]
-    _require_exact_keys(
-        aggregation_contract,
-        {
-            "artifact_schema",
-            "complete_candidate_set",
-            "output_path_policy",
-            "required_fields",
-            "schema_version",
-        },
-        "aggregation evidence contract",
-    )
-    if set(aggregation_contract["required_fields"]) != SELECTION_ARTIFACT_FIELDS:
-        raise ValueError("aggregation evidence fields do not match runner contract")
-    if (
-        aggregation_contract["schema_version"] != 1
-        or aggregation_contract["artifact_schema"] != "retrieval-selection/v1"
-        or aggregation_contract["output_path_policy"]
-        != "normalized_repo_relative_json_under_benchmark_results"
-    ):
-        raise ValueError("unsupported aggregation evidence contract")
-    _require_exact_keys(
-        matrix["selection"]["baseline"],
-        {
-            "overall_basis_points",
-            "parent_recall_at_10_basis_points",
-            "policy_sha256",
-            "raw_report_path",
-            "raw_report_sha256",
-        },
-        "selection baseline",
-    )
-    _require_exact_keys(
-        matrix["selection"]["limits"],
-        {"peak_rss_bytes", "warm_p95_ms"},
-        "selection limits",
-    )
-    _require_exact_keys(
-        matrix["selection"]["material_improvement"],
-        {"metric", "minimum_absolute_gain_basis_points"},
-        "selection material improvement",
-    )
-    _require_exact_keys(
-        matrix["lexical"],
-        {
-            "dictionary_sha256",
-            "dictionary_sha256_status",
-            "exclusion_reasons",
-            "hmm",
-            "id",
-            "kind",
-            "license",
-            "package_sha256",
-            "quality",
-            "query_document_configuration_identical",
-            "resource_measurements",
-            "shipping_eligible",
-            "source_url",
-            "version",
-        },
-        "matrix lexical policy",
-    )
-    if contract["precision"] != "float32" or contract["batch_size"] != 8:
-        raise ValueError("unsupported benchmark precision or batch size")
-    if contract["quality_claims_allowed"] is not True:
-        raise ValueError("matrix does not permit provenance-bound candidate quality claims")
-    if contract["cache_policy"] != {
-        "network_access": "prefetch_only",
-        "offline_required": True,
-        "revision_scoped": True,
-    }:
-        raise ValueError("unsupported benchmark cache policy")
-    if contract["reranker_depths"] != [10, 20, 50]:
-        raise ValueError("unsupported reranker depths")
-    corpus_path = Path(corpus_path)
-    corpus_hash = _sha256_file(corpus_path)
-    if corpus_hash != contract["corpus"]["sha256"]:
-        raise ValueError("benchmark corpus SHA256 does not match matrix")
-    for candidate in matrix["embeddings"]:
-        _validate_matrix_candidate(candidate, kind="embedding", contract=contract)
-    for candidate in matrix["rerankers"]:
-        _validate_matrix_candidate(candidate, kind="reranker", contract=contract)
-    embedding = next((item for item in matrix["embeddings"] if item["id"] == model_id), None)
-    if embedding is None:
-        raise ValueError(f"unknown embedding model: {model_id}")
-    variant = next((item for item in embedding["variants"] if item["variant_id"] == variant_id), None)
-    if variant is None:
-        raise ValueError(f"unknown embedding variant: {variant_id}")
-    if variant["precision"] != "float32" or not isinstance(variant["dimensions"], int):
-        raise ValueError("embedding variant is not pinned to float32 dimensions")
-    reranker = None
-    reranker_variant = None
-    if reranker_id is not None:
-        reranker = next((item for item in matrix["rerankers"] if item["id"] == reranker_id), None)
-        if reranker is None:
-            raise ValueError(f"unknown reranker model: {reranker_id}")
-        if len(reranker["variants"]) != 1:
-            raise ValueError("reranker lacks one explicit matrix variant")
-        reranker_variant = reranker["variants"][0]
-        if reranker_variant["precision"] != "float32":
-            raise ValueError("reranker variant is not pinned to float32")
+    _require_contract_shape(contract)
+    _require_selection_shape(matrix["selection"])
+    _require_exact_keys(matrix["lexical"], set(_LEXICAL_POLICY_KEYS), "matrix lexical policy")
+    _require_contract_values(contract)
+    _require_contract_policy(contract)
+    corpus_hash = _verified_corpus_hash(Path(corpus_path), contract)
+    _require_matrix_candidates(matrix, contract)
+    embedding = _selected_embedding(matrix, model_id)
+    variant = _selected_variant(embedding, variant_id)
+    reranker, reranker_variant = _selected_reranker(matrix, reranker_id)
     return ModelSelection(
         matrix=matrix,
         embedding=embedding,
@@ -607,17 +666,25 @@ def _assert_unique(values: Iterable[str], label: str) -> None:
         raise ValueError(f"duplicate normalized {label}")
 
 
+def _path_has_forbidden_characters(value: str) -> bool:
+    return "\\" in value or ":" in value
+
+
+def _path_is_not_plain(value: str, path: PurePosixPath) -> bool:
+    return path.is_absolute() or str(path) != value or any(part in {"", ".", ".."} for part in path.parts)
+
+
+def _path_looks_private(lowered: str) -> bool:
+    return any(marker in lowered for marker in ("/users/", "/home/", "private", "personal"))
+
+
 def _validate_relative_path(value: str) -> None:
-    lowered = value.casefold()
     path = PurePosixPath(value)
     if (
         not value.startswith("synthetic/")
-        or "\\" in value
-        or ":" in value
-        or path.is_absolute()
-        or str(path) != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or any(marker in lowered for marker in ("/users/", "/home/", "private", "personal"))
+        or _path_has_forbidden_characters(value)
+        or _path_is_not_plain(value, path)
+        or _path_looks_private(value.casefold())
     ):
         raise ValueError(f"non-public or non-relative synthetic path: {value}")
 
@@ -629,33 +696,44 @@ def _parse_date(value: str, label: str) -> date:
         raise ValueError(f"invalid {label} date: {value}") from exc
 
 
-def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
-    """Load and fail closed on schema, frozen-byte, and cross-reference errors."""
-    corpus_path = Path(corpus_path)
-    schema_path = Path(schema_path)
+def _read_corpus(corpus_path: Path) -> tuple[bytes, dict]:
     try:
         raw = read_stable_bytes(corpus_path, MAX_CORPUS_BYTES, label="retrieval corpus")
-        corpus = json.loads(raw)
+        return raw, json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load corpus {corpus_path}: {exc}") from exc
+
+
+def _read_schema(schema_path: Path) -> bytes:
     try:
         schema_raw = read_stable_bytes(schema_path, MAX_SCHEMA_BYTES, label="retrieval schema")
         json.loads(schema_raw)
+        return schema_raw
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load schema {schema_path}: {exc}") from exc
+
+
+def _validate_corpus_against_schema(corpus: dict, schema_raw: bytes) -> None:
     with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-schema-") as temporary:
         bounded_schema = Path(temporary) / "schema.json"
         bounded_schema.write_bytes(schema_raw)
         validate_schema(corpus, bounded_schema)
+
+
+def _require_frozen_corpus(corpus: dict, raw: bytes) -> None:
     if canonical_json_bytes(corpus) + b"\n" != raw:
         raise ValueError("corpus bytes are not canonical and frozen")
+    _require_known_corpus_identity(corpus)
+
+
+def _require_known_corpus_identity(corpus: dict) -> None:
     if corpus["schema_version"] != "retrieval-corpus/v2":
         raise ValueError("unsupported retrieval corpus schema version")
     if corpus["corpus_id"] not in FROZEN_CORPUS_IDS:
         raise ValueError("unexpected frozen corpus id")
 
-    documents = corpus["documents"]
-    queries = corpus["queries"]
+
+def _require_frozen_order(documents: list[dict], queries: list[dict]) -> None:
     if documents != sorted(documents, key=lambda item: item["parent_id"]):
         raise ValueError("documents must be frozen in parent_id order")
     if queries != sorted(queries, key=lambda item: item["query_id"]):
@@ -663,128 +741,236 @@ def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
     _assert_unique((document["parent_id"] for document in documents), "parent id")
     _assert_unique((query["query_id"] for query in queries), "query id")
 
-    parent_by_id = {document["parent_id"]: document for document in documents}
-    evidence_by_id: dict[str, tuple[dict, dict]] = {}
-    for document in documents:
-        _validate_relative_path(document["relative_path"])
-        valid_from = _parse_date(document["valid_from"], f"{document['parent_id']} valid_from")
-        valid_to = (
-            _parse_date(document["valid_to"], f"{document['parent_id']} valid_to")
-            if document["valid_to"] is not None
-            else None
-        )
-        if valid_to is not None and valid_from >= valid_to:
-            raise ValueError(f"invalid validity interval for {document['parent_id']}")
-        if document["status"] == "active":
-            if document["valid_to"] is not None or document["superseded_by"] is not None:
-                raise ValueError(f"active parent has supersession metadata: {document['parent_id']}")
-        else:
-            if document["valid_to"] is None or document["superseded_by"] is None:
-                raise ValueError(f"superseded parent lacks lifecycle metadata: {document['parent_id']}")
-        encoded = document["parent_text"].encode("utf-8")
-        ranges: list[tuple[int, int]] = []
-        for span in document["evidence_spans"]:
-            evidence_id = span["evidence_id"]
-            if _normalized_id(evidence_id) in {
-                _normalized_id(existing) for existing in evidence_by_id
-            }:
-                raise ValueError(f"duplicate normalized evidence id: {evidence_id}")
-            start = span["byte_start"]
-            end = span["byte_end"]
-            if start >= end or end > len(encoded):
-                raise ValueError(f"invalid UTF-8 range for {evidence_id}")
-            try:
-                selected = encoded[start:end].decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ValueError(f"range splits UTF-8 for {evidence_id}") from exc
-            if selected != span["text"]:
-                raise ValueError(f"UTF-8 range text mismatch for {evidence_id}")
-            digest = hashlib.sha256(span["text"].encode("utf-8")).hexdigest()
-            if digest != span["span_sha256"]:
-                raise ValueError(f"span hash mismatch for {evidence_id}")
-            if any(start < other_end and other_start < end for other_start, other_end in ranges):
-                raise ValueError(f"overlapping evidence spans in {document['parent_id']}")
-            ranges.append((start, end))
-            evidence_by_id[evidence_id] = (document, span)
 
+def _require_validity_interval(document: dict) -> None:
+    parent_id = document["parent_id"]
+    valid_from = _parse_date(document["valid_from"], f"{parent_id} valid_from")
+    if document["valid_to"] is None:
+        return
+    valid_to = _parse_date(document["valid_to"], f"{parent_id} valid_to")
+    if valid_from >= valid_to:
+        raise ValueError(f"invalid validity interval for {parent_id}")
+
+
+def _require_superseded_lifecycle(document: dict) -> None:
+    if document["valid_to"] is None or document["superseded_by"] is None:
+        raise ValueError(f"superseded parent lacks lifecycle metadata: {document['parent_id']}")
+
+
+def _require_lifecycle(document: dict) -> None:
+    if document["status"] != "active":
+        _require_superseded_lifecycle(document)
+        return
+    if document["valid_to"] is not None or document["superseded_by"] is not None:
+        raise ValueError(f"active parent has supersession metadata: {document['parent_id']}")
+
+
+def _require_unique_evidence_id(evidence_id: str, evidence_by_id: dict) -> None:
+    if _normalized_id(evidence_id) in {_normalized_id(existing) for existing in evidence_by_id}:
+        raise ValueError(f"duplicate normalized evidence id: {evidence_id}")
+
+
+def _span_text(span: dict, encoded: bytes) -> str:
+    evidence_id = span["evidence_id"]
+    start = span["byte_start"]
+    end = span["byte_end"]
+    if start >= end or end > len(encoded):
+        raise ValueError(f"invalid UTF-8 range for {evidence_id}")
+    try:
+        return encoded[start:end].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"range splits UTF-8 for {evidence_id}") from exc
+
+
+def _require_span_text(span: dict, selected: str) -> None:
+    evidence_id = span["evidence_id"]
+    if selected != span["text"]:
+        raise ValueError(f"UTF-8 range text mismatch for {evidence_id}")
+    if hashlib.sha256(span["text"].encode("utf-8")).hexdigest() != span["span_sha256"]:
+        raise ValueError(f"span hash mismatch for {evidence_id}")
+
+
+def _require_disjoint_span(span: dict, ranges: list[tuple[int, int]], parent_id: str) -> None:
+    start = span["byte_start"]
+    end = span["byte_end"]
+    if any(start < other_end and other_start < end for other_start, other_end in ranges):
+        raise ValueError(f"overlapping evidence spans in {parent_id}")
+
+
+def _register_spans(document: dict, evidence_by_id: dict[str, tuple[dict, dict]]) -> None:
+    encoded = document["parent_text"].encode("utf-8")
+    ranges: list[tuple[int, int]] = []
+    for span in document["evidence_spans"]:
+        _require_unique_evidence_id(span["evidence_id"], evidence_by_id)
+        _require_span_text(span, _span_text(span, encoded))
+        _require_disjoint_span(span, ranges, document["parent_id"])
+        ranges.append((span["byte_start"], span["byte_end"]))
+        evidence_by_id[span["evidence_id"]] = (document, span)
+
+
+def _register_document(document: dict, evidence_by_id: dict[str, tuple[dict, dict]]) -> None:
+    _validate_relative_path(document["relative_path"])
+    _require_validity_interval(document)
+    _require_lifecycle(document)
+    _register_spans(document, evidence_by_id)
+
+
+def _require_supersession_targets(documents: list[dict], parent_by_id: dict[str, dict]) -> None:
     for document in documents:
         target = document["superseded_by"]
-        if target is not None:
-            if target not in parent_by_id or parent_by_id[target]["status"] != "active":
-                raise ValueError(f"invalid supersession target for {document['parent_id']}")
+        if target is None:
+            continue
+        if target not in parent_by_id or parent_by_id[target]["status"] != "active":
+            raise ValueError(f"invalid supersession target for {document['parent_id']}")
 
-    for query in queries:
-        answerable = query["answerability"] == "answerable"
-        gold_fields = (
-            query["relevant_parents"],
-            query["required_evidence_spans"],
-            query["graded_evidence"],
-        )
-        if answerable:
-            if not all(gold_fields) or query["allowed_abstention_reason"] is not None:
-                raise ValueError(f"invalid answerable gold contract: {query['query_id']}")
-        elif any(gold_fields) or query["allowed_abstention_reason"] is None:
-            raise ValueError(f"invalid unanswerable gold contract: {query['query_id']}")
-        if query["temporal_scope"]["mode"] == "current":
-            if query["temporal_scope"]["as_of"] is not None:
-                raise ValueError(f"current query has as_of: {query['query_id']}")
-        elif query["temporal_scope"]["as_of"] is None:
-            raise ValueError(f"historical query lacks as_of: {query['query_id']}")
-        else:
-            _parse_date(query["temporal_scope"]["as_of"], f"{query['query_id']} as_of")
 
-        for field in ("relevant_parents", "required_evidence_spans", "negative_candidates"):
-            _assert_unique(query[field], field.replace("_", " "))
-        _assert_unique(
-            (item["evidence_id"] for item in query["graded_evidence"]),
-            "graded evidence",
-        )
-        relevant_parents = set(query["relevant_parents"])
-        required_evidence = set(query["required_evidence_spans"])
-        graded_evidence = {item["evidence_id"] for item in query["graded_evidence"]}
-        negatives = set(query["negative_candidates"])
-        if not relevant_parents <= parent_by_id.keys():
-            raise ValueError(f"unknown relevant parent: {query['query_id']}")
-        if not required_evidence <= evidence_by_id.keys() or not graded_evidence <= evidence_by_id.keys():
-            raise ValueError(f"unknown relevant evidence: {query['query_id']}")
-        if not negatives <= evidence_by_id.keys():
-            raise ValueError(f"unknown negative evidence: {query['query_id']}")
-        if required_evidence & negatives or graded_evidence & negatives:
-            raise ValueError(f"positive and negative evidence overlap: {query['query_id']}")
-        if required_evidence != graded_evidence:
-            raise ValueError(f"required and graded evidence differ: {query['query_id']}")
-        required_parents = {
-            evidence_by_id[evidence_id][0]["parent_id"] for evidence_id in required_evidence
-        }
-        if relevant_parents != required_parents:
-            raise ValueError(
-                f"relevant parents must exactly match required evidence parents: {query['query_id']}"
-            )
+def _require_unanswerable_gold(query: dict, gold_fields: tuple) -> None:
+    if any(gold_fields) or query["allowed_abstention_reason"] is None:
+        raise ValueError(f"invalid unanswerable gold contract: {query['query_id']}")
 
-        scope = _query_scope(query)
-        scoped = {candidate.evidence_id for candidate in filter_candidates(build_candidates(corpus), scope)}
-        for evidence_id in required_evidence:
-            document, _span = evidence_by_id[evidence_id]
-            if document["parent_id"] not in relevant_parents:
-                raise ValueError(f"evidence parent is not relevant: {query['query_id']}")
-            if document["project"] not in query["project_scope"]:
-                raise ValueError(f"project scope excludes gold: {query['query_id']}")
-            if evidence_id not in scoped:
-                raise ValueError(f"temporal scope excludes gold: {query['query_id']}")
-        if not negatives & scoped:
-            raise ValueError(f"query lacks an eligible negative candidate: {query['query_id']}")
 
+def _require_gold_contract(query: dict) -> None:
+    gold_fields = (query["relevant_parents"], query["required_evidence_spans"], query["graded_evidence"])
+    if query["answerability"] != "answerable":
+        _require_unanswerable_gold(query, gold_fields)
+        return
+    if not all(gold_fields) or query["allowed_abstention_reason"] is not None:
+        raise ValueError(f"invalid answerable gold contract: {query['query_id']}")
+
+
+def _require_temporal_scope(query: dict) -> None:
+    scope = query["temporal_scope"]
+    if scope["mode"] == "current":
+        if scope["as_of"] is not None:
+            raise ValueError(f"current query has as_of: {query['query_id']}")
+        return
+    if scope["as_of"] is None:
+        raise ValueError(f"historical query lacks as_of: {query['query_id']}")
+    _parse_date(scope["as_of"], f"{query['query_id']} as_of")
+
+
+def _require_unique_query_fields(query: dict) -> None:
+    for field in ("relevant_parents", "required_evidence_spans", "negative_candidates"):
+        _assert_unique(query[field], field.replace("_", " "))
+    _assert_unique((item["evidence_id"] for item in query["graded_evidence"]), "graded evidence")
+
+
+class _GoldSets:
+    def __init__(self, query: dict) -> None:
+        self.relevant_parents = set(query["relevant_parents"])
+        self.required_evidence = set(query["required_evidence_spans"])
+        self.graded_evidence = {item["evidence_id"] for item in query["graded_evidence"]}
+        self.negatives = set(query["negative_candidates"])
+
+
+def _require_known_gold(query: dict, gold: _GoldSets, parent_by_id: dict, evidence_by_id: dict) -> None:
+    query_id = query["query_id"]
+    if not gold.relevant_parents <= parent_by_id.keys():
+        raise ValueError(f"unknown relevant parent: {query_id}")
+    _require_known_gold_evidence(query_id, gold, evidence_by_id)
+
+
+def _require_known_gold_evidence(query_id: str, gold: _GoldSets, evidence_by_id: dict) -> None:
+    known = evidence_by_id.keys()
+    if not gold.required_evidence <= known or not gold.graded_evidence <= known:
+        raise ValueError(f"unknown relevant evidence: {query_id}")
+    if not gold.negatives <= known:
+        raise ValueError(f"unknown negative evidence: {query_id}")
+
+
+def _required_parents(gold: _GoldSets, evidence_by_id: dict) -> set[str]:
+    return {evidence_by_id[evidence_id][0]["parent_id"] for evidence_id in gold.required_evidence}
+
+
+def _require_consistent_gold(query: dict, gold: _GoldSets, evidence_by_id: dict) -> None:
+    query_id = query["query_id"]
+    if gold.required_evidence & gold.negatives or gold.graded_evidence & gold.negatives:
+        raise ValueError(f"positive and negative evidence overlap: {query_id}")
+    _require_matching_gold_sets(query_id, gold, evidence_by_id)
+
+
+def _require_matching_gold_sets(query_id: str, gold: _GoldSets, evidence_by_id: dict) -> None:
+    if gold.required_evidence != gold.graded_evidence:
+        raise ValueError(f"required and graded evidence differ: {query_id}")
+    if gold.relevant_parents != _required_parents(gold, evidence_by_id):
+        raise ValueError(f"relevant parents must exactly match required evidence parents: {query_id}")
+
+
+def _require_evidence_in_scope(query: dict, evidence_id: str, document: dict, gold: _GoldSets, scoped: set) -> None:
+    query_id = query["query_id"]
+    if document["parent_id"] not in gold.relevant_parents:
+        raise ValueError(f"evidence parent is not relevant: {query_id}")
+    _require_gold_in_query_scope(query, evidence_id, document, scoped)
+
+
+def _require_gold_in_query_scope(query: dict, evidence_id: str, document: dict, scoped: set) -> None:
+    query_id = query["query_id"]
+    if document["project"] not in query["project_scope"]:
+        raise ValueError(f"project scope excludes gold: {query_id}")
+    if evidence_id not in scoped:
+        raise ValueError(f"temporal scope excludes gold: {query_id}")
+
+
+def _require_scope_covers_gold(query: dict, gold: _GoldSets, evidence_by_id: dict, corpus: dict) -> None:
+    scope = _query_scope(query)
+    scoped = {candidate.evidence_id for candidate in filter_candidates(build_candidates(corpus), scope)}
+    for evidence_id in gold.required_evidence:
+        document, _span = evidence_by_id[evidence_id]
+        _require_evidence_in_scope(query, evidence_id, document, gold, scoped)
+    if not gold.negatives & scoped:
+        raise ValueError(f"query lacks an eligible negative candidate: {query['query_id']}")
+
+
+def _require_query(query: dict, parent_by_id: dict, evidence_by_id: dict, corpus: dict) -> None:
+    _require_gold_contract(query)
+    _require_temporal_scope(query)
+    _require_unique_query_fields(query)
+    gold = _GoldSets(query)
+    _require_known_gold(query, gold, parent_by_id, evidence_by_id)
+    _require_consistent_gold(query, gold, evidence_by_id)
+    _require_scope_covers_gold(query, gold, evidence_by_id, corpus)
+
+
+def _language_tallies(queries: list[dict]) -> tuple[dict[str, int], dict[str, set[str]]]:
     language_counts = {language: 0 for language in ("EN", "RU", "ZH")}
-    language_answers = {language: set() for language in language_counts}
+    language_answers: dict[str, set[str]] = {language: set() for language in language_counts}
     for query in queries:
         language_counts[query["language"]] += 1
         language_answers[query["language"]].add(query["answerability"])
+    return language_counts, language_answers
+
+
+def _require_cross_language_slice(queries: list[dict]) -> None:
+    if sum(query["cross_language"] for query in queries) < 3:
+        raise ValueError("cross-language slice requires at least three queries")
+
+
+def _require_language_coverage(queries: list[dict]) -> None:
+    language_counts, language_answers = _language_tallies(queries)
     if any(count < 6 for count in language_counts.values()):
         raise ValueError("each native language requires at least six queries")
     if any(values != {"answerable", "unanswerable"} for values in language_answers.values()):
         raise ValueError("each native language requires answerable and no-answer cases")
-    if sum(query["cross_language"] for query in queries) < 3:
-        raise ValueError("cross-language slice requires at least three queries")
+    _require_cross_language_slice(queries)
+
+
+def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
+    """Load and fail closed on schema, frozen-byte, and cross-reference errors."""
+    raw, corpus = _read_corpus(Path(corpus_path))
+    schema_raw = _read_schema(Path(schema_path))
+    _validate_corpus_against_schema(corpus, schema_raw)
+    _require_frozen_corpus(corpus, raw)
+    documents = corpus["documents"]
+    queries = corpus["queries"]
+    _require_frozen_order(documents, queries)
+    parent_by_id = {document["parent_id"]: document for document in documents}
+    evidence_by_id: dict[str, tuple[dict, dict]] = {}
+    for document in documents:
+        _register_document(document, evidence_by_id)
+    _require_supersession_targets(documents, parent_by_id)
+    for query in queries:
+        _require_query(query, parent_by_id, evidence_by_id, corpus)
+    _require_language_coverage(queries)
     return corpus
 
 
@@ -809,22 +995,21 @@ def build_candidates(corpus: dict) -> list[Candidate]:
     return sorted(candidates, key=lambda candidate: candidate.evidence_id)
 
 
+def _in_temporal_scope(candidate: Candidate, scope: QueryScope) -> bool:
+    if scope.temporal_mode == "current":
+        return candidate.status == "active"
+    assert scope.as_of is not None
+    if candidate.valid_from > scope.as_of:
+        return False
+    return candidate.valid_to is None or scope.as_of < candidate.valid_to
+
+
 def filter_candidates(candidates: Sequence[Candidate], scope: QueryScope) -> list[Candidate]:
-    filtered = []
-    for candidate in candidates:
-        if candidate.project not in scope.projects:
-            continue
-        if scope.temporal_mode == "current":
-            if candidate.status != "active":
-                continue
-        else:
-            assert scope.as_of is not None
-            if candidate.valid_from > scope.as_of:
-                continue
-            if candidate.valid_to is not None and scope.as_of >= candidate.valid_to:
-                continue
-        filtered.append(candidate)
-    return filtered
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.project in scope.projects and _in_temporal_scope(candidate, scope)
+    ]
 
 
 ALIASES = {
@@ -909,16 +1094,20 @@ def _lexical_score(query_text: str, candidate: Candidate) -> float:
     return len(overlap) / math.sqrt(len(query) * len(text)) + phrase_bonus
 
 
+def _unit_vector(vector: list[float]) -> tuple[float, ...]:
+    norm = math.sqrt(sum(component * component for component in vector))
+    if norm:
+        return tuple(component / norm for component in vector)
+    return tuple(vector)
+
+
 def _hash_vector(value: str, dimensions: int = 64) -> tuple[float, ...]:
     vector = [0.0] * dimensions
     for token in _tokens(value):
         digest = hashlib.sha256(token.encode("utf-8")).digest()
         index = int.from_bytes(digest[:4], "big") % dimensions
         vector[index] += 1.0 if digest[4] & 1 else -1.0
-    norm = math.sqrt(sum(component * component for component in vector))
-    if norm:
-        vector = [component / norm for component in vector]
-    return tuple(vector)
+    return _unit_vector(vector)
 
 
 def _dot(left: Sequence[float], right: Sequence[float]) -> float:
@@ -941,53 +1130,76 @@ class FakeLexicalAdapter:
         return sorted(scored, key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
-def _fts5_tokens(
-    value: str, tokenizer: str, *, deadline: float | None = None
-) -> tuple[str, ...]:
-    allowed = {
+_LEXICAL_DEADLINE_MESSAGE = "lexical benchmark absolute deadline exceeded"
+
+
+def _allowed_fts5_tokenizers() -> set[str]:
+    return {
         specification
         for configuration in LEXICAL_CONFIGURATIONS.values()
         for specification in configuration["indexes"].values()
     }
-    if tokenizer not in allowed:
+
+
+def _require_lexical_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.perf_counter() >= deadline:
+        raise TimeoutError(_LEXICAL_DEADLINE_MESSAGE)
+
+
+def _fts5_vocabulary(connection: sqlite3.Connection, value: str, tokenizer: str) -> tuple[str, ...]:
+    connection.execute(f"CREATE VIRTUAL TABLE token_source USING fts5(text, tokenize='{tokenizer}')")
+    connection.execute("CREATE VIRTUAL TABLE token_vocab USING fts5vocab(token_source, 'row')")
+    connection.execute("INSERT INTO token_source(text) VALUES (?)", (value,))
+    return tuple(row[0] for row in connection.execute("SELECT term FROM token_vocab ORDER BY term"))
+
+
+def _fts5_failure(deadline: float | None, tokenizer: str) -> Exception:
+    if deadline is not None and time.perf_counter() >= deadline:
+        return TimeoutError(_LEXICAL_DEADLINE_MESSAGE)
+    return ValueError(f"required SQLite FTS5 tokenizer unavailable: {tokenizer}")
+
+
+def _fts5_tokens(
+    value: str, tokenizer: str, *, deadline: float | None = None
+) -> tuple[str, ...]:
+    if tokenizer not in _allowed_fts5_tokenizers():
         raise ValueError(f"unsupported FTS5 tokenizer: {tokenizer}")
     connection = sqlite3.connect(":memory:")
     try:
+        _require_lexical_deadline(deadline)
         if deadline is not None:
-            if time.perf_counter() >= deadline:
-                raise TimeoutError("lexical benchmark absolute deadline exceeded")
             connection.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
-        connection.execute(f"CREATE VIRTUAL TABLE token_source USING fts5(text, tokenize='{tokenizer}')")
-        connection.execute("CREATE VIRTUAL TABLE token_vocab USING fts5vocab(token_source, 'row')")
-        connection.execute("INSERT INTO token_source(text) VALUES (?)", (value,))
-        result = tuple(
-            row[0] for row in connection.execute("SELECT term FROM token_vocab ORDER BY term")
-        )
-        if deadline is not None and time.perf_counter() >= deadline:
-            raise TimeoutError("lexical benchmark absolute deadline exceeded")
+        result = _fts5_vocabulary(connection, value, tokenizer)
+        _require_lexical_deadline(deadline)
         return result
     except sqlite3.Error as exc:
-        if deadline is not None and time.perf_counter() >= deadline:
-            raise TimeoutError("lexical benchmark absolute deadline exceeded") from exc
-        raise ValueError(f"required SQLite FTS5 tokenizer unavailable: {tokenizer}") from exc
+        raise _fts5_failure(deadline, tokenizer) from exc
     finally:
         connection.close()
+
+
+def _add_rrf_contributions(scores: dict[str, float], ranking: Sequence[tuple[str, float]], k: int) -> None:
+    seen: set[str] = set()
+    for rank, (evidence_id, _raw_bm25) in enumerate(ranking, 1):
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        scores[evidence_id] = scores.get(evidence_id, 0.0) + 1.0 / (k + rank)
+
+
+def _active_rankings(rankings: dict[str, Sequence[tuple[str, float]]]) -> dict[str, Sequence[tuple[str, float]]]:
+    return {name: ranking for name, ranking in rankings.items() if ranking}
 
 
 def _reciprocal_rank_fusion(
     rankings: dict[str, Sequence[tuple[str, float]]], *, k: int
 ) -> list[tuple[str, float]]:
-    active_rankings = {name: ranking for name, ranking in rankings.items() if ranking}
+    active_rankings = _active_rankings(rankings)
     if not active_rankings:
         return []
     scores: dict[str, float] = {}
     for index_name in sorted(active_rankings):
-        seen = set()
-        for rank, (evidence_id, _raw_bm25) in enumerate(active_rankings[index_name], 1):
-            if evidence_id in seen:
-                continue
-            seen.add(evidence_id)
-            scores[evidence_id] = scores.get(evidence_id, 0.0) + 1.0 / (k + rank)
+        _add_rrf_contributions(scores, active_rankings[index_name], k)
     theoretical_max = len(active_rankings) / (k + 1)
     scores = {evidence_id: score / theoretical_max for evidence_id, score in scores.items()}
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
@@ -1005,42 +1217,56 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def matrix_policy_fingerprint(matrix: dict) -> str:
-    policy = json.loads(json.dumps(matrix))
-    selection = policy["selection"]
-    selection.update(
-        default_embedding=None,
-        default_reranker=None,
-        result_evidence=None,
-        status="awaiting_raw_benchmark",
-    )
+def _measurement_objects(policy: dict) -> tuple[list[dict], list[dict]]:
     quality_objects = [policy["lexical"]["quality"]]
     resource_objects = [policy["lexical"]["resource_measurements"]]
     for candidate in policy["embeddings"] + policy["rerankers"]:
         for variant in candidate["variants"]:
             quality_objects.append(variant["quality"])
             resource_objects.append(variant["resource_measurements"])
+    return quality_objects, resource_objects
+
+
+def _blank_quality(quality: dict) -> None:
+    quality.update(
+        claim=None,
+        overall=None,
+        per_language={language: None for language in ("EN", "RU", "ZH")},
+        status="unmeasured",
+    )
+
+
+def _blank_resources(resources: dict) -> None:
+    for field in resources:
+        resources[field] = "unmeasured" if field == "status" else None
+
+
+def matrix_policy_fingerprint(matrix: dict) -> str:
+    policy = json.loads(json.dumps(matrix))
+    policy["selection"].update(
+        default_embedding=None,
+        default_reranker=None,
+        result_evidence=None,
+        status="awaiting_raw_benchmark",
+    )
+    quality_objects, resource_objects = _measurement_objects(policy)
     for quality in quality_objects:
-        quality.update(
-            claim=None,
-            overall=None,
-            per_language={language: None for language in ("EN", "RU", "ZH")},
-            status="unmeasured",
-        )
+        _blank_quality(quality)
     for resources in resource_objects:
-        for field in resources:
-            resources[field] = "unmeasured" if field == "status" else None
+        _blank_resources(resources)
     return _sha256_json(policy)
+
+
+def _installed_version_or_none(name: str) -> str | None:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
 
 
 def _environment_provenance(vector_backend: str | None) -> dict:
     names = ("sentence-transformers", "transformers", "torch", "numpy", "usearch")
-    versions = {}
-    for name in names:
-        try:
-            versions[name] = importlib_metadata.version(name)
-        except importlib_metadata.PackageNotFoundError:
-            versions[name] = None
+    versions = {name: _installed_version_or_none(name) for name in names}
     if vector_backend not in {"usearch-exact", "usearch-hnsw"}:
         versions["usearch"] = None
     return {
@@ -1055,23 +1281,30 @@ def _observed_runtime_environment(
 ) -> dict:
     observed = _environment_provenance(vector_backend)
     if lexical_config in {"L3", "L4"}:
-        try:
-            observed["packages"]["jieba"] = importlib_metadata.version("jieba")
-        except importlib_metadata.PackageNotFoundError:
-            observed["packages"]["jieba"] = None
+        observed["packages"]["jieba"] = _installed_version_or_none("jieba")
     return observed
 
 
-def _locked_package_versions(lock_path: Path) -> dict[str, str]:
+def _lock_packages(lock_path: Path) -> list[dict]:
     raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
-    parsed = tomllib.loads(raw.decode("utf-8"))
+    return tomllib.loads(raw.decode("utf-8")).get("package", [])
+
+
+def _package_name(package: dict) -> str:
+    return package["name"].casefold().replace("_", "-")
+
+
+def _resolution_applies(package: dict) -> bool:
+    markers = package.get("resolution-markers", [])
+    return not markers or any(Marker(marker).evaluate() for marker in markers)
+
+
+def _locked_package_versions(lock_path: Path) -> dict[str, str]:
     observed: dict[str, set[str]] = {}
-    for package in parsed.get("package", []):
-        markers = package.get("resolution-markers", [])
-        if markers and not any(Marker(marker).evaluate() for marker in markers):
+    for package in _lock_packages(lock_path):
+        if not _resolution_applies(package):
             continue
-        name = package["name"].casefold().replace("_", "-")
-        observed.setdefault(name, set()).add(package["version"])
+        observed.setdefault(_package_name(package), set()).add(package["version"])
     return {name: next(iter(versions)) for name, versions in observed.items() if len(versions) == 1}
 
 
@@ -1087,13 +1320,31 @@ def _is_recorded_digest(value: object) -> bool:
 
 
 def _locked_package_version_sets(lock_path: Path) -> dict[str, set[str]]:
-    raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
-    parsed = tomllib.loads(raw.decode("utf-8"))
     observed: dict[str, set[str]] = {}
-    for package in parsed.get("package", []):
-        name = package["name"].casefold().replace("_", "-")
-        observed.setdefault(name, set()).add(package["version"])
+    for package in _lock_packages(lock_path):
+        observed.setdefault(_package_name(package), set()).add(package["version"])
     return observed
+
+
+def _required_locked_packages(vector_backend: str, lexical_config: str) -> set[str]:
+    required = {"sentence-transformers", "transformers", "torch", "numpy"}
+    if vector_backend in {"usearch-exact", "usearch-hnsw"}:
+        required.add("usearch")
+    if lexical_config in {"L3", "L4"}:
+        required.add("jieba")
+    return required
+
+
+def _verified_installed_version(name: str, locked: dict[str, str], version_getter) -> str:
+    if name not in locked:
+        raise ValueError(f"{name} is absent from uv.lock")
+    try:
+        installed = version_getter(name)
+    except (KeyError, importlib_metadata.PackageNotFoundError) as exc:
+        raise ValueError(f"{name} locked dependency is not installed") from exc
+    if installed != locked[name]:
+        raise ValueError(f"{name} installed version {installed} does not match locked {locked[name]}")
+    return installed
 
 
 def _verify_locked_environment(
@@ -1103,24 +1354,8 @@ def _verify_locked_environment(
     version_getter=importlib_metadata.version,
 ) -> dict:
     locked = _locked_package_versions(ROOT / "uv.lock")
-    required = {"sentence-transformers", "transformers", "torch", "numpy"}
-    if vector_backend in {"usearch-exact", "usearch-hnsw"}:
-        required.add("usearch")
-    if lexical_config in {"L3", "L4"}:
-        required.add("jieba")
-    verified = {}
-    for name in sorted(required):
-        if name not in locked:
-            raise ValueError(f"{name} is absent from uv.lock")
-        try:
-            installed = version_getter(name)
-        except (KeyError, importlib_metadata.PackageNotFoundError) as exc:
-            raise ValueError(f"{name} locked dependency is not installed") from exc
-        if installed != locked[name]:
-            raise ValueError(
-                f"{name} installed version {installed} does not match locked {locked[name]}"
-            )
-        verified[name] = installed
+    required = _required_locked_packages(vector_backend, lexical_config)
+    verified = {name: _verified_installed_version(name, locked, version_getter) for name in sorted(required)}
     return {
         "packages": verified,
         "package_map_sha256": _sha256_json(verified),
@@ -1128,7 +1363,7 @@ def _verify_locked_environment(
     }
 
 
-def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
+def _pinned_jieba_distribution() -> tuple[object, object]:
     try:
         module = importlib.import_module("jieba")
         distribution = importlib_metadata.distribution("jieba")
@@ -1136,50 +1371,88 @@ def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
         raise ValueError(f"lexical configuration requires installed jieba {JIEBA_VERSION}") from exc
     if distribution.version != JIEBA_VERSION:
         raise ValueError(f"lexical configuration requires exactly jieba {JIEBA_VERSION}")
-    providers = importlib_metadata.packages_distributions().get("jieba", [])
-    if providers != ["jieba"]:
+    if importlib_metadata.packages_distributions().get("jieba", []) != ["jieba"]:
         raise ValueError("jieba import does not have exact distribution provenance")
+    return module, distribution
+
+
+def _jieba_dictionary_path(module: object, distribution) -> Path:
     files = {str(path).replace("\\", "/") for path in distribution.files or ()}
-    required_files = {"jieba/__init__.py", "jieba/dict.txt"}
-    if not required_files <= files:
+    if not {"jieba/__init__.py", "jieba/dict.txt"} <= files:
         raise ValueError("jieba distribution provenance lacks required package files")
     module_path = Path(getattr(module, "__file__", "")).resolve()
     expected_module = Path(distribution.locate_file("jieba/__init__.py")).resolve()
-    dictionary_path = Path(distribution.locate_file("jieba/dict.txt")).resolve()
     if module_path != expected_module:
         raise ValueError("jieba import path does not match distribution provenance")
+    return Path(distribution.locate_file("jieba/dict.txt")).resolve()
+
+
+def _pinned_jieba_dictionary_hash(dictionary_path: Path) -> str:
     dictionary_hash = _sha256_file(dictionary_path)
     if dictionary_hash != JIEBA_DEFAULT_DICTIONARY_SHA256:
         raise ValueError("jieba default dictionary SHA256 does not match pinned artifact")
+    return dictionary_hash
+
+
+def _jieba_tokenizer_type(module: object):
     tokenizer_type = getattr(module, "Tokenizer", None)
     if not callable(tokenizer_type):
         raise ValueError("installed jieba package has no Tokenizer class")
+    return tokenizer_type
+
+
+def _require_not_reparse(path: Path, message: str) -> None:
+    if path.exists() and _is_reparse_point(path):
+        raise ValueError(message)
+
+
+def _jieba_cache_directory(cache_root: Path) -> Path:
     cache_dir = cache_root / "jieba"
-    if cache_dir.exists() and _is_reparse_point(cache_dir):
-        raise ValueError("jieba cache directory must not be a symlink or reparse point")
+    _require_not_reparse(cache_dir, "jieba cache directory must not be a symlink or reparse point")
     cache_dir.mkdir(mode=0o700, exist_ok=True)
     if _is_reparse_point(cache_dir):
         raise ValueError("jieba cache directory must not be a symlink or reparse point")
     resolved_cache_dir = cache_dir.resolve(strict=True)
     if resolved_cache_dir.parent != cache_root or cache_root not in resolved_cache_dir.parents:
         raise ValueError("jieba cache directory escaped lexical cache root")
+    return resolved_cache_dir
+
+
+def _require_owner_only_cache(resolved_cache_dir: Path) -> None:
     cache_stat = resolved_cache_dir.stat(follow_symlinks=False)
     if hasattr(os, "getuid") and cache_stat.st_uid != os.getuid():
         raise PermissionError("jieba cache directory is not owned by the current user")
     if os.name == "posix" and stat.S_IMODE(cache_stat.st_mode) & 0o077:
         raise PermissionError("jieba cache directory must be owner-controlled")
+
+
+def _jieba_cache_file(resolved_cache_dir: Path) -> tuple[str, Path]:
     cache_name = f"jieba-{JIEBA_VERSION}.cache"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", cache_name):
         raise ValueError("jieba cache filename is not a bounded basename")
     cache_path = resolved_cache_dir / cache_name
-    if cache_path.exists() and _is_reparse_point(cache_path):
-        raise ValueError("jieba cache file must not be a symlink or reparse point")
+    _require_not_reparse(cache_path, "jieba cache file must not be a symlink or reparse point")
+    return cache_name, cache_path
+
+
+def _initialized_jieba_tokenizer(tokenizer_type, resolved_cache_dir: Path, cache_name: str, cache_path: Path):
     tokenizer = tokenizer_type()
     tokenizer.tmp_dir = str(resolved_cache_dir)
     tokenizer.cache_file = cache_name
     tokenizer.initialize()
     if not cache_path.is_file() or _is_reparse_point(cache_path):
         raise ValueError("jieba cache file was not safely created")
+    return tokenizer
+
+
+def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
+    module, distribution = _pinned_jieba_distribution()
+    dictionary_hash = _pinned_jieba_dictionary_hash(_jieba_dictionary_path(module, distribution))
+    tokenizer_type = _jieba_tokenizer_type(module)
+    resolved_cache_dir = _jieba_cache_directory(cache_root)
+    _require_owner_only_cache(resolved_cache_dir)
+    cache_name, cache_path = _jieba_cache_file(resolved_cache_dir)
+    tokenizer = _initialized_jieba_tokenizer(tokenizer_type, resolved_cache_dir, cache_name, cache_path)
     return tokenizer, {
         "provenance": "pinned-installed",
         "quality_evidence": True,
@@ -1187,6 +1460,54 @@ def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
         "dictionary_sha256": dictionary_hash,
         "cache_path": PurePosixPath(cache_path.as_posix()).as_posix(),
     }
+
+
+
+_OWNED_INDEX_FLAGS = (
+    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+)
+_INJECTED_SEGMENTER_RUNTIME = {
+    "provenance": "injected-test",
+    "quality_evidence": False,
+    "version": None,
+    "dictionary_sha256": None,
+}
+_SEGMENTATION_END = object()
+
+
+def _require_lexical_arguments(lexical_config: str, deadline_seconds: float) -> None:
+    if lexical_config not in LEXICAL_CONFIGURATIONS:
+        raise ValueError(f"unknown lexical configuration: {lexical_config}")
+    if deadline_seconds <= 0:
+        raise ValueError("lexical deadline must be positive")
+
+
+def _candidate_maps(candidates: Sequence[Candidate]) -> tuple[dict[str, Candidate], dict[str, Candidate]]:
+    normalized_ids = [_normalized_id(candidate.evidence_id) for candidate in candidates]
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise ValueError("duplicate normalized candidate id")
+    by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    universe = {_normalized_id(candidate.evidence_id): candidate for candidate in candidates}
+    return by_id, universe
+
+
+def _prepared_lexical_root(requested_root: Path) -> Path:
+    if requested_root.exists() and _is_reparse_point(requested_root):
+        raise ValueError("lexical cache root must not be a symlink or reparse point")
+    requested_root.mkdir(parents=True, exist_ok=True)
+    if _is_reparse_point(requested_root):
+        raise ValueError("lexical cache root must not be a symlink or reparse point")
+    return _validate_cache_root(requested_root).resolve(strict=True)
+
+
+def _next_segment(iterator) -> object:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _SEGMENTATION_END
+    except Exception as exc:
+        raise ValueError(f"segmentation failed: {exc}") from exc
+
 
 
 class SQLiteLexicalAdapter:
@@ -1202,65 +1523,45 @@ class SQLiteLexicalAdapter:
         deadline_seconds: float = DEFAULT_LEXICAL_DEADLINE_SECONDS,
         deadline: float | None = None,
     ) -> None:
-        if lexical_config not in LEXICAL_CONFIGURATIONS:
-            raise ValueError(f"unknown lexical configuration: {lexical_config}")
-        if deadline_seconds <= 0:
-            raise ValueError("lexical deadline must be positive")
+        _require_lexical_arguments(lexical_config, deadline_seconds)
         self.configuration = LEXICAL_CONFIGURATIONS[lexical_config]
-        normalized_ids = [_normalized_id(candidate.evidence_id) for candidate in candidates]
-        if len(normalized_ids) != len(set(normalized_ids)):
-            raise ValueError("duplicate normalized candidate id")
-        self._candidates = {candidate.evidence_id: candidate for candidate in candidates}
-        self._candidate_universe = {
-            _normalized_id(candidate.evidence_id): candidate for candidate in candidates
-        }
-        requested_root = Path(cache_root)
-        if requested_root.exists() and _is_reparse_point(requested_root):
-            raise ValueError("lexical cache root must not be a symlink or reparse point")
-        requested_root.mkdir(parents=True, exist_ok=True)
-        if _is_reparse_point(requested_root):
-            raise ValueError("lexical cache root must not be a symlink or reparse point")
-        self._root = _validate_cache_root(requested_root).resolve(strict=True)
+        self._candidates, self._candidate_universe = _candidate_maps(candidates)
+        self._root = _prepared_lexical_root(Path(cache_root))
         self._root_identity = self._root.stat(follow_symlinks=False)
         self.path = self._root / f"lexical-{lexical_config}.sqlite3"
         self._deadline = deadline or time.perf_counter() + deadline_seconds
-        self._jieba = None
-        self.segmentation_runtime = None
-        if self.configuration["segmentation"] is not None:
-            if test_segmenter is not None:
-                if not callable(getattr(test_segmenter, "cut", None)):
-                    raise ValueError("test segmenter has no callable cut function")
-                self._jieba = test_segmenter
-                self.segmentation_runtime = {
-                    "provenance": "injected-test",
-                    "quality_evidence": False,
-                    "version": None,
-                    "dictionary_sha256": None,
-                }
-            else:
-                self._jieba, self.segmentation_runtime = _load_pinned_jieba(self._root)
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_BINARY", 0)
-        )
-        self._descriptor = os.open(self.path, flags, 0o600)
+        self._jieba, self.segmentation_runtime = self._segmenter(test_segmenter)
+        self._descriptor = os.open(self.path, _OWNED_INDEX_FLAGS, 0o600)
         self._file_identity = os.fstat(self._descriptor)
         self._connection: sqlite3.Connection | None = None
         self._closed = False
         try:
-            self._check_deadline()
-            self._connection = self._connect_owned_file()
-            self._connection.set_progress_handler(self._progress_handler, 1000)
-            self._connection.execute("PRAGMA journal_mode=DELETE")
-            self._connection.execute("PRAGMA synchronous=FULL")
-            self._build(candidates)
-            self._check_owned_identity()
+            self._initialize(candidates)
         except BaseException:
             self._cleanup(remove=True)
             raise
+
+    def _segmenter(self, test_segmenter) -> tuple[object | None, dict | None]:
+        if self.configuration["segmentation"] is None:
+            return None, None
+        if test_segmenter is None:
+            return _load_pinned_jieba(self._root)
+        return self._injected_segmenter(test_segmenter)
+
+    @staticmethod
+    def _injected_segmenter(test_segmenter) -> tuple[object, dict]:
+        if not callable(getattr(test_segmenter, "cut", None)):
+            raise ValueError("test segmenter has no callable cut function")
+        return test_segmenter, dict(_INJECTED_SEGMENTER_RUNTIME)
+
+    def _initialize(self, candidates: Sequence[Candidate]) -> None:
+        self._check_deadline()
+        self._connection = self._connect_owned_file()
+        self._connection.set_progress_handler(self._progress_handler, 1000)
+        self._connection.execute("PRAGMA journal_mode=DELETE")
+        self._connection.execute("PRAGMA synchronous=FULL")
+        self._build(candidates)
+        self._check_owned_identity()
 
     def _check_deadline(self) -> None:
         if time.perf_counter() >= self._deadline:
@@ -1340,32 +1641,37 @@ class SQLiteLexicalAdapter:
         self._connection.commit()
         self._check_deadline()
 
-    def _segment(self, value: str) -> str:
-        assert self._jieba is not None
-        self._check_deadline()
+    def _segmentation_iterator(self, value: str):
         if len(value) > MAX_SEGMENTATION_INPUT_CHARS:
             raise ValueError("segmentation input limit exceeded")
         try:
-            iterator = iter(self._jieba.cut(value, HMM=False))
+            return iter(self._jieba.cut(value, HMM=False))
         except Exception as exc:
             raise ValueError(f"segmentation failed: {exc}") from exc
-        tokens = []
-        while True:
-            self._check_deadline()
-            try:
-                token = next(iterator)
-            except StopIteration:
-                break
-            except Exception as exc:
-                raise ValueError(f"segmentation failed: {exc}") from exc
-            normalized = str(token)
-            if not normalized:
-                continue
-            tokens.append(normalized)
-            if len(tokens) > MAX_SEGMENTATION_TOKENS:
-                raise ValueError("segmentation token limit exceeded")
+
+    def _segment(self, value: str) -> str:
+        assert self._jieba is not None
+        self._check_deadline()
+        tokens = self._segment_tokens(self._segmentation_iterator(value))
         self._check_deadline()
         return " ".join(tokens)
+
+    def _segment_tokens(self, iterator) -> list[str]:
+        tokens: list[str] = []
+        while True:
+            self._check_deadline()
+            token = _next_segment(iterator)
+            if token is _SEGMENTATION_END:
+                return tokens
+            self._append_segment_token(tokens, str(token))
+
+    @staticmethod
+    def _append_segment_token(tokens: list[str], normalized: str) -> None:
+        if not normalized:
+            return
+        tokens.append(normalized)
+        if len(tokens) > MAX_SEGMENTATION_TOKENS:
+            raise ValueError("segmentation token limit exceeded")
 
     def _index_text(self, index_name: str, candidate: Candidate) -> str:
         value = _candidate_text(candidate)
@@ -1380,35 +1686,24 @@ class SQLiteLexicalAdapter:
         tokenizer = self.configuration["indexes"][index_name]
         return _fts5_tokens(value, tokenizer, deadline=self._deadline)
 
-    def _rank_index(
-        self,
-        index_name: str,
-        query_text: str,
-        eligible_ids: set[str],
-        *,
-        limit: int,
-    ) -> list[tuple[str, float]]:
-        assert self._connection is not None
-        self._check_deadline()
-        if not eligible_ids:
-            return []
+    def _fts_match_query(self, index_name: str, query_text: str) -> str | None:
         if index_name == "chinese_trigram":
             normalized = unicodedata.normalize("NFKC", query_text).casefold()
             if len(normalized) < 3:
-                return []
-            fts_query = f'"{normalized.replace(chr(34), chr(34) * 2)}"'
-        else:
-            terms = self._query_terms(index_name, query_text)
-            if not terms:
-                return []
-            fts_query = " OR ".join(
-                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms
-            )
+                return None
+            return f'"{normalized.replace(chr(34), chr(34) * 2)}"'
+        terms = self._query_terms(index_name, query_text)
+        if not terms:
+            return None
+        return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+
+    def _bm25_rows(self, index_name: str, fts_query: str, eligible_ids: set[str], limit: int) -> list:
+        assert self._connection is not None
         table = f"fts_{index_name}"
         placeholders = ",".join("?" for _ in eligible_ids)
         parameters = [fts_query, *sorted(eligible_ids), limit]
         try:
-            rows = self._connection.execute(
+            return self._connection.execute(
                 f"SELECT evidence_id, bm25({table}) AS score FROM {table} "
                 f"WHERE {table} MATCH ? AND evidence_id IN ({placeholders}) "
                 "ORDER BY score ASC, evidence_id ASC LIMIT ?",
@@ -1418,6 +1713,22 @@ class SQLiteLexicalAdapter:
             if time.perf_counter() >= self._deadline:
                 raise TimeoutError("lexical benchmark absolute deadline exceeded") from exc
             raise ValueError(f"FTS5 query failed for {index_name}") from exc
+
+    def _rank_index(
+        self,
+        index_name: str,
+        query_text: str,
+        eligible_ids: set[str],
+        *,
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        self._check_deadline()
+        if not eligible_ids:
+            return []
+        fts_query = self._fts_match_query(index_name, query_text)
+        if fts_query is None:
+            return []
+        rows = self._bm25_rows(index_name, fts_query, eligible_ids, limit)
         self._check_deadline()
         return [(str(evidence_id), float(score)) for evidence_id, score in rows]
 
@@ -1427,6 +1738,38 @@ class SQLiteLexicalAdapter:
         if "chinese_trigram" in indexes and len(normalized) < 3:
             indexes.remove("chinese_trigram")
         return tuple(indexes)
+
+    def _require_candidate_universe(self, candidates: Sequence[Candidate]) -> None:
+        supplied: dict[str, Candidate] = {}
+        for candidate in candidates:
+            normalized = _normalized_id(candidate.evidence_id)
+            if normalized in supplied:
+                raise ValueError("candidate universe mismatch: duplicate normalized id")
+            supplied[normalized] = candidate
+        if supplied != self._candidate_universe:
+            raise ValueError("candidate universe mismatch")
+
+    def _scored(self, rankings: dict[str, list[tuple[str, float]]], limit: int) -> list[ScoredCandidate]:
+        if self.configuration["fusion"] is not None:
+            fused = _reciprocal_rank_fusion(rankings, k=int(self.configuration["fusion"]["k"]))[:limit]
+            return [ScoredCandidate(self._candidates[evidence_id], score) for evidence_id, score in fused]
+        only_ranking = next(iter(rankings.values()), [])
+        return [
+            ScoredCandidate(self._candidates[evidence_id], -raw_bm25)
+            for evidence_id, raw_bm25 in only_ranking[:limit]
+        ]
+
+    def _ranked(
+        self, query_text: str, scope: QueryScope, candidates: Sequence[Candidate], limit: int
+    ) -> list[ScoredCandidate]:
+        self._check_deadline()
+        self._require_candidate_universe(candidates)
+        eligible_ids = {candidate.evidence_id for candidate in filter_candidates(candidates, scope)}
+        rankings = {
+            index_name: self._rank_index(index_name, query_text, eligible_ids, limit=limit)
+            for index_name in self._active_indexes(query_text)
+        }
+        return self._scored(rankings, limit)
 
     def rank(
         self,
@@ -1439,35 +1782,7 @@ class SQLiteLexicalAdapter:
     ) -> list[ScoredCandidate]:
         del language
         try:
-            self._check_deadline()
-            supplied: dict[str, Candidate] = {}
-            for candidate in candidates:
-                normalized = _normalized_id(candidate.evidence_id)
-                if normalized in supplied:
-                    raise ValueError("candidate universe mismatch: duplicate normalized id")
-                supplied[normalized] = candidate
-            if supplied != self._candidate_universe:
-                raise ValueError("candidate universe mismatch")
-            eligible_ids = {
-                candidate.evidence_id for candidate in filter_candidates(candidates, scope)
-            }
-            rankings = {
-                index_name: self._rank_index(index_name, query_text, eligible_ids, limit=limit)
-                for index_name in self._active_indexes(query_text)
-            }
-            if self.configuration["fusion"] is not None:
-                fused = _reciprocal_rank_fusion(
-                    rankings, k=int(self.configuration["fusion"]["k"])
-                )[:limit]
-                return [
-                    ScoredCandidate(self._candidates[evidence_id], score)
-                    for evidence_id, score in fused
-                ]
-            only_ranking = next(iter(rankings.values()), [])
-            return [
-                ScoredCandidate(self._candidates[evidence_id], -raw_bm25)
-                for evidence_id, raw_bm25 in only_ranking[:limit]
-            ]
+            return self._ranked(query_text, scope, candidates, limit)
         except BaseException:
             self._cleanup(remove=True)
             raise
@@ -1475,23 +1790,34 @@ class SQLiteLexicalAdapter:
     def close(self) -> None:
         self._cleanup(remove=False)
 
+    def _owns_index(self) -> bool:
+        path_owned = _same_path_identity(self.path, self._file_identity)
+        root_owned = _same_path_identity(self._root, self._root_identity)
+        return root_owned and path_owned
+
+    def _close_connection(self) -> None:
+        if self._connection is None:
+            return
+        with contextlib.suppress(sqlite3.Error):
+            self._connection.set_progress_handler(None, 0)
+        with contextlib.suppress(sqlite3.Error):
+            self._connection.close()
+        self._connection = None
+
+    def _remove_index_files(self) -> None:
+        self.path.unlink(missing_ok=True)
+        for suffix in ("-journal", "-shm", "-wal"):
+            (self._root / f"{self.path.name}{suffix}").unlink(missing_ok=True)
+
     def _cleanup(self, *, remove: bool) -> None:
         if self._closed:
             return
-        path_owned = _same_path_identity(self.path, self._file_identity)
-        root_owned = _same_path_identity(self._root, self._root_identity)
-        if self._connection is not None:
-            with contextlib.suppress(sqlite3.Error):
-                self._connection.set_progress_handler(None, 0)
-            with contextlib.suppress(sqlite3.Error):
-                self._connection.close()
-            self._connection = None
+        owned = self._owns_index()
+        self._close_connection()
         os.close(self._descriptor)
         self._closed = True
-        if remove and root_owned and path_owned:
-            self.path.unlink(missing_ok=True)
-            for suffix in ("-journal", "-shm", "-wal"):
-                (self._root / f"{self.path.name}{suffix}").unlink(missing_ok=True)
+        if remove and owned:
+            self._remove_index_files()
 
 
 class FakeEmbeddingAdapter:
@@ -1514,23 +1840,40 @@ class FakeEmbeddingAdapter:
         return sorted(scored, key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
-def _prepare_embedding_vectors(raw, *, rows: int, dimensions: int, allow_truncation: bool):
+def _numpy_or_error():
     try:
         import numpy as np
     except ImportError as exc:
         raise ValueError("model-matrix adapter requires the retrieval-benchmark extra") from exc
-    vectors = np.asarray(raw)
+    return np
+
+
+def _require_vector_rows(vectors, rows: int) -> None:
     if vectors.ndim != 2 or vectors.shape[0] != rows:
         raise ValueError("encoder returned an invalid vector matrix shape")
+
+
+def _require_vector_dimension(vectors, dimensions: int, allow_truncation: bool) -> None:
     if vectors.shape[1] < dimensions or (not allow_truncation and vectors.shape[1] != dimensions):
         raise ValueError("encoder returned an invalid vector dimension")
-    vectors = np.ascontiguousarray(vectors[:, :dimensions], dtype=np.float32)
+
+
+def _unit_rows(np, vectors):
     if not np.isfinite(vectors).all():
         raise ValueError("encoder vectors must be finite")
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     if np.any(norms == 0):
         raise ValueError("encoder vectors must have nonzero norms")
     return np.ascontiguousarray(vectors / norms, dtype=np.float32)
+
+
+def _prepare_embedding_vectors(raw, *, rows: int, dimensions: int, allow_truncation: bool):
+    np = _numpy_or_error()
+    vectors = np.asarray(raw)
+    _require_vector_rows(vectors, rows)
+    _require_vector_dimension(vectors, dimensions, allow_truncation)
+    vectors = np.ascontiguousarray(vectors[:, :dimensions], dtype=np.float32)
+    return _unit_rows(np, vectors)
 
 
 def _numpy_exact_vectors(vectors, query, limit: int):
@@ -1555,6 +1898,51 @@ def _native_usearch_search(vectors, query, limit: int, exact: bool):
     return np.asarray(matches.keys), 1.0 - np.asarray(matches.distances, dtype=np.float32)
 
 
+def _require_search_shapes(vectors, query, candidate_ids: Sequence[str]) -> None:
+    if vectors.ndim != 2 or query.ndim != 1 or vectors.shape[1] != query.shape[0]:
+        raise ValueError("vector search dimension mismatch")
+    if len(candidate_ids) != vectors.shape[0]:
+        raise ValueError("vector search candidate ID mismatch")
+
+
+def _require_finite_search_inputs(np, vectors, query) -> None:
+    if not np.isfinite(vectors).all() or not np.isfinite(query).all():
+        raise ValueError("vector search inputs must be finite")
+
+
+def _require_usearch_parity(np, keys, scores, reference) -> None:
+    reference_keys, reference_scores = reference
+    if not np.array_equal(keys, reference_keys) or not np.allclose(
+        scores, reference_scores, rtol=1e-5, atol=1e-6
+    ):
+        raise ValueError("USearch exact parity check failed")
+
+
+def _usearch_results(np, vectors, query, limit: int, backend: str, usearch_search, reference):
+    search = usearch_search or _native_usearch_search
+    keys, scores = search(vectors, query, limit, backend == "usearch-exact")
+    keys = np.asarray(keys)
+    scores = np.asarray(scores, dtype=np.float32)
+    if backend == "usearch-exact":
+        _require_usearch_parity(np, keys, scores, reference)
+    return keys, scores
+
+
+def _backend_results(np, vectors, query, limit: int, backend: str, usearch_search, reference):
+    if backend in {"usearch-exact", "usearch-hnsw"}:
+        return _usearch_results(np, vectors, query, limit, backend, usearch_search, reference)
+    if backend != "numpy-exact":
+        raise ValueError(f"unknown vector backend: {backend}")
+    return reference
+
+
+def _require_backend_results(np, keys, scores) -> None:
+    if keys.ndim != 1 or scores.ndim != 1 or len(keys) != len(scores):
+        raise ValueError("vector backend returned invalid results")
+    if not np.isfinite(scores).all():
+        raise ValueError("vector backend returned nonfinite scores")
+
+
 def _search_vectors(
     vectors,
     query,
@@ -1566,31 +1954,45 @@ def _search_vectors(
 ) -> tuple[list[str], list[float]]:
     import numpy as np
 
-    if vectors.ndim != 2 or query.ndim != 1 or vectors.shape[1] != query.shape[0]:
-        raise ValueError("vector search dimension mismatch")
-    if len(candidate_ids) != vectors.shape[0]:
-        raise ValueError("vector search candidate ID mismatch")
-    if not np.isfinite(vectors).all() or not np.isfinite(query).all():
-        raise ValueError("vector search inputs must be finite")
-    reference_keys, reference_scores = _numpy_exact_vectors(vectors, query, limit)
-    keys, scores = reference_keys, reference_scores
-    if backend in {"usearch-exact", "usearch-hnsw"}:
-        search = usearch_search or _native_usearch_search
-        keys, scores = search(vectors, query, limit, backend == "usearch-exact")
-        keys = np.asarray(keys)
-        scores = np.asarray(scores, dtype=np.float32)
-        if backend == "usearch-exact" and (
-            not np.array_equal(keys, reference_keys)
-            or not np.allclose(scores, reference_scores, rtol=1e-5, atol=1e-6)
-        ):
-            raise ValueError("USearch exact parity check failed")
-    elif backend != "numpy-exact":
-        raise ValueError(f"unknown vector backend: {backend}")
-    if keys.ndim != 1 or scores.ndim != 1 or len(keys) != len(scores):
-        raise ValueError("vector backend returned invalid results")
-    if not np.isfinite(scores).all():
-        raise ValueError("vector backend returned nonfinite scores")
+    _require_search_shapes(vectors, query, candidate_ids)
+    _require_finite_search_inputs(np, vectors, query)
+    reference = _numpy_exact_vectors(vectors, query, limit)
+    keys, scores = _backend_results(np, vectors, query, limit, backend, usearch_search, reference)
+    _require_backend_results(np, keys, scores)
     return [candidate_ids[int(key)] for key in keys], [float(score) for score in scores]
+
+
+
+def _split_encoder_signals(raw):
+    if not isinstance(raw, dict):
+        return raw, None
+    if set(raw) != {"dense_vecs", "lexical_weights"}:
+        raise ValueError("encoder returned unknown embedding signals")
+    return raw["dense_vecs"], raw["lexical_weights"]
+
+
+def _sparse_weight(token: object, weight: object) -> float:
+    value = float(weight)
+    if not isinstance(token, str) or not token or not math.isfinite(value) or value <= 0:
+        raise ValueError("learned sparse token weights must be finite and positive")
+    return value
+
+
+def _normalized_sparse_row(row: object) -> dict[str, float]:
+    if not isinstance(row, dict):
+        raise ValueError("learned sparse output must contain token-weight mappings")
+    return {token: _sparse_weight(token, weight) for token, weight in row.items()}
+
+
+def _normalized_sparse(sparse: object, model_id: str, count: int) -> list[dict[str, float]]:
+    if model_id != "BAAI/bge-m3" or not isinstance(sparse, list) or len(sparse) != count:
+        raise ValueError("learned sparse output is not valid for this embedding")
+    return [_normalized_sparse_row(row) for row in sparse]
+
+
+def _learned_sparse_bytes(document_sparse: Sequence[dict[str, float]]) -> int:
+    return sum(len(token.encode("utf-8")) + 8 for row in document_sparse for token in row)
+
 
 
 class ModelEmbeddingAdapter:
@@ -1628,12 +2030,7 @@ class ModelEmbeddingAdapter:
             padding_side=inference["padding_side"],
             truncation_side=inference["truncation_side"],
         )
-        sparse = None
-        if isinstance(raw, dict):
-            if set(raw) != {"dense_vecs", "lexical_weights"}:
-                raise ValueError("encoder returned unknown embedding signals")
-            sparse = raw["lexical_weights"]
-            raw = raw["dense_vecs"]
+        raw, sparse = _split_encoder_signals(raw)
         vectors = _prepare_embedding_vectors(
             raw,
             rows=len(texts),
@@ -1641,20 +2038,7 @@ class ModelEmbeddingAdapter:
             allow_truncation=self.selection.variant["mrl"]["enabled"],
         )
         if sparse is not None:
-            if model["id"] != "BAAI/bge-m3" or not isinstance(sparse, list) or len(sparse) != len(texts):
-                raise ValueError("learned sparse output is not valid for this embedding")
-            normalized = []
-            for row in sparse:
-                if not isinstance(row, dict):
-                    raise ValueError("learned sparse output must contain token-weight mappings")
-                values = {}
-                for token, weight in row.items():
-                    value = float(weight)
-                    if not isinstance(token, str) or not token or not math.isfinite(value) or value <= 0:
-                        raise ValueError("learned sparse token weights must be finite and positive")
-                    values[token] = value
-                normalized.append(values)
-            sparse = normalized
+            sparse = _normalized_sparse(sparse, model["id"], len(texts))
         return vectors, sparse
 
     def _encode(self, texts: Sequence[str]):
@@ -1664,20 +2048,19 @@ class ModelEmbeddingAdapter:
         formatting = self.selection.embedding["formatting"]
         return formatting[field].format(text=text, instruction=formatting["instruction"])
 
+    def _index_documents(self, candidates: Sequence[Candidate]) -> None:
+        self._candidate_ids = tuple(candidate.evidence_id for candidate in candidates)
+        self._candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+        documents = [self._format(_candidate_text(candidate), "document") for candidate in candidates]
+        self.document_vectors, self.document_sparse = self._encode_signals(documents)
+        if self.document_sparse is not None:
+            self.learned_sparse_bytes = _learned_sparse_bytes(self.document_sparse)
+
     def _ensure_documents(self, candidates: Sequence[Candidate]) -> None:
-        ids = tuple(candidate.evidence_id for candidate in candidates)
         if self._candidate_ids is None:
-            self._candidate_ids = ids
-            self._candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
-            documents = [self._format(_candidate_text(candidate), "document") for candidate in candidates]
-            self.document_vectors, self.document_sparse = self._encode_signals(documents)
-            if self.document_sparse is not None:
-                self.learned_sparse_bytes = sum(
-                    len(token.encode("utf-8")) + 8
-                    for row in self.document_sparse
-                    for token in row
-                )
-        elif ids != self._candidate_ids:
+            self._index_documents(candidates)
+            return
+        if tuple(candidate.evidence_id for candidate in candidates) != self._candidate_ids:
             raise ValueError("dense candidate universe mismatch")
 
     def prepare_queries(self, query_texts: Sequence[str]) -> None:
@@ -1687,6 +2070,51 @@ class ModelEmbeddingAdapter:
         if sparse is not None:
             self._query_sparse.update(zip(formatted, sparse))
 
+    def _query_signals(self, formatted_query: str):
+        query_vector = self._query_vectors.get(formatted_query)
+        if query_vector is not None:
+            return query_vector, self._query_sparse.get(formatted_query)
+        vectors, sparse = self._encode_signals([formatted_query])
+        if sparse is None:
+            return vectors[0], None
+        return vectors[0], sparse[0]
+
+    def _eligible_positions(self, candidates: Sequence[Candidate], scope: QueryScope):
+        import numpy as np
+
+        eligible_ids = {item.evidence_id for item in filter_candidates(candidates, scope)}
+        indexes = np.asarray(
+            [index for index, evidence_id in enumerate(self._candidate_ids) if evidence_id in eligible_ids],
+            dtype=np.int64,
+        )
+        ids = tuple(self._candidate_ids[int(index)] for index in indexes)
+        return indexes, ids
+
+    def _dense_ranking(self, query_vector, indexes, ids: tuple[str, ...], limit: int) -> list[ScoredCandidate]:
+        assert self.document_vectors is not None
+        ranked_ids, scores = _search_vectors(
+            self.document_vectors[indexes],
+            query_vector,
+            ids,
+            min(limit, len(ids)),
+            backend=self.vector_backend,
+            usearch_search=self._usearch_search,
+        )
+        return [
+            ScoredCandidate(self._candidate_by_id[evidence_id], score)
+            for evidence_id, score in zip(ranked_ids, scores)
+        ]
+
+    def _sparse_ranking(self, query_sparse: dict, indexes, ids: tuple[str, ...], limit: int) -> list[ScoredCandidate]:
+        sparse_ranked = []
+        for index, evidence_id in zip(indexes, ids):
+            document = self.document_sparse[int(index)]
+            score = sum(weight * document.get(token, 0.0) for token, weight in query_sparse.items())
+            if score > 0:
+                sparse_ranked.append(ScoredCandidate(self._candidate_by_id[evidence_id], score))
+        sparse_ranked.sort(key=lambda item: (-item.score, item.evidence_id))
+        return sparse_ranked[:limit]
+
     def rank(
         self,
         query_text: str,
@@ -1695,56 +2123,19 @@ class ModelEmbeddingAdapter:
         *,
         limit: int,
     ) -> list[ScoredCandidate]:
-        import numpy as np
-
         self._ensure_documents(candidates)
-        assert self._candidate_ids is not None and self.document_vectors is not None
+        assert self._candidate_ids is not None
         formatted_query = self._format(query_text, "query")
-        query_vector = self._query_vectors.get(formatted_query)
-        query_sparse = self._query_sparse.get(formatted_query)
-        if query_vector is None:
-            vectors, sparse = self._encode_signals([formatted_query])
-            query_vector = vectors[0]
-            query_sparse = sparse[0] if sparse is not None else None
-        eligible_ids = {item.evidence_id for item in filter_candidates(candidates, scope)}
-        indexes = np.asarray(
-            [index for index, evidence_id in enumerate(self._candidate_ids) if evidence_id in eligible_ids],
-            dtype=np.int64,
-        )
-        vectors = self.document_vectors[indexes]
-        ids = tuple(self._candidate_ids[int(index)] for index in indexes)
-        ranked_ids, scores = _search_vectors(
-            vectors,
-            query_vector,
-            ids,
-            min(limit, len(ids)),
-            backend=self.vector_backend,
-            usearch_search=self._usearch_search,
-        )
-        dense = [
-            ScoredCandidate(self._candidate_by_id[evidence_id], score)
-            for evidence_id, score in zip(ranked_ids, scores)
-        ]
+        query_vector, query_sparse = self._query_signals(formatted_query)
+        indexes, ids = self._eligible_positions(candidates, scope)
+        dense = self._dense_ranking(query_vector, indexes, ids, limit)
         if self.document_sparse is None:
             return dense
         if query_sparse is None:
             raise ValueError("BGE-M3 query omitted learned sparse output")
-        sparse_ranked = []
-        for index, evidence_id in zip(indexes, ids):
-            document = self.document_sparse[int(index)]
-            score = sum(weight * document.get(token, 0.0) for token, weight in query_sparse.items())
-            if score > 0:
-                sparse_ranked.append(ScoredCandidate(self._candidate_by_id[evidence_id], score))
-        sparse_ranked.sort(key=lambda item: (-item.score, item.evidence_id))
-        sparse_ranked = sparse_ranked[:limit]
-        fused = _fuse_rankings(
-            (dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit
-        )
-        self.last_trace = {
-            "dense_candidate_ids": [item.evidence_id for item in dense],
-            "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
-            "fusion": {"method": "reciprocal-rank-fusion", "k": 60},
-        }
+        sparse_ranked = self._sparse_ranking(query_sparse, indexes, ids, limit)
+        fused = _fuse_rankings((dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit)
+        self.last_trace = _fusion_trace(dense, sparse_ranked)
         return fused
 
 
@@ -1768,6 +2159,28 @@ class ModelRerankerAdapter:
             ]
         return [{"query": query_text, "document": item.text} for item in candidates]
 
+    def _depth_scores(self, query_text: str, prefix: list[ScoredCandidate]):
+        reranker = self.selection.reranker
+        scores = self._scorer(
+            self._inputs(query_text, prefix),
+            batch_size=reranker["batch_size"],
+            max_length=reranker["formatting"]["max_length_tokens"],
+            contract_type=reranker["formatting"]["contract_type"],
+            score_tokens=reranker["formatting"]["score_tokens"],
+        )
+        if len(scores) != len(prefix) or any(not math.isfinite(float(score)) for score in scores):
+            raise ValueError("reranker returned invalid or nonfinite scores")
+        return scores
+
+    @staticmethod
+    def _rescored(prefix: list[ScoredCandidate], scores) -> list[ScoredCandidate]:
+        rescored = [
+            (index, ScoredCandidate(item.candidate, float(score)))
+            for index, (item, score) in enumerate(zip(prefix, scores))
+        ]
+        rescored.sort(key=lambda pair: (-pair[1].score, pair[0]))
+        return [item for _index, item in rescored]
+
     def rank_all(
         self,
         query_text: str,
@@ -1785,23 +2198,8 @@ class ModelRerankerAdapter:
         for depth in self.selection.matrix["benchmark_contract"]["reranker_depths"]:
             prefix = frozen[:depth]
             started = time.perf_counter()
-            scores = self._scorer(
-                self._inputs(query_text, prefix),
-                batch_size=self.selection.reranker["batch_size"],
-                max_length=self.selection.reranker["formatting"]["max_length_tokens"],
-                contract_type=self.selection.reranker["formatting"]["contract_type"],
-                score_tokens=self.selection.reranker["formatting"]["score_tokens"],
-            )
-            if len(scores) != len(prefix) or any(
-                not math.isfinite(float(score)) for score in scores
-            ):
-                raise ValueError("reranker returned invalid or nonfinite scores")
-            rescored = [
-                (index, ScoredCandidate(item.candidate, float(score)))
-                for index, (item, score) in enumerate(zip(prefix, scores))
-            ]
-            rescored.sort(key=lambda pair: (-pair[1].score, pair[0]))
-            ranked_by_depth[depth] = [item for _index, item in rescored] + frozen[depth:]
+            scores = self._depth_scores(query_text, prefix)
+            ranked_by_depth[depth] = self._rescored(prefix, scores) + frozen[depth:]
             depth_traces[str(depth)] = {
                 "candidate_ids": frozen_ids[:depth],
                 "duration_ms": (time.perf_counter() - started) * 1000,
@@ -1819,6 +2217,27 @@ class ModelRerankerAdapter:
         return ranked_by_depth
 
 
+def _fusion_trace(dense: list[ScoredCandidate], sparse_ranked: list[ScoredCandidate]) -> dict:
+    return {
+        "dense_candidate_ids": [item.evidence_id for item in dense],
+        "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
+        "fusion": {"method": "reciprocal-rank-fusion", "k": 60},
+    }
+
+
+def _eligible_scored_ids(candidates: Sequence[ScoredCandidate], scope: QueryScope) -> set[str]:
+    return {
+        candidate.evidence_id
+        for candidate in filter_candidates([item.candidate for item in candidates], scope)
+    }
+
+
+def _keep_best_scored(by_id: dict[str, ScoredCandidate], item: ScoredCandidate, score: float) -> None:
+    current = by_id.get(item.evidence_id)
+    if current is None or score > current.score:
+        by_id[item.evidence_id] = ScoredCandidate(item.candidate, score)
+
+
 class FakeRerankerAdapter:
     kind = ADAPTER_KIND
 
@@ -1830,19 +2249,13 @@ class FakeRerankerAdapter:
         *,
         limit: int,
     ) -> list[ScoredCandidate]:
-        eligible_ids = {
-            candidate.evidence_id
-            for candidate in filter_candidates([item.candidate for item in candidates], scope)
-        }
+        eligible_ids = _eligible_scored_ids(candidates, scope)
         by_id: dict[str, ScoredCandidate] = {}
         for item in candidates:
             if item.evidence_id not in eligible_ids:
                 continue
-            lexical = _lexical_score(query_text, item.candidate)
-            score = max(item.score, 0.0) + 2.0 * lexical
-            current = by_id.get(item.evidence_id)
-            if current is None or score > current.score:
-                by_id[item.evidence_id] = ScoredCandidate(item.candidate, score)
+            score = max(item.score, 0.0) + 2.0 * _lexical_score(query_text, item.candidate)
+            _keep_best_scored(by_id, item, score)
         return sorted(by_id.values(), key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
@@ -1934,6 +2347,12 @@ def _expand_parents(ranked: Sequence[ScoredCandidate]) -> list[str]:
     return parents
 
 
+def _abstention_contract_valid(query: dict, answer: dict) -> bool:
+    if query["answerability"] == "answerable":
+        return not answer["abstained"]
+    return answer["abstained"] and answer["reason"] == query["allowed_abstention_reason"]
+
+
 def _evaluation_row(query: dict, ranked: Sequence[ScoredCandidate], answer: dict) -> dict:
     ranked_evidence = [item.evidence_id for item in ranked]
     ranked_parents = _expand_parents(ranked)
@@ -1946,11 +2365,7 @@ def _evaluation_row(query: dict, ranked: Sequence[ScoredCandidate], answer: dict
         "cross_language": query["cross_language"],
         "answerability": query["answerability"],
         "abstained": answer["abstained"],
-        "abstention_contract_valid": (
-            not answer["abstained"]
-            if query["answerability"] == "answerable"
-            else answer["abstained"] and answer["reason"] == query["allowed_abstention_reason"]
-        ),
+        "abstention_contract_valid": _abstention_contract_valid(query, answer),
         "evidence_recall_at_10": recall_at_k(ranked_evidence, relevant_evidence, 10),
         "evidence_recall_at_20": recall_at_k(ranked_evidence, relevant_evidence, 20),
         "evidence_recall_at_50": recall_at_k(ranked_evidence, relevant_evidence, 50),
@@ -2004,8 +2419,17 @@ def _is_reparse_point(path: Path) -> bool:
     return path.is_symlink() or bool(getattr(stat, "st_file_attributes", 0) & 0x400)
 
 
-@contextlib.contextmanager
-def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
+_MODEL_CACHE_SUBDIRECTORIES = {
+    "HF_HOME": ("huggingface",),
+    "HF_HUB_CACHE": ("huggingface", "hub"),
+    "TRANSFORMERS_CACHE": ("transformers",),
+    "SENTENCE_TRANSFORMERS_HOME": ("sentence-transformers",),
+    "TORCH_HOME": ("torch",),
+    "XDG_CACHE_HOME": ("xdg",),
+}
+
+
+def _prepared_model_cache_root(cache_root: Path | str) -> Path:
     requested = Path(cache_root).expanduser()
     if requested.exists() and _is_reparse_point(requested):
         raise ValueError("model cache root must not be a symlink or reparse point")
@@ -2013,37 +2437,45 @@ def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
     root = _validate_cache_root(requested).resolve(strict=True)
     if _is_reparse_point(root):
         raise ValueError("model cache root must not be a symlink or reparse point")
-    paths = {
-        "HF_HOME": root / "huggingface",
-        "HF_HUB_CACHE": root / "huggingface" / "hub",
-        "TRANSFORMERS_CACHE": root / "transformers",
-        "SENTENCE_TRANSFORMERS_HOME": root / "sentence-transformers",
-        "TORCH_HOME": root / "torch",
-        "XDG_CACHE_HOME": root / "xdg",
-    }
+    return root
+
+
+def _model_cache_paths(root: Path) -> dict[str, Path]:
+    paths = {name: root.joinpath(*parts) for name, parts in _MODEL_CACHE_SUBDIRECTORIES.items()}
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(path) or root not in path.resolve(strict=True).parents:
             raise ValueError("model cache path escaped isolated cache root")
+    return paths
+
+
+def _offline_flag(allow_download: bool) -> str:
+    return "0" if allow_download else "1"
+
+
+def _restore_environment(previous: dict[str, str | None]) -> None:
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@contextlib.contextmanager
+def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
+    root = _prepared_model_cache_root(cache_root)
+    paths = _model_cache_paths(root)
     updates = {name: str(path) for name, path in paths.items()}
     updates.update(
-        HF_HUB_OFFLINE="0" if allow_download else "1",
-        TRANSFORMERS_OFFLINE="0" if allow_download else "1",
+        HF_HUB_OFFLINE=_offline_flag(allow_download),
+        TRANSFORMERS_OFFLINE=_offline_flag(allow_download),
     )
     previous = {name: os.environ.get(name) for name in updates}
     os.environ.update(updates)
     try:
-        yield (
-            "download-allowed-explicit-cache"
-            if allow_download
-            else "offline-local-files-only"
-        )
+        yield "download-allowed-explicit-cache" if allow_download else "offline-local-files-only"
     finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        _restore_environment(previous)
 
 
 def _use_posix_dir_fd() -> bool:
@@ -2058,10 +2490,12 @@ def _same_path_identity(path: Path, expected: os.stat_result) -> bool:
     return os.path.samestat(expected, current)
 
 
-def _write_fake_index(corpus: dict, cache_root: Path) -> int:
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_root = cache_root.resolve(strict=True)
-    root_identity = cache_root.stat(follow_symlinks=False)
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_POSIX_TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+_NEW_OUTPUT_FLAGS = _POSIX_TEMP_FLAGS | getattr(os, "O_BINARY", 0)
+
+
+def _fake_index_bytes(corpus: dict) -> bytes:
     payload = [
         {
             "evidence_id": candidate.evidence_id,
@@ -2071,132 +2505,153 @@ def _write_fake_index(corpus: dict, cache_root: Path) -> int:
         }
         for candidate in build_candidates(corpus)
     ]
-    data = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8") + b"\n"
-    target_name = "fake-index.json"
-    if _use_posix_dir_fd():
-        directory_fd = os.open(
-            cache_root,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        temporary_name = f".fake-index-{uuid.uuid4().hex}"
-        try:
-            if not os.path.samestat(root_identity, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index build")
-            descriptor = os.open(
-                temporary_name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if not _same_path_identity(cache_root, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index build")
-            os.replace(
-                temporary_name,
-                target_name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            os.fsync(directory_fd)
-            if not _same_path_identity(cache_root, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index publication")
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary_name, dir_fd=directory_fd)
-            os.close(directory_fd)
-        return len(data)
 
+
+def _write_and_sync(descriptor: int, data: bytes) -> None:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _require_descriptor_identity(directory_fd: int, identity: os.stat_result, message: str) -> None:
+    if not os.path.samestat(identity, os.fstat(directory_fd)):
+        raise PermissionError(message)
+
+
+def _require_path_identity(path: Path, identity: os.stat_result, message: str) -> None:
+    if not _same_path_identity(path, identity):
+        raise PermissionError(message)
+
+
+def _publish_fake_index_posix(cache_root: Path, root_identity: os.stat_result, data: bytes, target_name: str) -> None:
+    directory_fd = os.open(cache_root, _DIRECTORY_FLAGS)
+    temporary_name = f".fake-index-{uuid.uuid4().hex}"
+    try:
+        _require_descriptor_identity(directory_fd, root_identity, "cache root changed during index build")
+        descriptor = os.open(temporary_name, _POSIX_TEMP_FLAGS, 0o600, dir_fd=directory_fd)
+        _write_and_sync(descriptor, data)
+        _require_path_identity(cache_root, os.fstat(directory_fd), "cache root changed during index build")
+        os.replace(temporary_name, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        _require_path_identity(cache_root, os.fstat(directory_fd), "cache root changed during index publication")
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
+def _publish_fake_index_portable(
+    cache_root: Path, root_identity: os.stat_result, data: bytes, target_name: str
+) -> None:
     path = cache_root / target_name
     descriptor, temporary_name = tempfile.mkstemp(prefix=".fake-index-", dir=cache_root)
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if not _same_path_identity(cache_root, root_identity):
-            raise PermissionError("cache root changed during index build")
+        _write_and_sync(descriptor, data)
+        _require_path_identity(cache_root, root_identity, "cache root changed during index build")
         os.replace(temporary, path)
-        if not _same_path_identity(cache_root, root_identity):
-            raise PermissionError("cache root changed during index publication")
+        _require_path_identity(cache_root, root_identity, "cache root changed during index publication")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_fake_index(corpus: dict, cache_root: Path) -> int:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root = cache_root.resolve(strict=True)
+    root_identity = cache_root.stat(follow_symlinks=False)
+    data = _fake_index_bytes(corpus)
+    if _use_posix_dir_fd():
+        _publish_fake_index_posix(cache_root, root_identity, data, "fake-index.json")
+    else:
+        _publish_fake_index_portable(cache_root, root_identity, data, "fake-index.json")
     return len(data)
 
 
+def _opened_parent_descriptor(parent: Path, parent_identity: os.stat_result) -> int:
+    directory_fd = os.open(parent, _DIRECTORY_FLAGS)
+    if not os.path.samestat(parent_identity, os.fstat(directory_fd)):
+        os.close(directory_fd)
+        raise PermissionError("output parent changed before publication")
+    return directory_fd
+
+
+class _OutputTarget:
+    """One new output file, addressed through its parent descriptor on POSIX and by path elsewhere."""
+
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.parent_identity = output.parent.stat(follow_symlinks=False)
+        self.directory_fd: int | None = None
+        if _use_posix_dir_fd():
+            self.directory_fd = _opened_parent_descriptor(output.parent, self.parent_identity)
+        self.opened_identity: os.stat_result | None = None
+
+    def open_new(self) -> int:
+        if self.directory_fd is None:
+            return os.open(self.output, _NEW_OUTPUT_FLAGS, 0o600)
+        return os.open(self.output.name, _NEW_OUTPUT_FLAGS, 0o600, dir_fd=self.directory_fd)
+
+    def published_identity(self) -> os.stat_result:
+        if self.directory_fd is None:
+            return self.output.stat(follow_symlinks=False)
+        return os.stat(self.output.name, dir_fd=self.directory_fd, follow_symlinks=False)
+
+    def expected_parent(self) -> os.stat_result:
+        if self.directory_fd is None:
+            return self.parent_identity
+        return os.fstat(self.directory_fd)
+
+    def unlink(self) -> None:
+        if self.directory_fd is None:
+            self.output.unlink()
+            return
+        os.unlink(self.output.name, dir_fd=self.directory_fd)
+
+    def sync_parent(self) -> None:
+        if self.directory_fd is not None:
+            os.fsync(self.directory_fd)
+
+    def close(self) -> None:
+        if self.directory_fd is not None:
+            os.close(self.directory_fd)
+
+
+def _publish_bytes(target: _OutputTarget, data: bytes) -> os.stat_result:
+    descriptor = target.open_new()
+    with os.fdopen(descriptor, "wb") as handle:
+        target.opened_identity = os.fstat(handle.fileno())
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        if not os.path.samestat(target.opened_identity, target.published_identity()):
+            raise PermissionError("output changed during publication")
+    if not _same_path_identity(target.output.parent, target.expected_parent()):
+        raise PermissionError("output parent changed during publication")
+    target.sync_parent()
+    return target.opened_identity
+
+
+def _discard_partial_output(target: _OutputTarget) -> None:
+    if target.opened_identity is None:
+        return
+    with contextlib.suppress(FileNotFoundError):
+        if os.path.samestat(target.opened_identity, target.published_identity()):
+            target.unlink()
+
+
 def _write_new_bytes(output: Path, data: bytes) -> os.stat_result:
-    parent_identity = output.parent.stat(follow_symlinks=False)
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
-    directory_fd = None
-    opened_identity = None
-    if _use_posix_dir_fd():
-        directory_fd = os.open(
-            output.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        if not os.path.samestat(parent_identity, os.fstat(directory_fd)):
-            os.close(directory_fd)
-            raise PermissionError("output parent changed before publication")
+    target = _OutputTarget(output)
     try:
-        descriptor = os.open(
-            output.name if directory_fd is not None else output,
-            flags,
-            0o600,
-            **({"dir_fd": directory_fd} if directory_fd is not None else {}),
-        )
-        with os.fdopen(descriptor, "wb") as handle:
-            opened_identity = os.fstat(handle.fileno())
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-            published_identity = (
-                os.stat(output.name, dir_fd=directory_fd, follow_symlinks=False)
-                if directory_fd is not None
-                else output.stat(follow_symlinks=False)
-            )
-            if not os.path.samestat(opened_identity, published_identity):
-                raise PermissionError("output changed during publication")
-        expected_parent = os.fstat(directory_fd) if directory_fd is not None else parent_identity
-        if not _same_path_identity(output.parent, expected_parent):
-            raise PermissionError("output parent changed during publication")
-        if directory_fd is not None:
-            os.fsync(directory_fd)
-        return opened_identity
+        return _publish_bytes(target, data)
     except BaseException:
-        if opened_identity is not None:
-            with contextlib.suppress(FileNotFoundError):
-                published_identity = (
-                    os.stat(output.name, dir_fd=directory_fd, follow_symlinks=False)
-                    if directory_fd is not None
-                    else output.stat(follow_symlinks=False)
-                )
-                if os.path.samestat(opened_identity, published_identity):
-                    if directory_fd is not None:
-                        os.unlink(output.name, dir_fd=directory_fd)
-                    else:
-                        output.unlink()
+        _discard_partial_output(target)
         raise
     finally:
-        if directory_fd is not None:
-            os.close(directory_fd)
+        target.close()
 
 
 def _write_new_output(output: Path, serialized: str) -> None:
@@ -2216,11 +2671,7 @@ def _canonical_report_bytes(report: dict) -> bytes:
     ).encode("utf-8")
 
 
-def _run_process_tree(
-    command: Sequence[str], *, timeout: float, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess:
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("worker deadline must be positive and finite")
+def _worker_popen_options(env: dict[str, str] | None) -> dict:
     options = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
@@ -2231,68 +2682,134 @@ def _run_process_tree(
         options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     else:
         options["start_new_session"] = True
-    process = subprocess.Popen(list(command), **options)
+    return options
+
+
+def _kill_worker_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/taskkill.exe"
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        process.kill()
+        process.communicate(timeout=5)
+
+
+def _run_process_tree(
+    command: Sequence[str], *, timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("worker deadline must be positive and finite")
+    process = subprocess.Popen(list(command), **_worker_popen_options(env))
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        if os.name == "nt":
-            taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/taskkill.exe"
-            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                subprocess.run(
-                    [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-        else:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            process.kill()
-            process.communicate(timeout=5)
+        _kill_worker_tree(process)
         raise TimeoutError("real benchmark worker deadline exceeded") from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def _process_memory_counters_type(wintypes):
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    return ProcessMemoryCounters
+
+
+def _windows_peak_rss() -> tuple[int | None, str]:
+    try:
+        from ctypes import wintypes
+
+        counters = _process_memory_counters_type(wintypes)()
+        counters.cb = ctypes.sizeof(counters)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+        if ok:
+            return int(counters.PeakWorkingSetSize), "measured-windows-working-set"
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None, "unavailable"
+
+
+def _posix_peak_rss() -> tuple[int | None, str]:
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        multiplier = 1 if sys.platform == "darwin" else 1024
+        return int(usage * multiplier), "measured-posix-ru-maxrss"
+    except (ImportError, OSError, ValueError):
+        return None, "unavailable"
+
+
 def _peak_rss() -> tuple[int | None, str]:
     if os.name == "nt":
-        try:
-            from ctypes import wintypes
+        return _windows_peak_rss()
+    return _posix_peak_rss()
 
-            class ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
 
-            counters = ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
-            if ok:
-                return int(counters.PeakWorkingSetSize), "measured-windows-working-set"
-        except (AttributeError, OSError, ValueError):
-            pass
-    else:
-        try:
-            import resource
+_MEASURED_RESOURCE_FIELDS = (
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "cold_first_query_latency_ms",
+    "warm_latency_p50_ms",
+    "warm_latency_p95_ms",
+    "build_time_ms",
+    "indexing_throughput_chunks_per_second",
+    "peak_rss_bytes",
+    "index_size_bytes",
+)
 
-            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            multiplier = 1 if sys.platform == "darwin" else 1024
-            return int(usage * multiplier), "measured-posix-ru-maxrss"
-        except (ImportError, OSError, ValueError):
-            pass
-    return None, "unavailable"
+
+def _nearest_rank_p95(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return values[max(0, math.ceil(0.95 * len(values)) - 1)]
+
+
+def _median_or_none(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return statistics.median(values)
+
+
+def _first_or_none(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return values[0]
+
+
+def _indexing_throughput(chunk_count: int, indexing_duration_ms: float) -> float | None:
+    if chunk_count > 0 and indexing_duration_ms > 0:
+        return chunk_count / (indexing_duration_ms / 1000.0)
+    return None
+
+
+def _measurement_status(value: object) -> str:
+    if value is not None:
+        return "measured"
+    return "unavailable"
 
 
 def _resource_measurements(
@@ -2307,136 +2824,89 @@ def _resource_measurements(
 ) -> dict:
     sorted_latencies = sorted(latencies_ms)
     warm_latencies = sorted(latencies_ms[1:])
-
-    def p95(values: Sequence[float]) -> float | None:
-        if not values:
-            return None
-        return values[max(0, math.ceil(0.95 * len(values)) - 1)]
-
-    indexing_duration_ms = build_time_ms if indexing_duration_ms is None else indexing_duration_ms
-    throughput = (
-        chunk_count / (indexing_duration_ms / 1000.0)
-        if chunk_count > 0 and indexing_duration_ms > 0
-        else None
-    )
+    if indexing_duration_ms is None:
+        indexing_duration_ms = build_time_ms
     measurements = {
-        "latency_p50_ms": statistics.median(sorted_latencies) if sorted_latencies else None,
-        "latency_p95_ms": p95(sorted_latencies),
-        "cold_first_query_latency_ms": latencies_ms[0] if latencies_ms else None,
-        "warm_latency_p50_ms": statistics.median(warm_latencies) if warm_latencies else None,
-        "warm_latency_p95_ms": p95(warm_latencies),
+        "latency_p50_ms": _median_or_none(sorted_latencies),
+        "latency_p95_ms": _nearest_rank_p95(sorted_latencies),
+        "cold_first_query_latency_ms": _first_or_none(latencies_ms),
+        "warm_latency_p50_ms": _median_or_none(warm_latencies),
+        "warm_latency_p95_ms": _nearest_rank_p95(warm_latencies),
         "peak_rss_bytes": peak_rss_bytes,
         "peak_rss_status": peak_rss_status,
         "build_time_ms": build_time_ms,
-        "indexing_throughput_chunks_per_second": throughput,
+        "indexing_throughput_chunks_per_second": _indexing_throughput(chunk_count, indexing_duration_ms),
         "index_size_bytes": index_size_bytes,
     }
     measurements["measurement_status"] = {
-        name: "measured" if measurements[name] is not None else "unavailable"
-        for name in (
-            "latency_p50_ms",
-            "latency_p95_ms",
-            "cold_first_query_latency_ms",
-            "warm_latency_p50_ms",
-            "warm_latency_p95_ms",
-            "build_time_ms",
-            "indexing_throughput_chunks_per_second",
-            "peak_rss_bytes",
-            "index_size_bytes",
-        )
+        name: _measurement_status(measurements[name]) for name in _MEASURED_RESOURCE_FIELDS
     }
     return measurements
 
 
+_RETRIEVAL_GATE_METRICS = ("parent_recall_at_10", "all_required_evidence_recall_at_20", "ndcg_at_10", "mrr_at_10")
+
+
+def _false_answer_gate(value: float | None) -> bool:
+    return value is not None and value <= THRESHOLDS["no_answer_false_answer_rate"]
+
+
+def _language_passes(metrics: dict) -> bool:
+    gap = THRESHOLDS["max_language_gate_gap"]
+    retrieval_passes = all(metrics[name] >= THRESHOLDS[name] - gap for name in _RETRIEVAL_GATE_METRICS)
+    return retrieval_passes and _false_answer_gate(metrics["no_answer_false_answer_rate"])
+
+
+def _orchestration_passed(metric_gates: dict, language_results: dict, qa_contract_passed: bool) -> bool:
+    return all(metric_gates.values()) and all(language_results.values()) and qa_contract_passed
+
+
 def _gate_results(overall: dict, slices: dict[str, dict], *, qa_contract_passed: bool = True) -> dict:
-    metric_gates = {
-        name: overall[name] >= threshold
-        for name, threshold in (
-            ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-            (
-                "all_required_evidence_recall_at_20",
-                THRESHOLDS["all_required_evidence_recall_at_20"],
-            ),
-            ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-            ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-        )
-    }
-    metric_gates["no_answer_false_answer_rate"] = (
-        overall["no_answer_false_answer_rate"] is not None
-        and overall["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
-    )
-    language_results = {}
-    for language in ("EN", "RU", "ZH"):
-        retrieval_passes = all(
-            slices[language][metric] >= threshold - THRESHOLDS["max_language_gate_gap"]
-            for metric, threshold in (
-                ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-                (
-                    "all_required_evidence_recall_at_20",
-                    THRESHOLDS["all_required_evidence_recall_at_20"],
-                ),
-                ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-                ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-            )
-        )
-        language_results[language] = retrieval_passes and (
-            slices[language]["no_answer_false_answer_rate"] is not None
-            and slices[language]["no_answer_false_answer_rate"]
-            <= THRESHOLDS["no_answer_false_answer_rate"]
-        )
+    metric_gates = {name: overall[name] >= THRESHOLDS[name] for name in _RETRIEVAL_GATE_METRICS}
+    metric_gates["no_answer_false_answer_rate"] = _false_answer_gate(overall["no_answer_false_answer_rate"])
+    language_results = {language: _language_passes(slices[language]) for language in ("EN", "RU", "ZH")}
     return {
         "release_evidence": False,
         "interpretation": "orchestration-only",
         "metric_results": metric_gates,
         "language_results": language_results,
         "qa_contract_passed": qa_contract_passed,
-        "passed_for_orchestration": (
-            all(metric_gates.values()) and all(language_results.values()) and qa_contract_passed
-        ),
+        "passed_for_orchestration": _orchestration_passed(metric_gates, language_results, qa_contract_passed),
     }
 
 
-def _load_transformer_embedding(
-    selection: ModelSelection,
-    *,
-    cache_root: Path,
-    local_files_only: bool,
-    trust_remote_code: bool,
-):
-    if trust_remote_code:
-        raise ValueError("remote model code is forbidden")
-    model_spec = selection.embedding
-    if model_spec["native_library"]["name"] == "sentence-transformers":
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise ValueError(
-                "model-matrix adapter requires the retrieval-benchmark extra"
-            ) from exc
-        model = SentenceTransformer(
-            model_spec["id"],
-            revision=model_spec["revision"],
-            cache_folder=str(cache_root),
-            local_files_only=local_files_only,
-            trust_remote_code=False,
-            model_kwargs={"torch_dtype": "float32"},
+def _sentence_transformer_encoder(model_spec: dict, cache_root: Path, local_files_only: bool):
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise ValueError("model-matrix adapter requires the retrieval-benchmark extra") from exc
+    model = SentenceTransformer(
+        model_spec["id"],
+        revision=model_spec["revision"],
+        cache_folder=str(cache_root),
+        local_files_only=local_files_only,
+        trust_remote_code=False,
+        model_kwargs={"torch_dtype": "float32"},
+    )
+
+    def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
+        if pooling != model_spec["inference"]["pooling"]:
+            raise ValueError(f"unsupported native pooling: {pooling}")
+        model.max_seq_length = max_length
+        model.tokenizer.padding_side = padding_side
+        model.tokenizer.truncation_side = truncation_side
+        return model.encode(
+            list(texts),
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
+            show_progress_bar=False,
         )
 
-        def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
-            if pooling != model_spec["inference"]["pooling"]:
-                raise ValueError(f"unsupported native pooling: {pooling}")
-            model.max_seq_length = max_length
-            model.tokenizer.padding_side = padding_side
-            model.tokenizer.truncation_side = truncation_side
-            return model.encode(
-                list(texts),
-                batch_size=batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=False,
-                show_progress_bar=False,
-            )
+    return encode
 
-        return encode
+
+def _transformers_model(model_spec: dict, cache_root: Path, local_files_only: bool):
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -2451,100 +2921,170 @@ def _load_transformer_embedding(
     tokenizer = AutoTokenizer.from_pretrained(model_spec["id"], **common)
     model = AutoModel.from_pretrained(model_spec["id"], torch_dtype=torch.float32, **common)
     model.eval()
-    sparse_linear = None
-    if model_spec["id"] == "BAAI/bge-m3":
-        from huggingface_hub import hf_hub_download
+    return torch, tokenizer, model
 
-        asset = Path(
-            hf_hub_download(
-                repo_id=model_spec["id"],
-                filename="sparse_linear.pt",
-                revision=model_spec["revision"],
-                cache_dir=str(cache_root),
-                local_files_only=local_files_only,
-            )
+
+def _verified_sparse_asset(model_spec: dict, cache_root: Path, local_files_only: bool) -> Path:
+    from huggingface_hub import hf_hub_download
+
+    asset = Path(
+        hf_hub_download(
+            repo_id=model_spec["id"],
+            filename="sparse_linear.pt",
+            revision=model_spec["revision"],
+            cache_dir=str(cache_root),
+            local_files_only=local_files_only,
         )
-        resolved_asset = asset.resolve(strict=True)
-        resolved_cache = cache_root.resolve(strict=True)
-        if resolved_asset != resolved_cache and resolved_cache not in resolved_asset.parents:
-            raise ValueError("BGE-M3 sparse asset escaped the model cache")
-        if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
-            raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
-        state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
-        if not isinstance(state, dict) or set(state) != {"weight", "bias"}:
-            raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
-        weight = state["weight"]
-        bias = state["bias"]
-        if (
-            tuple(weight.shape) != (1, selection.variant["dimensions"])
-            or tuple(bias.shape) != (1,)
-        ):
-            raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
-        sparse_linear = torch.nn.Linear(selection.variant["dimensions"], 1, bias=True)
-        sparse_linear.load_state_dict(state, strict=True)
-        sparse_linear.eval()
+    )
+    resolved_asset = asset.resolve(strict=True)
+    resolved_cache = cache_root.resolve(strict=True)
+    if resolved_asset != resolved_cache and resolved_cache not in resolved_asset.parents:
+        raise ValueError("BGE-M3 sparse asset escaped the model cache")
+    if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
+        raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
+    return resolved_asset
 
-    def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
+
+def _sparse_linear_state(torch, resolved_asset: Path, dimensions: int) -> dict:
+    state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
+    if not isinstance(state, dict) or set(state) != {"weight", "bias"}:
+        raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
+    if tuple(state["weight"].shape) != (1, dimensions) or tuple(state["bias"].shape) != (1,):
+        raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
+    return state
+
+
+def _bge_m3_sparse_linear(torch, selection: ModelSelection, cache_root: Path, local_files_only: bool):
+    resolved_asset = _verified_sparse_asset(selection.embedding, cache_root, local_files_only)
+    dimensions = selection.variant["dimensions"]
+    state = _sparse_linear_state(torch, resolved_asset, dimensions)
+    sparse_linear = torch.nn.Linear(dimensions, 1, bias=True)
+    sparse_linear.load_state_dict(state, strict=True)
+    sparse_linear.eval()
+    return sparse_linear
+
+
+def _cls_pooling(torch, hidden, mask):
+    del torch, mask
+    return hidden[:, 0]
+
+
+def _mean_pooling(torch, hidden, mask):
+    del torch
+    expanded = mask.unsqueeze(-1).to(hidden.dtype)
+    return (hidden * expanded).sum(1) / expanded.sum(1).clamp_min(1)
+
+
+def _last_token_pooling(torch, hidden, mask):
+    reversed_mask = torch.flip(mask, dims=[1])
+    indexes = mask.shape[1] - 1 - reversed_mask.argmax(dim=1)
+    return hidden[torch.arange(hidden.shape[0]), indexes]
+
+
+_POOLERS = {"cls": _cls_pooling, "mean": _mean_pooling, "last_token": _last_token_pooling}
+
+
+def _pooled(torch, hidden, mask, pooling: str):
+    pooler = _POOLERS.get(pooling)
+    if pooler is None:
+        raise ValueError(f"unsupported matrix pooling: {pooling}")
+    return pooler(torch, hidden, mask)
+
+
+def _unused_token_ids(tokenizer) -> set:
+    return {tokenizer.cls_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id, tokenizer.unk_token_id}
+
+
+def _sparse_row(token_ids: Sequence[int], weights: Sequence[float], unused: set) -> dict[str, float]:
+    row: dict[str, float] = {}
+    for token_id, weight in zip(token_ids, weights):
+        if token_id not in unused and weight > 0:
+            key = str(token_id)
+            row[key] = max(row.get(key, 0.0), float(weight))
+    return row
+
+
+class _TransformerEncoder:
+    """The encode callable of a transformers-backed embedding candidate."""
+
+    def __init__(self, torch, tokenizer, model, sparse_linear) -> None:
+        self.torch = torch
+        self.tokenizer = tokenizer
+        self.model = model
+        self.sparse_linear = sparse_linear
+
+    def _token_weights(self, hidden):
+        with self.torch.inference_mode():
+            return self.torch.relu(self.sparse_linear(hidden)).squeeze(-1).float().cpu()
+
+    def _sparse_rows(self, batch, hidden) -> list[dict[str, float]]:
+        token_weights = self._token_weights(hidden)
+        unused = _unused_token_ids(self.tokenizer)
+        return [
+            _sparse_row(token_ids, weights, unused)
+            for token_ids, weights in zip(batch["input_ids"].cpu().tolist(), token_weights.tolist())
+        ]
+
+    def _encode_batch(self, texts, max_length: int, pooling: str, sparse_rows: list):
+        batch = self.tokenizer(
+            list(texts), padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        )
+        with self.torch.inference_mode():
+            hidden = self.model(**batch).last_hidden_state
+        values = _pooled(self.torch, hidden, batch["attention_mask"], pooling)
+        chunk = values.float().cpu().numpy()
+        if self.sparse_linear is not None:
+            sparse_rows.extend(self._sparse_rows(batch, hidden))
+        return chunk
+
+    def __call__(self, texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
         import numpy as np
 
-        tokenizer.padding_side = padding_side
-        tokenizer.truncation_side = truncation_side
+        self.tokenizer.padding_side = padding_side
+        self.tokenizer.truncation_side = truncation_side
         chunks = []
-        sparse_rows = []
+        sparse_rows: list[dict[str, float]] = []
         for offset in range(0, len(texts), batch_size):
-            batch = tokenizer(
-                list(texts[offset : offset + batch_size]),
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            with torch.inference_mode():
-                hidden = model(**batch).last_hidden_state
-            mask = batch["attention_mask"]
-            if pooling == "cls":
-                values = hidden[:, 0]
-            elif pooling == "mean":
-                expanded = mask.unsqueeze(-1).to(hidden.dtype)
-                values = (hidden * expanded).sum(1) / expanded.sum(1).clamp_min(1)
-            elif pooling == "last_token":
-                reversed_mask = torch.flip(mask, dims=[1])
-                indexes = mask.shape[1] - 1 - reversed_mask.argmax(dim=1)
-                values = hidden[torch.arange(hidden.shape[0]), indexes]
-            else:
-                raise ValueError(f"unsupported matrix pooling: {pooling}")
-            chunks.append(values.float().cpu().numpy())
-            if sparse_linear is not None:
-                with torch.inference_mode():
-                    token_weights = torch.relu(sparse_linear(hidden)).squeeze(-1).float().cpu()
-                unused = {
-                    tokenizer.cls_token_id,
-                    tokenizer.eos_token_id,
-                    tokenizer.pad_token_id,
-                    tokenizer.unk_token_id,
-                }
-                for token_ids, weights in zip(batch["input_ids"].cpu().tolist(), token_weights.tolist()):
-                    row = {}
-                    for token_id, weight in zip(token_ids, weights):
-                        if token_id not in unused and weight > 0:
-                            key = str(token_id)
-                            row[key] = max(row.get(key, 0.0), float(weight))
-                    sparse_rows.append(row)
+            chunks.append(self._encode_batch(texts[offset : offset + batch_size], max_length, pooling, sparse_rows))
         dense = np.concatenate(chunks, axis=0)
-        if sparse_linear is not None:
+        if self.sparse_linear is not None:
             return {"dense_vecs": dense, "lexical_weights": sparse_rows}
         return dense
 
-    return encode
+
+def _load_transformer_embedding(
+    selection: ModelSelection,
+    *,
+    cache_root: Path,
+    local_files_only: bool,
+    trust_remote_code: bool,
+):
+    if trust_remote_code:
+        raise ValueError("remote model code is forbidden")
+    model_spec = selection.embedding
+    if model_spec["native_library"]["name"] == "sentence-transformers":
+        return _sentence_transformer_encoder(model_spec, cache_root, local_files_only)
+    torch, tokenizer, model = _transformers_model(model_spec, cache_root, local_files_only)
+    sparse_linear = _optional_sparse_linear(torch, selection, cache_root, local_files_only)
+    return _TransformerEncoder(torch, tokenizer, model, sparse_linear)
 
 
-def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: str, max_length: int):
+def _optional_sparse_linear(torch, selection: ModelSelection, cache_root: Path, local_files_only: bool):
+    """BGE-M3's learned sparse head; None for every other embedder."""
+    if selection.embedding["id"] != "BAAI/bge-m3":
+        return None
+    return _bge_m3_sparse_linear(torch, selection, cache_root, local_files_only)
+
+
+def _token_ids(tokenizer, text: str) -> list[int]:
+    return list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def _qwen_template_parts(formatting: dict) -> tuple[str, str, str]:
     query_marker = "__LLM_WIKI_QUERY__"
     document_marker = "__LLM_WIKI_DOCUMENT__"
     rendered = formatting["user_template"].format(
-        instruction=formatting["instruction"],
-        query=query_marker,
-        document=document_marker,
+        instruction=formatting["instruction"], query=query_marker, document=document_marker
     )
     before_query, marker, remainder = rendered.partition(query_marker)
     if not marker:
@@ -2552,29 +3092,102 @@ def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: 
     between, marker, after_document = remainder.partition(document_marker)
     if not marker:
         raise ValueError("Qwen reranker user template lacks document placeholder")
+    return before_query, between, after_document
 
-    def token_ids(text: str) -> list[int]:
-        return list(tokenizer(text, add_special_tokens=False)["input_ids"])
 
-    fixed_prefix = token_ids(formatting["system_prefix"] + before_query)
-    fixed_middle = token_ids(between)
-    fixed_suffix = token_ids(after_document + formatting["assistant_suffix"])
-    query_ids = token_ids(formatting["query_template"].format(query=query))
-    document_ids = token_ids(formatting["document_template"].format(document=document))
-    fixed_length = len(fixed_prefix) + len(fixed_middle) + len(fixed_suffix)
-    if fixed_length > max_length:
-        raise ValueError("reranker fixed prefix and suffix exceed matrix max length")
-    budget = max_length - fixed_length
+def _trim_to_budget(query_ids: list[int], document_ids: list[int], budget: int) -> None:
     while len(query_ids) + len(document_ids) > budget:
         if len(query_ids) >= len(document_ids):
             query_ids.pop()
         else:
             document_ids.pop()
+
+
+def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: str, max_length: int):
+    before_query, between, after_document = _qwen_template_parts(formatting)
+    fixed_prefix = _token_ids(tokenizer, formatting["system_prefix"] + before_query)
+    fixed_middle = _token_ids(tokenizer, between)
+    fixed_suffix = _token_ids(tokenizer, after_document + formatting["assistant_suffix"])
+    query_ids = _token_ids(tokenizer, formatting["query_template"].format(query=query))
+    document_ids = _token_ids(tokenizer, formatting["document_template"].format(document=document))
+    fixed_length = len(fixed_prefix) + len(fixed_middle) + len(fixed_suffix)
+    if fixed_length > max_length:
+        raise ValueError("reranker fixed prefix and suffix exceed matrix max length")
+    _trim_to_budget(query_ids, document_ids, max_length - fixed_length)
     return {
         "input_ids": fixed_prefix + query_ids + fixed_middle + document_ids + fixed_suffix,
         "query_tokens_kept": len(query_ids),
         "document_tokens_kept": len(document_ids),
     }
+
+
+def _reranker_pad_id(tokenizer) -> int:
+    if tokenizer.pad_token_id is None:
+        return tokenizer.eos_token_id
+    return tokenizer.pad_token_id
+
+
+def _yes_no_token_ids(tokenizer, score_tokens: dict) -> tuple[int, int]:
+    no_ids = tokenizer(score_tokens["negative"], add_special_tokens=False)["input_ids"]
+    yes_ids = tokenizer(score_tokens["positive"], add_special_tokens=False)["input_ids"]
+    if len(no_ids) != 1 or len(yes_ids) != 1:
+        raise ValueError("Qwen reranker yes/no score tokens must each be one token")
+    return no_ids[0], yes_ids[0]
+
+
+def _left_padded(torch, rows: list[list[int]], pad_id: int):
+    width = max(len(row) for row in rows)
+    input_ids = torch.tensor([[pad_id] * (width - len(row)) + row for row in rows])
+    attention = torch.tensor([[0] * (width - len(row)) + [1] * len(row) for row in rows])
+    return input_ids, attention
+
+
+class _TransformerReranker:
+    """The score callable of a transformers-backed reranker candidate."""
+
+    def __init__(self, torch, tokenizer, model, formatting: dict) -> None:
+        self.torch = torch
+        self.tokenizer = tokenizer
+        self.model = model
+        self.formatting = formatting
+
+    def _pair_scores(self, chunk, max_length: int) -> list[float]:
+        queries, documents = zip(*chunk)
+        encoded = self.tokenizer(
+            list(queries),
+            list(documents),
+            padding=True,
+            truncation="longest_first",
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        with self.torch.inference_mode():
+            logits = self.model(**encoded).logits.float().reshape(-1)
+        return self.torch.sigmoid(logits).cpu().tolist()
+
+    def _qwen_scores(self, chunk, max_length: int, score_tokens: dict) -> list[float]:
+        rows = [
+            _qwen_reranker_input_ids(self.tokenizer, self.formatting, item["query"], item["document"], max_length)[
+                "input_ids"
+            ]
+            for item in chunk
+        ]
+        input_ids, attention = _left_padded(self.torch, rows, _reranker_pad_id(self.tokenizer))
+        with self.torch.inference_mode():
+            logits = self.model(input_ids=input_ids, attention_mask=attention).logits[:, -1, :].float()
+        no_id, yes_id = _yes_no_token_ids(self.tokenizer, score_tokens)
+        pair = self.torch.stack((logits[:, no_id], logits[:, yes_id]), dim=1)
+        return self.torch.softmax(pair, dim=1)[:, 1].cpu().tolist()
+
+    def __call__(self, inputs, *, batch_size, max_length, contract_type, score_tokens) -> list[float]:
+        scores: list[float] = []
+        for offset in range(0, len(inputs), batch_size):
+            chunk = inputs[offset : offset + batch_size]
+            if contract_type == "tokenizer_pair_sequence_classification":
+                scores.extend(self._pair_scores(chunk, max_length))
+                continue
+            scores.extend(self._qwen_scores(chunk, max_length, score_tokens))
+        return scores
 
 
 def _load_transformer_reranker(
@@ -2604,61 +3217,12 @@ def _load_transformer_reranker(
         "trust_remote_code": False,
     }
     tokenizer = AutoTokenizer.from_pretrained(spec["id"], **common)
-    model_class = (
-        AutoModelForSequenceClassification
-        if formatting["contract_type"] == "tokenizer_pair_sequence_classification"
-        else AutoModelForCausalLM
-    )
+    model_class = AutoModelForCausalLM
+    if formatting["contract_type"] == "tokenizer_pair_sequence_classification":
+        model_class = AutoModelForSequenceClassification
     model = model_class.from_pretrained(spec["id"], torch_dtype=torch.float32, **common)
     model.eval()
-
-    def score(inputs, *, batch_size, max_length, contract_type, score_tokens):
-        scores = []
-        for offset in range(0, len(inputs), batch_size):
-            chunk = inputs[offset : offset + batch_size]
-            if contract_type == "tokenizer_pair_sequence_classification":
-                queries, documents = zip(*chunk)
-                encoded = tokenizer(
-                    list(queries),
-                    list(documents),
-                    padding=True,
-                    truncation="longest_first",
-                    max_length=max_length,
-                    return_tensors="pt",
-                )
-                with torch.inference_mode():
-                    logits = model(**encoded).logits.float().reshape(-1)
-                scores.extend(torch.sigmoid(logits).cpu().tolist())
-                continue
-            rows = [
-                _qwen_reranker_input_ids(
-                    tokenizer,
-                    formatting,
-                    item["query"],
-                    item["document"],
-                    max_length,
-                )["input_ids"]
-                for item in chunk
-            ]
-            pad_id = tokenizer.pad_token_id
-            if pad_id is None:
-                pad_id = tokenizer.eos_token_id
-            width = max(len(row) for row in rows)
-            input_ids = torch.tensor([[pad_id] * (width - len(row)) + row for row in rows])
-            attention = torch.tensor(
-                [[0] * (width - len(row)) + [1] * len(row) for row in rows]
-            )
-            with torch.inference_mode():
-                logits = model(input_ids=input_ids, attention_mask=attention).logits[:, -1, :].float()
-            no_ids = tokenizer(score_tokens["negative"], add_special_tokens=False)["input_ids"]
-            yes_ids = tokenizer(score_tokens["positive"], add_special_tokens=False)["input_ids"]
-            if len(no_ids) != 1 or len(yes_ids) != 1:
-                raise ValueError("Qwen reranker yes/no score tokens must each be one token")
-            pair = torch.stack((logits[:, no_ids[0]], logits[:, yes_ids[0]]), dim=1)
-            scores.extend(torch.softmax(pair, dim=1)[:, 1].cpu().tolist())
-        return scores
-
-    return score
+    return _TransformerReranker(torch, tokenizer, model, formatting)
 
 
 def _fuse_rankings(
@@ -2675,19 +3239,33 @@ def _fuse_rankings(
     return [ScoredCandidate(by_id[evidence_id], score) for evidence_id, score in fused[:limit]]
 
 
+def _remove_reparse_point(path: Path) -> None:
+    if path.is_dir():
+        path.rmdir()
+        return
+    path.unlink(missing_ok=True)
+
+
+def _remove_artifact(path: Path) -> None:
+    if _is_reparse_point(path):
+        _remove_reparse_point(path)
+        return
+    _remove_plain_artifact(path)
+
+
+def _remove_plain_artifact(path: Path) -> None:
+    if path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
 def _remove_semantic_artifacts(cache_root: Path, lexical_path: Path) -> None:
     for path in cache_root.iterdir():
         if path == lexical_path:
             continue
-        if _is_reparse_point(path):
-            if path.is_dir():
-                path.rmdir()
-            else:
-                path.unlink(missing_ok=True)
-        elif path.is_file():
-            path.unlink(missing_ok=True)
-        elif path.is_dir():
-            shutil.rmtree(path)
+        _remove_artifact(path)
 
 
 def _decorate_lexical_fallback(
@@ -2777,68 +3355,69 @@ class _RunWorkspace:
     model_cache_identity: str
 
 
-def _owner_only_directory(path: Path, label: str) -> os.stat_result:
-    if _is_reparse_point(path):
-        raise ValueError(f"{label} must not be a symlink or reparse point")
-    identity = path.stat(follow_symlinks=False)
+def _require_owner_only(identity: os.stat_result, label: str) -> None:
     if hasattr(os, "getuid") and identity.st_uid != os.getuid():
         raise PermissionError(f"{label} is not owned by the current user")
     if os.name == "posix" and stat.S_IMODE(identity.st_mode) & 0o077:
         raise PermissionError(f"{label} must be owner-controlled")
+
+
+def _owner_only_directory(path: Path, label: str) -> os.stat_result:
+    if _is_reparse_point(path):
+        raise ValueError(f"{label} must not be a symlink or reparse point")
+    identity = path.stat(follow_symlinks=False)
+    _require_owner_only(identity, label)
     return identity
 
 
-def _create_run_workspace(model_cache_root: Path) -> _RunWorkspace:
-    requested = model_cache_root.expanduser()
-    if requested.exists() and _is_reparse_point(requested):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    requested.mkdir(parents=True, exist_ok=True)
-    root = _validate_cache_root(requested).resolve(strict=True)
-    if _is_reparse_point(root):
-        raise ValueError("model cache root must not be a symlink or reparse point")
+def _owned_root_identity(root: Path) -> os.stat_result:
     root_identity = root.stat(follow_symlinks=False)
     if hasattr(os, "getuid") and root_identity.st_uid != os.getuid():
         raise PermissionError("model cache root is not owned by the current user")
+    return root_identity
+
+
+def _prepared_runs_root(root: Path) -> tuple[Path, os.stat_result]:
     runs_root = root / "runs"
     if runs_root.exists() and _is_reparse_point(runs_root):
         raise ValueError("runs directory must not be a symlink or reparse point")
     runs_root.mkdir(mode=0o700, exist_ok=True)
-    runs_identity = _owner_only_directory(runs_root, "runs directory")
-    workspace = None
+    return runs_root, _owner_only_directory(runs_root, "runs directory")
+
+
+def _allocated_workspace(runs_root: Path) -> Path:
     for _attempt in range(32):
         candidate = runs_root / secrets.token_hex(16)
         try:
             candidate.mkdir(mode=0o700)
         except FileExistsError:
             continue
-        workspace = candidate
-        break
-    if workspace is None:
-        raise FileExistsError("could not allocate a unique benchmark run workspace")
+        return candidate
+    raise FileExistsError("could not allocate a unique benchmark run workspace")
+
+
+def _create_run_workspace(model_cache_root: Path) -> _RunWorkspace:
+    root = _prepared_model_cache_root(model_cache_root)
+    root_identity = _owned_root_identity(root)
+    runs_root, runs_identity = _prepared_runs_root(root)
+    workspace = _allocated_workspace(runs_root)
     workspace_identity = _owner_only_directory(workspace, "run workspace")
     if not _same_path_identity(runs_root, runs_identity):
         shutil.rmtree(workspace)
         raise PermissionError("runs directory changed during workspace creation")
-    identity_payload = {
-        "device": int(root_identity.st_dev),
-        "inode": int(root_identity.st_ino),
-    }
-    return _RunWorkspace(
-        workspace,
-        workspace_identity,
-        runs_root,
-        runs_identity,
-        _sha256_json(identity_payload),
-    )
+    identity_payload = {"device": int(root_identity.st_dev), "inode": int(root_identity.st_ino)}
+    return _RunWorkspace(workspace, workspace_identity, runs_root, runs_identity, _sha256_json(identity_payload))
+
+
+def _require_workspace_unchanged(workspace: _RunWorkspace) -> None:
+    if not _same_path_identity(workspace.runs_root, workspace.runs_identity):
+        raise PermissionError("runs directory changed before workspace cleanup")
+    if _is_reparse_point(workspace.path) or not _same_path_identity(workspace.path, workspace.identity):
+        raise PermissionError("run workspace changed before cleanup")
 
 
 def _cleanup_run_workspace(workspace: _RunWorkspace) -> None:
-    if not _same_path_identity(workspace.runs_root, workspace.runs_identity):
-        raise PermissionError("runs directory changed before workspace cleanup")
-    if _is_reparse_point(workspace.path) or not _same_path_identity(
-        workspace.path, workspace.identity
-    ):
-        raise PermissionError("run workspace changed before cleanup")
+    _require_workspace_unchanged(workspace)
     if os.name == "posix" and not shutil.rmtree.avoids_symlink_attacks:
         raise PermissionError("platform lacks descriptor-safe workspace cleanup")
     shutil.rmtree(workspace.path)
@@ -2929,6 +3508,801 @@ def run_benchmark(
         _cleanup_run_workspace(workspace)
 
 
+_METHODOLOGY_BASE = {
+    "source": "https://ir-measur.es/en/latest/measures.html",
+    "positive_retrieval_denominator": "answerable queries only",
+    "recall": "fraction of all known relevant candidates retrieved",
+    "all_required": "one only when every required evidence span is in top 20",
+    "mrr": "reciprocal rank of first relevant evidence span through rank 10",
+    "ndcg": "graded gain with log2 discount normalized by ideal ranking through rank 10",
+    "false_answer_denominator": "unanswerable queries only",
+    "unavailable_metrics": (
+        "empty-denominator rates are represented as JSON null and excluded from macro means"
+    ),
+    "timing_and_rss": "measured and non-canonical",
+    "phase_peak_rss": "process peak RSS is run-level; per-phase peaks are unavailable",
+    "resource_unavailable": "unavailable measurements use JSON null plus measurement_status",
+}
+_SHIPPABLE_LICENSES = frozenset({"Apache-2.0", "MIT"})
+
+
+def _require_supported_adapter(adapter: str) -> None:
+    if adapter not in {ADAPTER_KIND, MODEL_MATRIX_ADAPTER_KIND}:
+        raise ValueError("only deterministic-fake or explicit model-matrix adapters are supported")
+
+
+def _require_real_mode_choices(options: _RunOptions) -> None:
+    if options.adapter != MODEL_MATRIX_ADAPTER_KIND:
+        return
+    _require_explicit_matrix_choices(options)
+
+
+def _require_explicit_matrix_choices(options: _RunOptions) -> None:
+    if not all((options.model_id, options.variant_id, options.lexical_config, options.vector_backend)):
+        raise ValueError("model-matrix mode requires explicit model, variant, lexical, and vector choices")
+    if options.rerank_depth is not None:
+        raise ValueError("reranker evidence always runs matrix depths 10, 20, and 50 together")
+
+
+def _require_known_lexical_config(lexical_config: str | None) -> None:
+    if lexical_config is not None and lexical_config not in LEXICAL_CONFIGURATIONS:
+        raise ValueError(f"unknown lexical configuration: {lexical_config}")
+
+
+def _require_corpus_matches_selection(corpus: dict, selection: ModelSelection) -> None:
+    if hashlib.sha256(canonical_json_bytes(corpus) + b"\n").hexdigest() != selection.corpus_sha256:
+        raise ValueError("loaded corpus content does not match matrix corpus SHA256")
+
+
+def _first_not_none(value, default):
+    if value is not None:
+        return value
+    return default
+
+
+def _empty_accelerator_caches() -> None:
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _empty_mps_cache(torch)
+
+
+def _empty_mps_cache(torch) -> None:
+    mps = getattr(torch, "mps", None)
+    if mps is not None and mps.is_available():
+        mps.empty_cache()
+
+
+def _language_rows(rows: Sequence[dict], language: str) -> list[dict]:
+    return [row for row in rows if row["language"] == language]
+
+
+def _cross_language_rows(rows: Sequence[dict]) -> list[dict]:
+    return [row for row in rows if row["cross_language"]]
+
+
+def _language_slices(rows: Sequence[dict]) -> dict[str, dict]:
+    slices = {language: _aggregate(_language_rows(rows, language)) for language in ("EN", "RU", "ZH")}
+    slices["cross-language"] = _aggregate(_cross_language_rows(rows))
+    return slices
+
+
+def _status_or(value: object, missing: str) -> str:
+    if value is not None:
+        return "measured"
+    return missing
+
+
+def _per_document(total: int, count: int) -> float:
+    if count:
+        return total / count
+    return 0
+
+
+def _claim_interpretation(quality_claim: bool) -> str:
+    if quality_claim:
+        return "real-model-quality"
+    return "test-or-experimental"
+
+
+def _selection_licenses_shippable(selection: ModelSelection) -> bool:
+    if selection.embedding["license"] not in _SHIPPABLE_LICENSES:
+        return False
+    return selection.reranker is None or selection.reranker["license"] in _SHIPPABLE_LICENSES
+
+
+def _reranker_target(selection: ModelSelection) -> dict | None:
+    if selection.reranker is None:
+        return None
+    return _matrix_target(selection.reranker, selection.reranker_variant)
+
+
+def _ranked_evidence(ranking: Sequence[ScoredCandidate]) -> list[dict]:
+    return [{"evidence_id": item.evidence_id, "score": round(item.score, 8)} for item in ranking]
+
+
+class _RunOptions:
+    """The caller's choices for one benchmark run, unchanged from the signature of _run_benchmark_once."""
+
+    def __init__(self, **options) -> None:
+        self.adapter = options["adapter"]
+        self.corpus_path = options["corpus_path"]
+        self.matrix_path = options["matrix_path"]
+        self.model_id = options["model_id"]
+        self.variant_id = options["variant_id"]
+        self.reranker_id = options["reranker_id"]
+        self.rerank_depth = options["rerank_depth"]
+        self.vector_backend = options["vector_backend"]
+        self.allow_download = options["allow_download"]
+        self.lexical_config = options["lexical_config"]
+        self.test_segmenter = options["test_segmenter"]
+        self.model_loader = options["model_loader"]
+        self.encoder = options["encoder"]
+        self.reranker_loader = options["reranker_loader"]
+        self.scorer = options["scorer"]
+        self.usearch_search = options["usearch_search"]
+        self.lexical_deadline_seconds = options["lexical_deadline_seconds"]
+        self.clock = options["clock"]
+
+
+class _QueryRanking:
+    """What one query produced before its answer: the ranking, its traces, or a fallback report."""
+
+    def __init__(
+        self,
+        ranked=None,
+        *,
+        pre_rerank_ids=None,
+        embedding_signals=None,
+        latency_ms: float | None = None,
+    ) -> None:
+        self.ranked = ranked
+        self.pre_rerank_ids = pre_rerank_ids
+        self.reranker_trace = None
+        self.embedding_signals = embedding_signals
+        self.latency_ms = latency_ms
+        self.fallback: dict | None = None
+
+
+class _BenchmarkRun:
+    """One benchmark run: build, optional model stages, per-query evaluation, report.
+
+    The stages keep the original order of clock reads, cleanup and fallback, so a
+    report is byte-identical to the one the single function produced.
+    """
+
+    def __init__(self, corpus: dict, cache_root: Path, persistent_model_cache: Path, options: _RunOptions) -> None:
+        self.corpus = corpus
+        self.o = options
+        self.cache_root = cache_root
+        self.persistent_model_cache = persistent_model_cache
+        self.real_mode = options.adapter == MODEL_MATRIX_ADAPTER_KIND
+        self.effective_real_mode = self.real_mode
+        self.candidates = build_candidates(corpus)
+        self.phase_clock = options.clock or time.perf_counter
+        self.sqlite_lexical: SQLiteLexicalAdapter | None = None
+        self.lexical = None
+        self.embedding = None
+        self.reranker = None
+        self.selection: ModelSelection | None = None
+        self.acquisition_mode = None
+        self.model_load_ms = None
+        self.document_encoding_ms = None
+        self.vector_bytes = None
+        self.learned_sparse_bytes = None
+        self.reranker_model_load_ms = None
+        self.materialized_retrieval = None
+        self.cache_context = None
+        self.fallback_reason = None
+        self.releasing_embedding = False
+        self.index_size = 0
+        self.qa = FakeQAAdapter()
+        self.rows: list[dict] = []
+        self.traces: list[dict] = []
+        self.latencies: list[float] = []
+        self.rerank_rows: dict[int, list[dict]] = {}
+
+    # --- pipeline --------------------------------------------------------------
+
+    def execute(self) -> dict:
+        self.build_started = time.perf_counter()
+        self._build_lexical()
+        if self.effective_real_mode:
+            self._load_selection()
+            self._load_embedding()
+        self.build_time_ms = (time.perf_counter() - self.build_started) * 1000
+        self.rerank_rows = self._rerank_row_slots()
+        for stage in (self._prepare_real_retrieval, self._evaluate_queries):
+            fallback = stage()
+            if fallback is not None:
+                return fallback
+        return self._report()
+
+    # --- shared cleanup --------------------------------------------------------
+
+    def _close_cache_context(self, exc_info) -> None:
+        if self.cache_context is None:
+            return
+        self.cache_context.__exit__(*exc_info)
+        self.cache_context = None
+
+    def _discard_lexical_index(self) -> None:
+        if self.sqlite_lexical is not None:
+            self.sqlite_lexical._cleanup(remove=True)
+
+    def _discard_lexical_index_and_artifacts(self) -> None:
+        self.sqlite_lexical._cleanup(remove=True)
+        _remove_semantic_artifacts(self.cache_root.resolve(), self.sqlite_lexical.path)
+
+    def _lexical_fallback_report(self, exc: Exception) -> dict:
+        reason = f"{type(exc).__name__}: {exc}"
+        fallback = run_benchmark(
+            self.corpus,
+            cache_root=self.cache_root,
+            adapter=ADAPTER_KIND,
+            lexical_config=self.o.lexical_config,
+            test_segmenter=self.o.test_segmenter,
+            lexical_deadline_seconds=self.o.lexical_deadline_seconds,
+        )
+        return _decorate_lexical_fallback(
+            fallback,
+            selection=self.selection,
+            lexical_config=self.o.lexical_config,
+            vector_backend=self.o.vector_backend,
+            acquisition_mode=self.acquisition_mode,
+            reason=reason,
+        )
+
+    # --- build -----------------------------------------------------------------
+
+    def _build_fake_indexes(self) -> None:
+        self.index_size = _write_fake_index(self.corpus, self.cache_root)
+        self.lexical = FakeLexicalAdapter()
+        self.embedding = FakeEmbeddingAdapter()
+        self.reranker = FakeRerankerAdapter()
+
+    def _build_sqlite_index(self, lexical_deadline: float) -> None:
+        self.sqlite_lexical = SQLiteLexicalAdapter(
+            self.candidates,
+            self.cache_root,
+            self.o.lexical_config,
+            test_segmenter=self.o.test_segmenter,
+            deadline=lexical_deadline,
+        )
+        self.lexical = self.sqlite_lexical
+        self.index_size = self.sqlite_lexical.path.stat().st_size
+
+    def _build_lexical(self) -> None:
+        lexical_started = self.phase_clock()
+        lexical_deadline = self.build_started + self.o.lexical_deadline_seconds
+        if not self.real_mode and self.o.lexical_config is None:
+            self._build_fake_indexes()
+        else:
+            self._build_sqlite_index(lexical_deadline)
+        self.lexical_build_ms = (self.phase_clock() - lexical_started) * 1000
+
+    def _load_selection(self) -> None:
+        try:
+            self.selection = load_model_selection(
+                self.o.matrix_path,
+                self.o.corpus_path,
+                model_id=self.o.model_id,
+                variant_id=self.o.variant_id,
+                reranker_id=self.o.reranker_id,
+            )
+            _require_corpus_matches_selection(self.corpus, self.selection)
+        except BaseException:
+            self._discard_lexical_index()
+            raise
+
+    def _dense_encoder(self):
+        if self.o.encoder is not None:
+            return self.o.encoder
+        loader = _first_not_none(self.o.model_loader, _load_transformer_embedding)
+        return loader(
+            self.selection,
+            cache_root=self.persistent_model_cache.resolve(),
+            local_files_only=not self.o.allow_download,
+            trust_remote_code=False,
+        )
+
+    def _build_embedding(self) -> None:
+        self.cache_context = model_cache_environment(
+            self.persistent_model_cache, allow_download=self.o.allow_download
+        )
+        self.acquisition_mode = self.cache_context.__enter__()
+        load_started = self.phase_clock()
+        self.embedding = ModelEmbeddingAdapter(
+            self.selection,
+            encoder=self._dense_encoder(),
+            vector_backend=self.o.vector_backend,
+            usearch_search=self.o.usearch_search,
+        )
+        self.model_load_ms = (self.phase_clock() - load_started) * 1000
+        document_started = self.phase_clock()
+        self.embedding._ensure_documents(self.candidates)
+        self.document_encoding_ms = (self.phase_clock() - document_started) * 1000
+        self.vector_bytes = int(self.embedding.document_vectors.nbytes)
+        self.learned_sparse_bytes = self.embedding.learned_sparse_bytes
+        self.index_size += self.vector_bytes + self.learned_sparse_bytes
+
+    def _fall_back_to_lexical(self, exc: Exception) -> None:
+        self.fallback_reason = f"{type(exc).__name__}: {exc}"
+        self.effective_real_mode = False
+        self.embedding = None
+        self.reranker = None
+        self.model_load_ms = None
+        self.document_encoding_ms = None
+        _remove_semantic_artifacts(self.cache_root.resolve(), self.sqlite_lexical.path)
+        self.index_size = self.sqlite_lexical.path.stat().st_size
+
+    def _load_embedding(self) -> None:
+        try:
+            self._build_embedding()
+        except Exception as exc:
+            self._close_cache_context(sys.exc_info())
+            self._fall_back_to_lexical(exc)
+        except BaseException:
+            self._close_cache_context(sys.exc_info())
+            self._discard_lexical_index_and_artifacts()
+            raise
+
+    def _rerank_row_slots(self) -> dict[int, list[dict]]:
+        if not self.real_mode:
+            return {}
+        return {depth: [] for depth in self.selection.matrix["benchmark_contract"]["reranker_depths"]}
+
+    # --- real-mode retrieval before evaluation ---------------------------------
+
+    def _materialized_query(self, np, query: dict) -> dict:
+        started = time.perf_counter()
+        scope = _query_scope(query)
+        lexical_ranked = self.sqlite_lexical.rank(
+            query["text"], scope, self.candidates, limit=MAX_CANDIDATES, language=query["language"]
+        )
+        embedding_ranked = self.embedding.rank(query["text"], scope, self.candidates, limit=MAX_CANDIDATES)
+        fused = _fuse_rankings((lexical_ranked, embedding_ranked), self.candidates, limit=MAX_CANDIDATES)
+        return {
+            "candidate_ids": tuple(item.evidence_id for item in fused),
+            "scores": np.asarray([item.score for item in fused], dtype=np.float32),
+            "embedding_signals": json.loads(json.dumps(self.embedding.last_trace)),
+            "duration_ms": (time.perf_counter() - started) * 1000,
+        }
+
+    def _materialize_retrieval(self) -> None:
+        import numpy as np
+
+        self.materialized_retrieval = []
+        for query in self.corpus["queries"]:
+            self.materialized_retrieval.append(self._materialized_query(np, query))
+
+    def _release_embedding(self) -> None:
+        self.embedding._encoder = None
+        self.embedding = None
+        self.releasing_embedding = True
+        gc.collect()
+        _empty_accelerator_caches()
+        self.releasing_embedding = False
+
+    def _reranker_scorer(self):
+        if self.o.scorer is not None:
+            return self.o.scorer
+        loader = _first_not_none(self.o.reranker_loader, _load_transformer_reranker)
+        return loader(
+            self.selection,
+            cache_root=self.persistent_model_cache.resolve(),
+            local_files_only=not self.o.allow_download,
+            trust_remote_code=False,
+        )
+
+    def _load_reranker(self) -> None:
+        if self.o.reranker_id is None:
+            return
+        reranker_load_started = self.phase_clock()
+        self.reranker = ModelRerankerAdapter(self.selection, scorer=self._reranker_scorer())
+        self.reranker_model_load_ms = (self.phase_clock() - reranker_load_started) * 1000
+        self.model_load_ms += self.reranker_model_load_ms
+
+    def _prepare_real_retrieval(self) -> dict | None:
+        if not self.effective_real_mode:
+            return None
+        self.releasing_embedding = False
+        try:
+            self._materialize_retrieval()
+            self._release_embedding()
+            self._load_reranker()
+        except Exception as exc:
+            self._close_cache_context(sys.exc_info())
+            self._discard_lexical_index_and_artifacts()
+            if self.releasing_embedding:
+                raise
+            return self._lexical_fallback_report(exc)
+        except BaseException:
+            self._close_cache_context(sys.exc_info())
+            self._discard_lexical_index_and_artifacts()
+            raise
+        return None
+
+    # --- per-query evaluation --------------------------------------------------
+
+    def _fake_ranking(self, query: dict, scope: QueryScope) -> _QueryRanking:
+        lexical_ranked = self.lexical.rank(query["text"], scope, self.candidates, limit=MAX_CANDIDATES)
+        assert self.embedding is not None and self.reranker is not None
+        embedding_ranked = self.embedding.rank(query["text"], scope, self.candidates, limit=MAX_CANDIDATES)
+        ranked = self.reranker.rank(query["text"], scope, lexical_ranked + embedding_ranked, limit=MAX_CANDIDATES)
+        return _QueryRanking(ranked)
+
+    def _record_depth(self, query: dict, scope: QueryScope, depth: int, depth_ranking, retrieval_ms: float) -> None:
+        depth_trace = self.reranker.last_trace["depths"][str(depth)]
+        depth_trace["ranked_evidence"] = _ranked_evidence(depth_ranking)
+        depth_trace["query_latency_ms"] = retrieval_ms + depth_trace["duration_ms"]
+        depth_answer = self.qa.answer(query["text"], scope, depth_ranking)
+        depth_trace["abstained"] = depth_answer["abstained"]
+        depth_trace["abstention_reason"] = depth_answer["reason"]
+        self.rerank_rows[depth].append(_evaluation_row(query, depth_ranking, depth_answer))
+
+    def _rerank(self, query: dict, scope: QueryScope, ranking: _QueryRanking, retrieval_ms: float) -> None:
+        if self.reranker is None:
+            return
+        reranking_started = time.perf_counter()
+        ranked_by_depth = self.reranker.rank_all(query["text"], scope, ranking.ranked, limit=MAX_CANDIDATES)
+        for depth, depth_ranking in ranked_by_depth.items():
+            self._record_depth(query, scope, depth, depth_ranking, retrieval_ms)
+        ranking.ranked = ranked_by_depth[max(ranked_by_depth)]
+        ranking.reranker_trace = json.loads(json.dumps(self.reranker.last_trace))
+        ranking.latency_ms = retrieval_ms + (time.perf_counter() - reranking_started) * 1000
+
+    def _real_ranking(self, query_index: int, query: dict, scope: QueryScope) -> _QueryRanking:
+        frozen = self.materialized_retrieval[query_index]
+        ranked = [
+            ScoredCandidate(self.sqlite_lexical._candidates[evidence_id], float(score))
+            for evidence_id, score in zip(frozen["candidate_ids"], frozen["scores"])
+        ]
+        ranking = _QueryRanking(
+            ranked,
+            pre_rerank_ids=list(frozen["candidate_ids"]),
+            embedding_signals=frozen["embedding_signals"],
+            latency_ms=frozen["duration_ms"],
+        )
+        try:
+            self._rerank(query, scope, ranking, frozen["duration_ms"])
+        except Exception as exc:
+            self._close_cache_context(sys.exc_info())
+            self._discard_lexical_index_and_artifacts()
+            ranking.fallback = self._lexical_fallback_report(exc)
+        except BaseException:
+            self._close_cache_context(sys.exc_info())
+            self._discard_lexical_index_and_artifacts()
+            raise
+        return ranking
+
+    def _query_ranking(self, query_index: int, query: dict, scope: QueryScope) -> _QueryRanking:
+        if not self.real_mode and self.sqlite_lexical is None:
+            return self._fake_ranking(query, scope)
+        if self.effective_real_mode:
+            return self._real_ranking(query_index, query, scope)
+        ranked = self.sqlite_lexical.rank(
+            query["text"], scope, self.candidates, limit=MAX_CANDIDATES, language=query["language"]
+        )
+        return _QueryRanking(ranked)
+
+    def _query_latency(self, ranking: _QueryRanking, started: float) -> float:
+        if self.effective_real_mode:
+            return ranking.latency_ms
+        return (time.perf_counter() - started) * 1000
+
+    def _record_query(self, query: dict, scope: QueryScope, ranking: _QueryRanking, started: float) -> None:
+        answer = self.qa.answer(query["text"], scope, ranking.ranked)
+        latency_ms = self._query_latency(ranking, started)
+        self.latencies.append(latency_ms)
+        ranked_parents = _expand_parents(ranking.ranked)
+        row = _evaluation_row(query, ranking.ranked, answer)
+        self.rows.append(row)
+        trace = {
+            "query_id": query["query_id"],
+            "ranked_evidence": _ranked_evidence(ranking.ranked),
+            "ranked_parents": ranked_parents,
+            "abstained": answer["abstained"],
+            "abstention_reason": answer["reason"],
+            "abstention_contract_valid": row["abstention_contract_valid"],
+            "latency_ms": round(latency_ms, 6),
+        }
+        if self.real_mode:
+            trace["pre_rerank_candidate_ids"] = ranking.pre_rerank_ids
+            trace["reranker"] = ranking.reranker_trace
+            trace["embedding_signals"] = ranking.embedding_signals
+        self.traces.append(trace)
+
+    def _evaluate_query(self, query_index: int, query: dict) -> dict | None:
+        started = time.perf_counter()
+        scope = _query_scope(query)
+        ranking = self._query_ranking(query_index, query, scope)
+        if ranking.fallback is not None:
+            return ranking.fallback
+        self._record_query(query, scope, ranking, started)
+        return None
+
+    def _finish_evaluation(self, succeeded: bool, exc_info) -> None:
+        if self.sqlite_lexical is not None:
+            self.sqlite_lexical._cleanup(remove=not succeeded)
+        if self.cache_context is not None:
+            self.cache_context.__exit__(*exc_info)
+
+    def _evaluate_queries(self) -> dict | None:
+        succeeded = False
+        try:
+            for query_index, query in enumerate(self.corpus["queries"]):
+                fallback = self._evaluate_query(query_index, query)
+                if fallback is not None:
+                    return fallback
+            succeeded = True
+        finally:
+            self._finish_evaluation(succeeded, sys.exc_info())
+        return None
+
+    # --- report ----------------------------------------------------------------
+
+    def _indexing_duration_ms(self) -> float | None:
+        if self.effective_real_mode:
+            return self.document_encoding_ms
+        return self.lexical_build_ms
+
+    def _add_model_measurements(self, measurements: dict) -> None:
+        measurements["model_load_ms"] = self.model_load_ms
+        measurements["reranker_model_load_ms"] = self.reranker_model_load_ms
+        measurements["document_encoding_index_build_ms"] = self.document_encoding_ms
+        measurements["vector_bytes"] = self.vector_bytes
+        measurements["learned_sparse_bytes"] = self.learned_sparse_bytes
+        measurements["vector_bytes_per_document"] = _per_document(self.vector_bytes, len(self.candidates))
+        measurements["measurement_status"].update(
+            model_load_ms=_status_or(self.model_load_ms, "unavailable"),
+            reranker_model_load_ms=_status_or(self.reranker_model_load_ms, "not-applicable"),
+            document_encoding_index_build_ms=_status_or(self.document_encoding_ms, "unavailable"),
+            vector_bytes="measured",
+            learned_sparse_bytes=_status_or(self.learned_sparse_bytes, "not-applicable"),
+            vector_bytes_per_document="measured",
+        )
+
+    def _measurements(self) -> dict:
+        peak_rss, peak_rss_status = _peak_rss()
+        measurements = _resource_measurements(
+            self.latencies,
+            build_time_ms=self.build_time_ms,
+            indexing_duration_ms=self._indexing_duration_ms(),
+            chunk_count=len(self.candidates),
+            index_size_bytes=self.index_size,
+            peak_rss_bytes=peak_rss,
+            peak_rss_status=peak_rss_status,
+        )
+        measurements["lexical_build_ms"] = self.lexical_build_ms
+        measurements["measurement_status"]["lexical_build_ms"] = "measured"
+        if self.effective_real_mode:
+            self._add_model_measurements(measurements)
+        return measurements
+
+    def _reported_vector_backend(self) -> str | None:
+        if self.real_mode:
+            return self.o.vector_backend
+        return None
+
+    def _retrieval_order(self) -> str:
+        if self.effective_real_mode:
+            return "independent BM25 and dense generation, RRF, then all frozen-prefix rerank depths"
+        return "BM25-only lexical ablation; dense models not invoked"
+
+    def _reranked(self) -> bool:
+        if not self.effective_real_mode:
+            return False
+        return self.selection.reranker is not None
+
+    def _reranker_confidence(self) -> str | None:
+        if not self._reranked():
+            return None
+        formatting = self.selection.reranker["formatting"]
+        if formatting["contract_type"] == "tokenizer_pair_sequence_classification":
+            return "sigmoid_probability_from_sequence_classification_logit"
+        return formatting["scoring"]
+
+    def _add_lexical_methodology(self, methodology: dict) -> None:
+        methodology["lexical_configuration"] = json.loads(json.dumps(LEXICAL_CONFIGURATIONS[self.o.lexical_config]))
+        methodology["retrieval_order"] = self._retrieval_order()
+        methodology["segmentation_runtime"] = self.sqlite_lexical.segmentation_runtime
+        methodology["confidence"] = {
+            "fusion": "RRF divided by its theoretical maximum; bounded to [0,1]",
+            "qa_threshold": 0.54,
+            "reranker": self._reranker_confidence(),
+        }
+
+    def _methodology(self) -> dict:
+        methodology = dict(_METHODOLOGY_BASE)
+        methodology["environment_provenance"] = _environment_provenance(self._reported_vector_backend())
+        if self.o.lexical_config is not None:
+            self._add_lexical_methodology(methodology)
+        return methodology
+
+    def _add_real_mode_gates(self, gates: dict, measurements: dict, quality_claim: bool) -> None:
+        status = measurements["measurement_status"]
+        gates["interpretation"] = _claim_interpretation(quality_claim)
+        gates["shipping_eligible"] = True
+        gates["overall"] = gates["passed_for_orchestration"]
+        gates["per_language"] = dict(gates["language_results"])
+        gates["no_parent_recall_at_10_regression"] = gates["metric_results"]["parent_recall_at_10"]
+        gates["required"] = {
+            "every_language_gate": all(gates["language_results"].values()),
+            "latency": status["warm_latency_p95_ms"] == "measured",
+            "license": _selection_licenses_shippable(self.selection),
+            "no_parent_recall_at_10_regression": gates["metric_results"]["parent_recall_at_10"],
+            "ram": status["peak_rss_bytes"] == "measured",
+        }
+        gates["degraded"] = not self.effective_real_mode
+        gates["release_evidence"] = False
+
+    def _gates(self, overall: dict, slices: dict, measurements: dict, quality_claim: bool) -> dict:
+        gates = _gate_results(
+            overall,
+            slices,
+            qa_contract_passed=all(row["abstention_contract_valid"] for row in self.rows),
+        )
+        if self.real_mode:
+            self._add_real_mode_gates(gates, measurements, quality_claim)
+        return gates
+
+    def _depth_metric(self, depth: int, depth_rows: list[dict]) -> dict:
+        depth_traces = [trace["reranker"]["depths"][str(depth)] for trace in self.traces]
+        return {
+            "overall": _aggregate(depth_rows),
+            "slices": _language_slices(depth_rows),
+            "duration_ms": sum(depth_trace["duration_ms"] for depth_trace in depth_traces),
+            "inference_latencies_ms": [depth_trace["duration_ms"] for depth_trace in depth_traces],
+            "warm_latency_p95_ms": _resource_measurements(
+                [depth_trace["query_latency_ms"] for depth_trace in depth_traces],
+                build_time_ms=0,
+                chunk_count=0,
+                index_size_bytes=0,
+                peak_rss_bytes=None,
+                peak_rss_status="shared-run-level",
+            )["warm_latency_p95_ms"],
+            "shared_resources": ["peak_rss_bytes", "index_size_bytes", "vector_bytes"],
+        }
+
+    def _depth_metrics(self) -> dict:
+        if not self._reranked():
+            return {}
+        return {str(depth): self._depth_metric(depth, depth_rows) for depth, depth_rows in self.rerank_rows.items()}
+
+    def _lexical_matrix(self) -> dict | None:
+        if self.o.lexical_config is None or self.real_mode:
+            return None
+        matrix_raw = read_stable_bytes(Path(self.o.matrix_path), MAX_CORPUS_BYTES, label="model matrix")
+        lexical_matrix = json.loads(matrix_raw)
+        self._require_frozen_lexical_matrix(lexical_matrix, matrix_raw, Path(self.o.corpus_path))
+        return lexical_matrix
+
+    @staticmethod
+    def _require_frozen_lexical_matrix(lexical_matrix: dict, matrix_raw: bytes, corpus_path: Path) -> None:
+        if canonical_json_bytes(lexical_matrix) + b"\n" != matrix_raw:
+            raise ValueError("model matrix bytes are not canonical and frozen")
+        if _sha256_file(corpus_path) != lexical_matrix["benchmark_contract"]["corpus"]["sha256"]:
+            raise ValueError("lexical ablation corpus does not match the benchmark contract")
+
+    def _adapter_kind(self) -> str:
+        if self.real_mode:
+            return MODEL_MATRIX_ADAPTER_KIND
+        if self.sqlite_lexical is not None:
+            return self.sqlite_lexical.kind
+        return ADAPTER_KIND
+
+    def _model_identity(self) -> dict:
+        if not self.real_mode:
+            return {"model_id": None, "variant_id": None, "revision": None}
+        return {
+            "model_id": self.selection.embedding["id"],
+            "variant_id": self.selection.variant["variant_id"],
+            "revision": self.selection.embedding["revision"],
+        }
+
+    def _input_hashes(self, lexical_matrix: dict | None) -> dict:
+        if self.real_mode:
+            return {"matrix_sha256": self.selection.matrix_sha256, "corpus_sha256": self.selection.corpus_sha256}
+        if lexical_matrix is None:
+            return {"matrix_sha256": None, "corpus_sha256": None}
+        return {
+            "matrix_sha256": _sha256_file(Path(self.o.matrix_path)),
+            "corpus_sha256": _sha256_file(Path(self.o.corpus_path)),
+        }
+
+    def _reranker_report(self, depth_metrics: dict) -> dict | None:
+        if not self._reranked():
+            return None
+        reranker = self.selection.reranker
+        return {
+            "model_id": reranker["id"],
+            "revision": reranker["revision"],
+            "variant_id": self.selection.reranker_variant["variant_id"],
+            "depths": list(self.selection.matrix["benchmark_contract"]["reranker_depths"]),
+            "depth_metrics": depth_metrics,
+            "formatting": reranker["formatting"],
+        }
+
+    def _requested_mode(self) -> str:
+        if self.real_mode:
+            return MODEL_MATRIX_ADAPTER_KIND
+        return ADAPTER_KIND
+
+    def _effective_mode(self) -> str:
+        if self.effective_real_mode:
+            return MODEL_MATRIX_ADAPTER_KIND
+        if self.real_mode:
+            return f"lexical-{self.o.lexical_config}"
+        return ADAPTER_KIND
+
+    def _benchmark_contract(self, lexical_matrix: dict | None) -> dict | None:
+        if self.real_mode:
+            return self.selection.matrix["benchmark_contract"]
+        if lexical_matrix is not None:
+            return lexical_matrix["benchmark_contract"]
+        return None
+
+    def _contract_hashes(self, lexical_matrix: dict | None) -> dict:
+        contract = self._benchmark_contract(lexical_matrix)
+        if contract is None:
+            return {"benchmark_contract_sha256": None, "benchmark_runner_sha256": None}
+        return {"benchmark_contract_sha256": _sha256_json(contract), "benchmark_runner_sha256": _sha256_file(Path(__file__))}
+
+    def _candidate_report(self) -> dict | None:
+        if not self.real_mode:
+            return None
+        return {
+            "embedding": _matrix_target(self.selection.embedding, self.selection.variant),
+            "reranker": _reranker_target(self.selection),
+        }
+
+    def _report(self) -> dict:
+        quality_claim = False
+        release_evidence = False
+        overall = _aggregate(self.rows)
+        slices = _language_slices(self.rows)
+        macro = {metric: macro_average(slices, metric) for metric in EFFECTIVENESS_FIELDS}
+        measurements = self._measurements()
+        methodology = self._methodology()
+        gates = self._gates(overall, slices, measurements, quality_claim)
+        depth_metrics = self._depth_metrics()
+        lexical_matrix = self._lexical_matrix()
+        return {
+            "schema_version": "retrieval-report/v2",
+            "corpus_id": self.corpus["corpus_id"],
+            "adapter_kind": self._adapter_kind(),
+            "quality_claim": quality_claim,
+            "methodology": methodology,
+            "overall": overall,
+            "slices": slices,
+            "macro_average": macro,
+            "thresholds": dict(THRESHOLDS),
+            "gates": gates,
+            "measurements": measurements,
+            "traces": self.traces,
+            **self._model_identity(),
+            **self._input_hashes(lexical_matrix),
+            "acquisition_mode": self.acquisition_mode,
+            "vector_backend": self._reported_vector_backend(),
+            "reranker": self._reranker_report(depth_metrics),
+            "release_evidence": release_evidence,
+            "requested_mode": self._requested_mode(),
+            "effective_mode": self._effective_mode(),
+            "fallback_reason": self.fallback_reason,
+            **self._contract_hashes(lexical_matrix),
+            "candidate": self._candidate_report(),
+        }
+
+
+def _persistent_model_cache(cache_root: Path, model_cache_root: Path | str | None) -> Path:
+    if model_cache_root is None:
+        return _validate_cache_root(cache_root)
+    return _validate_cache_root(Path(model_cache_root))
+
+
 def _run_benchmark_once(
     corpus: dict,
     *,
@@ -2955,683 +4329,115 @@ def _run_benchmark_once(
     model_cache_root: Path | str | None = None,
 ) -> dict:
     """Run retrieval without exposing query gold metadata to any adapter."""
-    if adapter not in {ADAPTER_KIND, MODEL_MATRIX_ADAPTER_KIND}:
-        raise ValueError(
-            "only deterministic-fake or explicit model-matrix adapters are supported"
-        )
-    real_mode = adapter == MODEL_MATRIX_ADAPTER_KIND
-    if real_mode and not all((model_id, variant_id, lexical_config, vector_backend)):
-        raise ValueError("model-matrix mode requires explicit model, variant, lexical, and vector choices")
-    if real_mode and rerank_depth is not None:
-        raise ValueError("reranker evidence always runs matrix depths 10, 20, and 50 together")
-    if lexical_config is not None and lexical_config not in LEXICAL_CONFIGURATIONS:
-        raise ValueError(f"unknown lexical configuration: {lexical_config}")
-    cache_root = _validate_cache_root(Path(cache_root))
-    persistent_model_cache = _validate_cache_root(
-        Path(model_cache_root) if model_cache_root is not None else cache_root
+    del raw_output_written
+    options = _RunOptions(
+        adapter=adapter,
+        corpus_path=corpus_path,
+        matrix_path=matrix_path,
+        model_id=model_id,
+        variant_id=variant_id,
+        reranker_id=reranker_id,
+        rerank_depth=rerank_depth,
+        vector_backend=vector_backend,
+        allow_download=allow_download,
+        lexical_config=lexical_config,
+        test_segmenter=test_segmenter,
+        model_loader=model_loader,
+        encoder=encoder,
+        reranker_loader=reranker_loader,
+        scorer=scorer,
+        usearch_search=usearch_search,
+        lexical_deadline_seconds=lexical_deadline_seconds,
+        clock=clock,
     )
-    candidates = build_candidates(corpus)
-    phase_clock = clock or time.perf_counter
-    build_started = time.perf_counter()
-    lexical_started = phase_clock()
-    lexical_deadline = build_started + lexical_deadline_seconds
-    sqlite_lexical = None
-    selection = None
-    acquisition_mode = None
-    model_load_ms = None
-    document_encoding_ms = None
-    vector_bytes = None
-    learned_sparse_bytes = None
-    reranker_model_load_ms = None
-    materialized_retrieval = None
-    cache_context = None
-    effective_real_mode = real_mode
-    fallback_reason = None
-    if not real_mode and lexical_config is None:
-        index_size = _write_fake_index(corpus, cache_root)
-        lexical = FakeLexicalAdapter()
-        embedding = FakeEmbeddingAdapter()
-        reranker = FakeRerankerAdapter()
-    else:
-        sqlite_lexical = SQLiteLexicalAdapter(
-            candidates,
-            cache_root,
-            lexical_config,
-            test_segmenter=test_segmenter,
-            deadline=lexical_deadline,
-        )
-        lexical = sqlite_lexical
-        embedding = None
-        reranker = None
-        index_size = sqlite_lexical.path.stat().st_size
-    lexical_build_ms = (phase_clock() - lexical_started) * 1000
-    if effective_real_mode:
-        try:
-            selection = load_model_selection(
-                matrix_path,
-                corpus_path,
-                model_id=model_id,
-                variant_id=variant_id,
-                reranker_id=reranker_id,
-            )
-            if hashlib.sha256(canonical_json_bytes(corpus) + b"\n").hexdigest() != selection.corpus_sha256:
-                raise ValueError("loaded corpus content does not match matrix corpus SHA256")
-        except BaseException:
-            if sqlite_lexical is not None:
-                sqlite_lexical._cleanup(remove=True)
-            raise
-        try:
-            cache_context = model_cache_environment(
-                persistent_model_cache, allow_download=allow_download
-            )
-            acquisition_mode = cache_context.__enter__()
-            load_started = phase_clock()
-            if encoder is not None:
-                dense_encoder = encoder
-            elif model_loader is not None:
-                dense_encoder = model_loader(
-                    selection,
-                    cache_root=persistent_model_cache.resolve(),
-                    local_files_only=not allow_download,
-                    trust_remote_code=False,
-                )
-            else:
-                dense_encoder = _load_transformer_embedding(
-                    selection,
-                    cache_root=persistent_model_cache.resolve(),
-                    local_files_only=not allow_download,
-                    trust_remote_code=False,
-                )
-            embedding = ModelEmbeddingAdapter(
-                selection,
-                encoder=dense_encoder,
-                vector_backend=vector_backend,
-                usearch_search=usearch_search,
-            )
-            model_load_ms = (phase_clock() - load_started) * 1000
-            document_started = phase_clock()
-            embedding._ensure_documents(candidates)
-            document_encoding_ms = (phase_clock() - document_started) * 1000
-            vector_bytes = int(embedding.document_vectors.nbytes)
-            learned_sparse_bytes = embedding.learned_sparse_bytes
-            index_size += vector_bytes + learned_sparse_bytes
-        except Exception as exc:
-            if cache_context is not None:
-                cache_context.__exit__(*sys.exc_info())
-                cache_context = None
-            fallback_reason = f"{type(exc).__name__}: {exc}"
-            effective_real_mode = False
-            embedding = None
-            reranker = None
-            model_load_ms = None
-            document_encoding_ms = None
-            _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-            index_size = sqlite_lexical.path.stat().st_size
-        except BaseException:
-            if cache_context is not None:
-                cache_context.__exit__(*sys.exc_info())
-                cache_context = None
-            sqlite_lexical._cleanup(remove=True)
-            _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-            raise
-    build_time_ms = (time.perf_counter() - build_started) * 1000
-
-    qa = FakeQAAdapter()
-    rows = []
-    traces = []
-    latencies = []
-    rerank_rows = {
-        depth: []
-        for depth in (selection.matrix["benchmark_contract"]["reranker_depths"] if real_mode else [])
-    }
-
-    if effective_real_mode:
-        releasing_embedding = False
-        try:
-            import numpy as np
-
-            materialized_retrieval = []
-            for query in corpus["queries"]:
-                started = time.perf_counter()
-                scope = _query_scope(query)
-                lexical_ranked = sqlite_lexical.rank(
-                    query["text"],
-                    scope,
-                    candidates,
-                    limit=MAX_CANDIDATES,
-                    language=query["language"],
-                )
-                embedding_ranked = embedding.rank(
-                    query["text"], scope, candidates, limit=MAX_CANDIDATES
-                )
-                fused = _fuse_rankings(
-                    (lexical_ranked, embedding_ranked), candidates, limit=MAX_CANDIDATES
-                )
-                materialized_retrieval.append(
-                    {
-                        "candidate_ids": tuple(item.evidence_id for item in fused),
-                        "scores": np.asarray(
-                            [item.score for item in fused], dtype=np.float32
-                        ),
-                        "embedding_signals": json.loads(json.dumps(embedding.last_trace)),
-                        "duration_ms": (time.perf_counter() - started) * 1000,
-                    }
-                )
-
-            embedding._encoder = None
-            dense_encoder = None
-            embedding = None
-            releasing_embedding = True
-            gc.collect()
-            torch = sys.modules.get("torch")
-            if torch is not None:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                mps = getattr(torch, "mps", None)
-                if mps is not None and mps.is_available():
-                    mps.empty_cache()
-            releasing_embedding = False
-
-            if reranker_id is not None:
-                reranker_load_started = phase_clock()
-                if scorer is not None:
-                    reranker_scorer = scorer
-                elif reranker_loader is not None:
-                    reranker_scorer = reranker_loader(
-                        selection,
-                        cache_root=persistent_model_cache.resolve(),
-                        local_files_only=not allow_download,
-                        trust_remote_code=False,
-                    )
-                else:
-                    reranker_scorer = _load_transformer_reranker(
-                        selection,
-                        cache_root=persistent_model_cache.resolve(),
-                        local_files_only=not allow_download,
-                        trust_remote_code=False,
-                    )
-                reranker = ModelRerankerAdapter(selection, scorer=reranker_scorer)
-                reranker_model_load_ms = (phase_clock() - reranker_load_started) * 1000
-                model_load_ms += reranker_model_load_ms
-        except Exception as exc:
-            if releasing_embedding:
-                if cache_context is not None:
-                    cache_context.__exit__(*sys.exc_info())
-                    cache_context = None
-                sqlite_lexical._cleanup(remove=True)
-                _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-                raise
-            if cache_context is not None:
-                cache_context.__exit__(*sys.exc_info())
-                cache_context = None
-            reason = f"{type(exc).__name__}: {exc}"
-            sqlite_lexical._cleanup(remove=True)
-            _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-            fallback = run_benchmark(
-                corpus,
-                cache_root=cache_root,
-                adapter=ADAPTER_KIND,
-                lexical_config=lexical_config,
-                test_segmenter=test_segmenter,
-                lexical_deadline_seconds=lexical_deadline_seconds,
-            )
-            return _decorate_lexical_fallback(
-                fallback,
-                selection=selection,
-                lexical_config=lexical_config,
-                vector_backend=vector_backend,
-                acquisition_mode=acquisition_mode,
-                reason=reason,
-            )
-        except BaseException:
-            if cache_context is not None:
-                cache_context.__exit__(*sys.exc_info())
-                cache_context = None
-            sqlite_lexical._cleanup(remove=True)
-            _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-            raise
-
-    lexical_run_succeeded = False
-    try:
-        for query_index, query in enumerate(corpus["queries"]):
-            started = time.perf_counter()
-            scope = _query_scope(query)
-            pre_rerank_ids = None
-            reranker_trace = None
-            if not real_mode and sqlite_lexical is None:
-                lexical_ranked = lexical.rank(
-                    query["text"], scope, candidates, limit=MAX_CANDIDATES
-                )
-                assert embedding is not None and reranker is not None
-                embedding_ranked = embedding.rank(
-                    query["text"], scope, candidates, limit=MAX_CANDIDATES
-                )
-                ranked = reranker.rank(
-                    query["text"], scope, lexical_ranked + embedding_ranked, limit=MAX_CANDIDATES
-                )
-            elif effective_real_mode:
-                frozen = materialized_retrieval[query_index]
-                ranked = [
-                    ScoredCandidate(sqlite_lexical._candidates[evidence_id], float(score))
-                    for evidence_id, score in zip(frozen["candidate_ids"], frozen["scores"])
-                ]
-                retrieval_duration_ms = frozen["duration_ms"]
-                pre_rerank_ids = list(frozen["candidate_ids"])
-                embedding_signals = frozen["embedding_signals"]
-                try:
-                    if reranker is not None:
-                        reranking_started = time.perf_counter()
-                        ranked_by_depth = reranker.rank_all(
-                            query["text"], scope, ranked, limit=MAX_CANDIDATES
-                        )
-                        for depth, depth_ranking in ranked_by_depth.items():
-                            reranker.last_trace["depths"][str(depth)]["ranked_evidence"] = [
-                                {"evidence_id": item.evidence_id, "score": round(item.score, 8)}
-                                for item in depth_ranking
-                            ]
-                            reranker.last_trace["depths"][str(depth)]["query_latency_ms"] = (
-                                retrieval_duration_ms
-                                + reranker.last_trace["depths"][str(depth)]["duration_ms"]
-                            )
-                            depth_answer = qa.answer(query["text"], scope, depth_ranking)
-                            reranker.last_trace["depths"][str(depth)]["abstained"] = depth_answer[
-                                "abstained"
-                            ]
-                            reranker.last_trace["depths"][str(depth)]["abstention_reason"] = (
-                                depth_answer["reason"]
-                            )
-                            rerank_rows[depth].append(
-                                _evaluation_row(
-                                    query,
-                                    depth_ranking,
-                                    depth_answer,
-                                )
-                            )
-                        ranked = ranked_by_depth[max(ranked_by_depth)]
-                        reranker_trace = json.loads(json.dumps(reranker.last_trace))
-                        real_latency_ms = retrieval_duration_ms + (
-                            time.perf_counter() - reranking_started
-                        ) * 1000
-                    else:
-                        real_latency_ms = retrieval_duration_ms
-                except Exception as exc:
-                    if cache_context is not None:
-                        cache_context.__exit__(*sys.exc_info())
-                        cache_context = None
-                    reason = f"{type(exc).__name__}: {exc}"
-                    sqlite_lexical._cleanup(remove=True)
-                    _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-                    fallback = run_benchmark(
-                        corpus,
-                        cache_root=cache_root,
-                        adapter=ADAPTER_KIND,
-                        lexical_config=lexical_config,
-                        test_segmenter=test_segmenter,
-                        lexical_deadline_seconds=lexical_deadline_seconds,
-                    )
-                    return _decorate_lexical_fallback(
-                        fallback,
-                        selection=selection,
-                        lexical_config=lexical_config,
-                        vector_backend=vector_backend,
-                        acquisition_mode=acquisition_mode,
-                        reason=reason,
-                    )
-                except BaseException:
-                    if cache_context is not None:
-                        cache_context.__exit__(*sys.exc_info())
-                        cache_context = None
-                    sqlite_lexical._cleanup(remove=True)
-                    _remove_semantic_artifacts(cache_root.resolve(), sqlite_lexical.path)
-                    raise
-            else:
-                ranked = sqlite_lexical.rank(
-                    query["text"], scope, candidates, limit=MAX_CANDIDATES, language=query["language"]
-                )
-            answer = qa.answer(query["text"], scope, ranked)
-            latency_ms = (
-                real_latency_ms
-                if effective_real_mode
-                else (time.perf_counter() - started) * 1000
-            )
-            latencies.append(latency_ms)
-            ranked_parents = _expand_parents(ranked)
-            row = _evaluation_row(query, ranked, answer)
-            rows.append(row)
-            trace = {
-                    "query_id": query["query_id"],
-                    "ranked_evidence": [
-                        {"evidence_id": item.evidence_id, "score": round(item.score, 8)}
-                        for item in ranked
-                    ],
-                    "ranked_parents": ranked_parents,
-                    "abstained": answer["abstained"],
-                    "abstention_reason": answer["reason"],
-                    "abstention_contract_valid": row["abstention_contract_valid"],
-                    "latency_ms": round(latency_ms, 6),
-                }
-            if real_mode:
-                trace["pre_rerank_candidate_ids"] = pre_rerank_ids
-                trace["reranker"] = reranker_trace
-                trace["embedding_signals"] = embedding_signals if effective_real_mode else None
-            traces.append(trace)
-        lexical_run_succeeded = True
-    finally:
-        if sqlite_lexical is not None:
-            sqlite_lexical._cleanup(remove=not lexical_run_succeeded)
-        if cache_context is not None:
-            cache_context.__exit__(*sys.exc_info())
-
-    overall = _aggregate(rows)
-    slices = {
-        language: _aggregate([row for row in rows if row["language"] == language])
-        for language in ("EN", "RU", "ZH")
-    }
-    slices["cross-language"] = _aggregate([row for row in rows if row["cross_language"]])
-    macro = {metric: macro_average(slices, metric) for metric in EFFECTIVENESS_FIELDS}
-    peak_rss, peak_rss_status = _peak_rss()
-    measurements = _resource_measurements(
-        latencies,
-        build_time_ms=build_time_ms,
-        indexing_duration_ms=(
-            document_encoding_ms if effective_real_mode else lexical_build_ms
-        ),
-        chunk_count=len(candidates),
-        index_size_bytes=index_size,
-        peak_rss_bytes=peak_rss,
-        peak_rss_status=peak_rss_status,
-    )
-    measurements["lexical_build_ms"] = lexical_build_ms
-    measurements["measurement_status"]["lexical_build_ms"] = "measured"
-    if effective_real_mode:
-        measurements["model_load_ms"] = model_load_ms
-        measurements["reranker_model_load_ms"] = reranker_model_load_ms
-        measurements["document_encoding_index_build_ms"] = document_encoding_ms
-        measurements["vector_bytes"] = vector_bytes
-        measurements["learned_sparse_bytes"] = learned_sparse_bytes
-        measurements["vector_bytes_per_document"] = (
-            vector_bytes / len(candidates) if candidates else 0
-        )
-        measurements["measurement_status"].update(
-            model_load_ms="measured" if model_load_ms is not None else "unavailable",
-            reranker_model_load_ms=(
-                "measured" if reranker_model_load_ms is not None else "not-applicable"
-            ),
-            document_encoding_index_build_ms=(
-                "measured" if document_encoding_ms is not None else "unavailable"
-            ),
-            vector_bytes="measured",
-            learned_sparse_bytes=(
-                "measured" if learned_sparse_bytes is not None else "not-applicable"
-            ),
-            vector_bytes_per_document="measured",
-        )
-    methodology = {
-        "source": "https://ir-measur.es/en/latest/measures.html",
-        "positive_retrieval_denominator": "answerable queries only",
-        "recall": "fraction of all known relevant candidates retrieved",
-        "all_required": "one only when every required evidence span is in top 20",
-        "mrr": "reciprocal rank of first relevant evidence span through rank 10",
-        "ndcg": "graded gain with log2 discount normalized by ideal ranking through rank 10",
-        "false_answer_denominator": "unanswerable queries only",
-        "unavailable_metrics": (
-            "empty-denominator rates are represented as JSON null and excluded from macro means"
-        ),
-        "timing_and_rss": "measured and non-canonical",
-        "phase_peak_rss": "process peak RSS is run-level; per-phase peaks are unavailable",
-        "resource_unavailable": "unavailable measurements use JSON null plus measurement_status",
-        "environment_provenance": _environment_provenance(vector_backend if real_mode else None),
-    }
-    if lexical_config is not None:
-        methodology["lexical_configuration"] = json.loads(
-            json.dumps(LEXICAL_CONFIGURATIONS[lexical_config])
-        )
-        methodology["retrieval_order"] = (
-            "independent BM25 and dense generation, RRF, then all frozen-prefix rerank depths"
-            if effective_real_mode
-            else "BM25-only lexical ablation; dense models not invoked"
-        )
-        methodology["segmentation_runtime"] = sqlite_lexical.segmentation_runtime
-        methodology["confidence"] = {
-            "fusion": "RRF divided by its theoretical maximum; bounded to [0,1]",
-            "qa_threshold": 0.54,
-            "reranker": (
-                "sigmoid_probability_from_sequence_classification_logit"
-                if effective_real_mode
-                and selection.reranker is not None
-                and selection.reranker["formatting"]["contract_type"]
-                == "tokenizer_pair_sequence_classification"
-                else selection.reranker["formatting"]["scoring"]
-                if effective_real_mode and selection.reranker is not None
-                else None
-            ),
-        }
-    gates = _gate_results(
-        overall,
-        slices,
-        qa_contract_passed=all(row["abstention_contract_valid"] for row in rows),
-    )
-    quality_claim = False
-    release_evidence = False
-    if real_mode:
-        gates["interpretation"] = "real-model-quality" if quality_claim else "test-or-experimental"
-        gates["shipping_eligible"] = True
-        gates["overall"] = gates["passed_for_orchestration"]
-        gates["per_language"] = dict(gates["language_results"])
-        gates["no_parent_recall_at_10_regression"] = gates["metric_results"][
-            "parent_recall_at_10"
-        ]
-        gates["required"] = {
-            "every_language_gate": all(gates["language_results"].values()),
-            "latency": measurements["measurement_status"]["warm_latency_p95_ms"] == "measured",
-            "license": selection.embedding["license"] in {"Apache-2.0", "MIT"}
-            and (selection.reranker is None or selection.reranker["license"] in {"Apache-2.0", "MIT"}),
-            "no_parent_recall_at_10_regression": gates["metric_results"]["parent_recall_at_10"],
-            "ram": measurements["measurement_status"]["peak_rss_bytes"] == "measured",
-        }
-        gates["degraded"] = not effective_real_mode
-        gates["release_evidence"] = False
-    depth_metrics = {}
-    if effective_real_mode and selection.reranker is not None:
-        for depth, depth_rows in rerank_rows.items():
-            depth_slices = {
-                language: _aggregate(
-                    [row for row in depth_rows if row["language"] == language]
-                )
-                for language in ("EN", "RU", "ZH")
-            }
-            depth_slices["cross-language"] = _aggregate(
-                [row for row in depth_rows if row["cross_language"]]
-            )
-            depth_metrics[str(depth)] = {
-                "overall": _aggregate(depth_rows),
-                "slices": depth_slices,
-                "duration_ms": sum(
-                    trace["reranker"]["depths"][str(depth)]["duration_ms"]
-                    for trace in traces
-                ),
-                "inference_latencies_ms": [
-                    trace["reranker"]["depths"][str(depth)]["duration_ms"]
-                    for trace in traces
-                ],
-                "warm_latency_p95_ms": _resource_measurements(
-                    [
-                        trace["reranker"]["depths"][str(depth)]["query_latency_ms"]
-                        for trace in traces
-                    ],
-                    build_time_ms=0,
-                    chunk_count=0,
-                    index_size_bytes=0,
-                    peak_rss_bytes=None,
-                    peak_rss_status="shared-run-level",
-                )["warm_latency_p95_ms"],
-                "shared_resources": ["peak_rss_bytes", "index_size_bytes", "vector_bytes"],
-            }
-    lexical_matrix = None
-    if lexical_config is not None and not real_mode:
-        matrix_raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
-        lexical_matrix = json.loads(matrix_raw)
-        if canonical_json_bytes(lexical_matrix) + b"\n" != matrix_raw:
-            raise ValueError("model matrix bytes are not canonical and frozen")
-        if _sha256_file(Path(corpus_path)) != lexical_matrix["benchmark_contract"]["corpus"]["sha256"]:
-            raise ValueError("lexical ablation corpus does not match the benchmark contract")
-    return {
-        "schema_version": "retrieval-report/v2",
-        "corpus_id": corpus["corpus_id"],
-        "adapter_kind": MODEL_MATRIX_ADAPTER_KIND if real_mode else (
-            sqlite_lexical.kind if sqlite_lexical is not None else ADAPTER_KIND
-        ),
-        "quality_claim": quality_claim,
-        "methodology": methodology,
-        "overall": overall,
-        "slices": slices,
-        "macro_average": macro,
-        "thresholds": dict(THRESHOLDS),
-        "gates": gates,
-        "measurements": measurements,
-        "traces": traces,
-        "model_id": selection.embedding["id"] if real_mode else None,
-        "variant_id": selection.variant["variant_id"] if real_mode else None,
-        "revision": selection.embedding["revision"] if real_mode else None,
-        "matrix_sha256": (
-            selection.matrix_sha256
-            if real_mode
-            else _sha256_file(Path(matrix_path)) if lexical_matrix is not None else None
-        ),
-        "corpus_sha256": (
-            selection.corpus_sha256
-            if real_mode
-            else _sha256_file(Path(corpus_path)) if lexical_matrix is not None else None
-        ),
-        "acquisition_mode": acquisition_mode,
-        "vector_backend": vector_backend if real_mode else None,
-        "reranker": (
-            {
-                "model_id": selection.reranker["id"],
-                "revision": selection.reranker["revision"],
-                "variant_id": selection.reranker_variant["variant_id"],
-                "depths": list(selection.matrix["benchmark_contract"]["reranker_depths"]),
-                "depth_metrics": depth_metrics,
-                "formatting": selection.reranker["formatting"],
-            }
-            if real_mode and selection.reranker is not None and effective_real_mode
-            else None
-        ),
-        "release_evidence": release_evidence,
-        "requested_mode": MODEL_MATRIX_ADAPTER_KIND if real_mode else ADAPTER_KIND,
-        "effective_mode": (
-            MODEL_MATRIX_ADAPTER_KIND
-            if effective_real_mode
-            else f"lexical-{lexical_config}" if real_mode else ADAPTER_KIND
-        ),
-        "fallback_reason": fallback_reason,
-        "benchmark_contract_sha256": (
-            _sha256_json(selection.matrix["benchmark_contract"])
-            if real_mode
-            else _sha256_json(lexical_matrix["benchmark_contract"])
-            if lexical_matrix is not None
-            else None
-        ),
-        "benchmark_runner_sha256": (
-            _sha256_file(Path(__file__)) if real_mode or lexical_matrix is not None else None
-        ),
-        "candidate": (
-            {
-                "embedding": _matrix_target(selection.embedding, selection.variant),
-                "reranker": (
-                    _matrix_target(selection.reranker, selection.reranker_variant)
-                    if selection.reranker is not None
-                    else None
-                ),
-            }
-            if real_mode
-            else None
-        ),
-    }
+    _require_supported_adapter(adapter)
+    _require_real_mode_choices(options)
+    _require_known_lexical_config(lexical_config)
+    validated_cache_root = _validate_cache_root(Path(cache_root))
+    persistent_model_cache = _persistent_model_cache(validated_cache_root, model_cache_root)
+    return _BenchmarkRun(corpus, validated_cache_root, persistent_model_cache, options).execute()
 
 
 def _candidate_key(candidate: dict) -> str:
     return json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def _variant_matches(variant: dict, target: dict) -> bool:
+    return variant["variant_id"] == target["variant_id"] and variant["dimensions"] == target["dimensions"]
+
+
+def _candidate_matches(item: dict, target: dict) -> bool:
+    if item["id"] != target["id"] or item["revision"] != target["revision"]:
+        return False
+    return any(_variant_matches(variant, target) for variant in item["variants"])
+
+
+def _matching_candidate(items: Sequence[dict], target: dict) -> dict | None:
+    return next((item for item in items if _candidate_matches(item, target)), None)
+
+
+def _selected_reranker_policy(matrix: dict, reranker_target: dict | None) -> dict | None:
+    if reranker_target is None:
+        return None
+    reranker = _matching_candidate(matrix["rerankers"], reranker_target)
+    if reranker is None:
+        raise ValueError("raw report selects an unknown reranker target")
+    return reranker
+
+
 def _candidate_policy(matrix: dict, spec: dict) -> tuple[dict, dict | None]:
-    embedding_target = spec["embedding"]
-    embedding = next(
-        (
-            item
-            for item in matrix["embeddings"]
-            if item["id"] == embedding_target["id"]
-            and item["revision"] == embedding_target["revision"]
-            and any(
-                variant["variant_id"] == embedding_target["variant_id"]
-                and variant["dimensions"] == embedding_target["dimensions"]
-                for variant in item["variants"]
-            )
-        ),
-        None,
-    )
+    embedding = _matching_candidate(matrix["embeddings"], spec["embedding"])
     if embedding is None:
         raise ValueError("raw report selects an unknown embedding target")
-    reranker_target = spec["reranker"]
-    reranker = None
-    if reranker_target is not None:
-        reranker = next(
-            (
-                item
-                for item in matrix["rerankers"]
-                if item["id"] == reranker_target["id"]
-                and item["revision"] == reranker_target["revision"]
-                and any(
-                    variant["variant_id"] == reranker_target["variant_id"]
-                    and variant["dimensions"] == reranker_target["dimensions"]
-                    for variant in item["variants"]
-                )
-            ),
-            None,
-        )
-        if reranker is None:
-            raise ValueError("raw report selects an unknown reranker target")
-    return embedding, reranker
+    return embedding, _selected_reranker_policy(matrix, spec["reranker"])
 
 
-def _metrics_match(claimed: object, recomputed: object, path: str) -> None:
-    if isinstance(recomputed, dict):
-        if not isinstance(claimed, dict) or set(claimed) != set(recomputed):
-            raise ValueError(f"candidate metric object mismatch at {path}")
-        for key, value in recomputed.items():
-            _metrics_match(claimed[key], value, f"{path}.{key}")
-        return
-    if isinstance(recomputed, list):
-        if not isinstance(claimed, list) or len(claimed) != len(recomputed):
-            raise ValueError(f"candidate metric list mismatch at {path}")
-        for index, value in enumerate(recomputed):
-            _metrics_match(claimed[index], value, f"{path}[{index}]")
-        return
-    if recomputed is None or isinstance(recomputed, int):
-        if claimed != recomputed or type(claimed) is not type(recomputed):
-            raise ValueError(f"candidate metric mismatch at {path}")
-        return
+def _dict_metrics_match(claimed: object, recomputed: dict, path: str) -> None:
+    if not isinstance(claimed, dict) or set(claimed) != set(recomputed):
+        raise ValueError(f"candidate metric object mismatch at {path}")
+    for key, value in recomputed.items():
+        _metrics_match(claimed[key], value, f"{path}.{key}")
+
+
+def _list_metrics_match(claimed: object, recomputed: list, path: str) -> None:
+    if not isinstance(claimed, list) or len(claimed) != len(recomputed):
+        raise ValueError(f"candidate metric list mismatch at {path}")
+    for index, value in enumerate(recomputed):
+        _metrics_match(claimed[index], value, f"{path}[{index}]")
+
+
+def _exact_metric_match(claimed: object, recomputed: object, path: str) -> None:
+    if claimed != recomputed or type(claimed) is not type(recomputed):
+        raise ValueError(f"candidate metric mismatch at {path}")
+
+
+def _float_metric_match(claimed: object, recomputed: object, path: str) -> None:
     if not isinstance(claimed, (int, float)) or not math.isclose(
         float(claimed), float(recomputed), rel_tol=0.0, abs_tol=1e-12
     ):
         raise ValueError(f"candidate metric mismatch at {path}")
 
 
-def _recompute_report_metrics(
-    corpus: dict,
-    report: dict,
-    *,
-    require_complete_rankings: bool = True,
-    require_normalized_confidence: bool = True,
-) -> tuple[dict, dict]:
-    queries = {query["query_id"]: query for query in corpus["queries"]}
-    traces = report["traces"]
-    if not isinstance(traces, list) or len(traces) != len(queries):
-        raise ValueError("candidate traces must contain every frozen query exactly once")
-    trace_ids = [trace.get("query_id") for trace in traces if isinstance(trace, dict)]
-    if len(trace_ids) != len(traces) or set(trace_ids) != set(queries):
-        raise ValueError("candidate traces contain missing, extra, or duplicate query IDs")
-    gold_fields = {
+def _metric_matcher(recomputed: object):
+    if isinstance(recomputed, dict):
+        return _dict_metrics_match
+    if isinstance(recomputed, list):
+        return _list_metrics_match
+    return _scalar_metric_matcher(recomputed)
+
+
+def _scalar_metric_matcher(recomputed: object):
+    if recomputed is None or isinstance(recomputed, int):
+        return _exact_metric_match
+    return _float_metric_match
+
+
+def _metrics_match(claimed: object, recomputed: object, path: str) -> None:
+    _metric_matcher(recomputed)(claimed, recomputed, path)
+
+
+_GOLD_FIELDS = frozenset(
+    {
         "answerability",
         "allowed_abstention_reason",
         "cross_language",
@@ -3643,85 +4449,160 @@ def _recompute_report_metrics(
         "required_evidence_spans",
         "temporal_scope",
     }
+)
+_APPROVED_RERANKER_SOURCES = frozenset(
+    {
+        None,
+        "sigmoid_probability_from_sequence_classification_logit",
+        "softmax_probability_of_yes_over_no",
+    }
+)
+_RANKED_ITEM_KEYS = frozenset({"evidence_id", "score"})
 
-    def contains_gold(value: object) -> bool:
-        if isinstance(value, dict):
-            return bool(gold_fields & set(value)) or any(contains_gold(item) for item in value.values())
-        if isinstance(value, list):
-            return any(contains_gold(item) for item in value)
-        return False
 
-    if contains_gold(report):
-        raise ValueError("candidate report contains forbidden gold fields")
+def _dict_contains_gold(value: dict) -> bool:
+    if _GOLD_FIELDS & set(value):
+        return True
+    return any(_contains_gold(item) for item in value.values())
+
+
+def _contains_gold(value: object) -> bool:
+    if isinstance(value, dict):
+        return _dict_contains_gold(value)
+    if isinstance(value, list):
+        return any(_contains_gold(item) for item in value)
+    return False
+
+
+def _require_trace_count(traces: object, queries: dict) -> None:
+    if not isinstance(traces, list) or len(traces) != len(queries):
+        raise ValueError("candidate traces must contain every frozen query exactly once")
+
+
+def _require_trace_ids(traces: list, queries: dict) -> None:
+    trace_ids = [trace.get("query_id") for trace in traces if isinstance(trace, dict)]
+    if len(trace_ids) != len(traces) or set(trace_ids) != set(queries):
+        raise ValueError("candidate traces contain missing, extra, or duplicate query IDs")
+
+
+def _require_approved_confidence(report: dict) -> None:
     confidence = report["methodology"].get("confidence")
     if not isinstance(confidence, dict) or confidence.get("fusion") != (
         "RRF divided by its theoretical maximum; bounded to [0,1]"
     ) or confidence.get("qa_threshold") != 0.54:
         raise ValueError("candidate report confidence source or calibration is not approved")
-    approved_reranker_sources = {
-        None,
-        "sigmoid_probability_from_sequence_classification_logit",
-        "softmax_probability_of_yes_over_no",
-    }
-    if confidence.get("reranker") not in approved_reranker_sources:
+    if confidence.get("reranker") not in _APPROVED_RERANKER_SOURCES:
         raise ValueError("candidate report reranker confidence source is not approved")
 
-    candidates = build_candidates(corpus)
-    by_id = {candidate.evidence_id: candidate for candidate in candidates}
-    rows = []
-    for trace in traces:
-        query = queries[trace["query_id"]]
-        ranked_evidence = trace.get("ranked_evidence")
-        if not isinstance(ranked_evidence, list) or any(
-            not isinstance(item, dict) or set(item) != {"evidence_id", "score"}
-            for item in ranked_evidence
-        ):
-            raise ValueError("candidate trace ranked evidence is malformed")
+
+def _malformed_ranked_item(item: object) -> bool:
+    return not isinstance(item, dict) or set(item) != _RANKED_ITEM_KEYS
+
+
+def _well_formed_ranked_evidence(trace: dict) -> list:
+    ranked_evidence = trace.get("ranked_evidence")
+    if not isinstance(ranked_evidence, list) or any(_malformed_ranked_item(item) for item in ranked_evidence):
+        raise ValueError("candidate trace ranked evidence is malformed")
+    return ranked_evidence
+
+
+def _ids_match_eligible(ranked_ids: list[str], eligible: set[str], require_complete: bool) -> bool:
+    if require_complete:
+        return set(ranked_ids) == eligible
+    return set(ranked_ids) <= eligible
+
+
+def _require_exact_eligible_ids(ranked_ids: list[str], eligible: set[str], require_complete: bool) -> None:
+    if len(ranked_ids) != len(set(ranked_ids)) or not _ids_match_eligible(ranked_ids, eligible, require_complete):
+        raise ValueError("candidate trace does not contain exact eligible candidate IDs")
+
+
+def _normalized_score(score: object) -> bool:
+    return isinstance(score, (int, float)) and math.isfinite(float(score)) and 0 <= float(score) <= 1
+
+
+def _require_normalized_scores(ranked_evidence: list) -> None:
+    if any(not _normalized_score(item["score"]) for item in ranked_evidence):
+        raise ValueError("candidate trace scores must be finite normalized confidence")
+
+
+def _trace_answer(trace: dict) -> dict:
+    answer = {"abstained": trace.get("abstained"), "reason": trace.get("abstention_reason")}
+    if type(answer["abstained"]) is not bool:
+        raise ValueError("candidate trace abstention is invalid")
+    return answer
+
+
+def _calibrated_reason(expected_abstained: bool) -> str | None:
+    if expected_abstained:
+        return "not-in-corpus"
+    return None
+
+
+def _require_calibrated_abstention(answer: dict, ranked_evidence: list) -> None:
+    expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
+    if answer["abstained"] is not expected_abstained:
+        raise ValueError("candidate trace abstention differs from normalized confidence")
+    if answer["reason"] != _calibrated_reason(expected_abstained):
+        raise ValueError("candidate trace abstention reason differs from calibration")
+
+
+class _TraceRecompute:
+    """Recomputes one report's evaluation rows from its traces and the frozen corpus."""
+
+    def __init__(self, corpus: dict, *, require_complete_rankings: bool, require_normalized_confidence: bool) -> None:
+        self.candidates = build_candidates(corpus)
+        self.by_id = {candidate.evidence_id: candidate for candidate in self.candidates}
+        self.require_complete_rankings = require_complete_rankings
+        self.require_normalized_confidence = require_normalized_confidence
+
+    def _eligible_ids(self, query: dict) -> set[str]:
+        return {item.evidence_id for item in filter_candidates(self.candidates, _query_scope(query))}
+
+    def _checked_ranking(self, trace: dict, query: dict) -> tuple[list, list[ScoredCandidate]]:
+        ranked_evidence = _well_formed_ranked_evidence(trace)
         ranked_ids = [item["evidence_id"] for item in ranked_evidence]
-        eligible = {
-            item.evidence_id
-            for item in filter_candidates(candidates, _query_scope(query))
-        }
-        if len(ranked_ids) != len(set(ranked_ids)) or (
-            set(ranked_ids) != eligible
-            if require_complete_rankings
-            else not set(ranked_ids) <= eligible
-        ):
-            raise ValueError("candidate trace does not contain exact eligible candidate IDs")
-        if require_normalized_confidence and any(
-            not isinstance(item["score"], (int, float))
-            or not math.isfinite(float(item["score"]))
-            or not 0 <= float(item["score"]) <= 1
-            for item in ranked_evidence
-        ):
-            raise ValueError("candidate trace scores must be finite normalized confidence")
-        ranked = [ScoredCandidate(by_id[evidence_id], 0.0) for evidence_id in ranked_ids]
-        expected_parents = _expand_parents(ranked)
-        if trace.get("ranked_parents") != expected_parents:
+        _require_exact_eligible_ids(ranked_ids, self._eligible_ids(query), self.require_complete_rankings)
+        if self.require_normalized_confidence:
+            _require_normalized_scores(ranked_evidence)
+        ranked = [ScoredCandidate(self.by_id[evidence_id], 0.0) for evidence_id in ranked_ids]
+        if trace.get("ranked_parents") != _expand_parents(ranked):
             raise ValueError("candidate trace parent expansion mismatch")
-        answer = {
-            "abstained": trace.get("abstained"),
-            "reason": trace.get("abstention_reason"),
-        }
-        if type(answer["abstained"]) is not bool:
-            raise ValueError("candidate trace abstention is invalid")
-        if require_normalized_confidence:
-            expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
-            if answer["abstained"] is not expected_abstained:
-                raise ValueError("candidate trace abstention differs from normalized confidence")
-            expected_reason = "not-in-corpus" if expected_abstained else None
-            if answer["reason"] != expected_reason:
-                raise ValueError("candidate trace abstention reason differs from calibration")
+        return ranked_evidence, ranked
+
+    def row(self, trace: dict, query: dict) -> dict:
+        ranked_evidence, ranked = self._checked_ranking(trace, query)
+        answer = _trace_answer(trace)
+        if self.require_normalized_confidence:
+            _require_calibrated_abstention(answer, ranked_evidence)
         row = _evaluation_row(query, ranked, answer)
         if trace.get("abstention_contract_valid") is not row["abstention_contract_valid"]:
             raise ValueError("candidate trace abstention contract mismatch")
-        rows.append(row)
+        return row
+
+
+def _recompute_report_metrics(
+    corpus: dict,
+    report: dict,
+    *,
+    require_complete_rankings: bool = True,
+    require_normalized_confidence: bool = True,
+) -> tuple[dict, dict]:
+    queries = {query["query_id"]: query for query in corpus["queries"]}
+    traces = report["traces"]
+    _require_trace_count(traces, queries)
+    _require_trace_ids(traces, queries)
+    if _contains_gold(report):
+        raise ValueError("candidate report contains forbidden gold fields")
+    _require_approved_confidence(report)
+    recompute = _TraceRecompute(
+        corpus,
+        require_complete_rankings=require_complete_rankings,
+        require_normalized_confidence=require_normalized_confidence,
+    )
+    rows = [recompute.row(trace, queries[trace["query_id"]]) for trace in traces]
     overall = _aggregate(rows)
-    slices = {
-        language: _aggregate([row for row in rows if row["language"] == language])
-        for language in ("EN", "RU", "ZH")
-    }
-    slices["cross-language"] = _aggregate([row for row in rows if row["cross_language"]])
+    slices = _language_slices(rows)
     _metrics_match(report["overall"], overall, "overall")
     _metrics_match(report["slices"], slices, "slices")
     macro = {metric: macro_average(slices, metric) for metric in EFFECTIVENESS_FIELDS}
@@ -3755,6 +4636,67 @@ def _baseline_policy_sha256(report: dict) -> str:
     )
 
 
+_BASELINE_ENVIRONMENT_KEYS = frozenset({"packages", "runner_sha256", "uv_lock_sha256", "verified_lock"})
+_VERIFIED_LOCK_KEYS = frozenset({"packages", "package_map_sha256", "uv_lock_sha256"})
+_BASELINE_REQUIRED_PACKAGES = frozenset({"jieba", "numpy", "sentence-transformers", "torch", "transformers"})
+_ENVIRONMENT_PACKAGE_NAMES = ("numpy", "sentence-transformers", "torch", "transformers")
+
+
+def _dict_or_none(value: object, key: str) -> object:
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
+
+
+def _keys_are(value: object, keys: frozenset) -> bool:
+    return isinstance(value, dict) and set(value) == keys
+
+
+def _expected_environment_packages(frozen_packages: object) -> dict:
+    packages = {name: _dict_or_none(frozen_packages, name) for name in _ENVIRONMENT_PACKAGE_NAMES}
+    packages["usearch"] = None
+    return packages
+
+
+def _environment_shape_valid(environment: object, verified: object, frozen_packages: object) -> bool:
+    return (
+        _keys_are(environment, _BASELINE_ENVIRONMENT_KEYS)
+        and _keys_are(verified, _VERIFIED_LOCK_KEYS)
+        and _keys_are(frozen_packages, _BASELINE_REQUIRED_PACKAGES)
+    )
+
+
+def _frozen_versions_locked(frozen_packages: dict, locked: dict[str, set[str]]) -> bool:
+    return not any(
+        not isinstance(version, str) or version not in locked.get(name, set())
+        for name, version in frozen_packages.items()
+    )
+
+
+def _environment_bindings_valid(report: dict, environment: dict, verified: dict, frozen_packages: dict) -> bool:
+    if environment["packages"] != _expected_environment_packages(frozen_packages):
+        return False
+    if environment["runner_sha256"] != report.get("benchmark_runner_sha256"):
+        return False
+    return _lock_bindings_valid(environment, verified, frozen_packages)
+
+
+def _lock_bindings_valid(environment: dict, verified: dict, frozen_packages: dict) -> bool:
+    if not _is_recorded_digest(environment["uv_lock_sha256"]):
+        return False
+    if verified["uv_lock_sha256"] != environment["uv_lock_sha256"]:
+        return False
+    return verified["package_map_sha256"] == _sha256_json(frozen_packages)
+
+
+def _baseline_environment_valid(report: dict, environment, verified, frozen_packages, locked) -> bool:
+    if not _environment_shape_valid(environment, verified, frozen_packages):
+        return False
+    if not _frozen_versions_locked(frozen_packages, locked):
+        return False
+    return _environment_bindings_valid(report, environment, verified, frozen_packages)
+
+
 def _verify_baseline_package_contract(report: dict) -> dict:
     """Check the baseline was measured in the environment it claims.
 
@@ -3772,313 +4714,335 @@ def _verify_baseline_package_contract(report: dict) -> dict:
     `knowledge/notes/baseline-environment-binding-decision.md`.
     """
     environment = report.get("methodology", {}).get("environment_provenance")
-    verified = environment.get("verified_lock") if isinstance(environment, dict) else None
+    verified = _dict_or_none(environment, "verified_lock")
     locked = _locked_package_version_sets(ROOT / "uv.lock")
-    required = {"jieba", "numpy", "sentence-transformers", "torch", "transformers"}
-    frozen_packages = verified.get("packages") if isinstance(verified, dict) else None
-    expected_environment_packages = {
-        name: frozen_packages.get(name) if isinstance(frozen_packages, dict) else None
-        for name in ("numpy", "sentence-transformers", "torch", "transformers")
-    }
-    expected_environment_packages["usearch"] = None
-    if (
-        not isinstance(environment, dict)
-        or set(environment) != {
-            "packages",
-            "runner_sha256",
-            "uv_lock_sha256",
-            "verified_lock",
-        }
-        or not isinstance(verified, dict)
-        or set(verified) != {"packages", "package_map_sha256", "uv_lock_sha256"}
-        or not isinstance(frozen_packages, dict)
-        or set(frozen_packages) != required
-        or any(
-            not isinstance(version, str) or version not in locked.get(name, set())
-            for name, version in frozen_packages.items()
-        )
-        or environment["packages"] != expected_environment_packages
-        or environment["runner_sha256"] != report.get("benchmark_runner_sha256")
-        or not _is_recorded_digest(environment["uv_lock_sha256"])
-        or verified["uv_lock_sha256"] != environment["uv_lock_sha256"]
-        or verified["package_map_sha256"] != _sha256_json(frozen_packages)
-    ):
+    frozen_packages = _dict_or_none(verified, "packages")
+    if not _baseline_environment_valid(report, environment, verified, frozen_packages, locked):
         raise ValueError("bound baseline frozen package contract mismatch")
     lexical_config = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
-    return _observed_runtime_environment(
-        report.get("vector_backend"), lexical_config=lexical_config
-    )
+    return _observed_runtime_environment(report.get("vector_backend"), lexical_config=lexical_config)
 
 
-def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
-    baseline_target = {
-        "embedding": {
-            "dimensions": 384,
-            "id": "BAAI/bge-small-en-v1.5",
-            "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
-            "variant_id": "float32-384d",
-        },
-        "reranker": None,
-    }
-    if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(
-        report
-    ):
-        raise ValueError("bound baseline policy fingerprint mismatch")
-    _verify_baseline_package_contract(report)
-    if (
-        set(report) != REPORT_FIELDS
-        or report.get("schema_version") != "retrieval-report/v2"
-        or report.get("corpus_id") not in FROZEN_CORPUS_IDS
-        or report.get("adapter_kind") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("quality_claim") is not True
-        or report.get("requested_mode") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("candidate") != baseline_target
-        or report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("fallback_reason") is not None
-        or report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]
-        or report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"])
-        or report.get("acquisition_mode") != "offline-local-files-only"
-        or report.get("vector_backend") != "numpy-exact"
-        or report.get("release_evidence") is not False
-        or report.get("thresholds") != THRESHOLDS
-        or report.get("methodology", {}).get("lexical_configuration")
-        != LEXICAL_CONFIGURATIONS["L4"]
-    ):
-        raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
-    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
-    overall, slices = _recompute_report_metrics(corpus, report)
-    quality = round(
-        sum(
-            float(overall[name])
-            for name in (
-                "parent_recall_at_10",
-                "all_required_evidence_recall_at_20",
-                "ndcg_at_10",
-                "mrr_at_10",
-            )
-        )
-        / 4
-        * 10_000
-    )
+_BASELINE_TARGET = {
+    "embedding": {
+        "dimensions": 384,
+        "id": "BAAI/bge-small-en-v1.5",
+        "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "variant_id": "float32-384d",
+    },
+    "reranker": None,
+}
+_BASELINE_EQUALITIES = (
+    ("schema_version", "retrieval-report/v2"),
+    ("adapter_kind", MODEL_MATRIX_ADAPTER_KIND),
+    ("requested_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("candidate", _BASELINE_TARGET),
+    ("effective_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("acquisition_mode", "offline-local-files-only"),
+    ("vector_backend", "numpy-exact"),
+    ("thresholds", THRESHOLDS),
+)
+_BASELINE_IDENTITIES = (("quality_claim", True), ("fallback_reason", None), ("release_evidence", False))
+
+
+def _baseline_values_match(report: dict) -> bool:
+    equal = all(report.get(field) == expected for field, expected in _BASELINE_EQUALITIES)
+    return equal and all(report.get(field) is expected for field, expected in _BASELINE_IDENTITIES)
+
+
+def _baseline_bound_to_matrix(matrix: dict, report: dict) -> bool:
+    if report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]:
+        return False
+    if report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"]):
+        return False
+    return report.get("methodology", {}).get("lexical_configuration") == LEXICAL_CONFIGURATIONS["L4"]
+
+
+def _baseline_report_comparable(matrix: dict, report: dict) -> bool:
+    if set(report) != REPORT_FIELDS or report.get("corpus_id") not in FROZEN_CORPUS_IDS:
+        return False
+    if not _baseline_values_match(report):
+        return False
+    return _baseline_bound_to_matrix(matrix, report)
+
+
+def _quality_basis_points(overall: dict) -> int:
+    return round(sum(float(overall[name]) for name in _RETRIEVAL_GATE_METRICS) / 4 * 10_000)
+
+
+def _require_baseline_matches(matrix: dict, overall: dict) -> None:
+    quality = _quality_basis_points(overall)
     baseline = matrix["selection"]["baseline"]
     if baseline["overall_basis_points"] != quality or baseline[
         "parent_recall_at_10_basis_points"
     ] != round(float(overall["parent_recall_at_10"]) * 10_000):
         raise ValueError("selection baseline metrics do not match bound raw evidence")
+
+
+def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
+    if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(report):
+        raise ValueError("bound baseline policy fingerprint mismatch")
+    _verify_baseline_package_contract(report)
+    if not _baseline_report_comparable(matrix, report):
+        raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
+    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
+    overall, slices = _recompute_report_metrics(corpus, report)
+    _require_baseline_matches(matrix, overall)
     return overall, slices
+
+
+_LEXICAL_COMPARABLE_FIELDS = (
+    "schema_version",
+    "corpus_sha256",
+    "benchmark_contract_sha256",
+    "benchmark_runner_sha256",
+    "adapter_kind",
+    "effective_mode",
+)
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _finite_nonnegative(value: object) -> bool:
+    return _is_finite_number(value) and value >= 0
+
+
+def _lexical_configuration_id(report: dict, configurations: dict, seen: dict) -> str:
+    configuration = report.get("methodology", {}).get("lexical_configuration")
+    lexical = _dict_or_none(configuration, "id")
+    if lexical not in configurations or lexical in seen:
+        raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
+    if configuration != configurations[lexical]:
+        raise ValueError("lexical evidence configuration differs from the frozen matrix")
+    return lexical
+
+
+def _lexical_evidence_values(report: dict) -> tuple[list, object]:
+    overall = report.get("overall", {})
+    values = [overall.get(name) for name in _RETRIEVAL_GATE_METRICS]
+    latency = report.get("measurements", {}).get("warm_latency_p95_ms")
+    if not all(_is_finite_number(value) for value in values) or not _finite_nonnegative(latency):
+        raise ValueError("lexical ablation evidence is incomplete or nonfinite")
+    return values, latency
+
+
+class _LexicalTally:
+    """The L0-L4 ablation reports, checked for comparability as they are added."""
+
+    def __init__(self, configurations: dict) -> None:
+        self.configurations = configurations
+        self.by_id: dict[str, dict] = {}
+        self.provenance: tuple | None = None
+
+    def _require_comparable(self, report: dict) -> None:
+        comparable = tuple(report.get(field) for field in _LEXICAL_COMPARABLE_FIELDS)
+        if self.provenance is None:
+            self.provenance = comparable
+            return
+        if comparable != self.provenance:
+            raise ValueError("lexical ablation evidence is not comparable")
+
+    def add(self, report: dict) -> None:
+        lexical = _lexical_configuration_id(report, self.configurations, self.by_id)
+        self._require_comparable(report)
+        values, latency = _lexical_evidence_values(report)
+        self.by_id[lexical] = {
+            "id": lexical,
+            "quality": sum(float(value) for value in values) / len(values),
+            "warm_latency_p95_ms": float(latency),
+        }
 
 
 def _select_lexical_winner(
     reports: Sequence[dict], *, configurations: dict | None = None
 ) -> dict:
     configurations = LEXICAL_CONFIGURATIONS if configurations is None else configurations
-    by_id = {}
-    provenance = None
+    tally = _LexicalTally(configurations)
     for report in reports:
-        configuration = report.get("methodology", {}).get("lexical_configuration")
-        lexical = configuration.get("id") if isinstance(configuration, dict) else None
-        if lexical not in configurations or lexical in by_id:
-            raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
-        if configuration != configurations[lexical]:
-            raise ValueError("lexical evidence configuration differs from the frozen matrix")
-        comparable = tuple(
-            report.get(field)
-            for field in (
-                "schema_version",
-                "corpus_sha256",
-                "benchmark_contract_sha256",
-                "benchmark_runner_sha256",
-                "adapter_kind",
-                "effective_mode",
-            )
-        )
-        if provenance is None:
-            provenance = comparable
-        elif comparable != provenance:
-            raise ValueError("lexical ablation evidence is not comparable")
-        overall = report.get("overall", {})
-        values = [
-            overall.get(name)
-            for name in (
-                "parent_recall_at_10",
-                "all_required_evidence_recall_at_20",
-                "ndcg_at_10",
-                "mrr_at_10",
-            )
-        ]
-        latency = report.get("measurements", {}).get("warm_latency_p95_ms")
-        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values) or not (
-            isinstance(latency, (int, float)) and math.isfinite(latency) and latency >= 0
-        ):
-            raise ValueError("lexical ablation evidence is incomplete or nonfinite")
-        by_id[lexical] = {
-            "id": lexical,
-            "quality": sum(float(value) for value in values) / len(values),
-            "warm_latency_p95_ms": float(latency),
-        }
-    if set(by_id) != set(configurations):
+        tally.add(report)
+    if set(tally.by_id) != set(configurations):
         raise ValueError("lexical evidence requires the complete L0 through L4 ablation set")
     return min(
-        by_id.values(),
+        tally.by_id.values(),
         key=lambda item: (-item["quality"], item["warm_latency_p95_ms"], item["id"]),
     )
+
+
+def _depth_evidence(trace: dict, depth_key: str) -> dict:
+    depth_evidence = trace.get("reranker", {}).get("depths", {}).get(depth_key)
+    if not isinstance(depth_evidence, dict) or not isinstance(depth_evidence.get("ranked_evidence"), list):
+        raise ValueError("reranker trace lacks complete depth rankings")
+    return depth_evidence
+
+
+def _depth_timings(depth_evidence: dict) -> tuple[float, float]:
+    duration = depth_evidence.get("duration_ms")
+    query_latency = depth_evidence.get("query_latency_ms")
+    if not all(_finite_nonnegative(value) for value in (duration, query_latency)):
+        raise ValueError("reranker depth trace lacks finite timing")
+    return float(duration), float(query_latency)
+
+
+def _depth_trace(trace: dict, depth_evidence: dict, corpus: dict, candidates: dict) -> dict:
+    copied = dict(trace)
+    copied["ranked_evidence"] = depth_evidence["ranked_evidence"]
+    copied["abstained"] = depth_evidence.get("abstained")
+    copied["abstention_reason"] = depth_evidence.get("abstention_reason")
+    query = next(item for item in corpus["queries"] if item["query_id"] == copied["query_id"])
+    copied["abstention_contract_valid"] = _abstention_contract_valid(
+        query, {"abstained": copied["abstained"], "reason": copied["abstention_reason"]}
+    )
+    ranked = [
+        ScoredCandidate(candidates[item["evidence_id"]], 0.0)
+        for item in copied["ranked_evidence"]
+        if item["evidence_id"] in candidates
+    ]
+    copied["ranked_parents"] = _expand_parents(ranked)
+    return copied
+
+
+def _require_depth_timing(claimed: dict, inference_latencies: list[float], query_latencies: list[float]) -> None:
+    warm_p95 = _resource_measurements(
+        query_latencies,
+        build_time_ms=0,
+        chunk_count=0,
+        index_size_bytes=0,
+        peak_rss_bytes=None,
+        peak_rss_status="shared-run-level",
+    )["warm_latency_p95_ms"]
+    _metrics_match(claimed["inference_latencies_ms"], inference_latencies, "reranker timing")
+    _metrics_match(claimed["duration_ms"], sum(inference_latencies), "reranker duration")
+    _metrics_match(claimed["warm_latency_p95_ms"], warm_p95, "reranker warm p95")
+
+
+def _recomputed_depth(corpus: dict, report: dict, depth: int, candidates: dict) -> tuple[dict, dict]:
+    depth_key = str(depth)
+    depth_traces = []
+    inference_latencies = []
+    query_latencies = []
+    for trace in report["traces"]:
+        depth_evidence = _depth_evidence(trace, depth_key)
+        duration, query_latency = _depth_timings(depth_evidence)
+        inference_latencies.append(duration)
+        query_latencies.append(query_latency)
+        depth_traces.append(_depth_trace(trace, depth_evidence, corpus, candidates))
+    claimed = report["reranker"]["depth_metrics"][depth_key]
+    _require_depth_timing(claimed, inference_latencies, query_latencies)
+    synthetic = dict(
+        report,
+        traces=depth_traces,
+        overall=claimed["overall"],
+        slices=claimed["slices"],
+        macro_average={metric: macro_average(claimed["slices"], metric) for metric in EFFECTIVENESS_FIELDS},
+    )
+    return _recompute_report_metrics(corpus, synthetic)
 
 
 def _recompute_reranker_depth_metrics(corpus: dict, report: dict) -> dict[str, tuple[dict, dict]]:
     if report["reranker"] is None:
         return {}
-    recomputed = {}
     candidates = {item.evidence_id: item for item in build_candidates(corpus)}
-    for depth in report["reranker"]["depths"]:
-        depth_key = str(depth)
-        depth_traces = []
-        inference_latencies = []
-        query_latencies = []
-        for trace in report["traces"]:
-            depth_evidence = trace.get("reranker", {}).get("depths", {}).get(depth_key)
-            if not isinstance(depth_evidence, dict) or not isinstance(
-                depth_evidence.get("ranked_evidence"), list
-            ):
-                raise ValueError("reranker trace lacks complete depth rankings")
-            duration = depth_evidence.get("duration_ms")
-            query_latency = depth_evidence.get("query_latency_ms")
-            if not all(
-                isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
-                for value in (duration, query_latency)
-            ):
-                raise ValueError("reranker depth trace lacks finite timing")
-            inference_latencies.append(float(duration))
-            query_latencies.append(float(query_latency))
-            copied = dict(trace)
-            copied["ranked_evidence"] = depth_evidence["ranked_evidence"]
-            copied["abstained"] = depth_evidence.get("abstained")
-            copied["abstention_reason"] = depth_evidence.get("abstention_reason")
-            query = next(
-                item for item in corpus["queries"] if item["query_id"] == copied["query_id"]
-            )
-            copied["abstention_contract_valid"] = (
-                not copied["abstained"]
-                if query["answerability"] == "answerable"
-                else copied["abstained"]
-                and copied["abstention_reason"] == query["allowed_abstention_reason"]
-            )
-            ranked = [
-                ScoredCandidate(candidates[item["evidence_id"]], 0.0)
-                for item in copied["ranked_evidence"]
-                if item["evidence_id"] in candidates
-            ]
-            copied["ranked_parents"] = _expand_parents(ranked)
-            depth_traces.append(copied)
-        claimed = report["reranker"]["depth_metrics"][depth_key]
-        warm_p95 = _resource_measurements(
-            query_latencies,
-            build_time_ms=0,
-            chunk_count=0,
-            index_size_bytes=0,
-            peak_rss_bytes=None,
-            peak_rss_status="shared-run-level",
-        )["warm_latency_p95_ms"]
-        _metrics_match(claimed["inference_latencies_ms"], inference_latencies, "reranker timing")
-        _metrics_match(claimed["duration_ms"], sum(inference_latencies), "reranker duration")
-        _metrics_match(claimed["warm_latency_p95_ms"], warm_p95, "reranker warm p95")
-        synthetic = dict(
-            report,
-            traces=depth_traces,
-            overall=claimed["overall"],
-            slices=claimed["slices"],
-            macro_average={
-                metric: macro_average(claimed["slices"], metric)
-                for metric in EFFECTIVENESS_FIELDS
-            },
-        )
-        recomputed[depth_key] = _recompute_report_metrics(corpus, synthetic)
-    return recomputed
+    return {
+        str(depth): _recomputed_depth(corpus, report, depth, candidates)
+        for depth in report["reranker"]["depths"]
+    }
+
+
+_GATE_LANGUAGES = ("EN", "RU", "ZH")
+
+
+def _unit_rate(value: float) -> bool:
+    return math.isfinite(value) and 0 <= value <= 1
+
+
+def _finite_unit_number(value: object) -> bool:
+    return _is_finite_number(value) and 0 <= value <= 1
+
+
+def _language_quality_values(slices: dict) -> list[float]:
+    return [float(slices[language][name]) for language in _GATE_LANGUAGES for name in _RETRIEVAL_GATE_METRICS]
+
+
+def _require_quality_rates(overall: dict, slices: dict) -> list[float]:
+    quality_values = [float(overall[name]) for name in _RETRIEVAL_GATE_METRICS]
+    if not all(_unit_rate(value) for value in quality_values + _language_quality_values(slices)):
+        raise ValueError("raw report quality metrics must be finite rates")
+    return quality_values
+
+
+def _require_false_answer_rates(overall: dict, slices: dict) -> None:
+    values = [
+        overall["no_answer_false_answer_rate"],
+        *(slices[language]["no_answer_false_answer_rate"] for language in _GATE_LANGUAGES),
+    ]
+    if not all(_finite_unit_number(value) for value in values):
+        raise ValueError("raw report false-answer metrics must be finite rates")
+
+
+def _selection_language_passes(metrics: dict) -> bool:
+    gap = THRESHOLDS["max_language_gate_gap"]
+    retrieval = all(float(metrics[name]) >= THRESHOLDS[name] - gap for name in _RETRIEVAL_GATE_METRICS)
+    return retrieval and metrics["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
+
+
+def _require_resource_values(measurements: dict) -> tuple:
+    values = (measurements["warm_latency_p95_ms"], measurements["peak_rss_bytes"], measurements["index_size_bytes"])
+    if not all(_finite_nonnegative(value) for value in values):
+        raise ValueError("raw report has incomplete or nonfinite resource measurements")
+    return values
+
+
+def _improvement_flags(selection: dict, overall: dict, quality_basis_points: int) -> tuple[bool, bool]:
+    baseline = selection["baseline"]
+    material = selection["material_improvement"]
+    parent_ok = round(float(overall["parent_recall_at_10"]) * 10_000) >= baseline["parent_recall_at_10_basis_points"]
+    material_ok = quality_basis_points >= (
+        baseline["overall_basis_points"] + material["minimum_absolute_gain_basis_points"]
+    )
+    return parent_ok, material_ok
+
+
+def _policy_shippable(item: dict | None):
+    if item is None:
+        return True
+    return (
+        item["shipping_eligible"]
+        and not item["exclusion_reasons"]
+        and item["license"] in _SHIPPABLE_LICENSES
+        and item["trust_remote_code"] is False
+    )
+
+
+def _selection_objective(quality_basis_points: int, resources: tuple) -> dict:
+    p95, rss, index_bytes = resources
+    return {
+        "index_bytes": int(index_bytes),
+        "overall": quality_basis_points,
+        "peak_rss_bytes": int(rss),
+        "warm_p95_ms": math.ceil(p95),
+    }
 
 
 def _selection_report_gates(matrix: dict, report: dict, embedding: dict, reranker: dict | None):
     selection = matrix["selection"]
     overall = report["overall"]
     slices = report["slices"]
-    quality_metrics = (
-        "parent_recall_at_10",
-        "all_required_evidence_recall_at_20",
-        "ndcg_at_10",
-        "mrr_at_10",
-    )
-    quality_values = [float(overall[name]) for name in quality_metrics]
-    language_values = [
-        float(slices[language][name])
-        for language in ("EN", "RU", "ZH")
-        for name in quality_metrics
-    ]
-    if not all(math.isfinite(value) and 0 <= value <= 1 for value in quality_values + language_values):
-        raise ValueError("raw report quality metrics must be finite rates")
-    false_answer_values = [
-        overall["no_answer_false_answer_rate"],
-        *(slices[language]["no_answer_false_answer_rate"] for language in ("EN", "RU", "ZH")),
-    ]
-    if not all(
-        isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 1
-        for value in false_answer_values
-    ):
-        raise ValueError("raw report false-answer metrics must be finite rates")
-    quality = sum(quality_values) / len(quality_values)
-    quality_basis_points = round(quality * 10_000)
-    per_language = {
-        language: all(
-            float(slices[language][metric])
-            >= threshold - THRESHOLDS["max_language_gate_gap"]
-            for metric, threshold in (
-                ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-                (
-                    "all_required_evidence_recall_at_20",
-                    THRESHOLDS["all_required_evidence_recall_at_20"],
-                ),
-                ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-                ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-            )
-        )
-        and slices[language]["no_answer_false_answer_rate"]
-        <= THRESHOLDS["no_answer_false_answer_rate"]
-        for language in ("EN", "RU", "ZH")
-    }
-    measurements = report["measurements"]
-    p95 = measurements["warm_latency_p95_ms"]
-    rss = measurements["peak_rss_bytes"]
-    index_bytes = measurements["index_size_bytes"]
-    if not all(
-        isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
-        for value in (p95, rss, index_bytes)
-    ):
-        raise ValueError("raw report has incomplete or nonfinite resource measurements")
-    baseline = selection["baseline"]
-    material = selection["material_improvement"]
-    parent_ok = round(float(overall["parent_recall_at_10"]) * 10_000) >= baseline[
-        "parent_recall_at_10_basis_points"
-    ]
-    material_ok = quality_basis_points >= (
-        baseline["overall_basis_points"] + material["minimum_absolute_gain_basis_points"]
-    )
-    shipping = all(
-        item is None
-        or (
-            item["shipping_eligible"]
-            and not item["exclusion_reasons"]
-            and item["license"] in {"Apache-2.0", "MIT"}
-            and item["trust_remote_code"] is False
-        )
-        for item in (embedding, reranker)
-    )
-    false_answer_ok = (
-        overall["no_answer_false_answer_rate"]
-        <= THRESHOLDS["no_answer_false_answer_rate"]
-    )
+    quality_values = _require_quality_rates(overall, slices)
+    _require_false_answer_rates(overall, slices)
+    quality_basis_points = round(sum(quality_values) / len(quality_values) * 10_000)
+    per_language = {language: _selection_language_passes(slices[language]) for language in _GATE_LANGUAGES}
+    resources = _require_resource_values(report["measurements"])
+    parent_ok, material_ok = _improvement_flags(selection, overall, quality_basis_points)
+    shipping = all(_policy_shippable(item) for item in (embedding, reranker))
+    false_answer_ok = overall["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
     required = {
         "every_language_gate": all(per_language.values()) and false_answer_ok,
-        "latency": p95 <= selection["limits"]["warm_p95_ms"],
+        "latency": resources[0] <= selection["limits"]["warm_p95_ms"],
         "license": shipping,
         "no_parent_recall_at_10_regression": parent_ok,
-        "ram": rss <= selection["limits"]["peak_rss_bytes"],
+        "ram": resources[1] <= selection["limits"]["peak_rss_bytes"],
     }
     gates = {
         "material_improvement": material_ok,
@@ -4088,13 +5052,7 @@ def _selection_report_gates(matrix: dict, report: dict, embedding: dict, reranke
         "required": required,
         "shipping_eligible": shipping,
     }
-    objective = {
-        "index_bytes": int(index_bytes),
-        "overall": quality_basis_points,
-        "peak_rss_bytes": int(rss),
-        "warm_p95_ms": math.ceil(p95),
-    }
-    return gates, objective
+    return gates, _selection_objective(quality_basis_points, resources)
 
 
 def _objective_dominates(left: dict, right: dict, objectives: dict) -> bool:
@@ -4110,6 +5068,428 @@ def _objective_dominates(left: dict, right: dict, objectives: dict) -> bool:
     return all(weak) and any(strict)
 
 
+_CANDIDATE_REPORT_EQUALITIES = (
+    ("schema_version", "retrieval-report/v2"),
+    ("adapter_kind", MODEL_MATRIX_ADAPTER_KIND),
+    ("effective_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("acquisition_mode", "offline-local-files-only"),
+    ("thresholds", THRESHOLDS),
+)
+_CANDIDATE_REPORT_IDENTITIES = (("release_evidence", False), ("fallback_reason", None))
+_RERANKER_DEPTH_KEYS = frozenset({"10", "20", "50"})
+
+
+def _fields_equal(report: dict, pairs) -> bool:
+    return all(report[field] == expected for field, expected in pairs)
+
+
+def _fields_identical(report: dict, pairs) -> bool:
+    return all(report[field] is expected for field, expected in pairs)
+
+
+def _first_candidate_selection(matrix: dict, matrix_path: Path | str, corpus_path: Path | str) -> ModelSelection:
+    first = matrix["embeddings"][0]
+    return load_model_selection(
+        matrix_path,
+        corpus_path,
+        model_id=first["id"],
+        variant_id=first["variants"][0]["variant_id"],
+    )
+
+
+def _require_utc_timestamp(measured_at: str) -> None:
+    try:
+        parsed_time = datetime.fromisoformat(measured_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("aggregation measured_at must be an ISO UTC timestamp") from exc
+    if not measured_at.endswith("Z") or parsed_time.utcoffset() is None:
+        raise ValueError("aggregation measured_at must be an ISO UTC timestamp")
+
+
+def _absolute_output_request(repo: Path, output_path: Path | str) -> Path:
+    requested = Path(output_path)
+    if requested.is_symlink():
+        raise ValueError("selection output must not be a symlink")
+    if not requested.is_absolute():
+        return repo / requested
+    return requested
+
+
+def _output_relative_to_repo(repo: Path, requested: Path) -> PurePosixPath:
+    try:
+        relative = requested.relative_to(repo)
+    except ValueError as exc:
+        raise ValueError("selection output must be under benchmark/results") from exc
+    return PurePosixPath(relative.as_posix())
+
+
+def _path_names_private(normalized: PurePosixPath) -> bool:
+    return any(marker in normalized.as_posix().casefold() for marker in ("private", "personal"))
+
+
+def _normalized_results_path(normalized: PurePosixPath) -> bool:
+    if normalized.parts[:2] != ("benchmark", "results") or normalized.suffix != ".json":
+        return False
+    if any(part in {"", ".", ".."} for part in normalized.parts):
+        return False
+    return not _path_names_private(normalized)
+
+
+def _selection_output_path(repo: Path, output_path: Path | str) -> Path:
+    normalized = _output_relative_to_repo(repo, _absolute_output_request(repo, output_path))
+    if not _normalized_results_path(normalized):
+        raise ValueError("selection output must be a normalized JSON path under benchmark/results")
+    output = repo / Path(*normalized.parts)
+    if output.exists() or output.is_symlink():
+        raise ValueError("selection output already exists")
+    return output
+
+
+def _bound_baseline_report(repo: Path, baseline: dict) -> dict:
+    baseline_path = repo / Path(*PurePosixPath(baseline["raw_report_path"]).parts)
+    baseline_raw = read_stable_bytes(baseline_path, MAX_CORPUS_BYTES, label="baseline raw report")
+    if hashlib.sha256(baseline_raw).hexdigest() != baseline["raw_report_sha256"]:
+        raise ValueError("bound baseline raw report SHA256 mismatch")
+    try:
+        baseline_report = json.loads(baseline_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("bound baseline raw report is invalid") from exc
+    if baseline_raw != _canonical_report_bytes(baseline_report):
+        raise ValueError("bound baseline raw report must use canonical JSON bytes")
+    return baseline_report
+
+
+def _reject_nonfinite_constant(value: str):
+    raise ValueError(f"nonfinite JSON constant: {value}")
+
+
+def _parsed_candidate_report(raw: bytes) -> dict:
+    try:
+        report = json.loads(raw, parse_constant=_reject_nonfinite_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid candidate raw report: {exc}") from exc
+    _require_exact_keys(report, REPORT_FIELDS, "candidate raw report")
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("candidate raw report must use canonical JSON bytes")
+    return report
+
+
+def _candidate_provenance_complete(report: dict, bound: tuple) -> bool:
+    if report["corpus_id"] not in FROZEN_CORPUS_IDS or report["vector_backend"] == "usearch-hnsw":
+        return False
+    return (
+        _fields_equal(report, _CANDIDATE_REPORT_EQUALITIES)
+        and _fields_identical(report, _CANDIDATE_REPORT_IDENTITIES)
+        and _fields_equal(report, bound)
+    )
+
+
+def _comparable_environment(environment: object) -> object:
+    if not isinstance(environment, dict):
+        return environment
+    comparable = dict(environment)
+    comparable.pop("verified_lock", None)
+    return comparable
+
+
+class _CandidateReports:
+    """The candidate raw reports of one aggregation, each checked and recomputed as it is added."""
+
+    def __init__(self, corpus: dict, matrix: dict, validated: ModelSelection) -> None:
+        self.corpus = corpus
+        self.expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
+        self.contract_hash = _sha256_json(matrix["benchmark_contract"])
+        self.runner_hash = _sha256_file(Path(__file__))
+        self.bound = (
+            ("matrix_sha256", validated.matrix_sha256),
+            ("corpus_sha256", validated.corpus_sha256),
+            ("benchmark_contract_sha256", self.contract_hash),
+            ("benchmark_runner_sha256", self.runner_hash),
+        )
+        self.reports: dict[str, dict] = {}
+        self.report_hashes: dict[str, str] = {}
+        self.report_bytes: dict[str, bytes] = {}
+        self.recomputed_metrics: dict[str, tuple] = {}
+        self.recomputed_depth_metrics: dict[str, dict] = {}
+        self.common_environment = None
+
+    def _require_environment(self, report: dict) -> None:
+        environment = report["methodology"].get("environment_provenance")
+        expected_environment = _environment_provenance(report["vector_backend"])
+        if _comparable_environment(environment) != expected_environment:
+            raise ValueError("candidate environment provenance or lock hash mismatch")
+        self._require_common_environment(environment)
+
+    def _require_common_environment(self, environment: object) -> None:
+        if self.common_environment is None:
+            self.common_environment = environment
+            return
+        if environment != self.common_environment:
+            raise ValueError("candidate environment provenance is inconsistent")
+
+    def _new_key(self, report: dict) -> str:
+        key = _candidate_key(report["candidate"])
+        if key not in self.expected or key in self.reports:
+            raise ValueError("candidate raw report is unknown or duplicated")
+        return key
+
+    def add(self, raw_path: Path | str) -> None:
+        raw = read_stable_bytes(Path(raw_path), MAX_CORPUS_BYTES, label="candidate raw report")
+        report = _parsed_candidate_report(raw)
+        if not _candidate_provenance_complete(report, self.bound):
+            raise ValueError("candidate raw report provenance is incomplete")
+        self._require_environment(report)
+        key = self._new_key(report)
+        self.recomputed_metrics[key] = _recompute_report_metrics(self.corpus, report)
+        self.recomputed_depth_metrics[key] = _recompute_reranker_depth_metrics(self.corpus, report)
+        self.reports[key] = report
+        self.report_hashes[key] = hashlib.sha256(raw).hexdigest()
+        self.report_bytes[key] = raw
+
+    def require_complete(self) -> None:
+        if set(self.reports) != set(self.expected):
+            raise ValueError("aggregation requires the complete candidate report set")
+
+
+def _reranker_identity_matches(reranker_report: dict, target: dict) -> bool:
+    return (
+        reranker_report.get("model_id") == target["id"]
+        and reranker_report.get("revision") == target["revision"]
+        and reranker_report.get("variant_id") == target["variant_id"]
+    )
+
+
+def _reranker_depths_complete(reranker_report: dict, matrix: dict) -> bool:
+    return (
+        reranker_report.get("depths") == matrix["benchmark_contract"]["reranker_depths"]
+        and set(reranker_report.get("depth_metrics", {})) == _RERANKER_DEPTH_KEYS
+    )
+
+
+def _require_reranker_depth_evidence(reranker_report: object, target: dict, matrix: dict) -> None:
+    if (
+        not isinstance(reranker_report, dict)
+        or not _reranker_identity_matches(reranker_report, target)
+        or not _reranker_depths_complete(reranker_report, matrix)
+    ):
+        raise ValueError("reranker raw report lacks complete comparable depth evidence")
+
+
+def _depth_variant(report: dict, depth: int, depth_metrics: dict, recomputed: tuple) -> tuple[dict, dict]:
+    derived = dict(report)
+    derived["overall"], derived["slices"] = recomputed
+    derived["measurements"] = dict(report["measurements"])
+    if "warm_latency_p95_ms" in depth_metrics:
+        derived["measurements"]["warm_latency_p95_ms"] = depth_metrics["warm_latency_p95_ms"]
+    candidate = dict(report["candidate"])
+    candidate["rerank_depth"] = depth
+    return candidate, derived
+
+
+def _report_variants(matrix: dict, report: dict, reranker: dict | None, recomputed_depths: dict) -> list:
+    if reranker is None:
+        if report["reranker"] is not None:
+            raise ValueError("embedding-only report contains unexpected reranker evidence")
+        return [(report["candidate"], report)]
+    reranker_report = report["reranker"]
+    _require_reranker_depth_evidence(reranker_report, report["candidate"]["reranker"], matrix)
+    return [
+        _depth_variant(
+            report, depth, reranker_report["depth_metrics"][str(depth)], recomputed_depths[str(depth)]
+        )
+        for depth in matrix["benchmark_contract"]["reranker_depths"]
+    ]
+
+
+def _evaluated_variant(matrix, candidate, evaluated_report, embedding, reranker, raw_hash) -> dict:
+    try:
+        gates, objective = _selection_report_gates(matrix, evaluated_report, embedding, reranker)
+    except (KeyError, TypeError, OverflowError, ValueError) as exc:
+        raise ValueError(f"candidate raw report metrics are invalid: {exc}") from exc
+    return {
+        "candidate": candidate,
+        "gates": gates,
+        "objective_values": objective,
+        "raw_report_sha256": raw_hash,
+    }
+
+
+def _evaluated_report_variants(matrix: dict, collected: _CandidateReports, key: str) -> list[dict]:
+    report = dict(collected.reports[key])
+    report["overall"], report["slices"] = collected.recomputed_metrics[key]
+    embedding, reranker = _candidate_policy(matrix, report["candidate"])
+    variants = _report_variants(matrix, report, reranker, collected.recomputed_depth_metrics[key])
+    return [
+        _evaluated_variant(matrix, candidate, evaluated_report, embedding, reranker, collected.report_hashes[key])
+        for candidate, evaluated_report in variants
+    ]
+
+
+def _evaluated_candidates(matrix: dict, collected: _CandidateReports) -> list[dict]:
+    evaluated: list[dict] = []
+    for key in sorted(collected.reports):
+        evaluated.extend(_evaluated_report_variants(matrix, collected, key))
+    return evaluated
+
+
+def _dominated(item: dict, passing: list[dict], objectives: dict) -> bool:
+    return any(
+        other is not item
+        and _objective_dominates(other["objective_values"], item["objective_values"], objectives)
+        for other in passing
+    )
+
+
+def _pareto_frontier(evaluated: list[dict], objectives: dict) -> list[dict]:
+    passing = [item for item in evaluated if item["gates"]["overall"]]
+    return [item for item in passing if not _dominated(item, passing, objectives)]
+
+
+def _selection_order(item: dict) -> tuple:
+    values = item["objective_values"]
+    return (
+        -values["overall"],
+        values["warm_p95_ms"],
+        values["peak_rss_bytes"],
+        values["index_bytes"],
+        _candidate_key(item["candidate"]),
+    )
+
+
+def _selected_candidate(frontier: list[dict]) -> dict | None:
+    if not frontier:
+        return None
+    return min(frontier, key=_selection_order)
+
+
+def _retained_report_path(digest: str) -> str:
+    return f"benchmark/results/reports/{digest}.json"
+
+
+def _candidate_report_entries(collected: _CandidateReports) -> list[dict]:
+    return [
+        {
+            "candidate": collected.reports[key]["candidate"],
+            "raw_report_sha256": collected.report_hashes[key],
+            "retained_path": _retained_report_path(collected.report_hashes[key]),
+        }
+        for key in sorted(collected.reports)
+    ]
+
+
+def _payload_digest(payload: _WorkerPayload) -> str:
+    return hashlib.sha256(payload.canonical_bytes).hexdigest()
+
+
+def _lexical_report_entries(lexical_results: Sequence[_WorkerPayload] | None) -> list[dict]:
+    return [
+        {
+            "lexical_configuration": item.report["methodology"]["lexical_configuration"]["id"],
+            "raw_report_sha256": _payload_digest(item),
+            "retained_path": _retained_report_path(_payload_digest(item)),
+        }
+        for item in (lexical_results or ())
+    ]
+
+
+def _selection_outcome(selected: dict | None) -> dict:
+    if selected is None:
+        return {
+            "selected": None,
+            "gates": {"outcome": "no-winner", "fallback": "current-bm25"},
+            "measurements": None,
+        }
+    return {
+        "selected": selected["candidate"],
+        "gates": selected["gates"],
+        "measurements": selected["objective_values"],
+    }
+
+
+def _comparison_artifact(
+    matrix: dict,
+    validated: ModelSelection,
+    collected: _CandidateReports,
+    measured_at: str,
+    baseline_observed_runtime: dict,
+    frontier: list[dict],
+    lexical_results: Sequence[_WorkerPayload] | None,
+) -> dict:
+    selected = _selected_candidate(frontier)
+    return {
+        "schema_version": "retrieval-comparison/v1",
+        "quality_claim": False,
+        "release_evidence": False,
+        "measured_at": measured_at,
+        "matrix_sha256": validated.matrix_sha256,
+        "matrix_policy_sha256": matrix_policy_fingerprint(matrix),
+        "corpus_sha256": validated.corpus_sha256,
+        "benchmark_contract_sha256": collected.contract_hash,
+        "benchmark_runner_sha256": collected.runner_hash,
+        "baseline": {**matrix["selection"]["baseline"], "observed_runtime": baseline_observed_runtime},
+        "candidate_reports": _candidate_report_entries(collected) + _lexical_report_entries(lexical_results),
+        "pareto": frontier,
+        **_selection_outcome(selected),
+    }
+
+
+def _require_no_reparse_ancestors(start: Path, repo: Path) -> None:
+    current = start
+    while current != repo:
+        if _is_reparse_point(current):
+            raise ValueError("selection output path must not contain symlinks or reparse points")
+        current = current.parent
+
+
+def _checked_output_parent(repo: Path, output: Path) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = output.parent.resolve(strict=True)
+    if resolved_parent != repo and repo not in resolved_parent.parents:
+        raise ValueError("selection output parent escaped benchmark/results")
+    _require_no_reparse_ancestors(output.parent, repo)
+    return resolved_parent
+
+
+def _retained_reports_root(repo: Path) -> Path:
+    retained_root = repo / "benchmark" / "results" / "reports"
+    retained_root.mkdir(parents=True, exist_ok=True)
+    if retained_root.resolve(strict=True) != retained_root or _is_reparse_point(retained_root):
+        raise ValueError("retained report path must not contain symlinks or reparse points")
+    return retained_root
+
+
+def _remove_created_reports(created_reports: list[tuple[Path, os.stat_result]]) -> None:
+    for retained, identity in reversed(created_reports):
+        with contextlib.suppress(FileNotFoundError):
+            if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
+                retained.unlink()
+
+
+def _publish_retained_and_output(
+    retained_root: Path, retained_reports: list[tuple[str, bytes]], output: Path, serialized: str
+) -> None:
+    created_reports: list[tuple[Path, os.stat_result]] = []
+    try:
+        for digest, data in retained_reports:
+            retained = retained_root / f"{digest}.json"
+            identity = _write_new_bytes(retained, data)
+            created_reports.append((retained, identity))
+        _write_new_output(output, serialized)
+    except BaseException:
+        _remove_created_reports(created_reports)
+        raise
+
+
+def _write_comparison(repo: Path, output: Path, artifact: dict, collected: _CandidateReports, lexical_results) -> None:
+    serialized = (canonical_json_bytes(artifact) + b"\n").decode("utf-8")
+    resolved_parent = _checked_output_parent(repo, output)
+    output = resolved_parent / output.name
+    retained_root = _retained_reports_root(repo)
+    retained_reports = [(collected.report_hashes[key], collected.report_bytes[key]) for key in sorted(collected.reports)]
+    retained_reports += [(_payload_digest(item), item.canonical_bytes) for item in lexical_results or ()]
+    _publish_retained_and_output(retained_root, retained_reports, output, serialized)
+
+
 def _aggregate_reports(
     raw_report_paths: Sequence[Path | str],
     *,
@@ -4121,279 +5501,28 @@ def _aggregate_reports(
     _lexical_results: Sequence[_WorkerPayload] | None = None,
     _write_analysis: bool = True,
 ) -> dict:
-    matrix_raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
-    matrix = json.loads(matrix_raw)
-    first = matrix["embeddings"][0]
-    validated = load_model_selection(
-        matrix_path,
-        corpus_path,
-        model_id=first["id"],
-        variant_id=first["variants"][0]["variant_id"],
-    )
-    try:
-        parsed_time = datetime.fromisoformat(measured_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("aggregation measured_at must be an ISO UTC timestamp") from exc
-    if not measured_at.endswith("Z") or parsed_time.utcoffset() is None:
-        raise ValueError("aggregation measured_at must be an ISO UTC timestamp")
-
+    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
+    validated = _first_candidate_selection(matrix, matrix_path, corpus_path)
+    _require_utc_timestamp(measured_at)
     repo = Path(repo_root).resolve(strict=True)
-    requested_output = Path(output_path)
-    if requested_output.is_symlink():
-        raise ValueError("selection output must not be a symlink")
-    if not requested_output.is_absolute():
-        requested_output = repo / requested_output
-    try:
-        relative = requested_output.relative_to(repo)
-    except ValueError as exc:
-        raise ValueError("selection output must be under benchmark/results") from exc
-    normalized = PurePosixPath(relative.as_posix())
-    if (
-        normalized.parts[:2] != ("benchmark", "results")
-        or normalized.suffix != ".json"
-        or any(part in {"", ".", ".."} for part in normalized.parts)
-        or any(marker in normalized.as_posix().casefold() for marker in ("private", "personal"))
-    ):
-        raise ValueError("selection output must be a normalized JSON path under benchmark/results")
-    output = repo / Path(*normalized.parts)
-    if output.exists() or output.is_symlink():
-        raise ValueError("selection output already exists")
-
-    baseline = matrix["selection"]["baseline"]
-    baseline_path = repo / Path(*PurePosixPath(baseline["raw_report_path"]).parts)
-    baseline_raw = read_stable_bytes(baseline_path, MAX_CORPUS_BYTES, label="baseline raw report")
-    if hashlib.sha256(baseline_raw).hexdigest() != baseline["raw_report_sha256"]:
-        raise ValueError("bound baseline raw report SHA256 mismatch")
-    try:
-        baseline_report = json.loads(baseline_raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("bound baseline raw report is invalid") from exc
-    if baseline_raw != _canonical_report_bytes(baseline_report):
-        raise ValueError("bound baseline raw report must use canonical JSON bytes")
+    output = _selection_output_path(repo, output_path)
+    baseline_report = _bound_baseline_report(repo, matrix["selection"]["baseline"])
     _verified_baseline_metrics(matrix, baseline_report, corpus_path=corpus_path)
-    baseline_observed_runtime = _observed_runtime_environment(
-        baseline_report["vector_backend"], lexical_config="L4"
-    )
+    baseline_observed_runtime = _observed_runtime_environment(baseline_report["vector_backend"], lexical_config="L4")
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
-    expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
-    reports = {}
-    report_hashes = {}
-    report_bytes = {}
-    recomputed_metrics = {}
-    recomputed_depth_metrics = {}
-    common_environment = None
-    contract_hash = _sha256_json(matrix["benchmark_contract"])
-    runner_hash = _sha256_file(Path(__file__))
+    collected = _CandidateReports(corpus, matrix, validated)
     for raw_path in raw_report_paths:
-        raw = read_stable_bytes(Path(raw_path), MAX_CORPUS_BYTES, label="candidate raw report")
-        try:
-            report = json.loads(
-                raw,
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"nonfinite JSON constant: {value}")
-                ),
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise ValueError(f"invalid candidate raw report: {exc}") from exc
-        _require_exact_keys(report, REPORT_FIELDS, "candidate raw report")
-        if raw != _canonical_report_bytes(report):
-            raise ValueError("candidate raw report must use canonical JSON bytes")
-        if (
-            report["schema_version"] != "retrieval-report/v2"
-            or report["corpus_id"] not in FROZEN_CORPUS_IDS
-            or report["adapter_kind"] != MODEL_MATRIX_ADAPTER_KIND
-            or report["release_evidence"] is not False
-            or report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND
-            or report["fallback_reason"] is not None
-            or report["matrix_sha256"] != validated.matrix_sha256
-            or report["corpus_sha256"] != validated.corpus_sha256
-            or report["benchmark_contract_sha256"] != contract_hash
-            or report["benchmark_runner_sha256"] != runner_hash
-            or report["acquisition_mode"] != "offline-local-files-only"
-            or report["thresholds"] != THRESHOLDS
-            or report["vector_backend"] == "usearch-hnsw"
-        ):
-            raise ValueError("candidate raw report provenance is incomplete")
-        environment = report["methodology"].get("environment_provenance")
-        expected_environment = _environment_provenance(report["vector_backend"])
-        comparable_environment = dict(environment) if isinstance(environment, dict) else environment
-        if isinstance(comparable_environment, dict):
-            comparable_environment.pop("verified_lock", None)
-        if comparable_environment != expected_environment:
-            raise ValueError("candidate environment provenance or lock hash mismatch")
-        if common_environment is None:
-            common_environment = environment
-        elif environment != common_environment:
-            raise ValueError("candidate environment provenance is inconsistent")
-        key = _candidate_key(report["candidate"])
-        if key not in expected or key in reports:
-            raise ValueError("candidate raw report is unknown or duplicated")
-        recomputed_metrics[key] = _recompute_report_metrics(corpus, report)
-        recomputed_depth_metrics[key] = _recompute_reranker_depth_metrics(corpus, report)
-        reports[key] = report
-        report_hashes[key] = hashlib.sha256(raw).hexdigest()
-        report_bytes[key] = raw
-    if set(reports) != set(expected):
-        raise ValueError("aggregation requires the complete candidate report set")
-
-    evaluated = []
-    for key in sorted(reports):
-        report = dict(reports[key])
-        report["overall"], report["slices"] = recomputed_metrics[key]
-        embedding, reranker = _candidate_policy(matrix, report["candidate"])
-        report_variants = [(report["candidate"], report)]
-        if reranker is not None:
-            reranker_report = report["reranker"]
-            target = report["candidate"]["reranker"]
-            if (
-                not isinstance(reranker_report, dict)
-                or reranker_report.get("model_id") != target["id"]
-                or reranker_report.get("revision") != target["revision"]
-                or reranker_report.get("variant_id") != target["variant_id"]
-                or reranker_report.get("depths") != matrix["benchmark_contract"]["reranker_depths"]
-                or set(reranker_report.get("depth_metrics", {})) != {"10", "20", "50"}
-            ):
-                raise ValueError("reranker raw report lacks complete comparable depth evidence")
-            report_variants = []
-            for depth in matrix["benchmark_contract"]["reranker_depths"]:
-                depth_metrics = reranker_report["depth_metrics"][str(depth)]
-                derived = dict(report)
-                derived["overall"], derived["slices"] = recomputed_depth_metrics[key][str(depth)]
-                derived["measurements"] = dict(report["measurements"])
-                if "warm_latency_p95_ms" in depth_metrics:
-                    derived["measurements"]["warm_latency_p95_ms"] = depth_metrics[
-                        "warm_latency_p95_ms"
-                    ]
-                candidate = dict(report["candidate"])
-                candidate["rerank_depth"] = depth
-                report_variants.append((candidate, derived))
-        elif report["reranker"] is not None:
-            raise ValueError("embedding-only report contains unexpected reranker evidence")
-        for candidate, evaluated_report in report_variants:
-            try:
-                gates, objective = _selection_report_gates(
-                    matrix, evaluated_report, embedding, reranker
-                )
-            except (KeyError, TypeError, OverflowError, ValueError) as exc:
-                raise ValueError(f"candidate raw report metrics are invalid: {exc}") from exc
-            evaluated.append(
-                {
-                    "candidate": candidate,
-                    "gates": gates,
-                    "objective_values": objective,
-                    "raw_report_sha256": report_hashes[key],
-                }
-            )
-    passing = [item for item in evaluated if item["gates"]["overall"]]
-    frontier = [
-        item
-        for item in passing
-        if not any(
-            other is not item
-            and _objective_dominates(
-                other["objective_values"],
-                item["objective_values"],
-                matrix["selection"]["pareto_objectives"],
-            )
-            for other in passing
-        )
-    ]
-    selected = (
-        min(
-            frontier,
-            key=lambda item: (
-                -item["objective_values"]["overall"],
-                item["objective_values"]["warm_p95_ms"],
-                item["objective_values"]["peak_rss_bytes"],
-                item["objective_values"]["index_bytes"],
-                _candidate_key(item["candidate"]),
-            ),
-        )
-        if frontier
-        else None
+        collected.add(raw_path)
+    collected.require_complete()
+    frontier = _pareto_frontier(_evaluated_candidates(matrix, collected), matrix["selection"]["pareto_objectives"])
+    artifact = _comparison_artifact(
+        matrix, validated, collected, measured_at, baseline_observed_runtime, frontier, _lexical_results
     )
-    artifact = {
-        "schema_version": "retrieval-comparison/v1",
-        "quality_claim": False,
-        "release_evidence": False,
-        "measured_at": measured_at,
-        "matrix_sha256": validated.matrix_sha256,
-        "matrix_policy_sha256": matrix_policy_fingerprint(matrix),
-        "corpus_sha256": validated.corpus_sha256,
-        "benchmark_contract_sha256": contract_hash,
-        "benchmark_runner_sha256": runner_hash,
-        "baseline": {**baseline, "observed_runtime": baseline_observed_runtime},
-        "candidate_reports": [
-            {
-                "candidate": reports[key]["candidate"],
-                "raw_report_sha256": report_hashes[key],
-                "retained_path": (
-                    f"benchmark/results/reports/{report_hashes[key]}.json"
-                ),
-            }
-            for key in sorted(reports)
-        ]
-        + [
-            {
-                "lexical_configuration": item.report["methodology"]["lexical_configuration"][
-                    "id"
-                ],
-                "raw_report_sha256": hashlib.sha256(item.canonical_bytes).hexdigest(),
-                "retained_path": (
-                    "benchmark/results/reports/"
-                    f"{hashlib.sha256(item.canonical_bytes).hexdigest()}.json"
-                ),
-            }
-            for item in (_lexical_results or ())
-        ],
-        "pareto": frontier,
-        "selected": selected["candidate"] if selected is not None else None,
-        "gates": (
-            selected["gates"]
-            if selected is not None
-            else {"outcome": "no-winner", "fallback": "current-bm25"}
-        ),
-        "measurements": selected["objective_values"] if selected is not None else None,
-    }
     if set(artifact) != set(matrix["selection"]["aggregation_evidence_contract"]["required_fields"]):
         raise ValueError("selection artifact does not match matrix evidence contract")
     if not _write_analysis:
         return artifact
-    serialized = (canonical_json_bytes(artifact) + b"\n").decode("utf-8")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    resolved_parent = output.parent.resolve(strict=True)
-    if resolved_parent != repo and repo not in resolved_parent.parents:
-        raise ValueError("selection output parent escaped benchmark/results")
-    current = output.parent
-    while current != repo:
-        if _is_reparse_point(current):
-            raise ValueError("selection output path must not contain symlinks or reparse points")
-        current = current.parent
-    output = resolved_parent / output.name
-    retained_root = repo / "benchmark" / "results" / "reports"
-    retained_root.mkdir(parents=True, exist_ok=True)
-    resolved_retained_root = retained_root.resolve(strict=True)
-    if resolved_retained_root != retained_root or _is_reparse_point(retained_root):
-        raise ValueError("retained report path must not contain symlinks or reparse points")
-
-    created_reports = []
-    try:
-        for key in sorted(reports):
-            retained = retained_root / f"{report_hashes[key]}.json"
-            identity = _write_new_bytes(retained, report_bytes[key])
-            created_reports.append((retained, identity))
-        for item in _lexical_results or ():
-            digest = hashlib.sha256(item.canonical_bytes).hexdigest()
-            retained = retained_root / f"{digest}.json"
-            identity = _write_new_bytes(retained, item.canonical_bytes)
-            created_reports.append((retained, identity))
-        _write_new_output(output, serialized)
-    except BaseException:
-        for retained, identity in reversed(created_reports):
-            with contextlib.suppress(FileNotFoundError):
-                if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
-                    retained.unlink()
-        raise
+    _write_comparison(repo, output, artifact, collected, _lexical_results)
     return artifact
 
 
@@ -4417,6 +5546,235 @@ def aggregate_selection(
     )
 
 
+class _TrustedBindings:
+    """The transport and completeness contract an authoritative selection was bound to at import."""
+
+    def __init__(self, **bindings) -> None:
+        self.worker = bindings["worker"]
+        self.process_runner = bindings["process_runner"]
+        self.candidate_enumerator = bindings["candidate_enumerator"]
+        self.lexical_arguments = bindings["lexical_arguments"]
+        self.lexical_selector = bindings["lexical_selector"]
+        self.candidate_arguments = bindings["candidate_arguments"]
+        self.candidate_key = bindings["candidate_key"]
+        self.aggregator = bindings["aggregator"]
+        self.lexical_contract_sha256 = bindings["lexical_contract_sha256"]
+        self.lexical_levels = bindings["lexical_levels"]
+        self.candidate_count = bindings["candidate_count"]
+
+    def _values(self) -> tuple:
+        return (
+            self.worker,
+            self.process_runner,
+            self.candidate_enumerator,
+            self.lexical_arguments,
+            self.lexical_selector,
+            self.candidate_arguments,
+            self.candidate_key,
+            self.aggregator,
+            self.lexical_contract_sha256,
+            self.lexical_levels,
+            self.candidate_count,
+        )
+
+    def _current_identities(self) -> tuple:
+        return (
+            (required_candidate_specs, self.candidate_enumerator),
+            (_lexical_ablation_worker_arguments, self.lexical_arguments),
+            (_select_lexical_winner, self.lexical_selector),
+            (_candidate_worker_arguments, self.candidate_arguments),
+            (_candidate_key, self.candidate_key),
+            (_aggregate_reports, self.aggregator),
+        )
+
+    def _contract_intact(self) -> bool:
+        if any(current is not trusted for current, trusted in self._current_identities()):
+            return False
+        return _sha256_json(LEXICAL_CONFIGURATIONS) == self.lexical_contract_sha256
+
+    def require_intact(self) -> None:
+        if any(item is None for item in self._values()):
+            raise TypeError("authoritative orchestration requires its bound subprocess transport")
+        if not self._contract_intact():
+            raise ValueError("authoritative completeness contract was modified")
+
+
+def _require_candidate_specs(specs: list, trusted: _TrustedBindings) -> None:
+    unique = {trusted.candidate_key(spec) for spec in specs}
+    if len(specs) != trusted.candidate_count or len(unique) != trusted.candidate_count:
+        raise ValueError("authoritative selection requires exactly 27 unique matrix candidates")
+
+
+def _authoritative_inputs(trusted: _TrustedBindings, matrix_path: Path | str) -> tuple[dict, dict, list]:
+    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
+    lexical_configurations = json.loads(json.dumps(LEXICAL_CONFIGURATIONS))
+    if tuple(lexical_configurations) != trusted.lexical_levels:
+        raise ValueError("authoritative selection requires exact L0 through L4 configurations")
+    specs = json.loads(json.dumps(trusted.candidate_enumerator(matrix)))
+    _require_candidate_specs(specs, trusted)
+    return matrix, lexical_configurations, specs
+
+
+def _require_cache_and_deadline(cache_root: object, deadline_seconds: object) -> None:
+    if cache_root is None or deadline_seconds is None:
+        raise ValueError("authoritative orchestration requires cache root and deadline")
+
+
+def _invocation_matches(registered: tuple, argv, expected: dict, payload: _WorkerPayload) -> bool:
+    return (
+        registered[2] == tuple(argv)
+        and registered[3] == _sha256_json(expected)
+        and registered[4] == hashlib.sha256(payload.canonical_bytes).digest()
+    )
+
+
+class _WorkerLedger:
+    """Binds each worker payload to the one invocation that produced it."""
+
+    def __init__(self, worker, deadline_seconds: float, trusted_transport: bool) -> None:
+        self.worker = worker
+        self.deadline_seconds = deadline_seconds
+        self.trusted_transport = trusted_transport
+        self.nonce = secrets.token_bytes(32)
+        self.records: dict[int, tuple] = {}
+
+    def run(self, argv, expected: dict):
+        payload = self.worker(argv, deadline_seconds=self.deadline_seconds)
+        if self.trusted_transport and isinstance(payload, _WorkerPayload):
+            self.records[id(payload)] = (
+                self.nonce,
+                payload,
+                tuple(argv),
+                _sha256_json(expected),
+                hashlib.sha256(payload.canonical_bytes).digest(),
+            )
+        return payload
+
+    def consume(self, payload, argv, expected: dict) -> bool:
+        registered = self.records.pop(id(payload), None)
+        if registered is None:
+            return False
+        if registered[0] is not self.nonce or registered[1] is not payload:
+            return False
+        return _invocation_matches(registered, argv, expected, payload)
+
+
+def _worker_ledger(trusted: _TrustedBindings, deadline_seconds: float) -> _WorkerLedger:
+    worker = _run_bounded_model_worker
+    trusted_transport = worker is trusted.worker and _run_process_tree is trusted.process_runner
+    return _WorkerLedger(worker, deadline_seconds, trusted_transport)
+
+
+def _run_lexical_workers(ledger, trusted, cache_root, deadline_seconds, matrix, corpus_path) -> tuple[list, bool]:
+    lexical_results = []
+    execution_bound = True
+    for argv in trusted.lexical_arguments(cache_root, deadline_seconds, levels=trusted.lexical_levels):
+        expected = {"candidate": None, "lexical_configuration": argv[argv.index("--lexical-config") + 1]}
+        payload = ledger.run(argv, expected)
+        if not isinstance(payload, _WorkerPayload):
+            raise TypeError("lexical worker transport returned an invalid payload")
+        _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
+        execution_bound &= ledger.consume(payload, argv, expected)
+        lexical_results.append(payload)
+    return lexical_results, execution_bound
+
+
+def _lexical_winner(trusted: _TrustedBindings, lexical_results: list, lexical_configurations: dict) -> str:
+    reports = [item.report for item in lexical_results]
+    return trusted.lexical_selector(reports, configurations=lexical_configurations)["id"]
+
+
+def _require_candidate_payload(payload: object, spec: dict, lexical_config: str) -> None:
+    if not isinstance(payload, _WorkerPayload):
+        raise TypeError("authoritative worker transport returned an invalid payload")
+    _require_undegraded_candidate(payload.report, spec, lexical_config)
+    _validate_worker_payload(payload.report, payload.canonical_bytes)
+    if payload.report.get("candidate") != spec:
+        raise ValueError("worker result does not match requested matrix candidate")
+
+
+def _require_undegraded_candidate(report: dict, spec: dict, lexical_config: str) -> None:
+    if report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
+        raise ValueError(
+            f"authoritative candidate {_candidate_key(spec)} degraded: "
+            f"fallback_reason={report.get('fallback_reason')!s}"
+        )
+    if report.get("methodology", {}).get("lexical_configuration", {}).get("id") != lexical_config:
+        raise ValueError("candidate report does not use the frozen lexical winner")
+
+
+def _run_candidate_workers(ledger, trusted, specs, cache_root, deadline_seconds, lexical_config) -> tuple[list, bool]:
+    candidate_payloads = []
+    execution_bound = True
+    for spec in specs:
+        argv = trusted.candidate_arguments(spec, cache_root, deadline_seconds, lexical_config=lexical_config)
+        expected = {"candidate": spec, "lexical_configuration": lexical_config}
+        payload = ledger.run(argv, expected)
+        _require_candidate_payload(payload, spec, lexical_config)
+        execution_bound &= ledger.consume(payload, argv, expected)
+        candidate_payloads.append(payload)
+    return candidate_payloads, execution_bound
+
+
+def _written_candidate_paths(temporary: Path, candidate_payloads: list) -> list[Path]:
+    paths = []
+    for index, result in enumerate(candidate_payloads):
+        path = temporary / f"candidate-{index}.json"
+        _write_new_bytes(path, result.canonical_bytes)
+        paths.append(path)
+    return paths
+
+
+def _lexical_levels_of(lexical_results: list) -> set[str]:
+    return {item.report["methodology"]["lexical_configuration"]["id"] for item in lexical_results}
+
+
+def _require_complete_selection_evidence(lexical_results: list, candidate_payloads: list, trusted) -> None:
+    if (
+        len(lexical_results) != len(trusted.lexical_levels)
+        or _lexical_levels_of(lexical_results) != set(trusted.lexical_levels)
+        or len(candidate_payloads) != trusted.candidate_count
+    ):
+        raise ValueError("authoritative selection evidence is incomplete")
+
+
+def _aggregate_in_temporary(trusted, candidate_payloads, lexical_results, execution_bound, **locations) -> dict:
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
+        paths = _written_candidate_paths(Path(temporary), candidate_payloads)
+        _require_complete_selection_evidence(lexical_results, candidate_payloads, trusted)
+        return trusted.aggregator(
+            paths,
+            **locations,
+            _lexical_results=lexical_results,
+            _write_analysis=not execution_bound,
+        )
+
+
+def _authoritative_output(repo: Path, output_path: Path | str) -> Path:
+    requested_output = Path(output_path)
+    if not requested_output.is_absolute():
+        requested_output = repo / requested_output
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise ValueError("selection output already exists")
+    return output
+
+
+def _publish_authoritative_selection(artifact, repo_root, output_path, candidate_payloads, lexical_results) -> None:
+    artifact["schema_version"] = "retrieval-selection/v1"
+    artifact["quality_claim"] = artifact["selected"] is not None
+    artifact["release_evidence"] = True
+    serialized = canonical_json_bytes(artifact) + b"\n"
+    repo = Path(repo_root).resolve(strict=True)
+    output = _authoritative_output(repo, output_path)
+    resolved_parent = _checked_output_parent(repo, output)
+    retained_root = _retained_reports_root(repo)
+    retained_reports = [
+        (_payload_digest(payload), payload.canonical_bytes) for payload in [*candidate_payloads, *lexical_results]
+    ]
+    _publish_retained_and_output(retained_root, retained_reports, resolved_parent / output.name, serialized.decode("utf-8"))
+
+
 def _orchestrate_selection_impl(
     *,
     matrix_path: Path | str,
@@ -4438,187 +5796,46 @@ def _orchestrate_selection_impl(
     _trusted_lexical_levels=None,
     _trusted_candidate_count=None,
 ) -> dict:
-    if any(
-        item is None
-        for item in (
-            _trusted_worker,
-            _trusted_process_runner,
-            _trusted_candidate_enumerator,
-            _trusted_lexical_arguments,
-            _trusted_lexical_selector,
-            _trusted_candidate_arguments,
-            _trusted_candidate_key,
-            _trusted_aggregator,
-            _trusted_lexical_contract_sha256,
-            _trusted_lexical_levels,
-            _trusted_candidate_count,
-        )
-    ):
-        raise TypeError("authoritative orchestration requires its bound subprocess transport")
-    if (
-        required_candidate_specs is not _trusted_candidate_enumerator
-        or _lexical_ablation_worker_arguments is not _trusted_lexical_arguments
-        or _select_lexical_winner is not _trusted_lexical_selector
-        or _candidate_worker_arguments is not _trusted_candidate_arguments
-        or _candidate_key is not _trusted_candidate_key
-        or _aggregate_reports is not _trusted_aggregator
-        or _sha256_json(LEXICAL_CONFIGURATIONS) != _trusted_lexical_contract_sha256
-    ):
-        raise ValueError("authoritative completeness contract was modified")
-    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
-    lexical_configurations = json.loads(json.dumps(LEXICAL_CONFIGURATIONS))
-    if tuple(lexical_configurations) != _trusted_lexical_levels:
-        raise ValueError("authoritative selection requires exact L0 through L4 configurations")
-    specs = json.loads(json.dumps(_trusted_candidate_enumerator(matrix)))
-    if (
-        len(specs) != _trusted_candidate_count
-        or len({_trusted_candidate_key(spec) for spec in specs}) != _trusted_candidate_count
-    ):
-        raise ValueError("authoritative selection requires exactly 27 unique matrix candidates")
-    if cache_root is None or deadline_seconds is None:
-        raise ValueError("authoritative orchestration requires cache root and deadline")
-    requested_cache = Path(cache_root).expanduser()
-    if requested_cache.exists() and _is_reparse_point(requested_cache):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    requested_cache.mkdir(parents=True, exist_ok=True)
-    cache_root = _validate_cache_root(requested_cache).resolve(strict=True)
-    if _is_reparse_point(cache_root):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    worker = _run_bounded_model_worker
-    invocation_nonce = secrets.token_bytes(32)
-    invocation_records = {}
-    trusted_transport = worker is _trusted_worker and _run_process_tree is _trusted_process_runner
-
-    def run_worker(argv, expected):
-        payload = worker(argv, deadline_seconds=deadline_seconds)
-        if trusted_transport and isinstance(payload, _WorkerPayload):
-            invocation_records[id(payload)] = (
-                invocation_nonce,
-                payload,
-                tuple(argv),
-                _sha256_json(expected),
-                hashlib.sha256(payload.canonical_bytes).digest(),
-            )
-        return payload
-
-    def consume_worker(payload, argv, expected):
-        registered = invocation_records.pop(id(payload), None)
-        return (
-            registered is not None
-            and registered[0] is invocation_nonce
-            and registered[1] is payload
-            and registered[2] == tuple(argv)
-            and registered[3] == _sha256_json(expected)
-            and registered[4] == hashlib.sha256(payload.canonical_bytes).digest()
-        )
-
-    lexical_results = []
-    execution_bound = True
-    for argv in _trusted_lexical_arguments(
-        cache_root, deadline_seconds, levels=_trusted_lexical_levels
-    ):
-        lexical_config = argv[argv.index("--lexical-config") + 1]
-        expected = {"candidate": None, "lexical_configuration": lexical_config}
-        payload = run_worker(argv, expected)
-        if not isinstance(payload, _WorkerPayload):
-            raise TypeError("lexical worker transport returned an invalid payload")
-        _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
-        execution_bound &= consume_worker(payload, argv, expected)
-        lexical_results.append(payload)
-    lexical_config = _trusted_lexical_selector(
-        [item.report for item in lexical_results], configurations=lexical_configurations
-    )["id"]
-    candidate_payloads = []
-    for spec in specs:
-        argv = _trusted_candidate_arguments(
-            spec, cache_root, deadline_seconds, lexical_config=lexical_config
-        )
-        expected = {"candidate": spec, "lexical_configuration": lexical_config}
-        payload = run_worker(argv, expected)
-        if not isinstance(payload, _WorkerPayload):
-            raise TypeError("authoritative worker transport returned an invalid payload")
-        if payload.report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
-            raise ValueError(
-                f"authoritative candidate {_candidate_key(spec)} degraded: "
-                f"fallback_reason={payload.report.get('fallback_reason')!s}"
-            )
-        if payload.report.get("methodology", {}).get("lexical_configuration", {}).get(
-            "id"
-        ) != lexical_config:
-            raise ValueError("candidate report does not use the frozen lexical winner")
-        _validate_worker_payload(payload.report, payload.canonical_bytes)
-        if payload.report.get("candidate") != spec:
-            raise ValueError("worker result does not match requested matrix candidate")
-        execution_bound &= consume_worker(payload, argv, expected)
-        candidate_payloads.append(payload)
-    with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
-        paths = []
-        for index, result in enumerate(candidate_payloads):
-            path = Path(temporary) / f"candidate-{index}.json"
-            _write_new_bytes(path, result.canonical_bytes)
-            paths.append(path)
-        if (
-            len(lexical_results) != len(_trusted_lexical_levels)
-            or {
-                item.report["methodology"]["lexical_configuration"]["id"]
-                for item in lexical_results
-            }
-            != set(_trusted_lexical_levels)
-            or len(candidate_payloads) != _trusted_candidate_count
-        ):
-            raise ValueError("authoritative selection evidence is incomplete")
-        artifact = _trusted_aggregator(
-            paths,
-            matrix_path=matrix_path,
-            corpus_path=corpus_path,
-            repo_root=repo_root,
-            output_path=output_path,
-            measured_at=measured_at,
-            _lexical_results=lexical_results,
-            _write_analysis=not execution_bound,
-        )
+    trusted = _TrustedBindings(
+        worker=_trusted_worker,
+        process_runner=_trusted_process_runner,
+        candidate_enumerator=_trusted_candidate_enumerator,
+        lexical_arguments=_trusted_lexical_arguments,
+        lexical_selector=_trusted_lexical_selector,
+        candidate_arguments=_trusted_candidate_arguments,
+        candidate_key=_trusted_candidate_key,
+        aggregator=_trusted_aggregator,
+        lexical_contract_sha256=_trusted_lexical_contract_sha256,
+        lexical_levels=_trusted_lexical_levels,
+        candidate_count=_trusted_candidate_count,
+    )
+    trusted.require_intact()
+    matrix, lexical_configurations, specs = _authoritative_inputs(trusted, matrix_path)
+    _require_cache_and_deadline(cache_root, deadline_seconds)
+    cache_root = _prepared_model_cache_root(cache_root)
+    ledger = _worker_ledger(trusted, deadline_seconds)
+    lexical_results, lexical_bound = _run_lexical_workers(
+        ledger, trusted, cache_root, deadline_seconds, matrix, corpus_path
+    )
+    lexical_config = _lexical_winner(trusted, lexical_results, lexical_configurations)
+    candidate_payloads, candidate_bound = _run_candidate_workers(
+        ledger, trusted, specs, cache_root, deadline_seconds, lexical_config
+    )
+    execution_bound = lexical_bound & candidate_bound
+    artifact = _aggregate_in_temporary(
+        trusted,
+        candidate_payloads,
+        lexical_results,
+        execution_bound,
+        matrix_path=matrix_path,
+        corpus_path=corpus_path,
+        repo_root=repo_root,
+        output_path=output_path,
+        measured_at=measured_at,
+    )
     if not execution_bound:
         return artifact
-
-    artifact["schema_version"] = "retrieval-selection/v1"
-    artifact["quality_claim"] = artifact["selected"] is not None
-    artifact["release_evidence"] = True
-    serialized = canonical_json_bytes(artifact) + b"\n"
-    repo = Path(repo_root).resolve(strict=True)
-    requested_output = Path(output_path)
-    if not requested_output.is_absolute():
-        requested_output = repo / requested_output
-    output = requested_output.parent.resolve() / requested_output.name
-    if output.exists() or output.is_symlink():
-        raise ValueError("selection output already exists")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    resolved_parent = output.parent.resolve(strict=True)
-    if resolved_parent != repo and repo not in resolved_parent.parents:
-        raise ValueError("selection output parent escaped benchmark/results")
-    current = output.parent
-    while current != repo:
-        if _is_reparse_point(current):
-            raise ValueError("selection output path must not contain symlinks or reparse points")
-        current = current.parent
-    retained_root = repo / "benchmark" / "results" / "reports"
-    retained_root.mkdir(parents=True, exist_ok=True)
-    resolved_retained_root = retained_root.resolve(strict=True)
-    if resolved_retained_root != retained_root or _is_reparse_point(retained_root):
-        raise ValueError("retained report path must not contain symlinks or reparse points")
-    created_reports = []
-    try:
-        for payload in [*candidate_payloads, *lexical_results]:
-            digest = hashlib.sha256(payload.canonical_bytes).hexdigest()
-            retained = retained_root / f"{digest}.json"
-            identity = _write_new_bytes(retained, payload.canonical_bytes)
-            created_reports.append((retained, identity))
-        _write_new_output(resolved_parent / output.name, serialized.decode("utf-8"))
-    except BaseException:
-        for retained, identity in reversed(created_reports):
-            with contextlib.suppress(FileNotFoundError):
-                if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
-                    retained.unlink()
-        raise
+    _publish_authoritative_selection(artifact, repo_root, output_path, candidate_payloads, lexical_results)
     return artifact
 
 
@@ -4644,6 +5861,45 @@ def _lexical_ablation_worker_arguments(
     ]
 
 
+_LEXICAL_WORKER_IDENTITIES = (
+    ("quality_claim", False),
+    ("release_evidence", False),
+    ("candidate", None),
+    ("model_id", None),
+    ("fallback_reason", None),
+)
+
+
+def _lexical_worker_configuration_valid(report: dict, lexical: object) -> bool:
+    return lexical in LEXICAL_CONFIGURATIONS and (
+        report["methodology"]["lexical_configuration"] == LEXICAL_CONFIGURATIONS[lexical]
+    )
+
+
+def _lexical_worker_bound_to_matrix(report: dict, matrix: dict) -> bool:
+    if report["corpus_sha256"] != matrix["benchmark_contract"]["corpus"]["sha256"]:
+        return False
+    if report["matrix_sha256"] != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest():
+        return False
+    return _lexical_worker_bound_to_runner(report, matrix)
+
+
+def _lexical_worker_bound_to_runner(report: dict, matrix: dict) -> bool:
+    if report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"]):
+        return False
+    if report["benchmark_runner_sha256"] != _sha256_file(Path(__file__)):
+        return False
+    return report["methodology"].get("environment_provenance") == _environment_provenance(None)
+
+
+def _lexical_worker_provenance_valid(report: dict, lexical: object, matrix: dict) -> bool:
+    if not _lexical_worker_configuration_valid(report, lexical):
+        return False
+    if not _fields_identical(report, _LEXICAL_WORKER_IDENTITIES):
+        return False
+    return _lexical_worker_bound_to_matrix(report, matrix)
+
+
 def _validate_lexical_worker_payload(
     payload: _WorkerPayload, *, matrix: dict, corpus_path: Path | str
 ) -> None:
@@ -4652,21 +5908,7 @@ def _validate_lexical_worker_payload(
         raise ValueError("lexical worker report is not canonical")
     _require_exact_keys(report, REPORT_FIELDS, "lexical worker report")
     lexical = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
-    if (
-        lexical not in LEXICAL_CONFIGURATIONS
-        or report["methodology"]["lexical_configuration"] != LEXICAL_CONFIGURATIONS[lexical]
-        or report["quality_claim"] is not False
-        or report["release_evidence"] is not False
-        or report["candidate"] is not None
-        or report["model_id"] is not None
-        or report["fallback_reason"] is not None
-        or report["corpus_sha256"] != matrix["benchmark_contract"]["corpus"]["sha256"]
-        or report["matrix_sha256"]
-        != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest()
-        or report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"])
-        or report["benchmark_runner_sha256"] != _sha256_file(Path(__file__))
-        or report["methodology"].get("environment_provenance") != _environment_provenance(None)
-    ):
+    if not _lexical_worker_provenance_valid(report, lexical, matrix):
         raise ValueError("lexical worker provenance is incomplete or incomparable")
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
     _recompute_report_metrics(
@@ -4755,86 +5997,124 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate_cli_args(args: argparse.Namespace) -> None:
-    if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-        if (
-            args.cache_root is None
-            or args.selection_output is None
-            or args.measured_at is None
-            or args.deadline_seconds is None
-            or not math.isfinite(args.deadline_seconds)
-            or args.deadline_seconds <= 0
-        ):
-            raise ValueError(
-                "authoritative-selection requires cache root, selection output, measured-at, and deadline"
-            )
-        if args.raw_report or any(
-            value is not None
-            for value in (args.model_id, args.variant_id, args.reranker_id, args.output)
-        ) or args.allow_download:
-            raise ValueError("authoritative-selection derives candidates from the closed matrix")
-    elif args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-        if not args.raw_report or args.selection_output is None or args.measured_at is None:
-            raise ValueError(
-                "selection-aggregation requires explicit --raw-report, --selection-output, and --measured-at"
-            )
-        if any(
-            value is not None
-            for value in (
-                args.cache_root,
-                args.model_id,
-                args.variant_id,
-                args.reranker_id,
-                args.rerank_depth,
-                args.vector_backend,
-                args.lexical_config,
-                args.output,
-            )
-        ) or args.allow_download:
-            raise ValueError("selection-aggregation does not accept model-run options")
-    elif args.adapter == MODEL_MATRIX_ADAPTER_KIND:
-        required = {
-            "--model-id": args.model_id,
-            "--variant-id": args.variant_id,
-            "--cache-root": args.cache_root,
-            "--lexical-config": args.lexical_config,
-            "--vector-backend": args.vector_backend,
-        }
-        missing = [name for name, value in required.items() if value is None]
-        if missing:
-            raise ValueError(
-                "model-matrix adapter requires explicit " + ", ".join(missing)
-            )
-        if args.deadline_seconds is None or not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
-            raise ValueError("model-matrix adapter requires positive --deadline-seconds")
-        if args.rerank_depth is not None:
-            raise ValueError("reranker evidence automatically runs depths 10, 20, and 50 together")
-    elif any(
-        value is not None
-        for value in (
-            args.model_id,
-            args.variant_id,
-            args.reranker_id,
-            args.rerank_depth,
-            args.vector_backend,
+_MODEL_MATRIX_REQUIRED_OPTIONS = (
+    ("--model-id", "model_id"),
+    ("--variant-id", "variant_id"),
+    ("--cache-root", "cache_root"),
+    ("--lexical-config", "lexical_config"),
+    ("--vector-backend", "vector_backend"),
+)
+
+
+def _positive_finite_deadline(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and value > 0
+
+
+def _any_set(values: Sequence[object]) -> bool:
+    return any(value is not None for value in values)
+
+
+def _authoritative_cli_complete(args: argparse.Namespace) -> bool:
+    return (
+        args.cache_root is not None
+        and args.selection_output is not None
+        and args.measured_at is not None
+        and _positive_finite_deadline(args.deadline_seconds)
+    )
+
+
+def _authoritative_cli_overreach(args: argparse.Namespace):
+    return (
+        args.raw_report
+        or _any_set((args.model_id, args.variant_id, args.reranker_id, args.output))
+        or args.allow_download
+    )
+
+
+def _validate_authoritative_args(args: argparse.Namespace) -> None:
+    if not _authoritative_cli_complete(args):
+        raise ValueError(
+            "authoritative-selection requires cache root, selection output, measured-at, and deadline"
         )
-    ) or args.allow_download:
+    if _authoritative_cli_overreach(args):
+        raise ValueError("authoritative-selection derives candidates from the closed matrix")
+
+
+def _aggregation_cli_complete(args: argparse.Namespace) -> bool:
+    return bool(args.raw_report) and args.selection_output is not None and args.measured_at is not None
+
+
+def _aggregation_run_options(args: argparse.Namespace) -> tuple:
+    return (
+        args.cache_root,
+        args.model_id,
+        args.variant_id,
+        args.reranker_id,
+        args.rerank_depth,
+        args.vector_backend,
+        args.lexical_config,
+        args.output,
+    )
+
+
+def _validate_aggregation_args(args: argparse.Namespace) -> None:
+    if not _aggregation_cli_complete(args):
+        raise ValueError(
+            "selection-aggregation requires explicit --raw-report, --selection-output, and --measured-at"
+        )
+    if _any_set(_aggregation_run_options(args)) or args.allow_download:
+        raise ValueError("selection-aggregation does not accept model-run options")
+
+
+def _missing_model_matrix_options(args: argparse.Namespace) -> list[str]:
+    return [name for name, attribute in _MODEL_MATRIX_REQUIRED_OPTIONS if getattr(args, attribute) is None]
+
+
+def _validate_model_matrix_args(args: argparse.Namespace) -> None:
+    missing = _missing_model_matrix_options(args)
+    if missing:
+        raise ValueError("model-matrix adapter requires explicit " + ", ".join(missing))
+    _require_matrix_deadline_and_depth(args)
+
+
+def _require_matrix_deadline_and_depth(args: argparse.Namespace) -> None:
+    if not _positive_finite_deadline(args.deadline_seconds):
+        raise ValueError("model-matrix adapter requires positive --deadline-seconds")
+    if args.rerank_depth is not None:
+        raise ValueError("reranker evidence automatically runs depths 10, 20, and 50 together")
+
+
+def _validate_lexical_args(args: argparse.Namespace) -> None:
+    real_model_options = (args.model_id, args.variant_id, args.reranker_id, args.rerank_depth, args.vector_backend)
+    if _any_set(real_model_options) or args.allow_download:
         raise ValueError("real-model options require --adapter model-matrix")
+
+
+def _cli_validator(adapter: str):
+    validators = {
+        AUTHORITATIVE_SELECTION_ADAPTER_KIND: _validate_authoritative_args,
+        SELECTION_AGGREGATION_ADAPTER_KIND: _validate_aggregation_args,
+        MODEL_MATRIX_ADAPTER_KIND: _validate_model_matrix_args,
+    }
+    return validators.get(adapter, _validate_lexical_args)
+
+
+def _validate_cli_args(args: argparse.Namespace) -> None:
+    _cli_validator(args.adapter)(args)
+
+
+_DROPPED_WORKER_FLAGS = frozenset({"--internal-worker", "--json"})
 
 
 def _worker_arguments(argv: Sequence[str], output: Path) -> list[str]:
     cleaned = []
     skip = False
-    for index, value in enumerate(argv):
+    for value in argv:
         if skip:
             skip = False
             continue
-        if value == "--output":
-            skip = True
-            continue
-        if value == "--internal-worker":
-            continue
-        if value == "--json":
+        skip = value == "--output"
+        if skip or value in _DROPPED_WORKER_FLAGS:
             continue
         cleaned.append(value)
     return [*cleaned, "--output", str(output), "--internal-worker"]
@@ -4851,40 +6131,9 @@ def _validate_worker_payload(
     corpus and schema the worker was given; validating against the defaults
     refused every candidate only a non-default matrix names and every trace
     set of a non-default corpus (2026-09-10, the cross-lingual run)."""
-    if raw != _canonical_report_bytes(report):
-        raise ValueError("worker report is not canonical")
-    _require_exact_keys(report, REPORT_FIELDS, "worker report")
-    if report["quality_claim"] is not False or report["release_evidence"] is not False:
-        raise ValueError("worker payload attempted to self-attest")
-    if report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND:
-        raise ValueError("degraded worker payload cannot become quality evidence")
-    reranker_target = report.get("candidate", {}).get("reranker")
-    selection = load_model_selection(
-        matrix_path,
-        corpus_path,
-        model_id=report.get("model_id"),
-        variant_id=report.get("variant_id"),
-        reranker_id=reranker_target.get("id") if isinstance(reranker_target, dict) else None,
-    )
-    expected_candidate = {
-        "embedding": _matrix_target(selection.embedding, selection.variant),
-        "reranker": (
-            _matrix_target(selection.reranker, selection.reranker_variant)
-            if selection.reranker is not None
-            else None
-        ),
-    }
-    if (
-        report["candidate"] != expected_candidate
-        or report["matrix_sha256"] != selection.matrix_sha256
-        or report["corpus_sha256"] != selection.corpus_sha256
-        or report["benchmark_contract_sha256"]
-        != _sha256_json(selection.matrix["benchmark_contract"])
-        or report["benchmark_runner_sha256"] != _sha256_file(Path(__file__))
-        or report["acquisition_mode"] != "offline-local-files-only"
-        or report["fallback_reason"] is not None
-        or report["thresholds"] != THRESHOLDS
-    ):
+    _require_worker_report_shape(report, raw)
+    selection = _worker_selection(report, matrix_path, corpus_path)
+    if _worker_provenance(report) != _expected_worker_provenance(selection):
         raise ValueError("worker payload provenance is incomplete")
     environment = report["methodology"].get("environment_provenance")
     if environment != _environment_provenance(report["vector_backend"]):
@@ -4894,6 +6143,113 @@ def _validate_worker_payload(
     _recompute_reranker_depth_metrics(corpus, report)
     lexical = report["methodology"].get("lexical_configuration", {}).get("id")
     _verify_locked_environment(report["vector_backend"], lexical_config=lexical)
+
+
+def _require_worker_report_shape(report: dict, raw: bytes) -> None:
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("worker report is not canonical")
+    _require_exact_keys(report, REPORT_FIELDS, "worker report")
+    _require_unattested_quality_mode(report)
+
+
+def _require_unattested_quality_mode(report: dict) -> None:
+    if report["quality_claim"] is not False or report["release_evidence"] is not False:
+        raise ValueError("worker payload attempted to self-attest")
+    if report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND:
+        raise ValueError("degraded worker payload cannot become quality evidence")
+
+
+def _worker_selection(report: dict, matrix_path: Path | str, corpus_path: Path | str):
+    reranker_target = report.get("candidate", {}).get("reranker")
+    reranker_id = None
+    if isinstance(reranker_target, dict):
+        reranker_id = reranker_target.get("id")
+    return load_model_selection(
+        matrix_path,
+        corpus_path,
+        model_id=report.get("model_id"),
+        variant_id=report.get("variant_id"),
+        reranker_id=reranker_id,
+    )
+
+
+def _expected_worker_provenance(selection: ModelSelection) -> dict:
+    reranker = None
+    if selection.reranker is not None:
+        reranker = _matrix_target(selection.reranker, selection.reranker_variant)
+    return {
+        "candidate": {
+            "embedding": _matrix_target(selection.embedding, selection.variant),
+            "reranker": reranker,
+        },
+        "matrix_sha256": selection.matrix_sha256,
+        "corpus_sha256": selection.corpus_sha256,
+        "benchmark_contract_sha256": _sha256_json(selection.matrix["benchmark_contract"]),
+        "benchmark_runner_sha256": _sha256_file(Path(__file__)),
+        "acquisition_mode": "offline-local-files-only",
+        "fallback_reason": None,
+        "thresholds": THRESHOLDS,
+    }
+
+
+def _worker_provenance(report: dict) -> dict:
+    return {
+        key: report[key]
+        for key in (
+            "candidate",
+            "matrix_sha256",
+            "corpus_sha256",
+            "benchmark_contract_sha256",
+            "benchmark_runner_sha256",
+            "acquisition_mode",
+            "fallback_reason",
+            "thresholds",
+        )
+    }
+
+
+def _termination(returncode: int) -> str:
+    if returncode < 0:
+        return f"signal-{abs(returncode)}"
+    return "exit-code"
+
+
+def _worker_failure_message(completed: subprocess.CompletedProcess, deadline_seconds: float) -> str:
+    error = completed.stderr.decode("utf-8", errors="replace").strip()
+    return (
+        "real benchmark worker failed: "
+        f"returncode={completed.returncode}; timeout_seconds={deadline_seconds}; "
+        f"termination={_termination(completed.returncode)}; stderr={error or 'empty'}"
+    )
+
+
+def _completed_worker(command: list[str], deadline_seconds: float) -> subprocess.CompletedProcess:
+    try:
+        return _run_process_tree(command, timeout=deadline_seconds)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            "real benchmark worker failed: "
+            f"timeout_seconds={deadline_seconds}; termination=deadline-exceeded; {exc}"
+        ) from exc
+
+
+def _require_worker_report(completed: subprocess.CompletedProcess, report_path: Path, deadline_seconds: float) -> None:
+    if completed.returncode not in {0, 2} or not report_path.is_file():
+        raise ValueError(_worker_failure_message(completed, deadline_seconds))
+
+
+def _acquisition_receipt(raw: bytes, report: dict) -> dict:
+    if raw != _canonical_report_bytes(report) or report.get("quality_claim") is not False:
+        raise ValueError("model acquisition receipt is invalid")
+    return report
+
+
+def _transported_payload(raw: bytes, report: dict) -> _WorkerPayload:
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("worker report is not canonical")
+    if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
+        raise ValueError("worker transport received a self-attested payload")
+    return _WorkerPayload(report, raw)
 
 
 def _run_bounded_model_worker(
@@ -4906,36 +6262,13 @@ def _run_bounded_model_worker(
             str(Path(__file__).resolve()),
             *_worker_arguments(argv, report_path),
         ]
-        try:
-            completed = _run_process_tree(command, timeout=deadline_seconds)
-        except TimeoutError as exc:
-            raise TimeoutError(
-                "real benchmark worker failed: "
-                f"timeout_seconds={deadline_seconds}; termination=deadline-exceeded; {exc}"
-            ) from exc
-        if completed.returncode not in {0, 2} or not report_path.is_file():
-            error = completed.stderr.decode("utf-8", errors="replace").strip()
-            termination = (
-                f"signal-{abs(completed.returncode)}"
-                if completed.returncode < 0
-                else "exit-code"
-            )
-            raise ValueError(
-                "real benchmark worker failed: "
-                f"returncode={completed.returncode}; timeout_seconds={deadline_seconds}; "
-                f"termination={termination}; stderr={error or 'empty'}"
-            )
+        completed = _completed_worker(command, deadline_seconds)
+        _require_worker_report(completed, report_path, deadline_seconds)
         raw = read_stable_bytes(report_path, MAX_CORPUS_BYTES, label="worker report")
         report = json.loads(raw)
         if report.get("artifact_kind") == "model-acquisition-receipt":
-            if raw != _canonical_report_bytes(report) or report.get("quality_claim") is not False:
-                raise ValueError("model acquisition receipt is invalid")
-            return report
-        if raw != _canonical_report_bytes(report):
-            raise ValueError("worker report is not canonical")
-        if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
-            raise ValueError("worker transport received a self-attested payload")
-        return _WorkerPayload(report, raw)
+            return _acquisition_receipt(raw, report)
+        return _transported_payload(raw, report)
 
 
 def _bind_orchestrator(
@@ -5004,164 +6337,225 @@ del _bind_orchestrator
 del _orchestrate_selection_impl
 
 
+def _pretty_json(value: dict) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+
+
+def _print_json_or(args: argparse.Namespace, serialized: str, message: str) -> None:
+    if args.json:
+        print(serialized, end="")
+        return
+    print(message)
+
+
+def _source_argv(argv: Sequence[str] | None) -> list[str]:
+    if argv is not None:
+        return list(argv)
+    return sys.argv[1:]
+
+
+def _reject_legacy_flags(args: argparse.Namespace) -> None:
+    if args.semantic or args.report:
+        raise ValueError("use --adapter model-matrix instead of legacy --semantic/--report")
+    if args.model:
+        raise ValueError("use exact --model-id and --variant-id selectors")
+
+
+def _run_authoritative_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    del argv
+    artifact = orchestrate_selection(
+        matrix_path=args.matrix,
+        corpus_path=args.corpus,
+        repo_root=args.repo_root,
+        output_path=args.selection_output,
+        measured_at=args.measured_at,
+        cache_root=args.cache_root,
+        deadline_seconds=args.deadline_seconds,
+    )
+    message = (
+        "retrieval-v2 authoritative selection complete; "
+        f"release_evidence={str(artifact['release_evidence']).lower()}"
+    )
+    _print_json_or(args, _pretty_json(artifact), message)
+    return 0
+
+
+def _run_aggregation_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    del argv
+    artifact = aggregate_selection(
+        args.raw_report,
+        matrix_path=args.matrix,
+        corpus_path=args.corpus,
+        repo_root=args.repo_root,
+        output_path=args.selection_output,
+        measured_at=args.measured_at,
+    )
+    _print_json_or(args, _pretty_json(artifact), "retrieval-v2 report comparison complete; release_evidence=false")
+    return 0
+
+
+def _acquisition_receipt_for(args: argparse.Namespace, argv: Sequence[str] | None) -> dict:
+    if not args.internal_worker:
+        return _run_bounded_model_worker(_source_argv(argv), deadline_seconds=args.deadline_seconds)
+    selection = load_model_selection(
+        args.matrix,
+        args.corpus,
+        model_id=args.model_id,
+        variant_id=args.variant_id,
+        reranker_id=args.reranker_id,
+    )
+    return prefetch_models(selection, cache_root=args.cache_root)
+
+
+def _write_acquisition_output(requested: Path, serialized: str) -> None:
+    output = requested.expanduser()
+    if not output.is_absolute():
+        output = Path.cwd() / output
+    if output.exists() or output.is_symlink():
+        raise ValueError("--output must not already exist")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
+
+
+def _run_acquisition_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    receipt = _acquisition_receipt_for(args, argv)
+    serialized = _canonical_report_bytes(receipt).decode("utf-8")
+    if args.output is not None:
+        _write_acquisition_output(args.output, serialized)
+    _print_json_or(args, serialized, "model acquisition complete; quality_claim=false")
+    return 0
+
+
+def _worker_report_or_none(args: argparse.Namespace, argv: Sequence[str] | None) -> dict | None:
+    if args.adapter != MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
+        return None
+    payload = _run_bounded_model_worker(_source_argv(argv), deadline_seconds=args.deadline_seconds)
+    if not isinstance(payload, _WorkerPayload):
+        raise ValueError("benchmark worker did not return a worker payload")
+    _validate_worker_payload(payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema)
+    return _interpreted_worker_report(payload.report, args.output)
+
+
+def _interpreted_worker_report(worker_report: dict, output: Path | None) -> dict:
+    report = json.loads(json.dumps(worker_report))
+    if output is None:
+        report["gates"]["interpretation"] = "stdout-only-non-quality"
+    return report
+
+
+def _run_options_from_args(args: argparse.Namespace) -> dict:
+    run_options = {
+        "adapter": args.adapter,
+        "corpus_path": args.corpus,
+        "matrix_path": args.matrix,
+        "model_id": args.model_id,
+        "variant_id": args.variant_id,
+        "reranker_id": args.reranker_id,
+        "rerank_depth": args.rerank_depth,
+        "vector_backend": args.vector_backend,
+        "allow_download": args.allow_download,
+        "lexical_config": args.lexical_config,
+        "raw_output_written": args.output is not None,
+    }
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.internal_worker:
+        run_options["lexical_deadline_seconds"] = args.deadline_seconds
+    return run_options
+
+
+def _run_cli_benchmark(corpus: dict, args: argparse.Namespace, run_options: dict) -> dict:
+    if args.cache_root is not None:
+        return run_benchmark(corpus, cache_root=args.cache_root, **run_options)
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-v2-") as temporary:
+        return run_benchmark(corpus, cache_root=Path(temporary), **run_options)
+
+
+def _serialized_cli_report(args: argparse.Namespace, report: dict) -> str:
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
+        return _canonical_report_bytes(report).decode("utf-8")
+    return _pretty_json(report)
+
+
+def _absolute_output_path(requested_output: Path) -> Path:
+    if requested_output.is_absolute():
+        return requested_output
+    return Path.cwd() / requested_output
+
+
+def _new_report_output_path(requested: Path) -> Path:
+    requested_output = requested.expanduser()
+    if requested_output.is_symlink():
+        raise ValueError("--output must not be a symlink")
+    requested_output = _absolute_output_path(requested_output)
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise ValueError("--output must not already exist")
+    return output
+
+
+def _source_and_vault_roots() -> list[Path]:
+    forbidden = [ROOT.resolve()]
+    configured_vault = os.environ.get("LLM_WIKI_ROOT")
+    if configured_vault:
+        forbidden.append(Path(configured_vault).expanduser().resolve())
+    return forbidden
+
+
+def _require_outside_source_and_vault(output: Path) -> None:
+    if any(output == root or root in output.parents for root in _source_and_vault_roots()):
+        raise ValueError("--output must be outside source and vault roots")
+
+
+def _write_report_output(requested: Path, serialized: str) -> None:
+    output = _new_report_output_path(requested)
+    _require_outside_source_and_vault(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
+
+
+def _cli_exit_code(report: dict) -> int:
+    gates = report["gates"]
+    if gates["passed_for_orchestration"] and not gates.get("degraded", False):
+        return 0
+    return 2
+
+
+def _run_benchmark_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    report = _worker_report_or_none(args, argv)
+    corpus = load_corpus(args.corpus, args.schema)
+    run_options = _run_options_from_args(args)
+    if report is None:
+        report = _run_cli_benchmark(corpus, args, run_options)
+    serialized = _serialized_cli_report(args, report)
+    if args.output is not None:
+        _write_report_output(args.output, serialized)
+    message = (
+        f"retrieval-v2 {report.get('adapter_kind', args.adapter)} complete; "
+        f"quality_claim={str(report['quality_claim']).lower()}; "
+        f"release_evidence={str(report.get('release_evidence', False)).lower()}"
+    )
+    _print_json_or(args, serialized, message)
+    return _cli_exit_code(report)
+
+
+def _cli_mode(args: argparse.Namespace):
+    selection_modes = {
+        AUTHORITATIVE_SELECTION_ADAPTER_KIND: _run_authoritative_cli,
+        SELECTION_AGGREGATION_ADAPTER_KIND: _run_aggregation_cli,
+    }
+    mode = selection_modes.get(args.adapter)
+    if mode is not None:
+        return mode
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.allow_download:
+        return _run_acquisition_cli
+    return _run_benchmark_cli
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         _validate_cli_args(args)
-        if args.semantic or args.report:
-            raise ValueError("use --adapter model-matrix instead of legacy --semantic/--report")
-        if args.model:
-            raise ValueError("use exact --model-id and --variant-id selectors")
-        if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-            artifact = orchestrate_selection(
-                matrix_path=args.matrix,
-                corpus_path=args.corpus,
-                repo_root=args.repo_root,
-                output_path=args.selection_output,
-                measured_at=args.measured_at,
-                cache_root=args.cache_root,
-                deadline_seconds=args.deadline_seconds,
-            )
-            serialized = json.dumps(
-                artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-            if args.json:
-                print(serialized, end="")
-            else:
-                print(
-                    "retrieval-v2 authoritative selection complete; "
-                    f"release_evidence={str(artifact['release_evidence']).lower()}"
-                )
-            return 0
-        if args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-            artifact = aggregate_selection(
-                args.raw_report,
-                matrix_path=args.matrix,
-                corpus_path=args.corpus,
-                repo_root=args.repo_root,
-                output_path=args.selection_output,
-                measured_at=args.measured_at,
-            )
-            serialized = json.dumps(
-                artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-            if args.json:
-                print(serialized, end="")
-            else:
-                print("retrieval-v2 report comparison complete; release_evidence=false")
-            return 0
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.allow_download:
-            if not args.internal_worker:
-                source_argv = list(argv) if argv is not None else sys.argv[1:]
-                receipt = _run_bounded_model_worker(
-                    source_argv, deadline_seconds=args.deadline_seconds
-                )
-            else:
-                selection = load_model_selection(
-                    args.matrix,
-                    args.corpus,
-                    model_id=args.model_id,
-                    variant_id=args.variant_id,
-                    reranker_id=args.reranker_id,
-                )
-                receipt = prefetch_models(selection, cache_root=args.cache_root)
-            serialized = _canonical_report_bytes(receipt).decode("utf-8")
-            if args.output is not None:
-                output = args.output.expanduser()
-                if not output.is_absolute():
-                    output = Path.cwd() / output
-                if output.exists() or output.is_symlink():
-                    raise ValueError("--output must not already exist")
-                output.parent.mkdir(parents=True, exist_ok=True)
-                _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
-            if args.json:
-                print(serialized, end="")
-            else:
-                print("model acquisition complete; quality_claim=false")
-            return 0
-        report = None
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and not args.internal_worker:
-            source_argv = list(argv) if argv is not None else sys.argv[1:]
-            payload = _run_bounded_model_worker(
-                source_argv, deadline_seconds=args.deadline_seconds
-            )
-            if not isinstance(payload, _WorkerPayload):
-                raise ValueError("benchmark worker did not return a worker payload")
-            _validate_worker_payload(
-                payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema
-            )
-            report = json.loads(json.dumps(payload.report))
-            if args.output is None:
-                report["gates"]["interpretation"] = "stdout-only-non-quality"
-        corpus = load_corpus(args.corpus, args.schema)
-        run_options = {
-            "adapter": args.adapter,
-            "corpus_path": args.corpus,
-            "matrix_path": args.matrix,
-            "model_id": args.model_id,
-            "variant_id": args.variant_id,
-            "reranker_id": args.reranker_id,
-            "rerank_depth": args.rerank_depth,
-            "vector_backend": args.vector_backend,
-            "allow_download": args.allow_download,
-            "lexical_config": args.lexical_config,
-            "raw_output_written": args.output is not None,
-        }
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.internal_worker:
-            run_options["lexical_deadline_seconds"] = args.deadline_seconds
-        if report is not None:
-            pass
-        elif args.cache_root is None:
-            with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-v2-") as temporary:
-                report = run_benchmark(
-                    corpus,
-                    cache_root=Path(temporary),
-                    **run_options,
-                )
-        else:
-            report = run_benchmark(
-                corpus,
-                cache_root=args.cache_root,
-                **run_options,
-            )
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
-            serialized = _canonical_report_bytes(report).decode("utf-8")
-        else:
-            serialized = json.dumps(
-                report, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-        if args.output is not None:
-            requested_output = args.output.expanduser()
-            if requested_output.is_symlink():
-                raise ValueError("--output must not be a symlink")
-            if not requested_output.is_absolute():
-                requested_output = Path.cwd() / requested_output
-            output = requested_output.parent.resolve() / requested_output.name
-            if output.exists() or output.is_symlink():
-                raise ValueError("--output must not already exist")
-            forbidden = [ROOT.resolve()]
-            configured_vault = os.environ.get("LLM_WIKI_ROOT")
-            if configured_vault:
-                forbidden.append(Path(configured_vault).expanduser().resolve())
-            if any(output == root or root in output.parents for root in forbidden):
-                raise ValueError("--output must be outside source and vault roots")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output = output.parent.resolve(strict=True) / output.name
-            _write_new_output(output, serialized)
-        if args.json:
-            print(serialized, end="")
-        else:
-            print(
-                f"retrieval-v2 {report.get('adapter_kind', args.adapter)} complete; "
-                f"quality_claim={str(report['quality_claim']).lower()}; "
-                f"release_evidence={str(report.get('release_evidence', False)).lower()}"
-            )
-        return (
-            0
-            if report["gates"]["passed_for_orchestration"]
-            and not report["gates"].get("degraded", False)
-            else 2
-        )
+        _reject_legacy_flags(args)
+        return _cli_mode(args)(args, argv)
     except (OSError, ValueError, SchemaValidationError) as exc:
         print(f"retrieval-v2 error: {exc}", file=sys.stderr)
         return 2

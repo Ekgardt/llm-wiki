@@ -274,7 +274,7 @@ def _start_optional_worker(
         started = time.monotonic()
         try:
             value = operation()
-        except BaseException as exc:
+        except Exception as exc:  # noqa: BLE001 - an interrupt propagates
             result.put((False, exc))
         else:
             # Only a run that produced something is a cost observation. A fast
@@ -2859,12 +2859,19 @@ def _generation_dense_hits(
         )
     except (GenerationSealChanged, TimeoutError):
         raise
-    except Exception:  # noqa: BLE001 - unreadable vectors degrade one signal
+    except Exception as exc:  # noqa: BLE001 - unreadable vectors degrade one signal
+        _note_degradation("generation_vectors", exc)
         require_seal()
         context["dense_fallback"] = "generation_vectors_unavailable"
         return None
     finally:
         _close_quietly(owned)
+
+
+def _note_degradation(kind: str, error: BaseException) -> None:
+    import search_memory
+
+    search_memory.note_degradation(kind, error)
 
 
 def _close_quietly(handle: Any) -> None:
@@ -3802,7 +3809,8 @@ def _active_manifest_for(
         manifest = catalog.get_active_for_repository(scope, **stop)
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - no usable generation is not an error
+    except Exception as exc:  # noqa: BLE001 - no usable generation is not an error
+        search_memory.note_degradation("generation_manifest", exc)
         return None
     if not isinstance(manifest, dict):
         return None
@@ -3836,7 +3844,8 @@ def _generation_lexical_or_raise(
         raise
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - the label reaches the trace, the cause the log
+        _note_degradation("generation_lexical", exc)
         note("generation_corrupt")
         raise GenerationSealChanged
 
@@ -3958,6 +3967,282 @@ def _resolved_query_encoder(
     return search_memory._resolved_generation_embedder(True, None, model_id, model_revision)
 
 
+@dataclass
+class _SearchRun:
+    """One `retrieve_via_search_memory` call: its arguments and the state its backends share.
+
+    The backends were closures over this state until 2026-09-11 (audit L8,
+    docs/research/2026-09-11-one-search-run-is-an-object-not-ten-closures.md).
+    """
+
+    search_memory: Any
+    query: str
+    scope: str
+    limit: int
+    force_rebuild: bool
+    project: str | None
+    since: str | None
+    as_of: str | None
+    semantic: bool
+    page_paths: list[Path] | None
+    graph: bool
+    rerank: bool
+    catalog: Any
+    embedder: object | None
+    model_id: str | None
+    model_revision: str | None
+    deadline: float | None
+    max_candidates: int | None
+    cancelled: Callable[[], bool] | None
+    requested: Any
+    wanted: tuple[str, ...]
+    generation_ctx: dict[str, Any] = dataclass_field(
+        default_factory=lambda: {
+            "manifest": None,
+            "connection": None,
+            "graph": None,
+            "seal": None,
+            "dense_fallback": None,
+            "legacy_dense_blocked": False,
+        }
+    )
+    use_generation: bool = False
+    corpus_generation: str = "legacy"
+    generation_fallback: str | None = None
+    legacy_fallback: str | None = None
+
+    def __post_init__(self) -> None:
+        self.hard_deadline = self.deadline is not None
+        self.generation_stop = _generation_stop(self.deadline, self.cancelled)
+        self.optional_generation_stop = _optional_stop(self.hard_deadline, self.generation_stop)
+        self.optional_deadline = _optional_value(self.hard_deadline, self.deadline)
+        self.optional_cancelled = _optional_value(self.hard_deadline, self.cancelled)
+
+    # --- the generation this run reads ---------------------------------------
+
+    def artifact_names_for(self, manifest: dict[str, object], *, want_vectors: bool) -> tuple[str, ...]:
+        names: list[str] = [self.search_memory.GENERATION_FTS_ARTIFACT]
+        if want_vectors and manifest.get("vector_state") == "complete":
+            names.extend(self.search_memory.GENERATION_VECTOR_ARTIFACTS)
+        if "graph" in self.wanted and self.search_memory._generation_artifact(
+            manifest, "evidence.sqlite3"
+        ):
+            names.append("evidence.sqlite3")
+        return tuple(names)
+
+    def resolved_manifest(self, want_vectors: bool) -> tuple[Any, Any] | None:
+        """(scope, manifest) for the active generation, or None when unusable."""
+        resolved = _active_manifest_for(
+            self.catalog,
+            self.search_memory,
+            deadline=self.deadline,
+            cancelled=self.cancelled,
+            stop=self.generation_stop,
+        )
+        if resolved is None:
+            return None
+        _note_stale_vectors(self.generation_ctx, resolved[1], want_vectors)
+        return resolved
+
+    def attach_graph(self, repository_scope: Any, connection: Any) -> bool:
+        try:
+            from evidence_graph import EvidenceGraph
+
+            self.generation_ctx["graph"] = EvidenceGraph.open_active_for_repository(
+                self.catalog,
+                repository_scope,
+                deadline=self.deadline,
+                cancelled=self.cancelled,
+            )
+        except TimeoutError:
+            _drop_generation_connection(self.generation_ctx, connection)
+            raise
+        except Exception as exc:  # noqa: BLE001 - an unusable graph drops the generation
+            _note_degradation("generation_graph", exc)
+            _drop_generation_connection(self.generation_ctx, connection)
+            self.generation_ctx["graph"] = None
+            return False
+        if self.generation_ctx["graph"] is None:
+            _drop_generation_connection(self.generation_ctx, connection)
+            return False
+        return True
+
+    def catalog_requested(self) -> bool:
+        return _catalog_requested(self.catalog, self.force_rebuild, self.page_paths)
+
+    def open_generation(self, *, want_vectors: bool) -> bool:
+        if not self.catalog_requested():
+            return False
+        resolved = self.resolved_manifest(want_vectors)
+        if resolved is None:
+            return False
+        return self.adopt_generation(resolved, want_vectors=want_vectors)
+
+    def adopt_generation(self, resolved: Any, *, want_vectors: bool) -> bool:
+        """Publish one resolved manifest as the generation this query reads."""
+        repository_scope, manifest = resolved
+        artifact_names = self.artifact_names_for(manifest, want_vectors=want_vectors)
+        seal = self.search_memory._generation_consumption_seal(
+            self.catalog, manifest, artifact_names, **self.generation_stop
+        )
+        connection = _generation_connection_for(
+            self.search_memory, self.catalog, manifest, seal, self.generation_stop
+        )
+        if connection is None:
+            return False
+        self.generation_ctx["manifest"] = manifest
+        self.generation_ctx["connection"] = connection
+        self.generation_ctx["seal"] = seal
+        self.generation_ctx["artifact_names"] = artifact_names
+        if "evidence.sqlite3" not in artifact_names:
+            return True
+        return self.attach_graph(repository_scope, connection)
+
+    def open(self) -> None:
+        """Decide whether this run reads the active generation, and name what it reads."""
+        want_vectors = _wants_vectors(self.wanted, self.semantic)
+        self.use_generation = self.open_generation(want_vectors=want_vectors)
+        self.corpus_generation, self.generation_fallback = _generation_naming(
+            self.use_generation,
+            self.catalog_requested(),
+            self.generation_ctx,
+            self.corpus_generation,
+        )
+
+    def note_generation_fallback(self, reason: str) -> None:
+        self.generation_fallback = self.generation_fallback or reason
+
+    # --- the three backends ---------------------------------------------------
+
+    def lexical_backend(self, **filters: Any) -> Sequence[Mapping[str, Any]]:
+        if self.use_generation:
+            return _generation_lexical_or_raise(
+                filters,
+                catalog=self.catalog,
+                context=self.generation_ctx,
+                stop=self.generation_stop,
+                note=self.note_generation_fallback,
+            )
+        rows = self.search_memory._legacy_lexical_hits(
+            filters["query"],
+            scope=filters["scope"],
+            limit=filters["limit"],
+            force_rebuild=self.force_rebuild,
+            project=filters["project"],
+            since=filters["since"],
+            as_of=filters["as_of"],
+            page_paths=self.page_paths,
+            deadline=self.deadline,
+            cancelled=self.cancelled,
+        )
+        self.legacy_fallback = _first_fallback_reason(rows, self.legacy_fallback)
+        return _filtered_hits(rows, filters)
+
+    def require_seal(self) -> None:
+        if _generation_seal_holds(self.catalog, self.generation_ctx, self.optional_generation_stop):
+            return
+        self.generation_ctx["dense_fallback"] = "generation_seal_changed"
+        self.generation_fallback = "generation_seal_changed"
+        raise GenerationSealChanged
+
+    def dense_backend(self, **filters: Any) -> Sequence[Mapping[str, Any]] | None:
+        if "dense" not in self.wanted or self.generation_ctx["legacy_dense_blocked"]:
+            return None
+        if self.use_generation:
+            return _generation_dense_backend_hits(
+                filters,
+                catalog=self.catalog,
+                context=self.generation_ctx,
+                stop=self.optional_generation_stop,
+                require_seal=self.require_seal,
+                own_connection=self.hard_deadline,
+                generation_fallback=self.generation_fallback,
+                embedder=self.embedder,
+                model_id=self.model_id,
+                model_revision=self.model_revision,
+            )
+        return _legacy_dense_backend_hits(
+            self.search_memory,
+            filters,
+            page_paths=self.page_paths,
+            deadline=self.optional_deadline,
+            cancelled=self.optional_cancelled,
+        )
+
+    def graph_backend(self, **filters: Any) -> Sequence[Mapping[str, Any]] | None:
+        if not self.graph or "graph" not in self.wanted:
+            return None
+        if self.use_generation:
+            return _generation_graph_backend_hits(
+                filters,
+                catalog=self.catalog,
+                context=self.generation_ctx,
+                stop=self.generation_stop,
+                cancelled=self.cancelled,
+            )
+        return _neighbour_boost_or_none(self.lexical_backend, filters)
+
+    # --- the run ----------------------------------------------------------------
+
+    def run_retrieval(self) -> RetrievalResult:
+        return retrieve(
+            self.query,
+            requested_profile=self.requested,
+            scope=self.scope,
+            limit=self.limit,
+            project=self.project,
+            since=self.since,
+            as_of=self.as_of,
+            lexical_backend=_wanted_backend(self.lexical_backend, "lexical" in self.wanted),
+            dense_backend=_wanted_backend(
+                self.dense_backend, "dense" in self.wanted and self.semantic
+            ),
+            graph_backend=_wanted_backend(
+                self.graph_backend, "graph" in self.wanted and self.graph
+            ),
+            corpus_generation=self.corpus_generation,
+            graph_enabled=self.graph,
+            rerank_enabled=self.rerank,
+            partial=False,
+            deadline_monotonic=self.deadline,
+            max_candidates=self.max_candidates,
+            cancelled=self.cancelled,
+        )
+
+    def run_under_seal(self) -> RetrievalResult:
+        """One run, valid only while the generation seal still holds."""
+        outcome = self.run_retrieval()
+        if self.use_generation and not _generation_seal_holds(
+            self.catalog, self.generation_ctx, self.generation_stop
+        ):
+            self.generation_fallback = "generation_seal_changed"
+            raise GenerationSealChanged
+        return outcome
+
+    def run(self) -> RetrievalResult:
+        """Run under the seal; a seal that changed mid-run is answered from legacy."""
+        try:
+            try:
+                return self.run_under_seal()
+            except GenerationSealChanged:
+                self.use_generation = False
+                self.corpus_generation = "legacy"
+                return self.run_retrieval()
+        finally:
+            _close_generation_handles(self.generation_ctx)
+
+    def reported(self, result: RetrievalResult) -> RetrievalResult:
+        return _with_reported_trace(
+            result,
+            query=self.query,
+            dense_fallback=_first_reason(
+                self.generation_ctx.get("dense_fallback"), self.generation_fallback
+            ),
+            generation_fallback=self.generation_fallback,
+            legacy_fallback=self.legacy_fallback,
+        )
+
+
 def retrieve_via_search_memory(
     query: str,
     *,
@@ -3991,260 +4276,45 @@ def retrieve_via_search_memory(
     import search_memory
 
     _check_stopped(deadline_monotonic, cancelled)
-    (
-        generation_embedder,
-        generation_model_id,
-        generation_model_revision,
-    ) = _resolved_query_encoder(
+    embedder, model_id, model_revision = _resolved_query_encoder(
         search_memory,
         semantic=semantic,
         embedder=generation_embedder,
         model_id=generation_model_id,
         model_revision=generation_model_revision,
     )
-
-    _GenerationSealChanged = GenerationSealChanged
-
     analysis = analyze_query(query)
     requested = _requested_profile(profile, analysis, semantic=semantic)
-    wanted_tuple = _wanted_signals(requested, semantic=semantic)
-    hard_deadline = deadline_monotonic is not None
-
-    selected_catalog = _selected_catalog(catalog, search_memory)
-    corpus_generation = "legacy"
-    generation_ctx: dict[str, Any] = {
-        "manifest": None,
-        "connection": None,
-        "graph": None,
-        "seal": None,
-        "dense_fallback": None,
-        "legacy_dense_blocked": False,
-    }
-    generation_stop = _generation_stop(deadline_monotonic, cancelled)
-    optional_generation_stop = _optional_stop(hard_deadline, generation_stop)
-    optional_deadline = _optional_value(hard_deadline, deadline_monotonic)
-    optional_cancelled = _optional_value(hard_deadline, cancelled)
-
-    def _artifact_names_for(manifest: dict[str, object], *, want_vectors: bool) -> tuple[str, ...]:
-        names: list[str] = [search_memory.GENERATION_FTS_ARTIFACT]
-        if want_vectors and manifest.get("vector_state") == "complete":
-            names.extend(search_memory.GENERATION_VECTOR_ARTIFACTS)
-        if "graph" in wanted_tuple and search_memory._generation_artifact(
-            manifest, "evidence.sqlite3"
-        ):
-            names.append("evidence.sqlite3")
-        return tuple(names)
-
-    def _resolved_manifest(want_vectors: bool) -> tuple[Any, Any] | None:
-        """(scope, manifest) for the active generation, or None when unusable."""
-        resolved = _active_manifest_for(
-            selected_catalog,
-            search_memory,
-            deadline=deadline_monotonic,
-            cancelled=cancelled,
-            stop=generation_stop,
-        )
-        if resolved is None:
-            return None
-        _note_stale_vectors(generation_ctx, resolved[1], want_vectors)
-        return resolved
-
-    def _attach_graph(repository_scope: Any, connection: Any) -> bool:
-        try:
-            from evidence_graph import EvidenceGraph
-
-            generation_ctx["graph"] = EvidenceGraph.open_active_for_repository(
-                selected_catalog,
-                repository_scope,
-                deadline=deadline_monotonic,
-                cancelled=cancelled,
-            )
-        except TimeoutError:
-            _drop_generation_connection(generation_ctx, connection)
-            raise
-        except Exception:  # noqa: BLE001 - an unusable graph drops the generation
-            _drop_generation_connection(generation_ctx, connection)
-            generation_ctx["graph"] = None
-            return False
-        if generation_ctx["graph"] is None:
-            _drop_generation_connection(generation_ctx, connection)
-            return False
-        return True
-
-    def _open_generation(*, want_vectors: bool) -> bool:
-        if not _catalog_requested(selected_catalog, force_rebuild, page_paths):
-            return False
-        resolved = _resolved_manifest(want_vectors)
-        if resolved is None:
-            return False
-        return _adopt_generation(resolved, want_vectors=want_vectors)
-
-    def _adopt_generation(resolved: Any, *, want_vectors: bool) -> bool:
-        """Publish one resolved manifest as the generation this query reads."""
-        repository_scope, manifest = resolved
-        artifact_names = _artifact_names_for(manifest, want_vectors=want_vectors)
-        seal = search_memory._generation_consumption_seal(
-            selected_catalog, manifest, artifact_names, **generation_stop
-        )
-        connection = _generation_connection_for(
-            search_memory, selected_catalog, manifest, seal, generation_stop
-        )
-        if connection is None:
-            return False
-        generation_ctx["manifest"] = manifest
-        generation_ctx["connection"] = connection
-        generation_ctx["seal"] = seal
-        generation_ctx["artifact_names"] = artifact_names
-        if "evidence.sqlite3" not in artifact_names:
-            return True
-        return _attach_graph(repository_scope, connection)
-
-    catalog_requested = _catalog_requested(selected_catalog, force_rebuild, page_paths)
-    want_vectors = _wants_vectors(wanted_tuple, semantic)
-    use_generation = _open_generation(want_vectors=want_vectors)
-    legacy_fallback: str | None = None
-    corpus_generation, generation_fallback = _generation_naming(
-        use_generation, catalog_requested, generation_ctx, corpus_generation
+    run = _SearchRun(
+        search_memory,
+        query,
+        scope,
+        limit,
+        force_rebuild,
+        project,
+        since,
+        as_of,
+        semantic,
+        page_paths,
+        graph,
+        rerank,
+        _selected_catalog(catalog, search_memory),
+        embedder,
+        model_id,
+        model_revision,
+        deadline_monotonic,
+        max_candidates,
+        cancelled,
+        requested,
+        _wanted_signals(requested, semantic=semantic),
     )
-
-    def _note_generation_fallback(reason: str) -> None:
-        nonlocal generation_fallback
-        generation_fallback = generation_fallback or reason
-
-    def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
-        nonlocal legacy_fallback
-        if use_generation:
-            return _generation_lexical_or_raise(
-                filters,
-                catalog=selected_catalog,
-                context=generation_ctx,
-                stop=generation_stop,
-                note=_note_generation_fallback,
-            )
-        rows = search_memory._legacy_lexical_hits(
-            filters["query"],
-            scope=filters["scope"],
-            limit=filters["limit"],
-            force_rebuild=force_rebuild,
-            project=filters["project"],
-            since=filters["since"],
-            as_of=filters["as_of"],
-            page_paths=page_paths,
-            deadline=deadline_monotonic,
-            cancelled=cancelled,
-        )
-        legacy_fallback = _first_fallback_reason(rows, legacy_fallback)
-        return _filtered_hits(rows, filters)
-
-    def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
-        nonlocal generation_fallback
-
-        def require_seal() -> None:
-            if _generation_seal_holds(
-                selected_catalog, generation_ctx, optional_generation_stop
-            ):
-                return
-            nonlocal generation_fallback
-            generation_ctx["dense_fallback"] = "generation_seal_changed"
-            generation_fallback = "generation_seal_changed"
-            raise _GenerationSealChanged
-
-        if "dense" not in wanted_tuple or generation_ctx["legacy_dense_blocked"]:
-            return None
-        if use_generation:
-            return _generation_dense_backend_hits(
-                filters,
-                catalog=selected_catalog,
-                context=generation_ctx,
-                stop=optional_generation_stop,
-                require_seal=require_seal,
-                own_connection=hard_deadline,
-                generation_fallback=generation_fallback,
-                embedder=generation_embedder,
-                model_id=generation_model_id,
-                model_revision=generation_model_revision,
-            )
-        return _legacy_dense_backend_hits(
-            search_memory,
-            filters,
-            page_paths=page_paths,
-            deadline=optional_deadline,
-            cancelled=optional_cancelled,
-        )
-
-    def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
-        if not graph or "graph" not in wanted_tuple:
-            return None
-        if use_generation:
-            return _generation_graph_backend_hits(
-                filters,
-                catalog=selected_catalog,
-                context=generation_ctx,
-                stop=generation_stop,
-                cancelled=cancelled,
-            )
-        return _neighbour_boost_or_none(lexical_backend, filters)
-
-    def run_retrieval() -> RetrievalResult:
-        return retrieve(
-            query,
-            requested_profile=requested,
-            scope=scope,
-            limit=limit,
-            project=project,
-            since=since,
-            as_of=as_of,
-            lexical_backend=_wanted_backend(lexical_backend, "lexical" in wanted_tuple),
-            dense_backend=_wanted_backend(
-                dense_backend, "dense" in wanted_tuple and semantic
-            ),
-            graph_backend=_wanted_backend(
-                graph_backend, "graph" in wanted_tuple and graph
-            ),
-            corpus_generation=corpus_generation,
-            graph_enabled=graph,
-            rerank_enabled=rerank,
-            partial=False,
-            deadline_monotonic=deadline_monotonic,
-            max_candidates=max_candidates,
-            cancelled=cancelled,
-        )
-
-    def run_under_seal() -> RetrievalResult:
-        """One run, valid only while the generation seal still holds."""
-        outcome = run_retrieval()
-        if use_generation and not _generation_seal_holds(
-            selected_catalog, generation_ctx, generation_stop
-        ):
-            nonlocal generation_fallback
-            generation_fallback = "generation_seal_changed"
-            raise _GenerationSealChanged
-        return outcome
-
-    try:
-        try:
-            result = run_under_seal()
-        except _GenerationSealChanged:
-            use_generation = False
-            corpus_generation = "legacy"
-            result = run_retrieval()
-    finally:
-        _close_generation_handles(generation_ctx)
-
-    result = _with_reported_trace(
-        result,
-        query=query,
-        dense_fallback=_first_reason(
-            generation_ctx.get("dense_fallback"), generation_fallback
-        ),
-        generation_fallback=generation_fallback,
-        legacy_fallback=legacy_fallback,
-    )
+    run.open()
+    result = run.reported(run.run())
     if trace_sink is not None:
         trace_sink.update(asdict(result.trace))
     rows = candidates_to_legacy(result, display_meta=result.display_meta)
     if emit_telemetry:
         _record_impressions(
-            rows, query=query, corpus_generation=corpus_generation, source_tool=source_tool
+            rows, query=query, corpus_generation=run.corpus_generation, source_tool=source_tool
         )
     return rows

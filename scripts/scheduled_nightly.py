@@ -1,21 +1,27 @@
-"""Nightly consolidation — runs at 03:00 via Windows Task Scheduler.
+"""Nightly consolidation pass — started at 03:00 by the installed scheduler.
 
-What it does:
-1. Work any pending queue tasks (deferred LLM work).
-2. Force-spawn compile to process all uncompiled daily logs.
-3. Run lint and bounded immutable generation maintenance.
-
-Designed to be invoked by Task Scheduler; never requires user interaction.
-All output goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
+The scheduler is Task Scheduler on Windows, a user LaunchAgent on macOS, a
+user systemd timer on Linux, cron as the explicit degraded fallback
+(`install_control.py`). The pass runs, in order: capture-intent adoption,
+runtime reclaim, the deferred memory queue, yesterday's session
+consolidation; the compile (spawned through `maybe_compile`, followed until
+it finishes or the wait bound passes) and user-turn keying; then the steps
+that read the compile's output — orphaned-checkpoint clearing, structural
+lint, backlink repair, the FTS5 index, registered-repository refresh,
+generation pruning, model weights, the bounded generation refresh —
+telemetry compaction, the health report, report pruning and the bounded
+fast-forward of the checkout. Never requires user interaction. All output
+goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import sys
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +43,16 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from operational_ownership import (  # noqa: E402
+    OperationalOwnershipError,
     OwnerLease,
+    acquire_scheduled_owner,
+    adopted_ownership_registry,
     heartbeat_owner,
+    release_marker_owner,
 )
+from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
+from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
 
 # How long the nightly pass will spend rebuilding the evidence generation.
 # The interactive default is one minute, which is the right bound for a doctor
@@ -48,24 +61,30 @@ from operational_ownership import (  # noqa: E402
 # night and the generation was never rebuilt at all. The unit itself has no
 # start timeout, so the only bound that matters is this one.
 NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
+# The refresh of every registered foreign repository shares one bound, the
+# child's own (`repository_index.REFRESH_ALL_BUDGET_SECONDS`); the refresh is
+# incremental (measured 2026-09-10: 16 s after one edited file in a 1 022-file
+# repository, against 60 s for the full build), and a repository that does
+# not fit is deferred to the next night, never half-built. The step's kill
+# timeout sits above that budget by a margin for interpreter start-up and
+# the deferral report, so the child's graceful deferral runs before the
+# parent's kill (audit OPS-10).
+STEP_START_MARGIN_SECONDS = 120
 
 
-def _generation_result(ownership: OwnerLease | None) -> dict:
-    """Pass the owner only when the shared builder still accepts one."""
-    arguments = {
-        "root": ROOT,
-        "state_root": STATE_ROOT,
-        "time_budget_seconds": NIGHTLY_GENERATION_BUDGET_SECONDS,
-        "max_sources": DEFAULT_GENERATION_SOURCE_LIMIT,
-    }
-    if ownership is None or not _accepts_ownership(run_generation_maintenance):
-        return run_generation_maintenance(**arguments)
-    return run_generation_maintenance(**arguments, ownership=ownership)
+def _generation_result() -> dict:
+    """The shared builder takes its own `repair` owner; the pass passes none."""
+    return run_generation_maintenance(
+        root=ROOT,
+        state_root=STATE_ROOT,
+        time_budget_seconds=NIGHTLY_GENERATION_BUDGET_SECONDS,
+        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+    )
 
 
-def _refresh_generation(log, *, ownership: OwnerLease | None = None) -> int:
+def _refresh_generation(log) -> int:
     """Run the shared bounded builder under its fenced maintenance owner."""
-    result = _generation_result(ownership)
+    result = _generation_result()
     status = result["status"]
     generation = result.get("generation_id") or "none"
     log(
@@ -134,14 +153,6 @@ def _record_nightly_skip(today: str, reason: str) -> None:
         }
 
     update_state(_mutate)
-
-
-def _accepts_ownership(function) -> bool:
-    parameters = inspect.signature(function).parameters
-    return "ownership" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
 
 
 @dataclass(frozen=True)
@@ -285,15 +296,46 @@ def _post_compile_steps() -> list[_Step]:
             60,
         ),
         _Step(
+            # Issue #24, section A: the timer half of the background refresh.
+            # Every registered repository whose checkout still exists is looked
+            # at and rebuilt incrementally only when its sources changed, each
+            # under its own per-repository fence.
+            "Step 3c: refreshing registered repository generations...",
+            "repositories",
+            _script("repository_index.py")
+            + ["refresh-all", "--budget-seconds", str(REFRESH_ALL_BUDGET_SECONDS)],
+            REFRESH_ALL_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
+        ),
+        _Step(
+            # Issue #24, section D1: a foreign generation is never activated,
+            # so the pruner below reports it pending and keeps it forever.
+            # This retires, per checkout, every generation of a checkout that
+            # is gone or marked not indexed and all but the newest two of the
+            # rest, each repository under its own fence.
+            "Step 3c': retiring repository generations no checkout reads...",
+            "repository_retention",
+            _script("repository_index.py") + ["retire"],
+            RETIRE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
+        ),
+        _Step(
             # Every refresh publishes a new immutable generation and nothing
             # removed the old ones: five in one day, 1.05 GB, on the vault of
             # issue #29. The pruner keeps the active generation and one ancestor.
-            "Step 3c: pruning superseded evidence generations...",
+            "Step 3d: pruning superseded evidence generations...",
             "prune_generations",
             _script("prune_generations.py") + ["--apply"],
             300,
         ),
         _checkpoint_step(),
+        _Step(
+            # The read path loads weights local-only; a cache that lacks the
+            # two pinned models answers by words alone. Present files are not
+            # fetched again, so this is a no-op on every night but the first.
+            "Step 3f: fetching missing model weights...",
+            "models",
+            _script("install_models.py"),
+            1800,
+        ),
     ]
 
 
@@ -382,12 +424,12 @@ def _compact_telemetry(log) -> None:
         log(f"  telemetry: failed ({e}) — skipping")
 
 
-def _post_compile_pass(run_step, log, ownership: OwnerLease | None) -> int:
+def _post_compile_pass(run_step, log) -> int:
     failures = _run_steps(run_step, log, _post_compile_steps())
 
     # Step 3c: refresh one immutable generation under the shared fence.
     log("Step 3c: refreshing immutable evidence generation...")
-    failures += _refresh_generation(log, ownership=ownership)
+    failures += _refresh_generation(log)
 
     # Step 3d: compact disposable telemetry without touching knowledge.
     log("Step 3d: compacting retrieval telemetry...")
@@ -424,7 +466,7 @@ def _write_health_report(log) -> None:
         )
         log(f"  health: {report.get('overall_status', 'unknown')}")
     except Exception as exc:  # noqa: BLE001 - a report is never a reason to fail
-        log(f"  health report skipped: {type(exc).__name__}")
+        log(f"  health report skipped: {describe_error(exc)}")
 
 
 def _update_code(log) -> None:
@@ -447,7 +489,7 @@ def _prune_reports(log) -> None:
     log(f"  pruned {prune_maintenance_output()} old file(s)")
 
 
-def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
+def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
     failures = _run_steps(
         run_step,
         log,
@@ -467,7 +509,7 @@ def _nightly_steps(run_step, log, ownership: OwnerLease | None) -> int:
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
         return failures
     failures += _report_compile_outcome(log, before)
-    return failures + _post_compile_pass(run_step, log, ownership)
+    return failures + _post_compile_pass(run_step, log)
 
 
 def _report_compile_outcome(log, before: str | None) -> int:
@@ -496,49 +538,79 @@ def _nightly_logger(log_file: Path):
     return log
 
 
-def _owned_step_runner(ownership: OwnerLease | None):
-    """Pass the maintenance owner through to steps that accept one."""
+def _require_fence(fence: threading.Event | None) -> None:
+    """A lost fence stops the pass before the next step, while the loss is fresh."""
+    if fence is not None and fence.is_set():
+        raise OperationalOwnershipError("owner_fence_lost")
+
+
+def _fenced_step_runner(fence: threading.Event | None):
     def run_step(command, log, name, *, timeout):
-        if ownership is not None and _accepts_ownership(_run_step):
-            return _run_step(command, log, name, timeout=timeout, ownership=ownership)
+        _require_fence(fence)
         return _run_step(command, log, name, timeout=timeout)
 
     return run_step
 
 
-def _run_nightly_body(*, ownership: OwnerLease | None) -> int:
+def _terminal_error(error: str | None, fence: threading.Event | None) -> str | None:
+    """A fence lost during the last step is recorded, never overwritten by success."""
+    if error is not None:
+        return error
+    if fence is not None and fence.is_set():
+        return "OperationalOwnershipError: owner_fence_lost"
+    return None
+
+
+def _run_nightly_body(
+    *, ownership: OwnerLease | None, fence: threading.Event | None = None
+) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     _require_nightly_owner(ownership)
-    run_step = _owned_step_runner(ownership)
+    run_step = _fenced_step_runner(fence)
 
     failures = 1
     terminal_error = None
     try:
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        log = _nightly_logger(REPORTS_DIR / f"nightly-{today}.md")
-        log(f"=== Nightly consolidation pass — {today} ===")
-
-        failures = _nightly_steps(run_step, log, ownership)
-        _prune_reports(log)
-        _update_code(log)
-
-        log(f"=== Nightly pass complete (failures={failures}) ===")
+        failures = _nightly_pass(today, run_step, ownership, fence)
         return 1 if failures else 0
     except Exception as exc:
         terminal_error = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        try:
-            _record_nightly_result(today, failures, terminal_error)
-        except Exception as exc:
-            print(f"scheduled_nightly: could not record result: {exc}", file=sys.stderr)
+        _record_result_quietly(today, failures, _terminal_error(terminal_error, fence))
 
 
-def run_nightly(*, ownership: OwnerLease | None) -> int:
+def _nightly_pass(today: str, run_step, ownership: OwnerLease | None, fence) -> int:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    log = _nightly_logger(REPORTS_DIR / f"nightly-{today}.md")
+    log(f"=== Nightly consolidation pass — {today} ===")
+    failures = _nightly_steps(run_step, log, ownership)
+    _require_fence(fence)
+    _prune_reports(log)
+    _update_code(log)
+    log(f"=== Nightly pass complete (failures={failures}) ===")
+    return failures
+
+
+def _record_result_quietly(today: str, failures: int, error: str | None) -> None:
+    try:
+        _record_nightly_result(today, failures or int(error is not None), error)
+    except Exception as exc:
+        print(f"scheduled_nightly: could not record result: {exc}", file=sys.stderr)
+
+
+def run_nightly(
+    *,
+    ownership: OwnerLease | None,
+    registry: object | None = None,
+    fence: threading.Event | None = None,
+) -> int:
+    """Run the pass; a nightly lease is refreshed here, a weekly one by its caller."""
     if ownership is None or ownership.role == "weekly":
-        return _run_nightly_body(ownership=ownership)
-    with heartbeat_owner(ownership):
-        return _run_nightly_body(ownership=ownership)
+        return _run_nightly_body(ownership=ownership, fence=fence)
+    lost = threading.Event()
+    with heartbeat_owner(ownership, registry=registry, lost=lost):
+        return _run_nightly_body(ownership=ownership, fence=lost)
 
 
 def _write_marker(marker: Path) -> bool:
@@ -554,25 +626,28 @@ def _write_marker(marker: Path) -> bool:
     return True
 
 
-def _marker_is_abandoned(marker: Path) -> bool:
-    """A marker older than 30 minutes whose owner process is gone."""
+def _abandoned_marker_bytes(marker: Path) -> bytes | None:
+    """The bytes of a marker whose owner process is gone; None while it lives.
+
+    Liveness is the process, never the age (the compile-lock note of
+    2026-09-10); this legacy marker serves only vaults without a V3
+    coordinator, where the registry's reclaim is unavailable.
+    """
     from memory_state import _is_pid_alive
 
     try:
-        if time.time() - marker.stat().st_mtime <= 1800:
-            return False
-        old_pid = int(marker.read_text(encoding="utf-8").strip())
+        payload = marker.read_bytes()
+        old_pid = int(payload.decode("utf-8").strip())
     except (OSError, ValueError):
-        return False
-    return not _is_pid_alive(old_pid)
+        return None
+    return None if _is_pid_alive(old_pid) else payload
 
 
 def _steal_marker(marker: Path) -> bool:
-    if not _marker_is_abandoned(marker):
-        return False
-    try:
-        marker.unlink()
-    except OSError:
+    from memory_state import retire_stale_lock
+
+    judged = _abandoned_marker_bytes(marker)
+    if judged is None or not retire_stale_lock(marker, judged):
         return False
     return _write_marker(marker)
 
@@ -593,20 +668,72 @@ def _release_legacy_maintenance_marker(marker: Path) -> None:
         pass
 
 
-def main() -> int:
-    today = datetime.now().strftime("%Y-%m-%d")
+@dataclass(frozen=True)
+class ScheduledFence:
+    """What a scheduled pass holds: the canonical lease on an adopted vault, the
+    legacy marker on a vault without a V3 coordinator."""
+
+    lease: OwnerLease | None
+    registry: object | None
+    release: Callable[[], None]
+
+
+def _canonical_fence(role: str, registry) -> ScheduledFence:
+    lease, marker = acquire_scheduled_owner(role, state_root=STATE_ROOT, registry=registry)
+
+    def release() -> None:
+        # A fence already lost or taken over is reported, not raised again:
+        # the body recorded the loss, and there is nothing left to release.
+        try:
+            release_marker_owner(lease, marker, registry=registry)
+        except OperationalOwnershipError as exc:
+            print(f"scheduled_nightly: fence not released ({exc.code})", file=sys.stderr)
+
+    return ScheduledFence(lease, registry, release)
+
+
+def _legacy_fence() -> ScheduledFence | None:
     marker = _acquire_legacy_maintenance_marker()
     if marker is None:
-        print("scheduled_nightly: maintenance already running, skipping.", file=sys.stderr)
-        try:
-            _record_nightly_skip(today, "maintenance_lock_held")
-        except Exception as exc:
-            print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
+        return None
+    return ScheduledFence(None, None, lambda: _release_legacy_maintenance_marker(marker))
+
+
+def take_scheduled_fence(role: str) -> ScheduledFence | None:
+    """The fence for `role`: canonical where the vault is adopted, legacy otherwise.
+
+    None means another pass holds the legacy marker. A canonical refusal raises
+    `OperationalOwnershipError` with the registry's reason.
+    Decision: knowledge/notes/nightly-takes-the-canonical-fence-decision.md
+    """
+    registry = adopted_ownership_registry(ROOT, STATE_ROOT)
+    if registry is None:
+        return _legacy_fence()
+    return _canonical_fence(role, registry)
+
+
+def record_scheduled_skip(today: str, reason: str) -> None:
+    print(f"scheduled_nightly: maintenance already running ({reason}), skipping.", file=sys.stderr)
+    try:
+        _record_nightly_skip(today, reason)
+    except Exception as exc:
+        print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
+
+
+def main() -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        fence = take_scheduled_fence("nightly")
+    except OperationalOwnershipError as exc:
+        record_scheduled_skip(today, exc.code)
+        return 0
+    if fence is None:
+        record_scheduled_skip(today, "maintenance_lock_held")
         return 0
     try:
-        return run_nightly(ownership=None)
+        return run_nightly(ownership=fence.lease, registry=fence.registry)
     finally:
-        _release_legacy_maintenance_marker(marker)
+        fence.release()
 
 
 if __name__ == "__main__":

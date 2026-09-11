@@ -199,10 +199,34 @@ def test_the_shards_cover_every_test_file_exactly_once() -> None:
 
 
 CLEAN_PROFILES = (
-    ("clean-production", None),
     ("clean-hybrid", "hybrid"),
     ("clean-code-graph", "code-graph"),
 )
+CLEAN_JOBS = ("clean-production", *(name for name, _extra in CLEAN_PROFILES))
+
+
+def _linux_entries(include: list[dict]) -> list[dict]:
+    return [entry for entry in include if entry["os"] == "ubuntu-24.04"]
+
+
+def _assert_isolated_uv(commands: str) -> None:
+    assert "uv sync --locked --no-default-groups" in commands
+    runs = [line for line in commands.splitlines() if line.strip().startswith("uv run")]
+    assert all("--locked --no-sync" in line for line in runs)
+
+
+def _assert_clean_production(job: dict[str, object]) -> None:
+    """A clean production install runs on every platform the contract names (audit OPS-14)."""
+    assert job["runs-on"] == "${{ matrix.os }}"
+    assert job["timeout-minutes"] == 20
+    include = job["strategy"]["matrix"]["include"]
+    assert {entry["os"] for entry in include} == RUNNERS
+    assert _linux_entries(include) == [
+        {"os": "ubuntu-24.04", "python": "3.10", "label": "py3.10"},
+        {"os": "ubuntu-24.04", "python": "3.14", "label": "py3.14"},
+    ]
+    assert len({entry["label"] for entry in include}) == len(include)
+    _assert_isolated_uv(_commands(job))
 
 
 def _assert_clean_profile(job: dict[str, object], extra: str | None) -> None:
@@ -220,8 +244,9 @@ def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
     jobs = _workflow()["jobs"]
     for name, extra in CLEAN_PROFILES:
         _assert_clean_profile(jobs[name], extra)
-    environments = {jobs[name]["env"]["UV_PROJECT_ENVIRONMENT"] for name, _extra in CLEAN_PROFILES}
-    assert len(environments) == len(CLEAN_PROFILES)
+    _assert_clean_production(jobs["clean-production"])
+    environments = {jobs[name]["env"]["UV_PROJECT_ENVIRONMENT"] for name in CLEAN_JOBS}
+    assert len(environments) == len(CLEAN_JOBS)
 
     production = _commands(jobs["clean-production"])
     assert "install_smoke.py" in production
@@ -235,7 +260,8 @@ def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
     assert "scripts/code_graph.py tests/fixtures/code_kernel/python" in code_graph
 
 
-def test_native_installer_matrix_covers_linux_and_windows() -> None:
+def test_native_installer_matrix_covers_every_platform_the_contract_names() -> None:
+    """Task Scheduler, a LaunchAgent and a systemd timer: all three get a runner (audit OPS-14)."""
     job = _workflow()["jobs"]["installer"]
     assert job["runs-on"] == "${{ matrix.os }}"
     assert job["timeout-minutes"] == 20
@@ -243,6 +269,7 @@ def test_native_installer_matrix_covers_linux_and_windows() -> None:
     assert job["strategy"]["matrix"]["include"] == [
         {"os": "ubuntu-24.04", "platform": "linux"},
         {"os": "windows-2025", "platform": "windows"},
+        {"os": "macos-15", "platform": "macos"},
     ]
     commands = _commands(job)
     for path in (

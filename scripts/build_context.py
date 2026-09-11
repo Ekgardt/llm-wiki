@@ -17,6 +17,7 @@ refresh tokens".
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from datetime import datetime
@@ -53,60 +54,86 @@ def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+
+def _frontmatter_value(content: str, field: str) -> str | None:
+    """A frontmatter field read the way the agent-strength and retirement checks always read it."""
+    fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+    if not fm_match:
+        return None
+    match = re.search(rf"^{field}:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
 def _find_project_pages(slug: str) -> list[dict]:
     """Find all knowledge pages tagged with `project: <slug>`."""
-    results = []
     if not KNOWLEDGE.exists():
-        return results
-    for md in sorted(KNOWLEDGE.rglob("*.md")):
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-        if fm_match:
-            status_m = re.search(r"^status:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
-            if status_m and status_m.group(1).strip() in ("archived", "superseded"):
-                continue
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE)
-        if project and project.lower().strip() == slug.lower().strip():
-            page_type = _extract_frontmatter_field(content, TYPE_FIELD_RE) or "unknown"
-            status = _extract_frontmatter_field(content, STATUS_FIELD_RE) or "active"
-            title_match = H1_RE.search(content)
-            title = title_match.group(1).strip() if title_match else md.stem
-            summary_match = SUMMARY_RE.search(content)
-            summary = summary_match.group(1).strip() if summary_match else ""
-            results.append({
-                "path": md.relative_to(ROOT).as_posix(),
-                "type": page_type,
-                "status": status,
-                "title": title,
-                "summary": summary,
-            })
-    return results
+        return []
+    pages = (_project_page(md, slug) for md in sorted(KNOWLEDGE.rglob("*.md")))
+    return [page for page in pages if page is not None]
+
+
+def _project_page(md: Path, slug: str) -> dict | None:
+    content = _read_text_or_none(md)
+    if content is None or _frontmatter_value(content, "status") in ("archived", "superseded"):
+        return None
+    project = _extract_frontmatter_field(content, PROJECT_FIELD_RE)
+    if not project or project.lower().strip() != slug.lower().strip():
+        return None
+    return _page_record(md, content)
+
+
+def _page_record(md: Path, content: str) -> dict:
+    title_match = H1_RE.search(content)
+    summary_match = SUMMARY_RE.search(content)
+    return {
+        "path": md.relative_to(ROOT).as_posix(),
+        "type": _extract_frontmatter_field(content, TYPE_FIELD_RE) or "unknown",
+        "status": _extract_frontmatter_field(content, STATUS_FIELD_RE) or "active",
+        "title": title_match.group(1).strip() if title_match else md.stem,
+        "summary": summary_match.group(1).strip() if summary_match else "",
+    }
 
 
 def _find_recent_daily_activity(slug: str, days: int = 7) -> list[str]:
     """Find recent daily-log breadcrumbs mentioning this slug."""
-    results = []
     if not DAILY_DIR.exists():
-        return results
+        return []
     cutoff = datetime.now().timestamp() - (days * 86400)
+    results: list[str] = []
     for md in sorted(DAILY_DIR.glob("*.md"), reverse=True):
-        try:
-            if md.stat().st_mtime < cutoff:
-                continue
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        if slug.lower() in content.lower():
-            # Extract lines mentioning the slug
-            for line in content.splitlines():
-                if slug.lower() in line.lower() and line.strip():
-                    results.append(f"{md.stem}: {line.strip()}")
-                    if len(results) >= 10:
-                        return results
+        results.extend(_slug_lines(md, slug, cutoff))
+        if len(results) >= 10:
+            return results[:10]
     return results
+
+
+def _slug_lines(md: Path, slug: str, cutoff: float) -> list[str]:
+    """The non-blank lines of one recent daily log that mention the slug."""
+    content = _recent_text(md, cutoff)
+    if content is None or slug.lower() not in content.lower():
+        return []
+    return [f"{md.stem}: {line.strip()}" for line in content.splitlines() if _mentions(line, slug)]
+
+
+def _mentions(line: str, slug: str) -> bool:
+    return slug.lower() in line.lower() and bool(line.strip())
+
+
+def _recent_text(md: Path, cutoff: float) -> str | None:
+    try:
+        if md.stat().st_mtime < cutoff:
+            return None
+        return md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
 
 
 def _read_state_handoff(slug: str) -> str:
@@ -116,13 +143,19 @@ def _read_state_handoff(slug: str) -> str:
     if not state_path.resolve().is_relative_to(PROJECTS_DIR.resolve()):
         print(f"build_context: slug escapes PROJECTS_DIR: {slug!r}", file=sys.stderr)
         return ""
-    if not state_path.exists():
+    content = _existing_text(state_path)
+    if content is None:
         return ""
-    try:
-        content = state_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return ""
-    # Extract "## Where we left off" section
+    return _where_we_left_off(content)
+
+
+def _existing_text(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return _read_text_or_none(path)
+
+
+def _where_we_left_off(content: str) -> str:
     match = re.search(
         r"^##\s*Where we left off\s*$\n(.*?)(?=\n##\s|\Z)",
         content,
@@ -144,55 +177,56 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
     Returns: ordered list of knowledge types the agent excels at,
     or None if no data (use balanced view).
     """
-    import json as _json
-
     type_counts: dict[str, int] = {}
-
-    # Count knowledge pages by source_authority or detected agent
-    if KNOWLEDGE.exists():
-        for md in KNOWLEDGE.rglob("*.md"):
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-            source_authority = ""
-            if fm_match:
-                sa_match = re.search(r"^source_authority:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
-                if sa_match:
-                    source_authority = sa_match.group(1).strip()
-            if agent.lower() not in source_authority.lower():
-                # Only check frontmatter source_authority (already done above)
-                # Do NOT fall back to substring scan of body text
-                continue
-            # Extract type
-            fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-            if fm_match:
-                type_match = re.search(r"^type:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
-                if type_match:
-                    t = type_match.group(1).strip()
-                    type_counts[t] = type_counts.get(t, 0) + 1
-
-    # Also check feedback: types where agent gets corrections = weakness
-    feedback_dir = ROOT / "knowledge" / "feedback"
-    if feedback_dir.exists():
-        for f in feedback_dir.glob("*.json"):
-            try:
-                fb = _json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, _json.JSONDecodeError):
-                continue
-            if agent.lower() in fb.get("text", "").lower() or agent.lower() in fb.get("project", "").lower():
-                fb_type = fb.get("type", "")
-                # Corrections indicate the agent is active in this area
-                # but makes mistakes — still engagement signal
-                type_counts[f"feedback_{fb_type}"] = type_counts.get(f"feedback_{fb_type}", 0) + 1
-
+    _count_authored_types(agent, type_counts)
+    _count_feedback_types(agent, type_counts)
     if not type_counts:
         return None  # no data → balanced view
-
     # Rank types by frequency (most contributions = strongest area)
     ranked = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
     return [t for t, _ in ranked[:5]]
+
+
+def _count_authored_types(agent: str, type_counts: dict[str, int]) -> None:
+    """Count knowledge pages whose source_authority names the agent, by page type."""
+    if not KNOWLEDGE.exists():
+        return
+    for md in KNOWLEDGE.rglob("*.md"):
+        page_type = _authored_page_type(md, agent)
+        if page_type is not None:
+            type_counts[page_type] = type_counts.get(page_type, 0) + 1
+
+
+def _authored_page_type(md: Path, agent: str) -> str | None:
+    content = _read_text_or_none(md)
+    if content is None:
+        return None
+    # Only the frontmatter source_authority counts; never a substring scan of the body.
+    if agent.lower() not in (_frontmatter_value(content, "source_authority") or "").lower():
+        return None
+    return _frontmatter_value(content, "type")
+
+
+def _count_feedback_types(agent: str, type_counts: dict[str, int]) -> None:
+    """Feedback naming the agent: corrections still mark an area it is active in."""
+    feedback_dir = ROOT / "knowledge" / "feedback"
+    if not feedback_dir.exists():
+        return
+    for path in feedback_dir.glob("*.json"):
+        feedback_type = _agent_feedback_type(path, agent)
+        if feedback_type is not None:
+            key = f"feedback_{feedback_type}"
+            type_counts[key] = type_counts.get(key, 0) + 1
+
+
+def _agent_feedback_type(path: Path, agent: str) -> str | None:
+    try:
+        fb = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if agent.lower() in fb.get("text", "").lower() or agent.lower() in fb.get("project", "").lower():
+        return fb.get("type", "")
+    return None
 
 
 def _project_context_item(
@@ -239,14 +273,7 @@ def _pack_project_context(parts: list[tuple[str, str]], max_chars: int) -> str:
     character limit survives as the emergency_byte_cap failure guard so
     Markdown is never sliced mid-item.
     """
-    items = [
-        item
-        for item in (
-            _project_context_item(kind, index, text, total=len(parts))
-            for index, (kind, text) in enumerate(parts)
-        )
-        if item is not None
-    ]
+    items = _project_context_items(parts)
     if not items:
         return ""
     try:
@@ -262,6 +289,14 @@ def _pack_project_context(parts: list[tuple[str, str]], max_chars: int) -> str:
         return error.failure.render(max_bytes=max_chars)
 
 
+def _project_context_items(parts: list[tuple[str, str]]) -> list[ContextItem]:
+    items = (
+        _project_context_item(kind, index, text, total=len(parts))
+        for index, (kind, text) in enumerate(parts)
+    )
+    return [item for item in items if item is not None]
+
+
 def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) -> str:
     """Build the project-context injection block.
 
@@ -272,67 +307,80 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
                demonstrated strengths (derived from feedback history),
                NOT hardcoded assumptions about which tool is "better at X".
     """
-    parts = [("orientation", f"## Project context: {slug}\n")]
-
-    # 1. Handoff note from state.md
-    handoff = _read_state_handoff(slug)
-    if handoff:
-        parts.append(("handoff", f"### Where you left off\n{handoff}\n"))
-
-    # 2. Knowledge pages tagged for this project
-    pages = _find_project_pages(slug)
-    active_pages = [p for p in pages if p["status"] != "superseded"]
-
-    # Per-agent filtering (Dorabotka C v2: auto-detect, not hardcoded)
-    if agent:
-        agent = agent.lower()
-        # Auto-detect agent strengths from feedback history.
-        # Instead of hardcoding "codex=codegen, opencode=research",
-        # we look at which knowledge types each agent has contributed
-        # successfully (via feedback_capture + knowledge page source).
-        agent_priority = _detect_agent_strengths(agent)
-        if not agent_priority:
-            # Fallback: balanced view (all types)
-            agent_priority = None
-        if agent_priority:
-            active_pages.sort(
-                key=lambda p: agent_priority.index(p["type"]) if p["type"] in agent_priority else 99
-            )
-
-    if active_pages:
-        knowledge = [f"### Known knowledge ({len(active_pages)} pages)"]
-        by_type: dict[str, list[dict]] = {}
-        for p in active_pages:
-            by_type.setdefault(p["type"], []).append(p)
-        for ptype in sorted(by_type.keys()):
-            knowledge.append(f"**{ptype}s:**")
-            for p in by_type[ptype][:5]:
-                summary = p["summary"] if p["summary"] else p["title"]
-                knowledge.append(f"- {summary}")
-            knowledge.append("")
-        parts.append(("evidence", "\n".join(knowledge)))
-
-    # 3. Recent activity
-    activity = _find_recent_daily_activity(slug)
-    if activity:
-        recent = ["### Recent activity (last 7 days)"]
-        recent.extend(f"- {line}" for line in activity[:5])
-        parts.append(("history", "\n".join(recent)))
-
-    # 4. Heartbeat from state.json
-    try:
-        state = load_state()
-        hb = state.get("codex_heartbeats", {}).get(slug, {})
-        if hb:
-            parts.append((
-                "history",
-                "### Last seen\n"
-                f"- {hb.get('reason', 'unknown')} at {hb.get('at', '?')}",
-            ))
-    except Exception:
-        pass
-
+    parts = [
+        ("orientation", f"## Project context: {slug}\n"),
+        *_handoff_part(slug),  # 1. Handoff note from state.md
+        *_knowledge_part(slug, agent),  # 2. Knowledge pages tagged for this project
+        *_activity_part(slug),  # 3. Recent activity
+        *_heartbeat_part(slug),  # 4. Heartbeat from state.json
+    ]
     return _pack_project_context(parts, max_chars)
+
+
+def _handoff_part(slug: str) -> list[tuple[str, str]]:
+    handoff = _read_state_handoff(slug)
+    if not handoff:
+        return []
+    return [("handoff", f"### Where you left off\n{handoff}\n")]
+
+
+def _knowledge_part(slug: str, agent: str | None) -> list[tuple[str, str]]:
+    active_pages = [p for p in _find_project_pages(slug) if p["status"] != "superseded"]
+    if agent:
+        _order_by_strengths(active_pages, agent.lower())
+    if not active_pages:
+        return []
+    return [("evidence", _knowledge_section(active_pages))]
+
+
+def _order_by_strengths(pages: list[dict], agent: str) -> None:
+    """Per-agent ordering (Dorabotka C v2: auto-detected strengths, not hardcoded).
+
+    The knowledge types the agent has contributed come first; with no
+    history the order stays balanced.
+    """
+    agent_priority = _detect_agent_strengths(agent)
+    if not agent_priority:
+        return
+    pages.sort(key=lambda p: _strength_rank(agent_priority, p["type"]))
+
+
+def _strength_rank(agent_priority: list[str], page_type: str) -> int:
+    if page_type in agent_priority:
+        return agent_priority.index(page_type)
+    return 99
+
+
+def _knowledge_section(active_pages: list[dict]) -> str:
+    knowledge = [f"### Known knowledge ({len(active_pages)} pages)"]
+    by_type: dict[str, list[dict]] = {}
+    for p in active_pages:
+        by_type.setdefault(p["type"], []).append(p)
+    for ptype in sorted(by_type.keys()):
+        knowledge.extend([f"**{ptype}s:**", *(f"- {p['summary'] or p['title']}" for p in by_type[ptype][:5]), ""])
+    return "\n".join(knowledge)
+
+
+def _activity_part(slug: str) -> list[tuple[str, str]]:
+    activity = _find_recent_daily_activity(slug)
+    if not activity:
+        return []
+    recent = ["### Recent activity (last 7 days)", *(f"- {line}" for line in activity[:5])]
+    return [("history", "\n".join(recent))]
+
+
+def _heartbeat_part(slug: str) -> list[tuple[str, str]]:
+    try:
+        return _heartbeat_lines(load_state(), slug)
+    except Exception:
+        return []
+
+
+def _heartbeat_lines(state: dict, slug: str) -> list[tuple[str, str]]:
+    hb = state.get("codex_heartbeats", {}).get(slug, {})
+    if not hb:
+        return []
+    return [("history", "### Last seen\n" f"- {hb.get('reason', 'unknown')} at {hb.get('at', '?')}")]
 
 
 def main() -> int:

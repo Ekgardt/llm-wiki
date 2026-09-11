@@ -25,6 +25,7 @@ from pathlib import Path
 import maybe_compile
 from memory_state import REPORTS_DIR, ROOT
 from secret_redact import redact_secrets
+from sync_memory import _run_process_tree as _run_tree
 
 ARTIFACT_DIR = REPORTS_DIR / "maintenance"
 STEP_SUMMARY_LINES = 6
@@ -51,9 +52,15 @@ def _open_owner_only(path: Path):
 
 
 def _run_to_files(cmd: list[str], out_path: Path, err_path: Path, timeout: int) -> int:
-    """Run the step with both streams going to disk, never to memory."""
+    """Run the step with both streams going to disk, never to memory.
+
+    The step runs in its own session (process group on Windows), so a step
+    that reaches its bound is ended with every worker it spawned; `run()`
+    alone would kill the direct child and leave the rest writing (audit
+    OPS-06, `docs/research/2026-09-10-a-step-that-times-out-takes-its-children-with-it.md`).
+    """
     with _open_owner_only(out_path) as out_handle, _open_owner_only(err_path) as err_handle:
-        completed = subprocess.run(
+        completed = _run_tree(
             cmd,
             cwd=str(ROOT),
             stdout=out_handle,
@@ -152,8 +159,8 @@ def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
     out_path, err_path = _step_artifacts(label)
     try:
         returncode = _run_to_files(cmd, out_path, err_path, timeout)
-    except subprocess.TimeoutExpired:
-        log_fn(f"  {label}: TIMEOUT after {timeout}s — skipping, continuing")
+    except subprocess.TimeoutExpired as exc:
+        log_fn(f"  {label}: TIMEOUT after {timeout}s — {_tree_ended(exc)}, continuing")
         log_fn(f"  {label}: partial output → {_artifact_note(out_path, err_path)}")
         return 2
     except OSError as e:
@@ -162,6 +169,14 @@ def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
         return 2
     _log_step_output(log_fn, label, out_path, err_path, returncode)
     return _step_status(returncode)
+
+
+def _tree_ended(exc: subprocess.TimeoutExpired) -> str:
+    """What became of the step's process tree, from the runner's own report."""
+    cleanup_error = getattr(exc, "cleanup_error", None)
+    if cleanup_error:
+        return f"process tree NOT fully ended ({cleanup_error})"
+    return "process tree ended"
 
 
 def _safe_entry(path: Path) -> tuple[float, int, Path] | None:

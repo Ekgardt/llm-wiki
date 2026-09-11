@@ -280,6 +280,10 @@ def _prepare_install_root(state_root: Path) -> Path:
 def _profile_path_exists(profile: Path) -> bool:
     if profile.is_symlink():
         raise InstallControlError("install_profile_symlink")
+    return _regular_profile_exists(profile)
+
+
+def _regular_profile_exists(profile: Path) -> bool:
     if not profile.exists():
         return False
     if not profile.is_file():
@@ -290,6 +294,10 @@ def _profile_path_exists(profile: Path) -> bool:
 def _read_profile(profile: Path) -> bytes:
     if not _profile_path_exists(profile):
         return b""
+    return _read_bounded_profile(profile)
+
+
+def _read_bounded_profile(profile: Path) -> bytes:
     if profile.stat().st_size > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_profile_invalid")
     value = profile.read_bytes()
@@ -471,11 +479,17 @@ def profile_resource(
     )
 
 
+_NATIVE_SCHEDULERS = {"win32": "task_scheduler", "darwin": "launchd"}
+
+
 def _native_scheduler_backend(platform: str, systemd_available: bool) -> str:
-    if platform == "win32":
-        return "task_scheduler"
-    if platform == "darwin":
-        return "launchd"
+    native = _NATIVE_SCHEDULERS.get(platform)
+    if native is not None:
+        return native
+    return _linux_scheduler_backend(platform, systemd_available)
+
+
+def _linux_scheduler_backend(platform: str, systemd_available: bool) -> str:
     if platform != "linux":
         raise ValueError("unsupported scheduler platform")
     if not systemd_available:
@@ -641,6 +655,10 @@ def _read_managed_file(path: Path) -> bytes | None:
         raise InstallControlError("install_resource_symlink")
     if not path.exists():
         return None
+    return _read_regular_managed_file(path)
+
+
+def _read_regular_managed_file(path: Path) -> bytes:
     if not path.is_file() or path.stat().st_size > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_resource_file_invalid")
     return path.read_bytes()
@@ -956,11 +974,11 @@ def _decode_definition_map(value: object, expected_names: Sequence[str]) -> dict
 
 
 def _require_definition_bundle_header(value: Mapping[str, object]) -> None:
-    if set(value) != {"definitions", "format", "state"}:
-        raise InstallControlError("install_definition_bundle_invalid")
-    if value.get("format") != _DEFINITION_BUNDLE_FORMAT:
-        raise InstallControlError("install_definition_bundle_invalid")
-    if value.get("state") != "enabled_active":
+    if (
+        set(value) != {"definitions", "format", "state"}
+        or value.get("format") != _DEFINITION_BUNDLE_FORMAT
+        or value.get("state") != "enabled_active"
+    ):
         raise InstallControlError("install_definition_bundle_invalid")
 
 
@@ -1019,6 +1037,14 @@ def _definition_candidate(
     value = _strict_json_object(candidate)
     if value.get("format") == _DEFINITION_BUNDLE_FORMAT:
         return _decode_definition_bundle(candidate, expected_names)
+    return _legacy_definitions(candidate, expected_names, legacy_loader)
+
+
+def _legacy_definitions(
+    candidate: bytes,
+    expected_names: Sequence[str],
+    legacy_loader: Callable[[], Mapping[str, bytes]],
+) -> dict[str, bytes]:
     definitions = dict(legacy_loader())
     if set(definitions) != set(expected_names):
         raise InstallControlError("install_legacy_definition_ambiguous")
@@ -1423,6 +1449,10 @@ def _read_crontab(runner: CommandRunner, crontab: str) -> bytes | None:
     exit_code, output = runner((crontab, "-l"), None)
     if exit_code == 1:
         return None
+    return _crontab_output(exit_code, output)
+
+
+def _crontab_output(exit_code: int, output: bytes) -> bytes:
     if exit_code != 0:
         raise InstallControlError("install_crontab_read_failed")
     if len(output) > MAX_PREIMAGE_BYTES:
@@ -1448,7 +1478,10 @@ def _extract_cron_block(table: bytes | None) -> bytes | None:
     bounds = _cron_bounds(table)
     if bounds is None:
         return None
-    start, end = bounds
+    return _owned_cron_block(table, *bounds)
+
+
+def _owned_cron_block(table: bytes, start: int, end: int) -> bytes:
     starts_on_line = (b"\n" + table[:start]).endswith(b"\n")
     ends_on_line = table[end : end + 1] in {b"", b"\n", b"\r"}
     if not starts_on_line or not ends_on_line:
@@ -1667,9 +1700,10 @@ def _decode_windows_task_spec(candidate: bytes, root: Path, state_root: Path) ->
     if len(candidate) > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_windows_task_spec_invalid")
     value = _strict_json_object(candidate)
-    if set(value) != {"root", "state_root", "tasks", "uv_path"}:
-        raise InstallControlError("install_windows_task_spec_invalid")
-    if value.get("tasks") != _expected_windows_tasks():
+    if (
+        set(value) != {"root", "state_root", "tasks", "uv_path"}
+        or value.get("tasks") != _expected_windows_tasks()
+    ):
         raise InstallControlError("install_windows_task_spec_invalid")
     _require_windows_spec_path(value.get("root"), root)
     _require_windows_spec_path(value.get("state_root"), state_root)
@@ -1748,7 +1782,10 @@ def _read_windows_tasks(
     exit_code, output = runner((*command, "-StateJson"), None)
     if exit_code != 0:
         raise InstallControlError("install_windows_task_state_failed")
-    state = _windows_task_state_value(output)
+    return _windows_task_snapshot(_windows_task_state_value(output), desired)
+
+
+def _windows_task_snapshot(state: str, desired: bytes) -> bytes | None:
     if state == "absent":
         return None
     if state == "equivalent":
@@ -2208,6 +2245,25 @@ def _revert_resource(
         return
     if not _same_snapshot(current, installed):
         raise InstallControlError("install_rollback_drift")
+    _restore_origin(
+        install_root=install_root,
+        transaction_path=transaction_path,
+        transaction=transaction,
+        record=record,
+        resource=resource,
+        origin=origin,
+    )
+
+
+def _restore_origin(
+    *,
+    install_root: Path,
+    transaction_path: Path,
+    transaction: dict[str, object],
+    record: dict[str, object],
+    resource: ManagedResource,
+    origin: Mapping[str, object],
+) -> None:
     _mark_resource_state(transaction_path, transaction, record, "reverting")
     resource.write_owned(_read_origin(install_root, origin))
     if not _same_snapshot(resource.read_owned(), origin):
@@ -2701,15 +2757,26 @@ def _v2_revert_resource(
     _require_revertible(current, desired)
     _mark_resource_state(transaction_path, transaction, record, "reverting")
     rollback_value = _read_v2_snapshot(install_root, rollback)
-    metadata = record.get("metadata")
-    if not isinstance(metadata, Mapping):
-        raise InstallControlError("install_transaction_invalid")
+    metadata = _resource_record_metadata(record)
     _write_resource_projection(
         resource, _read_v2_snapshot(install_root, desired), rollback_value, metadata
     )
+    _require_rolled_back(install_root, resource, rollback)
+    _mark_resource_state(transaction_path, transaction, record, "reverted")
+
+
+def _resource_record_metadata(record: Mapping[str, object]) -> Mapping[str, object]:
+    metadata = record.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise InstallControlError("install_transaction_invalid")
+    return metadata
+
+
+def _require_rolled_back(
+    install_root: Path, resource: ManagedResource, rollback: Mapping[str, object]
+) -> None:
     if not _same_snapshot(_read_v2_resource(install_root, resource, (rollback,)), rollback):
         raise InstallControlError("install_rollback_verification_failed")
-    _mark_resource_state(transaction_path, transaction, record, "reverted")
 
 
 def _v2_rollback_mutations(
@@ -2781,13 +2848,15 @@ def _manifest_bytes(path: Path) -> bytes | None:
 
 def _require_manifest_cas(current: bytes | None, expected_sha256: str | None) -> None:
     if expected_sha256 is None:
-        if current is not None:
-            raise InstallControlError("install_manifest_conflict")
+        _require_absent_manifest(current)
         return
-    if current is None:
+    if current is None or _sha256(current) != expected_sha256:
         raise InstallControlError("install_manifest_changed")
-    if _sha256(current) != expected_sha256:
-        raise InstallControlError("install_manifest_changed")
+
+
+def _require_absent_manifest(current: bytes | None) -> None:
+    if current is not None:
+        raise InstallControlError("install_manifest_conflict")
 
 
 def _publish_v2_manifest(
@@ -3011,12 +3080,20 @@ def _checkpoint_desired_snapshot(
     if isinstance(snapshot.get("preimage"), str):
         value = _read_origin(install_root, snapshot)
         return _normalized_snapshot(install_root, snapshot, value)
-    if resource.recover_legacy_projection is not None:
-        actual, persisted = resource.recover_legacy_projection(snapshot)
-        if not _same_snapshot(actual, snapshot):
-            raise InstallControlError("install_resource_drift")
-        return _v2_snapshot(install_root, persisted)
-    return _normalized_snapshot(install_root, snapshot, resource.read_owned())
+    return _checkpoint_owned_snapshot(install_root, snapshot, resource)
+
+
+def _checkpoint_owned_snapshot(
+    install_root: Path,
+    snapshot: Mapping[str, object],
+    resource: ManagedResource,
+) -> dict[str, object]:
+    if resource.recover_legacy_projection is None:
+        return _normalized_snapshot(install_root, snapshot, resource.read_owned())
+    actual, persisted = resource.recover_legacy_projection(snapshot)
+    if not _same_snapshot(actual, snapshot):
+        raise InstallControlError("install_resource_drift")
+    return _v2_snapshot(install_root, persisted)
 
 
 def _resource_identity_matches(record: Mapping[str, object], resource: ManagedResource) -> bool:
@@ -3300,8 +3377,7 @@ def _resume_v2_operation(
 ) -> dict[str, object] | None:
     if not _v2_nonterminal(transaction):
         return None
-    if transaction is None or transaction.get("request_sha256") != request_sha256:
-        raise InstallControlError("install_transaction_blocks_new_work")
+    _require_matching_request(transaction, request_sha256)
     records = _transaction_resources(transaction)
     ordered = _ordered_transaction_resources(records, resources)
     transaction_path = install_root / "transaction.json"
@@ -3315,6 +3391,13 @@ def _resume_v2_operation(
         records=records,
         resources=ordered,
     )
+
+
+def _require_matching_request(
+    transaction: Mapping[str, object] | None, request_sha256: str
+) -> None:
+    if transaction is None or transaction.get("request_sha256") != request_sha256:
+        raise InstallControlError("install_transaction_blocks_new_work")
 
 
 def _install_v2_under_lock(
@@ -3350,11 +3433,7 @@ def _install_v2_under_lock(
             resources=resources,
             request_sha256=request_sha256,
         )
-    if transaction is not None and transaction.get("state") not in {
-        "committed",
-        "reverted",
-    }:
-        raise InstallControlError("install_transaction_blocks_new_work")
+    _require_settled_transaction(transaction)
     return _start_v2_install(
         install_root=install_root,
         state_root=state_root,
@@ -3364,6 +3443,14 @@ def _install_v2_under_lock(
         resources=resources,
         request_sha256=request_sha256,
     )
+
+
+def _require_settled_transaction(transaction: Mapping[str, object] | None) -> None:
+    if transaction is not None and transaction.get("state") not in {
+        "committed",
+        "reverted",
+    }:
+        raise InstallControlError("install_transaction_blocks_new_work")
 
 
 def _install_v2(
@@ -3674,9 +3761,7 @@ def _uninstall_v2_under_lock(
 ) -> dict[str, object]:
     if manifest is not None:
         return _active_v2_uninstall(install_root, manifest, transaction, resources)
-    if transaction is None:
-        raise InstallControlError("install_manifest_absent")
-    if transaction.get("operation") != "uninstall":
+    if transaction is None or transaction.get("operation") != "uninstall":
         raise InstallControlError("install_manifest_absent")
     return _resume_inactive_v2_uninstall(install_root / "transaction.json", transaction)
 
@@ -3954,6 +4039,15 @@ def _resume_or_accept_v2_rollback(
     if transaction is None or transaction.get("operation") != "rollback":
         return None
     active = _required_active_manifest(manifest)
+    return _rollback_resolution(install_root, active, transaction, resources)
+
+
+def _rollback_resolution(
+    install_root: Path,
+    active: dict[str, object],
+    transaction: dict[str, object],
+    resources: Sequence[ManagedResource],
+) -> dict[str, object] | None:
     if transaction.get("state") == "committed":
         return _accepted_v2_rollback(active, transaction)
     if transaction.get("state") not in {
@@ -4093,9 +4187,7 @@ def _v2_checkpoint_records(checkpoint: object) -> list[Mapping[str, object]]:
     if not isinstance(checkpoint, Mapping):
         raise InstallControlError("install_state_schema_invalid")
     records = checkpoint.get("resources")
-    if not isinstance(records, list):
-        raise InstallControlError("install_state_schema_invalid")
-    if any(not isinstance(record, Mapping) for record in records):
+    if not isinstance(records, list) or any(not isinstance(record, Mapping) for record in records):
         raise InstallControlError("install_state_schema_invalid")
     return records
 
@@ -4132,18 +4224,25 @@ def _validate_v2_manifest_transaction(
     manifest: Mapping[str, object],
     transaction: Mapping[str, object],
 ) -> None:
-    if manifest.get("transaction_id") != transaction.get("id"):
-        raise InstallControlError("install_manifest_transaction_mismatch")
-    if manifest.get("request_sha256") != transaction.get("request_sha256"):
-        raise InstallControlError("install_manifest_transaction_mismatch")
-    expected = transaction.get("target_manifest_sha256")
-    actual = _sha256(canonical_json_bytes(dict(manifest)))
-    if expected != actual:
-        raise InstallControlError("install_manifest_transaction_mismatch")
+    _require_transaction_binding(manifest, transaction)
     if _v2_manifest_from_transaction(transaction) != manifest:
         raise InstallControlError("install_manifest_transaction_mismatch")
     _validate_v2_record_preimages(install_root, manifest)
     _validate_v2_record_preimages(install_root, transaction)
+
+
+def _require_transaction_binding(
+    manifest: Mapping[str, object], transaction: Mapping[str, object]
+) -> None:
+    """The manifest names its transaction, its request, and is the transaction's target."""
+    if (
+        manifest.get("transaction_id") != transaction.get("id")
+        or manifest.get("request_sha256") != transaction.get("request_sha256")
+    ):
+        raise InstallControlError("install_manifest_transaction_mismatch")
+    expected = transaction.get("target_manifest_sha256")
+    if expected != _sha256(canonical_json_bytes(dict(manifest))):
+        raise InstallControlError("install_manifest_transaction_mismatch")
 
 
 def _validate_manifest_transaction(
@@ -4151,14 +4250,7 @@ def _validate_manifest_transaction(
     manifest: Mapping[str, object],
     transaction: Mapping[str, object],
 ) -> None:
-    if manifest.get("transaction_id") != transaction.get("id"):
-        raise InstallControlError("install_manifest_transaction_mismatch")
-    if manifest.get("request_sha256") != transaction.get("request_sha256"):
-        raise InstallControlError("install_manifest_transaction_mismatch")
-    expected = transaction.get("target_manifest_sha256")
-    actual = _sha256(canonical_json_bytes(dict(manifest)))
-    if expected != actual:
-        raise InstallControlError("install_manifest_transaction_mismatch")
+    _require_transaction_binding(manifest, transaction)
     _validate_preimage_references(install_root, _transaction_resources(manifest))
 
 
@@ -4209,14 +4301,7 @@ def _active_v2_install_health(
     manifest: Mapping[str, object],
     transaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    if transaction is None or transaction.get("schema") != "install-transaction/v2":
-        raise InstallControlError("install_manifest_without_transaction")
-    if transaction.get("operation") not in {
-        "install",
-        "update",
-        "rollback",
-        "uninstall",
-    }:
+    if not _v2_transaction_operation(transaction):
         raise InstallControlError("install_manifest_without_transaction")
     if manifest.get("transaction_id") == transaction.get("id"):
         _validate_v2_manifest_transaction(install_root, manifest, transaction)
@@ -4224,24 +4309,42 @@ def _active_v2_install_health(
     return _active_v2_base_health(install_root, manifest, transaction)
 
 
-def _active_v2_base_health_state(state: object) -> dict[str, object]:
-    if state == "quarantined":
-        return _install_health(
-            "quarantined",
-            "error",
-            ["install_transaction_quarantined"],
-            ["install_manifest_retained", "install_transaction_quarantined"],
-        )
-    if state == "reverted":
-        return _install_health("active", "ok", [], ["install_manifest_retained"])
-    if state in {"prepared", "mutating", "publishing", "reverting"}:
-        return _install_health(
+def _v2_transaction_operation(transaction: Mapping[str, object] | None) -> bool:
+    if transaction is None or transaction.get("schema") != "install-transaction/v2":
+        return False
+    return transaction.get("operation") in {
+        "install",
+        "update",
+        "rollback",
+        "uninstall",
+    }
+
+
+_BASE_HEALTH_STATES = {
+    "quarantined": (
+        "quarantined",
+        "error",
+        ("install_transaction_quarantined",),
+        ("install_manifest_retained", "install_transaction_quarantined"),
+    ),
+    "reverted": ("active", "ok", (), ("install_manifest_retained",)),
+    **{
+        state: (
             "nonterminal",
             "degraded",
-            ["install_transaction_nonterminal"],
-            ["install_manifest_retained", "install_transaction_nonterminal"],
+            ("install_transaction_nonterminal",),
+            ("install_manifest_retained", "install_transaction_nonterminal"),
         )
-    raise InstallControlError("install_manifest_transaction_mismatch")
+        for state in ("prepared", "mutating", "publishing", "reverting")
+    },
+}
+
+
+def _active_v2_base_health_state(state: object) -> dict[str, object]:
+    health = _BASE_HEALTH_STATES.get(state)
+    if health is None:
+        raise InstallControlError("install_manifest_transaction_mismatch")
+    return _install_health(*health)
 
 
 def _active_v2_base_health(
@@ -4342,6 +4445,10 @@ def _validate_install_records(install_root: Path) -> dict[str, object]:
         return _active_install_health_for_schema(install_root, manifest, transaction)
     if transaction is not None:
         return _inactive_install_health_for_schema(install_root, transaction)
+    return _empty_install_root_health(install_root)
+
+
+def _empty_install_root_health(install_root: Path) -> dict[str, object]:
     entries = {entry.name for entry in install_root.iterdir()}
     if entries <= {"install.lock", "preimages", "scheduler"}:
         return _install_health("absent", "ok", [], [])

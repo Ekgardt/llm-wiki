@@ -147,6 +147,15 @@ successful cutover and do not remove v2 state manually.
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
 | **Obsidian** | Optional Markdown viewer only: open the vault directly. No Obsidian UI is required. |
 
+The same managed hooks also put the code graph where agents search (issue #24):
+a `Grep`/`Glob` in Claude Code, or an `rg`/`grep` in Codex, whose pattern names a
+symbol of an indexed repository gets a three-line hint naming its definitions and
+`mcp__llm-wiki__get_architecture`; a subagent start and a session start get one
+line naming the code tools. The OpenCode plugin appends the hint to its
+`grep`/`glob` output. Nothing is added for unindexed checkouts, literals or file
+globs, and a hook never blocks or fails a tool call. See
+[Code Navigation](CODE-NAVIGATION.md#graph-context-where-the-agent-searches-issue-24-section-c).
+
 Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
 Malformed configuration, ownership conflicts, or drift fail closed instead of being
 overwritten. `doctor` reports active, absent, or conflicting structural ownership and
@@ -172,7 +181,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |
 | `find_dead_code` | Queries the active Evidence Graph first and reports source generation, graph completeness, unresolved count, and fallback. `live=true` explicitly bypasses the store. |
-| `get_architecture` | Keeps structural `summary`, `symbol`, `callers`, `callees`, `dependencies`, `path`, `community`, and `impact`; precise Python `definition`, `references`, `implementations`, `type`, `diagnostics`, and positioned call modes use the owned Pyright session. |
+| `get_architecture` | Keeps structural `summary`, `symbol`, `callers`, `callees`, `dependencies`, `path`, `community`, and `impact`; adds `search` (ranked qualified names with degree), `snippet` by `owner.name` with exact stored line ranges, `coverage` with the parse ranges the extractor could not read, `depth` on `callers`/`callees`, and `affected_symbols` on `impact` (#24, B); precise Python `definition`, `references`, `implementations`, `type`, `diagnostics`, and positioned call modes use the owned Pyright session. |
 | `doctor` | Exposes nine closed actions: `status`, queue inspect/cancel/redrive/dead-list, transaction recover/undo, archive status, and claim status. Mutation actions require `repair=true`. |
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
@@ -180,6 +189,27 @@ output is used when the installed SDK supports it. The envelope still derives it
 top-level index timestamp from legacy `cache/index.sqlite`; per-component generation
 freshness in that envelope is **evidence pending**. Treat row-level generation and
 fallback fields as the current retrieval truth.
+
+## Repository indexes follow your worktrees
+
+Index a repository once (`get_architecture mode=index`, or
+`uv run python scripts/repository_index.py index <checkout>`). From then on its
+other worktrees are indexed without you: the nightly pass indexes up to eight
+new ones, and the first `get_architecture` answer in a new worktree starts its
+index in the background. The nightly pass also retires what nobody reads: every
+generation of a worktree whose directory is gone, and all but the newest two of
+a live one (`repository_index.py retire --dry-run` shows the plan).
+
+To keep a one-off branch or worktree out of the index, mark it in Git:
+
+```bash
+git config branch.my-one-off.llmwikiIndex false   # one branch
+git config llmwiki.index false                    # the whole repository
+```
+
+A marked checkout is refused by name and its existing generations are retired on
+the next nightly pass. Details:
+[Code Navigation](CODE-NAVIGATION.md#worktrees-and-retention-issue-24-section-d1).
 
 ## Read-only Python code navigation
 
@@ -266,7 +296,8 @@ NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   Drain deferred queue → consolidate yesterday's session records into the daily
   log → compile all pending → structural lint → add owed backlinks → rebuild the
   FTS index → refresh the immutable evidence generation (and its vectors) →
-  compact retrieval telemetry → prune old reports → fast-forward the checkout
+  fetch any missing pinned model weights → compact retrieval telemetry →
+  prune old reports → fast-forward the checkout
 
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
@@ -291,15 +322,16 @@ in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
 
 ```bash
 uv run python scripts/search_memory.py "how do we handle auth?"
-uv run python scripts/search_memory.py "database performance" --semantic
+uv run python scripts/search_memory.py "database performance" --no-semantic
 uv run python scripts/search_memory.py --project my-app "decisions"
 uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-Plain `search_memory.py` always runs BM25. `--semantic` enables vectors when the
-optional model is available; graph-neighbor fusion applies only when graph evidence
-is available. If optional signals are unavailable, search returns the BM25 result
-instead of claiming triple-fusion.
+`search_memory.py` reads the active evidence generation first and falls back
+to the legacy BM25 index. Vectors are on by default when the optional model is
+available; `--no-semantic` turns them off. Graph-neighbor fusion applies only
+when graph evidence is available. If optional signals are unavailable, search
+returns the lexical result instead of claiming triple-fusion.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 
@@ -307,6 +339,35 @@ The memory index holds `knowledge/` only. The product's own `scripts/`,
 `docs/` and `tests/` are not in it (they once were 92 % of an installed
 vault's chunks and outranked the user's pages). Code questions go through
 `get_architecture`, which reads a directory or a repository index.
+
+```bash
+uv run python scripts/repository_index.py index /path/to/repo     # build and register
+uv run python scripts/repository_index.py detect /path/to/repo    # what changed since
+uv run python scripts/repository_index.py refresh /path/to/repo   # rebuild only if stale
+uv run python scripts/repository_index.py refresh-all             # every registered repo
+uv run python scripts/repository_index.py list
+uv run python scripts/code_graph.py /path/to/repo --callers NAME  # from the index; --live re-parses
+```
+
+Over MCP, `get_architecture` answers the code questions an agent asks in the
+loop, all from the repository's generation (see `docs/CODE-NAVIGATION.md`):
+
+| question | call |
+|---|---|
+| which symbols are named like this, ranked | `mode=search`, `symbol="find_*"`, optional `path="scripts/"`, `limit` |
+| the exact source of one symbol | `mode=snippet`, `symbol="scripts.code_graph.find_callers"` |
+| is this file indexed, fresh, and parsed | `mode=coverage`, `path="scripts/code_graph.py"` |
+| who calls this, up to N hops | `mode=callers`, `symbol=NAME`, `depth=3` (also `callees`) |
+| what does my uncommitted diff touch | `mode=impact` — `changed_symbols` and `affected_symbols` |
+
+Structural code answers are read from a reader that is validated once per
+MCP process and reused (warm `callers` on a 1 000-file repository: ~40 ms),
+and each answer carries a `freshness` block naming the commit its generation
+was built from and the commit the checkout is at. When they differ the
+bounded incremental refresh starts in the background; the answer you get is
+from the generation the vault has, and the next answer sees the new one. The
+nightly pass refreshes every registered repository. See
+`docs/CODE-NAVIGATION.md`.
 
 ### Compiling knowledge manually
 
@@ -381,8 +442,8 @@ pending**. Use `doctor` for overall runtime health and inspect MCP retrieval row
 Migration is additive and non-destructive:
 
 1. Back up or commit authoritative Markdown and Git state as you normally would.
-2. Leave `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
-   `cache/lancedb/` in place.
+2. Leave `cache/index.sqlite`, `cache/vectors.npy` and `cache/vectors_meta.json`
+   in place.
 3. Build and validate a generation through the integrated builder/catalog API.
 4. Activate only with the expected active generation ID; a CAS mismatch means retry
    from a fresh snapshot, not overwrite.
@@ -559,7 +620,23 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers` with `intfloat/multilingual-e5-small` — 384 dimensions over 100 languages, so a question in one language reaches a page written in another. The English-only model it replaces scored every candidate alike on non-English questions.
+This installs `sentence-transformers`; the encoder is `intfloat/multilingual-e5-small`
+— 384 dimensions over 100 languages, so a question in one language reaches a page
+written in another. The English-only model it replaces scored every candidate alike
+on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
+reranker below) are fetched by one explicit, verified step that the installer and
+the nightly pass run for you and that you can run by hand:
+
+```bash
+uv run python scripts/install_models.py          # fetch what is missing, verify
+uv run python scripts/install_models.py --check  # report only
+```
+
+Each model is fetched at its pinned commit, only the files the loaders read,
+and `model.safetensors` is checked against the size and SHA-256 recorded beside
+the revision; a file that does not match is removed and the command fails.
+Present files are never fetched again. Until the weights are there, `doctor`
+reports `models: degraded` with that command and search stays lexical.
 A first query in a fresh process loads the model: measured on one host, about
 11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
 it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
@@ -569,6 +646,28 @@ are built by a generation refresh — the nightly maintenance pass, or
 `uv run python scripts/doctor.py --repair` — not at install and not when a
 page changes. Until a refresh has run with the model installed, `doctor`
 reports `vector_state: absent` and search stays lexical. (Issue #29.)
+
+## Reranker (on by default)
+
+After the lexical and dense legs are fused, a multilingual cross-encoder,
+`BAAI/bge-reranker-v2-m3` at a pinned revision, reads the question together
+with each of the ten best candidates and reorders them. It is on by default
+since 2026-09-10: on the cross-lingual corpus it takes a Russian question over
+English pages from MRR 0.60 to 0.98, where swapping the embedding model gained
+at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`).
+
+- The MCP server loads it once at start-up (about 2 s, quantised to int8 on the
+  CPU) and keeps it resident; a question then pays only the scoring, about 2 s
+  for ten passages on four quiet cores and up to 3.5 s on loaded ones. The
+  trace reports `reranker_applied`, `reranker_depth` and `reranker_duration_ms`.
+- The CLI reranks only when asked with `--rerank`: a one-shot process cannot
+  amortise the load.
+- Weights are read from the local Hugging Face cache only, like the embedding
+  model's; `scripts/install_models.py` puts them there (see above). Without
+  them the trace says `reranker_unavailable` and the fused order stands.
+- `LLMWIKI_RERANKER_MODEL=off` switches it off; `LLMWIKI_RERANKER_MODEL` plus a
+  40-hex `LLMWIKI_RERANKER_REVISION` name another model.
+  `LLMWIKI_RERANKER_PRECISION=fp32` restores full precision at twice the time.
 
 ---
 
@@ -586,8 +685,11 @@ reports `vector_state: absent` and search stays lexical. (Issue #29.)
 - Check `run/state.json` for `compiled_daily_hashes` and `last_compile_status`
 
 ### "Search returns nothing"
-- Rebuild the index: `uv run python scripts/search_memory.py --rebuild`
-- Check `cache/index.sqlite` exists and is non-empty
+- See what the search reads: `uv run python scripts/search_memory.py --status`
+  (the active generation, then the legacy index)
+- Check health and rebuild the generation: `uv run python scripts/doctor.py`,
+  then `uv run python scripts/doctor.py --repair`
+- `search_memory.py --rebuild` rebuilds only the legacy `cache/index.sqlite`
 
 ### "Hook errors"
 - Check `logs/hook-errors.log` for captured exceptions

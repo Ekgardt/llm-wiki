@@ -124,13 +124,29 @@ def test_a_session_with_nothing_in_it_writes_nothing(tmp_path: Path, monkeypatch
     assert calls == []
 
 
-def test_a_failed_write_never_breaks_capture(tmp_path: Path, monkeypatch) -> None:
+def test_a_failed_write_never_breaks_capture_and_is_written_down(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import capture_diagnostics
+
     def explode(*_args, **_kwargs):
         raise RuntimeError("transaction refused")
 
+    recorded: list[tuple] = []
     monkeypatch.setattr("markdown_transaction.mutate_knowledge", explode)
+    monkeypatch.setattr(
+        capture_diagnostics,
+        "record_capture_failure",
+        lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
+    )
 
-    assert session_evidence.write_session_evidence(tmp_path, {"session": "s"}, TRANSCRIPT) is None
+    path = session_evidence.write_session_evidence(tmp_path, {"session": "s"}, TRANSCRIPT)
+
+    assert path is None
+    assert [(kind, reason, fields["session_id"]) for kind, reason, fields in recorded] == [
+        ("session_evidence", "RuntimeError: transaction refused", "s")
+    ]
+    assert isinstance(recorded[0][2]["error"], RuntimeError)
 
 
 def test_intent_evidence_text_is_recovered() -> None:

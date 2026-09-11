@@ -20,6 +20,8 @@ import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 # How long a coordination wait may take on the slowest supported machine: the
 # hosted four-vCPU Windows and macOS runners, where opening a SQLite database
 # and finishing one transaction has been measured well past two seconds under
@@ -898,8 +900,8 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
         assert all(owner[index] for index in (0, 2, 3))
         assert owner[4] >= 1
         release.set()
-        one.result(timeout=5)
-        two.result(timeout=5)
+        one.result(timeout=SHORT_TIMEOUT)
+        two.result(timeout=SHORT_TIMEOUT)
     assert order == ["first", "second"]
 
 

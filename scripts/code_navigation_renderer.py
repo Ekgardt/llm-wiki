@@ -50,8 +50,7 @@ def _coerce_offset(offset: int | None) -> int:
         raise TypeError("offset must be an integer")
     if offset < 0:
         raise ValueError("offset must be non-negative")
-    if offset > _MAX_JSON_SAFE_INTEGER:
-        raise ValueError("offset must be a JSON-safe integer")
+    _require_json_safe_integer(offset, "offset")
     return offset
 
 
@@ -287,128 +286,152 @@ def render_navigation(
         raise TypeError("result must be a NavigationResult")
     if not isinstance(include_source, bool):
         raise TypeError("include_source must be a boolean")
-    total = result.total
-    effective_offset = _coerce_offset(result.offset if offset is None else offset)
-    effective_limit = _coerce_limit(result.limit if limit is None else limit)
-    diagnostic_mode = result.requested_capability is Capability.DIAGNOSTICS
-    if (diagnostic_mode and result.locations) or (
-        not diagnostic_mode and result.diagnostics
-    ):
+    page = _NavigationPage(
+        result,
+        _coerce_offset(result.offset if offset is None else offset),
+        _coerce_limit(result.limit if limit is None else limit),
+    )
+    return page.fitted()
+
+
+def _require_fact_shape(result: NavigationResult, diagnostic_mode: bool) -> None:
+    stray = result.locations if diagnostic_mode else result.diagnostics
+    if stray:
         raise ValueError("navigation result fact shape is invalid")
-    _validate_result_integers(result)
+
+
+def _require_total(result: NavigationResult, fact_count: int) -> None:
+    if result.total != fact_count:
+        raise ValueError("result total must equal primary fact count")
+
+
+def _sorted_facts(
+    result: NavigationResult, diagnostic_mode: bool
+) -> tuple[tuple[NavigationDiagnostic, ...], tuple[NavigationLocation, ...], int]:
+    """(diagnostics, locations, primary fact count), the primary facts in render order."""
     if diagnostic_mode:
-        fact_count = len(result.diagnostics)
-        if total != fact_count:
-            raise ValueError("result total must equal primary fact count")
-        diagnostics = tuple(sorted(result.diagnostics, key=_diagnostic_sort_key))
-        locations: tuple[NavigationLocation, ...] = ()
-    else:
-        fact_count = len(result.locations)
-        if total != fact_count:
-            raise ValueError("result total must equal primary fact count")
-        locations = tuple(sorted(result.locations, key=_location_sort_key))
-        diagnostics: tuple[NavigationDiagnostic, ...] = ()
-    base_warnings = tuple(result.warnings)
-    hover, hover_truncated, hover_original_bytes = _bound_hover(result.hover)
-    if hover_truncated:
-        base_warnings = (
-            *base_warnings,
-            "hover_truncated",
-            f"hover_original_bytes:{hover_original_bytes}",
-        )
-    available = max(0, fact_count - effective_offset)
-    requested_window = min(effective_limit, available)
+        _require_total(result, len(result.diagnostics))
+        return tuple(sorted(result.diagnostics, key=_diagnostic_sort_key)), (), len(result.diagnostics)
+    _require_total(result, len(result.locations))
+    return (), tuple(sorted(result.locations, key=_location_sort_key)), len(result.locations)
+
+
+def _base_warnings(result: NavigationResult, hover_truncated: bool, hover_original_bytes: int) -> tuple[str, ...]:
+    base = tuple(result.warnings)
+    if not hover_truncated:
+        return base
+    return (*base, "hover_truncated", f"hover_original_bytes:{hover_original_bytes}")
+
+
+def _token_warnings(token_reduced: bool, fact_omitted: bool) -> tuple[str, ...]:
+    warnings: tuple[str, ...] = ("output_token_bound",) if token_reduced else ()
+    if fact_omitted:
+        warnings = (*warnings, "fact_omitted_token_bound")
+    return warnings
+
+
+def _fits(payload: dict[str, object]) -> bool:
+    return estimate_tokens(_encode_payload(payload)) <= MAX_ESTIMATED_TOKENS
+
+
+def _within_token_bound(payload: dict[str, object]) -> dict[str, object]:
+    if not _fits(payload):
+        raise ValueError("navigation metadata exceeds token bound")
+    return payload
+
+
+class _NavigationPage:
+    """One result's facts, rendered at the widest window that fits the token bound."""
+
+    def __init__(self, result: NavigationResult, offset: int, limit: int) -> None:
+        self.result = result
+        self.total = result.total
+        self.offset = offset
+        self.limit = limit
+        self.diagnostic_mode = result.requested_capability is Capability.DIAGNOSTICS
+        _require_fact_shape(result, self.diagnostic_mode)
+        _validate_result_integers(result)
+        self.diagnostics, self.locations, fact_count = _sorted_facts(result, self.diagnostic_mode)
+        self.hover, self.hover_truncated, hover_original_bytes = _bound_hover(result.hover)
+        self.base_warnings = _base_warnings(result, self.hover_truncated, hover_original_bytes)
+        self.requested_window = min(limit, max(0, fact_count - offset))
+
+    def fitted(self) -> dict[str, object]:
+        if self.requested_window == 0:
+            return _within_token_bound(self.trial(0, token_reduced=False))
+        _within_token_bound(self.trial(0, token_reduced=True))
+        full_payload = self.trial(self.requested_window, token_reduced=False)
+        if _fits(full_payload):
+            return full_payload
+        return self._largest_fitting_page()
+
+    def _largest_fitting_page(self) -> dict[str, object]:
+        best_payload = self._widest_fitting_window(1, self.requested_window - 1)
+        if best_payload is not None:
+            return best_payload
+        return _within_token_bound(self.trial(0, token_reduced=True, fact_omitted=True))
+
+    def _widest_fitting_window(self, low: int, high: int) -> dict[str, object] | None:
+        """Binary search over reduced windows; the widest payload that fits, if any."""
+        best_payload: dict[str, object] | None = None
+        while low <= high:
+            window = (low + high) // 2
+            payload = self.trial(window, token_reduced=True)
+            if _fits(payload):
+                best_payload = payload
+                low = window + 1
+            else:
+                high = window - 1
+        return best_payload
+
+    def _page_views(self, window: int) -> tuple[list[dict[str, object]], list[dict[str, object]], tuple]:
+        end = self.offset + window
+        if self.diagnostic_mode:
+            diagnostic_views, clipping_warnings = _build_diagnostics(self.diagnostics[self.offset : end])
+            return [], diagnostic_views, clipping_warnings
+        groups, clipping_warnings = _build_groups(self.locations[self.offset : end])
+        return groups, [], clipping_warnings
+
+    def _truncated(self, omitted: int, token_reduced: bool, clipping_warnings) -> bool:
+        return omitted > 0 or token_reduced or self.hover_truncated or bool(clipping_warnings)
 
     def trial(
+        self,
         window: int,
         *,
         token_reduced: bool,
         fact_omitted: bool = False,
     ) -> dict[str, object]:
-        if diagnostic_mode:
-            diagnostic_page = diagnostics[effective_offset : effective_offset + window]
-            diagnostic_views, clipping_warnings = _build_diagnostics(diagnostic_page)
-            groups: list[dict[str, object]] = []
-        else:
-            location_page = locations[effective_offset : effective_offset + window]
-            groups, clipping_warnings = _build_groups(location_page)
-            diagnostic_views = []
+        groups, diagnostic_views, clipping_warnings = self._page_views(window)
         consumed = 1 if fact_omitted else window
-        token_warnings: tuple[str, ...] = ()
-        if token_reduced:
-            token_warnings = ("output_token_bound",)
-        if fact_omitted:
-            token_warnings = (*token_warnings, "fact_omitted_token_bound")
         rendered_warnings = _warnings(
-            base_warnings,
+            self.base_warnings,
             clipping_warnings,
-            token_warnings,
+            _token_warnings(token_reduced, fact_omitted),
         )
-        token_omitted_count = 1 if fact_omitted else 0
-        omitted = token_omitted_count + max(
-            0,
-            total - (effective_offset + consumed),
-        )
-        truncated = (
-            omitted > 0
-            or token_reduced
-            or hover_truncated
-            or bool(clipping_warnings)
-        )
-        partial = (
-            omitted > 0
-            or token_reduced
-            or hover_truncated
-            or bool(clipping_warnings)
-        )
-        payload = _assemble(
-            result,
-            status=_render_status(result.status, partial=partial),
+        omitted = int(fact_omitted) + max(0, self.total - (self.offset + consumed))
+        truncated = self._truncated(omitted, token_reduced, clipping_warnings)
+        return _assemble(
+            self.result,
+            status=_render_status(self.result.status, partial=truncated),
             groups=groups,
             diagnostics=diagnostic_views,
-            offset=effective_offset,
-            limit=effective_limit,
+            offset=self.offset,
+            limit=self.limit,
             consumed=consumed,
-            total=total,
-            hover=hover,
+            total=self.total,
+            hover=self.hover,
             warnings=rendered_warnings,
             truncated=truncated,
             omitted=omitted,
         )
-        return payload
 
-    if requested_window == 0:
-        payload = trial(0, token_reduced=False)
-        if estimate_tokens(_encode_payload(payload)) > MAX_ESTIMATED_TOKENS:
-            raise ValueError("navigation metadata exceeds token bound")
-        return payload
 
-    zero_fact_payload = trial(0, token_reduced=True)
-    if estimate_tokens(_encode_payload(zero_fact_payload)) > MAX_ESTIMATED_TOKENS:
-        raise ValueError("navigation metadata exceeds token bound")
-
-    full_payload = trial(requested_window, token_reduced=False)
-    if estimate_tokens(_encode_payload(full_payload)) <= MAX_ESTIMATED_TOKENS:
-        return full_payload
-
-    low = 1
-    high = requested_window - 1
-    best_payload: dict[str, object] | None = None
-    while low <= high:
-        window = (low + high) // 2
-        payload = trial(window, token_reduced=True)
-        if estimate_tokens(_encode_payload(payload)) <= MAX_ESTIMATED_TOKENS:
-            best_payload = payload
-            low = window + 1
-        else:
-            high = window - 1
-    if best_payload is not None:
-        return best_payload
-
-    omitted_payload = trial(0, token_reduced=True, fact_omitted=True)
-    if estimate_tokens(_encode_payload(omitted_payload)) > MAX_ESTIMATED_TOKENS:
-        raise ValueError("navigation metadata exceeds token bound")
-    return omitted_payload
+def _next_offset(offset: int, consumed: int, total: int) -> int | None:
+    end = offset + consumed
+    if consumed > 0 and end < total:
+        return end
+    return None
 
 
 def _assemble(
@@ -426,11 +449,7 @@ def _assemble(
     truncated: bool,
     omitted: int,
 ) -> dict[str, object]:
-    next_offset = (
-        offset + consumed
-        if consumed > 0 and (offset + consumed) < total
-        else None
-    )
+    next_offset = _next_offset(offset, consumed, total)
     ordered: dict[str, object] = {}
     ordered["status"] = status.value
     ordered["freshness"] = {

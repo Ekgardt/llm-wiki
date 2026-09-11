@@ -5,11 +5,12 @@ import json
 import os
 import sqlite3
 import threading
-import time
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
 
 
 def sha(value: bytes) -> str:
@@ -329,7 +330,7 @@ def test_claim_index_excludes_ambiguous_active_evidence_with_stable_diagnostic(
 def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
     pipeline, tmp_path: Path
 ) -> None:
-    from claims import ClaimIndex
+    from claims import MAX_CLAIM_PAGE_BYTES, ClaimIndex
 
     index = ClaimIndex(tmp_path / "state")
     outside = tmp_path / "outside.md"
@@ -342,7 +343,7 @@ def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
         index.candidates(None, limit=51)
     huge = tmp_path / "knowledge/notes/huge.md"
     huge.parent.mkdir(parents=True)
-    huge.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    huge.write_bytes(b"x" * (MAX_CLAIM_PAGE_BYTES + 1))
     with pytest.raises(ValueError, match="exceeds"):
         index.rebuild(lambda: [huge])
     if hasattr(os, "symlink"):
@@ -379,20 +380,20 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
 
     def slow_read(page: Path):
         entered.set()
-        assert release.wait(5)
+        assert release.wait(PAUSE_TIMEOUT)
         return original(page)
 
     stale._page_bytes = slow_read
     stale_thread = threading.Thread(target=stale.rebuild, args=(lambda: [old_page],))
     fresh_thread = threading.Thread(target=fresh.rebuild, args=(lambda: [new_page],))
     stale_thread.start()
-    assert entered.wait(5)
+    assert entered.wait(LONG_TIMEOUT)
     fresh_thread.start()
-    time.sleep(0.2)
-    assert fresh_thread.is_alive()
+    # No "still blocked" sleep: the fresh candidates below survive only if
+    # the stale rebuild wrote first (audit M9).
     release.set()
-    stale_thread.join(5)
-    fresh_thread.join(5)
+    stale_thread.join(LONG_TIMEOUT)
+    fresh_thread.join(LONG_TIMEOUT)
     assert not stale_thread.is_alive() and not fresh_thread.is_alive()
     assert [item.page for item in fresh.candidates(normalized)] == [
         "knowledge/notes/new.md"
@@ -430,13 +431,12 @@ def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
     with _exclusive_file_lock(index.lock_path):
         worker = threading.Thread(target=rebuild)
         worker.start()
-        time.sleep(0.2)
-        assert worker.is_alive()
-        assert not provider_called.is_set()
+        # No "still blocked" sleep: the provider sees new.md below only if
+        # it ran after this write (audit M9).
         newer = json.loads(json.dumps(normalized.record))
         newer["id"] = "claim:newer:0"
         new_page.write_bytes(ledger_page(newer))
-    worker.join(5)
+    worker.join(LONG_TIMEOUT)
 
     assert not worker.is_alive()
     assert errors == []
@@ -463,7 +463,7 @@ def test_claim_rebuild_lock_timeout_does_not_unlock_the_owner(tmp_path: Path) ->
     with _exclusive_file_lock(lock):
         contender = threading.Thread(target=contend)
         contender.start()
-        contender.join(2)
+        contender.join(LONG_TIMEOUT)
         assert not contender.is_alive()
         assert len(failures) == 1
         assert isinstance(failures[0], TimeoutError)
@@ -698,5 +698,5 @@ def test_lint_candidate_location_and_project_claim_page_selection(
         for item in lint_memory.check_claim_schemas([misplaced])
     )
     selected = lint_memory._project_claim_pages(tmp_path / "knowledge/projects")
-    assert [item.name for item in selected] == ["context.md", "journal.md", "state.md"]
-    assert len(lint_memory.check_claim_schemas(selected)) == 3
+    assert [item.name for item in selected] == ["context.md", "state.md"]
+    assert len(lint_memory.check_claim_schemas(selected)) == 2

@@ -30,6 +30,8 @@ from project_journal import (
 )
 from reliable_memory import SchemaValidationError, canonical_json_bytes, validate_schema
 
+from tests.slow_machine import LONG_TIMEOUT
+
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
@@ -1665,11 +1667,11 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
         with pytest.raises(ProjectPendingPriorError):
             newer_store.checkpoint("demo", second_event, "agent-b")
         newer_blocked.set()
-        assert head_committed.wait(120)
+        assert head_committed.wait(LONG_TIMEOUT)
         return newer_store.checkpoint("demo", second_event, "agent-b")
 
     def replay_head():
-        assert newer_blocked.wait(120)
+        assert newer_blocked.wait(LONG_TIMEOUT)
         receipt = ProjectStore(vault, state_root).checkpoint(
             "demo", first_event, "agent-c"
         )
@@ -1679,7 +1681,7 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
     with ThreadPoolExecutor(max_workers=2) as pool:
         newer = pool.submit(replay_newer)
         head = pool.submit(replay_head)
-        receipts = [head.result(timeout=180), newer.result(timeout=180)]
+        receipts = [head.result(timeout=LONG_TIMEOUT), newer.result(timeout=LONG_TIMEOUT)]
 
     assert [receipt.sequence for receipt in receipts] == [1, 2]
     assert [record["occurrence_id"] for record in journal_records(ProjectStore(vault, state_root))] == [
@@ -1823,7 +1825,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
 
     def pause_first(reservation, lease):
         first_reserved.set()
-        assert release_first.wait(60)
+        assert release_first.wait(LONG_TIMEOUT)
         return project(reservation, lease)
 
     monkeypatch.setattr(first_store, "_project_reserved", pause_first)
@@ -1834,7 +1836,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
             checkpoint_event("evt-first", "same-owner:first"),
             "agent-a",
         )
-        assert first_reserved.wait(60)
+        assert first_reserved.wait(LONG_TIMEOUT)
         with pytest.raises(ProjectLeaseBusy):
             second_store.checkpoint(
                 "demo",
@@ -1842,7 +1844,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
                 "agent-a",
             )
         release_first.set()
-        first_receipt = first.result(timeout=60)
+        first_receipt = first.result(timeout=LONG_TIMEOUT)
 
     second_receipt = second_store.checkpoint(
         "demo",

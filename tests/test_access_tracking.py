@@ -619,3 +619,27 @@ class TestFlushFrontmatter:
 
         assert access_tracking.flush_all() == 0
         assert page.read_bytes() == before
+
+
+class TestAFailedFlushIsNamed:
+    """Audit H2: a page that cannot be exported is named, not skipped in silence."""
+
+    def test_the_page_and_the_reason_are_reported(self, tmp_path, monkeypatch, capsys):
+        import access_tracking
+        import retrieval_telemetry
+
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
+        (notes / "large.md").write_bytes(b"x" * 33)
+        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(access_tracking, "MAX_ACCESS_PAGE_BYTES", 32)
+        database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        access_tracking._FLUSH_FAILURES.clear()
+
+        assert access_tracking.flush_access_to_frontmatter("large") == 0
+
+        failures = access_tracking.last_flush_failures()
+        assert [failure["slug"] for failure in failures] == ["large"]
+        assert failures[0]["error"].startswith("ValueError")
+        assert "access_tracking: large: not exported (ValueError" in capsys.readouterr().err

@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+import maybe_compile  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
@@ -130,7 +131,7 @@ MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
 MAX_RELATED = 64
-MAX_AFTER_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024
@@ -622,7 +623,7 @@ def pack_compile_batches(
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
 ) -> tuple[CompileBatch, ...]:
-    budget = ContextBudget(model, 32_768, 4_000, 1_024)
+    budget = _compile_budget(model)
     measure = _batch_measure(inputs, model, token_adapters)
     daily_paths = {item.logical_path for item in inputs.dailies}
     optional_sources = tuple(
@@ -1371,7 +1372,7 @@ def _compile_prompt_fits(
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None,
 ) -> bool:
-    budget = ContextBudget(model, 32_768, 4_000, 1_024)
+    budget = _compile_budget(model)
     count = count_tokens(
         f"{system}\n{canonical_json_bytes(schema).decode()}\n{prompt}",
         model=model,
@@ -3045,21 +3046,30 @@ class _ApplyPlan:
         """A quarantined batch publishes candidates only, and no pages."""
         changes: list[MarkdownChange] = []
         paths: list[str] = []
+        present: list[str] = []
         for pipeline, assessments in self.claim_groups:
-            policy_changes, _preconditions, candidate_paths = pipeline.plan_changes(
-                _forced_quarantine(assessments)
+            policy_changes, _preconditions, candidate_paths, present_paths = (
+                pipeline.plan_candidate_changes(_forced_quarantine(assessments))
             )
             changes.extend(policy_changes)
             paths.extend(candidate_paths)
+            present.extend(present_paths)
         if not changes:
-            raise ValueError("quarantined compile batch produced no candidates")
+            return self._already_quarantined(present)
         self.claim_groups[0][0].ensure_candidate_parent()
         return self._commit_quarantine_changes(changes, paths)
 
-    def _commit_quarantine_changes(
-        self, changes: list[MarkdownChange], paths: list[str]
-    ) -> CompileApplyResult:
-        operation_id = "compile-quarantine:" + sha256_bytes(
+    def _already_quarantined(self, present: list[str]) -> CompileApplyResult:
+        """Nothing new to write: this attempt's own commit, or the candidates of an earlier one."""
+        if not present:
+            raise ValueError("quarantined compile batch produced no candidates")
+        operation_id = self._quarantine_operation_id(present)
+        if self.coordinator.committed_attempt(operation_id) is None:
+            raise CandidatesAlreadyQuarantined(present)
+        return self._quarantine_result(operation_id, present)
+
+    def _quarantine_operation_id(self, paths: list[str]) -> str:
+        return "compile-quarantine:" + sha256_bytes(
             canonical_json_bytes(
                 {
                     "action_key": self.action_key,
@@ -3068,6 +3078,23 @@ class _ApplyPlan:
                 }
             )
         )
+
+    def _quarantine_result(self, operation_id: str, paths: list[str]) -> CompileApplyResult:
+        committed, sequence = _transaction_authority(self.coordinator, operation_id)
+        return CompileApplyResult(
+            committed.id,
+            operation_id,
+            committed.state,
+            tuple(sorted(paths)),
+            sequence,
+            committed.updated_at,
+            self.action_key,
+        )
+
+    def _commit_quarantine_changes(
+        self, changes: list[MarkdownChange], paths: list[str]
+    ) -> CompileApplyResult:
+        operation_id = self._quarantine_operation_id(paths)
         transaction = self.coordinator.prepare(
             sorted(changes, key=lambda item: item.path),
             operation_id=operation_id,
@@ -3082,16 +3109,7 @@ class _ApplyPlan:
         self.coordinator.apply(
             transaction.id, deadline=self.deadline, cancelled=self.cancelled
         )
-        committed, sequence = _transaction_authority(self.coordinator, operation_id)
-        return CompileApplyResult(
-            committed.id,
-            operation_id,
-            committed.state,
-            tuple(sorted(paths)),
-            sequence,
-            committed.updated_at,
-            self.action_key,
-        )
+        return self._quarantine_result(operation_id, paths)
 
     # -- the pages themselves ------------------------------------------------
 
@@ -3431,6 +3449,14 @@ def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, s
     if len(ids) != 1 or len(keys) != 1:
         raise ValueError("compile receipts disagree about transaction authority")
     return ids.pop(), keys.pop()
+
+
+class CandidatesAlreadyQuarantined(Exception):
+    """Every candidate of a quarantined batch already awaits review; nothing new to write."""
+
+    def __init__(self, paths: Sequence[str]) -> None:
+        super().__init__(f"{len(paths)} candidate(s) already await review")
+        self.paths = tuple(paths)
 
 
 def _forced_quarantine(assessments: Sequence[object]) -> tuple[object, ...]:
@@ -3931,6 +3957,19 @@ def _mark_started(trigger: str) -> None:
     update_state(_mutate)
 
 
+# One compile budget: a 32k window, 4k reserved for the answer, 1k of slack.
+# Written once, read by batching and by the schema fit check (audit L6).
+COMPILE_CONTEXT_WINDOW_TOKENS = 32_768
+COMPILE_ANSWER_RESERVE_TOKENS = 4_000
+COMPILE_SLACK_TOKENS = 1_024
+
+
+def _compile_budget(model: str | None) -> ContextBudget:
+    return ContextBudget(
+        model, COMPILE_CONTEXT_WINDOW_TOKENS, COMPILE_ANSWER_RESERVE_TOKENS, COMPILE_SLACK_TOKENS
+    )
+
+
 def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:
     if status == "error":
         return "failed"
@@ -3958,10 +3997,8 @@ def _mark_finished(
             s.pop("last_compile_error", None)
 
     update_state(_mutate)
-    # Clear the maybe_compile lock so the next trigger knows we're done.
-    # Without this, the lock auto-expires after MAX_COMPILE_DURATION_S
-    # (30 min) — clearing it explicitly means the next session-end can
-    # spawn compile immediately instead of waiting for stale-lock timeout.
+    # Clear the maybe_compile lock so the next trigger knows we're done; a
+    # lock never expires by age, only with its process.
     _clear_compile_lock()
 
 
@@ -3996,11 +4033,12 @@ def _lock_lines(lock_file: Path) -> list[str] | None:
 
 
 def _lock_is_ours(lines: list[str]) -> bool:
+    """Unreadable, our own PID, or a dead owner; a placeholder is a spawner's."""
     pid = _lock_pid(lines)
     if pid is None or pid == os.getpid():
         return True
     if pid == 0:
-        return _own_placeholder(_lock_owner(lines))
+        return False
     return not _is_pid_alive(pid)
 
 
@@ -4010,20 +4048,6 @@ def _lock_pid(lines: list[str]) -> int | None:
         return int(lines[0].strip())
     except (IndexError, ValueError):
         return None
-
-
-def _lock_owner(lines: list[str]) -> str:
-    if len(lines) < 3:
-        return ""
-    return lines[2].strip()
-
-
-def _own_placeholder(owner: str) -> bool:
-    """Only a matching owner token proves we wrote the PID-0 placeholder."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import maybe_compile
-
-    return bool(owner) and owner == maybe_compile._current_owner
 
 
 def _unlink_quietly(path: Path) -> None:
@@ -4050,13 +4074,10 @@ def main() -> int:
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
     _mark_started(args.trigger)
-    lock_acquired = _acquire_compile_lock()
-    if lock_acquired is None:
-        print(
-            "compile_memory: another compile is running (lock held). Exiting.",
-            file=sys.stderr,
-        )
-        _mark_finished(args.trigger, "error", "lock held by another compile")
+    lock_token, refusal = _acquire_compile_lock()
+    if lock_token is None:
+        print(f"compile_memory: not running: {refusal}", file=sys.stderr)
+        _mark_finished(args.trigger, "error", refusal)
         return 1
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
@@ -4065,34 +4086,37 @@ def main() -> int:
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise
     finally:
-        _release_compile_lock(lock_acquired)
+        _release_compile_lock(lock_token)
 
 
-def _acquire_compile_lock() -> bool | None:
-    """Claim the compile lock for a direct run.
+SPAWNED_LOCK = "spawned"
 
-    True when this run owns the lock, False when the spawner owns it and must
-    keep it, None when another compile holds it. A lock failure never blocks a
-    direct run: the check is best effort.
+
+def _acquire_compile_lock() -> tuple[str | None, str]:
+    """Claim the compile lock for a direct run: (lock handle, reason).
+
+    The handle is the owner token when this run claimed the lock,
+    `SPAWNED_LOCK` when the spawner wrote it for us and keeps its lifecycle,
+    None when the run is refused — another compile holds the lock, or the
+    lock could not be taken or read. Doubt refuses: two compiles writing one
+    daily log is worse than one late compile. The token travels in the
+    return value, not in a module global (audit OPS-22).
+    Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import maybe_compile
-
         if maybe_compile._try_claim_lock():
-            return _claim_direct_lock(maybe_compile)
-        return False if _spawned_lock_is_ours(maybe_compile) else None
-    except Exception:
-        return False
+            return (_claim_direct_lock(), "claimed")
+        if _spawned_lock_is_ours(maybe_compile):
+            return (SPAWNED_LOCK, "spawned")
+        return (None, f"lock held by another compile ({maybe_compile._lock_state()[1]})")
+    except Exception as exc:  # noqa: BLE001 - any lock failure refuses the run
+        return (None, f"compile lock unavailable ({type(exc).__name__}: {exc})")
 
 
-def _claim_direct_lock(maybe_compile: object) -> bool:
-    """Replace the PID-0 placeholder with our PID and keep the owner token."""
+def _claim_direct_lock() -> str:
+    """Replace the PID-0 placeholder with our PID; the new token is the handle."""
     maybe_compile._write_lock(os.getpid())
-    lock = maybe_compile._read_lock()
-    if lock:
-        maybe_compile._current_owner = lock.get("owner")
-    return True
+    return maybe_compile.lock_owner_token() or ""
 
 
 def _spawned_lock_is_ours(maybe_compile: object) -> bool:
@@ -4100,16 +4124,14 @@ def _spawned_lock_is_ours(maybe_compile: object) -> bool:
     return bool(lock) and lock.get("pid") == os.getpid()
 
 
-def _release_compile_lock(lock_acquired: bool) -> None:
+def _release_compile_lock(lock_token: str | None) -> None:
     """maybe_compile owns the lifecycle of a lock it wrote for a spawned run."""
-    if not lock_acquired:
+    if not lock_token or lock_token == SPAWNED_LOCK:
         return
     try:
-        import maybe_compile
-
-        maybe_compile._clear_lock()
-    except Exception:
-        pass
+        maybe_compile._clear_lock(lock_token)
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        print(f"compile_memory: compile lock not released ({exc})", file=sys.stderr)
 
 
 def _run(
@@ -4244,6 +4266,8 @@ def _apply_batch(
         )
     except TimeoutError:
         raise
+    except CandidatesAlreadyQuarantined as already:
+        return _still_quarantined_outcome(already)
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         return BatchOutcome(
             _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
@@ -4251,6 +4275,16 @@ def _apply_batch(
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
     return _committed_outcome(result)
+
+
+def _still_quarantined_outcome(already: CandidatesAlreadyQuarantined) -> BatchOutcome:
+    """The same claims were quarantined by an earlier attempt: no commit, the daily stays pending."""
+    print(
+        f"compile_memory: batch still quarantined: {len(already.paths)} candidate(s) under "
+        "knowledge/inbox/claims/ already await review, no page published; the daily "
+        "stays pending until the candidate is reviewed."
+    )
+    return BatchOutcome(0, "quarantined", 0)
 
 
 def _transactional_owner(

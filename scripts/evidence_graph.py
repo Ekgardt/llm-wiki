@@ -27,6 +27,12 @@ GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 class GraphSchema(str, Enum):
     V2 = "evidence-graph/v2"
     V3 = "evidence-graph/v3"
+# Absurdity ceilings, not read bounds (audit M8, docs/research/2026-09-11-a-ceiling-says-which-kind-of-ceiling-it-is.md).
+# A source reaches this module already read, and the reader that bounded it
+# is the corpus snapshot (`corpus_snapshot.MAX_CORPUS_FILE_BYTES`, one page);
+# an artifact is read to the size its sealed manifest declares. These two
+# only refuse a mis-typed size, a field outside any sane range, or a build
+# that has run away, so a caller never has to reason about 16 GiB.
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
@@ -1286,7 +1292,7 @@ def _normalized_source(
     assert source_id is not None
     content = source_bytes[source_id]
     if not isinstance(content, bytes) or len(content) > MAX_SOURCE_BYTES:
-        raise TypeError("captured source content must be bounded bytes")
+        raise TypeError("captured source content must be bytes under the absurdity ceiling")
     size = _integer(record["size"], "source size")
     digest = _digest(record["sha256"], "source hash")
     if _source_bytes_mismatch(size, digest, content, deadline, cancelled, monotonic):
@@ -1929,7 +1935,7 @@ def _validated_stored_source(
     assert source_id is not None
     content = row["content"]
     if not isinstance(content, bytes) or len(content) > MAX_SOURCE_BYTES:
-        raise ValueError("captured source content must be bounded bytes")
+        raise ValueError("captured source content must be bytes under the absurdity ceiling")
     size = _integer(row["size"], "source size")
     digest = _digest(row["sha256"], "source hash")
     if _source_bytes_mismatch(size, digest, content, deadline, cancelled, monotonic):
@@ -3259,6 +3265,103 @@ def _require_direction(direction: str) -> None:
         raise ValueError("direction must be in or out")
 
 
+# Issue #24, section B2. A name search is a `LIKE` over the stored name, so the
+# caller's glob is translated and everything else is escaped: `_` is a wildcard
+# to LIKE and a plain character in every identifier this graph holds.
+MAX_SEARCH_PATTERN = 256
+MAX_SEARCH_MATCHES = 5_000
+_LIKE_ESCAPE = "\\"
+_GLOB_TO_LIKE = {"*": "%", "?": "_"}
+
+
+def _like_piece(character: str) -> str:
+    if character in _GLOB_TO_LIKE:
+        return _GLOB_TO_LIKE[character]
+    if character in ("%", "_", _LIKE_ESCAPE):
+        return _LIKE_ESCAPE + character
+    return character
+
+
+def _like_escaped(value: str) -> str:
+    """The text as a literal LIKE operand: no glob translation, only escaping."""
+    for character in (_LIKE_ESCAPE, "%", "_"):
+        value = value.replace(character, _LIKE_ESCAPE + character)
+    return value
+
+
+def _search_patterns(pattern: object) -> tuple[str, str, str]:
+    """(match, exact, prefix) LIKE forms of one search pattern.
+
+    Without a glob the pattern matches anywhere in the name; with one, the
+    caller placed the anchors. The exact form is compared with `=`, so it is
+    the raw text; the prefix form is the escaped text with a trailing `%`.
+    """
+    value = _text(pattern, "search pattern", maximum=MAX_SEARCH_PATTERN)
+    translated = "".join(_like_piece(character) for character in value)
+    if any(character in value for character in _GLOB_TO_LIKE):
+        return translated, value, translated
+    return f"%{translated}%", value, f"{translated}%"
+
+
+def _path_prefix_clause(
+    path_prefix: str | None, clauses: list[str], parameters: list[object]
+) -> None:
+    if path_prefix is None:
+        return
+    prefix = _text(path_prefix, "path prefix", maximum=4096)
+    clauses.append(f"json_extract(metadata_json, '$.path') LIKE ? ESCAPE '{_LIKE_ESCAPE}'")
+    parameters.append(f"{_like_escaped(prefix)}%")
+
+
+# Degrees are grouped over the matched set and joined back, not asked per row
+# in a correlated subquery: measured 2026-09-10 on a 9 061-node generation the
+# planner served the correlated form through `assertion_resolution`, a full
+# scan of every resolved edge per matched node - 8.7 s for 1 000 matches
+# against 72 ms for this form.
+_SEARCH_DEGREES = (
+    "ind AS (SELECT a.target_node_id AS node_id, COUNT(*) AS c FROM assertion a "
+    "JOIN m ON m.node_id = a.target_node_id WHERE a.resolution = 'resolved' "
+    "GROUP BY a.target_node_id), "
+    "outd AS (SELECT a.source_node_id AS node_id, COUNT(*) AS c FROM assertion a "
+    "JOIN m ON m.node_id = a.source_node_id WHERE a.resolution = 'resolved' "
+    "AND a.target_node_id IS NOT NULL GROUP BY a.source_node_id)"
+)
+_SEARCH_RANK = (
+    "CASE WHEN json_extract(metadata_json, '$.name') = ? THEN 0 "
+    f"WHEN json_extract(metadata_json, '$.name') LIKE ? ESCAPE '{_LIKE_ESCAPE}' THEN 1 "
+    "ELSE 2 END"
+)
+
+
+def _search_row(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "node_id": row["node_id"],
+        "kind": row["kind"],
+        "identity_scheme": row["identity_scheme"],
+        "identity_key": row["identity_key"],
+        "metadata": json.loads(row["metadata_json"]),
+        "rank": int(row["rank"]),
+        "in_degree": int(row["in_degree"]),
+        "out_degree": int(row["out_degree"]),
+    }
+
+
+# The first span of each page member, the form `node_locations` uses: grouped
+# over the page, never asked per node (NEW-125).
+_SYMBOL_LOCATIONS = (
+    "loc AS (SELECT o.node_id, MIN(o.line_start) AS line_start, s.relative_path "
+    "FROM occurrence o JOIN m ON m.node_id = o.node_id JOIN source s USING(source_id) "
+    "GROUP BY o.node_id)"
+)
+
+
+def _symbol_page_row(row: sqlite3.Row) -> dict[str, object]:
+    located = _search_row(row)
+    located["relative_path"] = row["relative_path"]
+    located["line"] = row["line_start"]
+    return located
+
+
 def _edge_filter(edge_values: tuple[str, ...], parameters: list[object]) -> str:
     if not edge_values:
         return ""
@@ -3443,6 +3546,11 @@ def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
 class EvidenceGraph:
     """Read-only facade over one catalog-selected immutable graph generation."""
 
+    # sqlite3 refuses to use one connection from another thread unless the
+    # caller promises to serialise access. The default stays strict; the
+    # reader cache opts in through `SharedEvidenceGraph` below.
+    _check_same_thread = True
+
     def __init__(
         self,
         database_path: Path,
@@ -3470,7 +3578,9 @@ class EvidenceGraph:
                 "Evidence Graph must remain inside an existing state root"
             ) from exc
         uri = f"{self.database_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
-        database = sqlite3.connect(uri, uri=True, timeout=0)
+        database = sqlite3.connect(
+            uri, uri=True, timeout=0, check_same_thread=type(self)._check_same_thread
+        )
         try:
             current = self.database_path.stat(follow_symlinks=False)
             if not os.path.samestat(expected, current):
@@ -4413,6 +4523,144 @@ ORDER BY depth, assertion_ids LIMIT ?
         )
         return tuple((str(row["relative_path"]), bytes(row["content"])) for row in rows)
 
+    def source_by_path(
+        self, relative_path: str, *, deadline: float | None = None
+    ) -> dict[str, object] | None:
+        """One stored source by repository-relative path, content included.
+
+        Issue #24, B1. Whether a path is indexed, whether it is fresh and how
+        many nodes it has must be one generation's word about one file, so
+        the answer reads the row the graph was built from rather than a
+        manifest that lives beside the vault's generations only.
+        """
+        rows = self._execute(
+            "SELECT source_id, relative_path, sha256, size, media_type, language, "
+            "git_oid, content FROM source WHERE relative_path = ? LIMIT ?",
+            (_text(relative_path, "relative_path", maximum=4096),),
+            max_rows=1,
+            deadline=deadline,
+        )
+        if not rows:
+            return None
+        item = dict(rows[0])
+        item["content"] = bytes(item["content"])
+        return item
+
+    def source_observations(
+        self, relative_path: str, *, deadline: float | None = None
+    ) -> dict[str, int]:
+        """Observation counts by reason for one stored source (issue #24, B1).
+
+        A `parse_error` row here means the extractor indexed nothing from the
+        file; `unsupported_semantics` means no grammar covered its language.
+        """
+        rows = self._execute(
+            "SELECT o.reason AS reason, COUNT(DISTINCT o.observation_id) AS total "
+            "FROM source s JOIN evidence e USING(source_id) "
+            "JOIN observation o ON o.observation_id = e.observation_id "
+            "WHERE s.relative_path = ? GROUP BY o.reason ORDER BY o.reason LIMIT ?",
+            (_text(relative_path, "relative_path", maximum=4096),),
+            max_rows=len(_OBSERVATION_REASONS),
+            deadline=deadline,
+        )
+        return {str(row["reason"]): int(row["total"]) for row in rows}
+
+    def search_nodes(
+        self,
+        pattern: str,
+        *,
+        kinds: Sequence[str] | None = None,
+        path_prefix: str | None = None,
+        max_rows: int = 50,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        """Ranked whole-graph name search with degree (issue #24, B2).
+
+        `*` and `?` are globs; without one the pattern matches anywhere in
+        the name. Ranking is exact name, then prefix, then substring, then
+        in-degree descending, then name. `total` is the exact match count
+        and `truncated` says whether the page was cut. A pattern matching
+        more than `MAX_SEARCH_MATCHES` names is refused by name rather than
+        ranked, because ranking costs one degree count per match.
+        """
+        match, exact, prefix = _search_patterns(pattern)
+        clauses = [f"json_extract(metadata_json, '$.name') LIKE ? ESCAPE '{_LIKE_ESCAPE}'"]
+        parameters: list[object] = [match]
+        _kind_clause(kinds, clauses, parameters)
+        _path_prefix_clause(path_prefix, clauses, parameters)
+        where = " WHERE " + " AND ".join(clauses)
+        total = self._search_total(where, parameters, deadline)
+        rows, truncated = self._execute_top(
+            "WITH m AS (SELECT node_id, kind, identity_scheme, identity_key, "
+            f"metadata_json FROM node{where}), {_SEARCH_DEGREES} "
+            "SELECT m.node_id, m.kind, m.identity_scheme, m.identity_key, "
+            f"m.metadata_json, {_SEARCH_RANK} AS rank, COALESCE(ind.c, 0) AS in_degree, "
+            "COALESCE(outd.c, 0) AS out_degree FROM m "
+            "LEFT JOIN ind USING(node_id) LEFT JOIN outd USING(node_id) "
+            "ORDER BY rank, in_degree DESC, json_extract(metadata_json, '$.name'), "
+            "m.identity_key, m.node_id LIMIT ?",
+            # Placeholders bind in textual order: the match filter sits in the
+            # first CTE, the rank tiers in the SELECT list after it.
+            [*parameters, exact, prefix],
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return {
+            "rows": [_search_row(row) for row in rows],
+            "total": total,
+            "truncated": truncated,
+        }
+
+    def symbol_page(
+        self,
+        kinds: Sequence[str],
+        *,
+        after_node_id: str = "",
+        max_rows: int = MAX_ROWS,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        """One keyset page of symbols with degree and first location (#24, C1).
+
+        The hook-time hint table is exported from here, once per build, so the
+        degree definition stays `_SEARCH_DEGREES` - the one `search_nodes`
+        ranks by - and the location is `node_locations`' first span. Pages are
+        ordered by `node_id` and continue after `after_node_id`.
+        """
+        clauses = ["node_id > ?"]
+        parameters: list[object] = [str(after_node_id)]
+        _kind_clause(kinds, clauses, parameters)
+        limit = _bound(max_rows, "max_rows", MAX_ROWS)
+        rows = self._fetch(
+            "WITH m AS (SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
+            f"FROM node WHERE {' AND '.join(clauses)} ORDER BY node_id LIMIT ?), "
+            f"{_SEARCH_DEGREES}, {_SYMBOL_LOCATIONS} "
+            "SELECT m.node_id, m.kind, m.identity_scheme, m.identity_key, m.metadata_json, "
+            "0 AS rank, COALESCE(ind.c, 0) AS in_degree, COALESCE(outd.c, 0) AS out_degree, "
+            "loc.line_start, loc.relative_path FROM m LEFT JOIN ind USING(node_id) "
+            "LEFT JOIN outd USING(node_id) LEFT JOIN loc USING(node_id) ORDER BY m.node_id",
+            parameters,
+            limit=limit,
+            deadline=deadline,
+        )
+        return {
+            "rows": [_symbol_page_row(row) for row in rows[:limit]],
+            "truncated": len(rows) > limit,
+        }
+
+    def _search_total(self, where: str, parameters: list[object], deadline) -> int:
+        rows = self._fetch(
+            f"SELECT COUNT(*) AS total FROM node{where} LIMIT ?",
+            parameters,
+            limit=1,
+            deadline=deadline,
+        )
+        total = int(rows[0]["total"])
+        if total > MAX_SEARCH_MATCHES:
+            raise ValueError(
+                f"search pattern matches {total} symbols, above the {MAX_SEARCH_MATCHES} ceiling; narrow it"
+            )
+        return total
+
     def unresolved_calls_naming(
         self,
         name: str,
@@ -4458,3 +4706,15 @@ ORDER BY depth, assertion_ids LIMIT ?
             "count": int(totals[0]["total"]),
             "truncated": truncated,
         }
+
+
+class SharedEvidenceGraph(EvidenceGraph):
+    """A reader `evidence_reader_cache` may lend to several worker threads.
+
+    The generation is immutable and every statement is a read; the cache's
+    lease lock hands the connection to one thread at a time, which is all
+    SQLite's multi-thread mode asks. Only a single-thread build refuses it,
+    and the cache checks `sqlite3.threadsafety` for that before opening one.
+    """
+
+    _check_same_thread = False

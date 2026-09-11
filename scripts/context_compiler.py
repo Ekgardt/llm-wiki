@@ -176,6 +176,10 @@ def _extract_aliases(frontmatter: Mapping[str, object]) -> tuple[str, ...]:
     aliases = frontmatter.get("aliases")
     if isinstance(aliases, list):
         return tuple(str(a).strip() for a in aliases if str(a).strip())
+    return _single_alias(aliases)
+
+
+def _single_alias(aliases: object) -> tuple[str, ...]:
     if isinstance(aliases, str) and aliases:
         return (aliases,)
     return ()
@@ -222,28 +226,29 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
     return tuple(parents)
 
 
+def _when(value: object, text: str) -> list[str]:
+    """[text] when the value is present, [] otherwise."""
+    if not value:
+        return []
+    return [text]
+
+
 def _metadata_prefix(parent: _Parent, heading_path: tuple[str, ...] = ()) -> str:
     """One-line deterministic prefix carrying every metadata signal."""
-    parts: list[str] = [parent.title]
     meta = parent.source.metadata
-    record = parent.source.record
-    if meta.project:
-        parts.append(f"project={meta.project}")
-    parts.append(f"type={meta.type}")
-    parts.append(f"status={meta.status}")
-    if meta.valid_from:
-        parts.append(f"valid_from={meta.valid_from}")
-    if meta.valid_to:
-        parts.append(f"valid_to={meta.valid_to}")
-    if meta.confidence:
-        parts.append(f"confidence={meta.confidence}")
-    if meta.authority:
-        parts.append(f"authority={meta.authority}")
-    if parent.aliases:
-        parts.append("aliases=" + ", ".join(parent.aliases))
-    if heading_path:
-        parts.append("heading=" + " > ".join(heading_path))
-    parts.append(f"sha256={record.sha256[:12]}")
+    parts = [
+        parent.title,
+        *_when(meta.project, f"project={meta.project}"),
+        f"type={meta.type}",
+        f"status={meta.status}",
+        *_when(meta.valid_from, f"valid_from={meta.valid_from}"),
+        *_when(meta.valid_to, f"valid_to={meta.valid_to}"),
+        *_when(meta.confidence, f"confidence={meta.confidence}"),
+        *_when(meta.authority, f"authority={meta.authority}"),
+        *_when(parent.aliases, "aliases=" + ", ".join(parent.aliases)),
+        *_when(heading_path, "heading=" + " > ".join(heading_path)),
+        f"sha256={parent.source.record.sha256[:12]}",
+    ]
     return "[" + " | ".join(parts) + "]"
 
 
@@ -260,23 +265,30 @@ def _l0_text(parent: _Parent) -> str:
 
 
 def _l1_text(parent: _Parent) -> str:
-    body = parent.source.content.decode("utf-8", errors="replace")
-    frontmatter_end = 0
-    if body.startswith("---"):
-        end = body.find("\n---", 3)
-        if end >= 0:
-            frontmatter_end = end + 4
-    body = body[frontmatter_end:]
-    overview_lines: list[str] = []
-    overview_lines.append(parent.summary)
+    body = _without_frontmatter(parent.source.content.decode("utf-8", errors="replace"))
+    overview_lines = [parent.summary, *_overview_lines(body)]
+    return f"{_metadata_prefix(parent)}\n" + "\n".join(overview_lines)
+
+
+def _without_frontmatter(body: str) -> str:
+    if not body.startswith("---"):
+        return body
+    end = body.find("\n---", 3)
+    if end < 0:
+        return body
+    return body[end + 4:]
+
+
+def _overview_lines(body: str) -> list[str]:
+    """Non-blank body lines after the H1, up to the History section."""
+    lines = []
     for raw in body.splitlines()[1:]:
         stripped = raw.strip()
-        if not stripped:
-            continue
         if stripped.lower().startswith("## history"):
             break
-        overview_lines.append(stripped)
-    return f"{_metadata_prefix(parent)}\n" + "\n".join(overview_lines)
+        if stripped:
+            lines.append(stripped)
+    return lines
 
 
 def _l2_text_small_parent(parent: _Parent, heading_path: tuple[str, ...]) -> str:
@@ -302,38 +314,59 @@ def _l2_text_heading_subtree(
         deadline=deadline,
         cancelled=cancelled,
     )
-    target = next((match for match in headings if match.start() == chunk.byte_start), None)
     section_start = chunk.byte_start
-    section_end = chunk.byte_end
-    within_subtree_budget = True
-    if target is not None:
-        level = len(target.group(1))
-        section_end = len(content)
-        for heading in headings:
-            if heading.start() <= section_start:
-                continue
-            if len(heading.group(1)) <= level:
-                section_end = heading.start()
-                break
-    if section_end - section_start > subtree_char_budget:
-        section_end = chunk.byte_end
-        within_subtree_budget = False
-    if within_subtree_budget:
-        adjacent_start = section_end
-        adjacent_end = next(
-            (heading.start() for heading in headings if heading.start() > adjacent_start),
-            len(content),
-        )
-        adjacent_size = adjacent_end - adjacent_start
-        if (
-            0 < adjacent_size <= ADJACENT_CONTEXT_CHARS
-            and adjacent_end - section_start <= subtree_char_budget
-        ):
-            section_end = adjacent_end
+    section_end = _budgeted_end(
+        headings,
+        section_start,
+        _section_end(headings, chunk, len(content)),
+        chunk.byte_end,
+        subtree_char_budget,
+        len(content),
+    )
     span = content[section_start:section_end]
     text = span.decode("utf-8", errors="strict")
     prefix = _metadata_prefix(parent, chunk.heading_ancestry)
     return f"{prefix}\n{text}", section_start, section_end
+
+
+def _section_end(headings: list, chunk: RetrievalChunk, content_length: int) -> int:
+    """The end of the heading subtree the chunk starts; the chunk's own end when no heading starts it."""
+    target = _heading_at(headings, chunk.byte_start)
+    if target is None:
+        return chunk.byte_end
+    return _subtree_end(headings, chunk.byte_start, len(target.group(1)), content_length)
+
+
+def _heading_at(headings: list, start: int):
+    return next((match for match in headings if match.start() == start), None)
+
+
+def _subtree_end(headings: list, start: int, level: int, content_length: int) -> int:
+    """Where the next heading of the same or a higher level begins."""
+    return next(
+        (heading.start() for heading in headings if heading.start() > start and len(heading.group(1)) <= level),
+        content_length,
+    )
+
+
+def _budgeted_end(
+    headings: list, section_start: int, section_end: int, chunk_end: int, budget: int, content_length: int
+) -> int:
+    if section_end - section_start > budget:
+        return chunk_end
+    return _with_adjacent(headings, section_start, section_end, budget, content_length)
+
+
+def _with_adjacent(headings: list, section_start: int, section_end: int, budget: int, content_length: int) -> int:
+    """Extend over a short following section when the whole still fits the budget."""
+    adjacent_end = next(
+        (heading.start() for heading in headings if heading.start() > section_end),
+        content_length,
+    )
+    adjacent_size = adjacent_end - section_end
+    if 0 < adjacent_size <= ADJACENT_CONTEXT_CHARS and adjacent_end - section_start <= budget:
+        return adjacent_end
+    return section_end
 
 
 def _short_hash(source: CapturedSource) -> str:
@@ -435,53 +468,78 @@ def _build_l2_item(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> tuple[CompiledItem, MaterializationReason]:
-    body_bytes = len(parent.source.content)
-    cited_start = chunk.byte_start if chunk is not None else 0
-    cited_end = chunk.byte_end if chunk is not None else body_bytes
-    cited_headings = chunk.heading_ancestry if chunk is not None else (parent.title,)
-    if body_bytes <= small_parent_chars:
-        item = _make_compiled_item(
-            parent=parent,
-            representation="l2",
-            text=_l2_text_small_parent(parent, cited_headings),
-            heading_path=cited_headings,
-            byte_start=0,
-            byte_end=body_bytes,
-            relevance=DEFAULT_RELEVANCE_L2,
-            discriminator=chunk.id if chunk is not None else "full",
-        )
-        return item, "small_parent_full"
+    if len(parent.source.content) <= small_parent_chars:
+        return _whole_parent_l2(parent, chunk), "small_parent_full"
     if chunk is None:
         # No specific chunk pinned; fall back to small-parent expansion of
         # the leading section so L2 always carries something useful.
-        item = _make_compiled_item(
-            parent=parent,
-            representation="l2",
-            text=_l2_text_small_parent(parent, cited_headings),
-            heading_path=cited_headings,
-            byte_start=cited_start,
-            byte_end=cited_end,
-            relevance=DEFAULT_RELEVANCE_L2,
-        )
-        return item, "small_parent_full"
+        return _leading_l2(parent), "small_parent_full"
+    return _subtree_l2(parent, chunk, large_parent_subtree_chars, deadline, cancelled), "heading_subtree"
+
+
+def _whole_parent_l2(parent: _Parent, chunk: RetrievalChunk | None) -> CompiledItem:
+    cited_headings = _cited_headings(parent, chunk)
+    return _make_compiled_item(
+        parent=parent,
+        representation="l2",
+        text=_l2_text_small_parent(parent, cited_headings),
+        heading_path=cited_headings,
+        byte_start=0,
+        byte_end=len(parent.source.content),
+        relevance=DEFAULT_RELEVANCE_L2,
+        discriminator=_chunk_discriminator(chunk),
+    )
+
+
+def _cited_headings(parent: _Parent, chunk: RetrievalChunk | None) -> tuple[str, ...]:
+    if chunk is None:
+        return (parent.title,)
+    return chunk.heading_ancestry
+
+
+def _chunk_discriminator(chunk: RetrievalChunk | None) -> str:
+    if chunk is None:
+        return "full"
+    return chunk.id
+
+
+def _leading_l2(parent: _Parent) -> CompiledItem:
+    cited_headings = (parent.title,)
+    return _make_compiled_item(
+        parent=parent,
+        representation="l2",
+        text=_l2_text_small_parent(parent, cited_headings),
+        heading_path=cited_headings,
+        byte_start=0,
+        byte_end=len(parent.source.content),
+        relevance=DEFAULT_RELEVANCE_L2,
+    )
+
+
+def _subtree_l2(
+    parent: _Parent,
+    chunk: RetrievalChunk,
+    subtree_char_budget: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> CompiledItem:
     text, emitted_start, emitted_end = _l2_text_heading_subtree(
         parent,
         chunk,
-        subtree_char_budget=large_parent_subtree_chars,
+        subtree_char_budget=subtree_char_budget,
         deadline=deadline,
         cancelled=cancelled,
     )
-    item = _make_compiled_item(
+    return _make_compiled_item(
         parent=parent,
         representation="l2",
         text=text,
-        heading_path=cited_headings,
+        heading_path=chunk.heading_ancestry,
         byte_start=emitted_start,
         byte_end=emitted_end,
         relevance=DEFAULT_RELEVANCE_L2,
         discriminator=chunk.id,
     )
-    return item, "heading_subtree"
 
 
 def compile_context(
@@ -503,148 +561,207 @@ def compile_context(
     policy: ``generated_context`` defaults to False and must be explicitly
     enabled by the caller.
     """
+    _require_compile_options(snapshot, small_parent_chars, large_parent_subtree_chars, generated_context)
+    graph_trace = _graph_expansion_traces(graph_expansions)
+    compilation = _Compilation(
+        snapshot,
+        {str(s) for s in shortlist},
+        tuple(sorted({str(c) for c in evidence_chunk_ids})),
+    )
+    compilation.materialize(
+        _L2Limits(small_parent_chars, large_parent_subtree_chars, deadline, cancelled)
+    )
+    # 4. Always pack under the shared budget, including the default path.
+    packed = compile_context_items(
+        [_to_context_item(item) for item in compilation.items],
+        budget=_budget_or_default(budget),
+        per_source_cap=6,
+        per_parent_cap=6,
+    )
+    return compilation.result(packed, graph_trace, generated_context)
+
+
+def _require_compile_options(
+    snapshot: object, small_parent_chars: int, large_parent_subtree_chars: int, generated_context: bool
+) -> None:
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
+    _require_nonnegative_limits(small_parent_chars, large_parent_subtree_chars)
+    if generated_context:
+        raise ValueError("generated_context=True requires a successful frozen ablation")
+
+
+def _require_nonnegative_limits(small_parent_chars: int, large_parent_subtree_chars: int) -> None:
     if small_parent_chars < 0:
         raise ValueError("small_parent_chars must be nonnegative")
     if large_parent_subtree_chars < 0:
         raise ValueError("large_parent_subtree_chars must be nonnegative")
-    if generated_context:
-        raise ValueError("generated_context=True requires a successful frozen ablation")
 
-    graph_trace: list[GraphExpansionTrace] = []
-    for expansion in graph_expansions:
-        candidate_id = expansion.get("candidate_id")
-        seed_id = expansion.get("seed_id")
-        assertion_path = expansion.get("assertion_path")
-        evidence_ids = expansion.get("evidence_ids")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id
-            or not isinstance(seed_id, str)
-            or not seed_id
-            or not isinstance(assertion_path, (list, tuple))
-            or not assertion_path
-            or not all(isinstance(step, Mapping) for step in assertion_path)
-            or not isinstance(evidence_ids, (list, tuple))
-            or not evidence_ids
-        ):
-            raise ValueError("graph expansion provenance is incomplete")
-        normalized_evidence = tuple(
-            str(item) for item in evidence_ids if isinstance(item, str) and item
-        )
-        normalized_path: list[Mapping[str, object]] = []
-        for step in assertion_path:
-            assertion_id = step.get("assertion_id")
-            step_evidence = step.get("evidence_ids")
-            if (
-                not isinstance(assertion_id, str)
-                or not assertion_id
-                or not isinstance(step_evidence, (list, tuple))
-                or not step_evidence
-            ):
-                raise ValueError("graph expansion provenance is incomplete")
-            normalized_step = dict(step)
-            normalized_step["evidence_ids"] = tuple(
-                str(item) for item in step_evidence if isinstance(item, str) and item
-            )
-            if not normalized_step["evidence_ids"]:
-                raise ValueError("graph expansion provenance is incomplete")
-            normalized_path.append(normalized_step)
-        if not normalized_evidence:
-            raise ValueError("graph expansion provenance is incomplete")
-        graph_trace.append(
-            GraphExpansionTrace(
-                candidate_id=candidate_id,
-                seed_id=seed_id,
-                assertion_path=tuple(normalized_path),
-                evidence_ids=normalized_evidence,
-            )
-        )
-    graph_trace.sort(key=lambda item: (item.candidate_id, item.seed_id))
 
-    parents = _build_parents(snapshot)
-    shortlist_set = {str(s) for s in shortlist}
-    requested_evidence_ids = tuple(sorted({str(c) for c in evidence_chunk_ids}))
-    chunks_by_id: dict[str, RetrievalChunk] = {}
-    for chunk in snapshot.chunks:
-        chunks_by_id[chunk.id] = chunk
-    parents_by_logical_id = {
-        parent.source.record.logical_id: parent for parent in parents
-    }
-    missed_parent_ids = tuple(sorted(shortlist_set - parents_by_logical_id.keys()))
-    parent_paths = {parent.source.record.relative_path for parent in parents}
-    missed_evidence_ids = tuple(
-        chunk_id
-        for chunk_id in requested_evidence_ids
-        if chunk_id not in chunks_by_id
-        or chunks_by_id[chunk_id].parent_page not in parent_paths
+def _budget_or_default(budget: ContextBudget | None) -> ContextBudget:
+    if budget is None:
+        return DEFAULT_BUDGET
+    return budget
+
+
+_INCOMPLETE_PROVENANCE = "graph expansion provenance is incomplete"
+
+
+def _nonempty_str(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _nonempty_sequence(value: object) -> bool:
+    return isinstance(value, (list, tuple)) and bool(value)
+
+
+def _evidence_strings(values: Iterable[object]) -> tuple[str, ...]:
+    return tuple(str(item) for item in values if isinstance(item, str) and item)
+
+
+def _graph_expansion_traces(graph_expansions: Iterable[Mapping[str, object]]) -> list[GraphExpansionTrace]:
+    traces = [_graph_expansion_trace(expansion) for expansion in graph_expansions]
+    traces.sort(key=lambda item: (item.candidate_id, item.seed_id))
+    return traces
+
+
+def _graph_expansion_trace(expansion: Mapping[str, object]) -> GraphExpansionTrace:
+    candidate_id = expansion.get("candidate_id")
+    seed_id = expansion.get("seed_id")
+    assertion_path = expansion.get("assertion_path")
+    evidence_ids = expansion.get("evidence_ids")
+    if not _complete_expansion(candidate_id, seed_id, assertion_path, evidence_ids):
+        raise ValueError(_INCOMPLETE_PROVENANCE)
+    normalized_evidence = _evidence_strings(evidence_ids)
+    normalized_path = [_normalized_step(step) for step in assertion_path]
+    if not normalized_evidence:
+        raise ValueError(_INCOMPLETE_PROVENANCE)
+    return GraphExpansionTrace(
+        candidate_id=candidate_id,
+        seed_id=seed_id,
+        assertion_path=tuple(normalized_path),
+        evidence_ids=normalized_evidence,
     )
 
-    compiled_items: list[CompiledItem] = []
-    materializations: list[MaterializationTrace] = []
 
-    # 1. Broad L0 for every parent.
-    for parent in parents:
-        compiled_items.append(_build_l0_item(parent))
-        materializations.append(
-            MaterializationTrace(
-                parent_id=parent.source.record.relative_path,
-                representation="l0",
-                heading_path=(parent.title,),
-                byte_start=0,
-                byte_end=len(parent.source.content),
-                reason="broad_l0",
-            )
-        )
+def _complete_expansion(candidate_id: object, seed_id: object, assertion_path: object, evidence_ids: object) -> bool:
+    if not _nonempty_str(candidate_id) or not _nonempty_str(seed_id):
+        return False
+    return _mapping_path(assertion_path) and _nonempty_sequence(evidence_ids)
 
-    # 2. Shortlist L1 promotion.
-    for parent in parents:
-        if parent.source.record.logical_id not in shortlist_set:
-            continue
-        compiled_items.append(_build_l1_item(parent))
-        materializations.append(
-            MaterializationTrace(
-                parent_id=parent.source.record.relative_path,
-                representation="l1",
-                heading_path=(parent.title,),
-                byte_start=0,
-                byte_end=len(parent.source.content),
-                reason="shortlist_l1",
-            )
-        )
 
-    # 3. Final L2/source evidence.
-    l1_parent_by_item_id: dict[str, str] = {}
-    evidence_by_item_id: dict[str, str] = {}
-    for item in compiled_items:
-        if item.representation == "l1":
-            owner = next(
-                parent for parent in parents if parent.source.record.relative_path == item.parent_id
-            )
-            l1_parent_by_item_id[item.item_id] = owner.source.record.logical_id
+def _mapping_path(assertion_path: object) -> bool:
+    return _nonempty_sequence(assertion_path) and all(isinstance(step, Mapping) for step in assertion_path)
 
-    for chunk_id in requested_evidence_ids:
-        chunk = chunks_by_id.get(chunk_id)
-        if chunk is None:
-            continue
-        owner = next(
-            (p for p in parents if p.source.record.relative_path == chunk.parent_page),
+
+def _normalized_step(step: Mapping[str, object]) -> dict[str, object]:
+    assertion_id = step.get("assertion_id")
+    step_evidence = step.get("evidence_ids")
+    if not _nonempty_str(assertion_id) or not _nonempty_sequence(step_evidence):
+        raise ValueError(_INCOMPLETE_PROVENANCE)
+    normalized_step = dict(step)
+    normalized_step["evidence_ids"] = _evidence_strings(step_evidence)
+    if not normalized_step["evidence_ids"]:
+        raise ValueError(_INCOMPLETE_PROVENANCE)
+    return normalized_step
+
+
+@dataclass(frozen=True)
+class _L2Limits:
+    small_parent_chars: int
+    large_parent_subtree_chars: int
+    deadline: float | None
+    cancelled: Callable[[], bool] | None
+
+
+def _whole_parent_trace(parent: _Parent, representation: Representation, reason: MaterializationReason) -> MaterializationTrace:
+    return MaterializationTrace(
+        parent_id=parent.source.record.relative_path,
+        representation=representation,
+        heading_path=(parent.title,),
+        byte_start=0,
+        byte_end=len(parent.source.content),
+        reason=reason,
+    )
+
+
+def _mapped_ids(packed_items: list[CompiledItem], mapping: dict[str, str]) -> tuple[str, ...]:
+    return tuple(sorted(mapping[item.item_id] for item in packed_items if item.item_id in mapping))
+
+
+def _representation_count(packed_items: list[CompiledItem], representation: str) -> int:
+    return sum(1 for item in packed_items if item.representation == representation)
+
+
+def _packing_trace(packed, packed_items: list[CompiledItem]) -> PackingTrace:
+    return PackingTrace(
+        packed_item_ids=tuple(item.item_id for item in packed_items),
+        dropped=packed.dropped,
+        ranked_item_ids=packed.ranked_item_ids,
+        packed_tokens=packed.packed_tokens,
+        counter_source=packed.counter_source,
+        budget_model=packed.budget.model,
+    )
+
+
+class _Compilation:
+    """The items one compile materializes, each with its trace and its owner."""
+
+    def __init__(self, snapshot: CorpusSnapshot, shortlist: set[str], evidence_ids: tuple[str, ...]) -> None:
+        self.parents = _build_parents(snapshot)
+        self.shortlist = shortlist
+        self.requested_evidence_ids = evidence_ids
+        self.chunks_by_id = {chunk.id: chunk for chunk in snapshot.chunks}
+        self.items: list[CompiledItem] = []
+        self.materializations: list[MaterializationTrace] = []
+        self.l1_parent_by_item_id: dict[str, str] = {}
+        self.evidence_by_item_id: dict[str, str] = {}
+
+    def materialize(self, limits: _L2Limits) -> None:
+        # 1. Broad L0 for every parent.
+        for parent in self.parents:
+            self._add(_build_l0_item(parent), _whole_parent_trace(parent, "l0", "broad_l0"))
+        # 2. Shortlist L1 promotion.
+        for parent in self.parents:
+            self._add_shortlisted(parent)
+        # 3. Final L2/source evidence.
+        for chunk_id in self.requested_evidence_ids:
+            self._add_evidence(chunk_id, limits)
+
+    def _add(self, item: CompiledItem, trace: MaterializationTrace) -> None:
+        self.items.append(item)
+        self.materializations.append(trace)
+
+    def _first_parent_at(self, relative_path: str) -> _Parent | None:
+        return next(
+            (parent for parent in self.parents if parent.source.record.relative_path == relative_path),
             None,
         )
+
+    def _add_shortlisted(self, parent: _Parent) -> None:
+        if parent.source.record.logical_id not in self.shortlist:
+            return
+        item = _build_l1_item(parent)
+        self._add(item, _whole_parent_trace(parent, "l1", "shortlist_l1"))
+        owner = self._first_parent_at(item.parent_id)
+        self.l1_parent_by_item_id[item.item_id] = owner.source.record.logical_id
+
+    def _add_evidence(self, chunk_id: str, limits: _L2Limits) -> None:
+        chunk = self.chunks_by_id.get(chunk_id)
+        owner = self._evidence_owner(chunk)
         if owner is None:
-            continue
+            return
         item, reason = _build_l2_item(
             owner,
             chunk=chunk,
-            small_parent_chars=small_parent_chars,
-            large_parent_subtree_chars=large_parent_subtree_chars,
-            deadline=deadline,
-            cancelled=cancelled,
+            small_parent_chars=limits.small_parent_chars,
+            large_parent_subtree_chars=limits.large_parent_subtree_chars,
+            deadline=limits.deadline,
+            cancelled=limits.cancelled,
         )
-        compiled_items.append(item)
-        evidence_by_item_id[item.item_id] = chunk_id
-        materializations.append(
+        self.evidence_by_item_id[item.item_id] = chunk_id
+        self._add(
+            item,
             MaterializationTrace(
                 parent_id=owner.source.record.relative_path,
                 representation="l2",
@@ -652,80 +769,69 @@ def compile_context(
                 byte_start=item.byte_start,
                 byte_end=item.byte_end,
                 reason=reason,
+            ),
+        )
+
+    def _evidence_owner(self, chunk: RetrievalChunk | None) -> _Parent | None:
+        if chunk is None:
+            return None
+        return self._first_parent_at(chunk.parent_page)
+
+    def missed_parent_ids(self) -> tuple[str, ...]:
+        logical_ids = {parent.source.record.logical_id for parent in self.parents}
+        return tuple(sorted(self.shortlist - logical_ids))
+
+    def missed_evidence_ids(self) -> tuple[str, ...]:
+        parent_paths = {parent.source.record.relative_path for parent in self.parents}
+        return tuple(
+            chunk_id
+            for chunk_id in self.requested_evidence_ids
+            if not self._evidence_within(chunk_id, parent_paths)
+        )
+
+    def _evidence_within(self, chunk_id: str, parent_paths: set[str]) -> bool:
+        chunk = self.chunks_by_id.get(chunk_id)
+        return chunk is not None and chunk.parent_page in parent_paths
+
+    def _packed_l0_parent_ids(self, packed_items: list[CompiledItem]) -> tuple[str, ...]:
+        l0_paths = {item.parent_id for item in packed_items if item.representation == "l0"}
+        return tuple(
+            sorted(
+                parent.source.record.logical_id
+                for parent in self.parents
+                if parent.source.record.relative_path in l0_paths
             )
         )
 
-    duplicate_stems = _detect_duplicate_stems(parents)
+    def _retrieval_trace(self, packed_items: list[CompiledItem]) -> RetrievalTrace:
+        return RetrievalTrace(
+            candidate_parent_ids=self._packed_l0_parent_ids(packed_items),
+            shortlisted_parent_ids=_mapped_ids(packed_items, self.l1_parent_by_item_id),
+            evidence_chunk_ids=_mapped_ids(packed_items, self.evidence_by_item_id),
+            missed_parent_ids=self.missed_parent_ids(),
+            missed_evidence_chunk_ids=self.missed_evidence_ids(),
+        )
 
-    # 4. Always pack under the shared budget, including the default path.
-    active_budget = budget if budget is not None else DEFAULT_BUDGET
-    packed = compile_context_items(
-        [_to_context_item(item) for item in compiled_items],
-        budget=active_budget,
-        per_source_cap=6,
-        per_parent_cap=6,
-    )
-    compiled_by_id = {item.item_id: item for item in compiled_items}
-    trace_by_id = {
-        item.item_id: trace
-        for item, trace in zip(compiled_items, materializations)
-    }
-    packed_items = [compiled_by_id[item.item_id] for item in packed.items]
-    materializations = [trace_by_id[item.item_id] for item in packed.items]
-    packed_l0_parent_ids = tuple(
-        sorted(
-            parent.source.record.logical_id
-            for parent in parents
-            if any(
-                item.representation == "l0"
-                and item.parent_id == parent.source.record.relative_path
-                for item in packed_items
-            )
+    def result(self, packed, graph_trace: list[GraphExpansionTrace], generated_context: bool) -> CompiledContext:
+        compiled_by_id = {item.item_id: item for item in self.items}
+        trace_by_id = {item.item_id: trace for item, trace in zip(self.items, self.materializations)}
+        packed_items = [compiled_by_id[item.item_id] for item in packed.items]
+        materializations = [trace_by_id[item.item_id] for item in packed.items]
+        trace = CompilationTrace(
+            candidate_count=len(self.parents),
+            l0_count=_representation_count(packed_items, "l0"),
+            l1_count=_representation_count(packed_items, "l1"),
+            l2_count=_representation_count(packed_items, "l2"),
+            materializations=tuple(materializations),
+            generated_context_enabled=bool(generated_context),
+            duplicate_stems=_detect_duplicate_stems(self.parents),
+            retrieval=self._retrieval_trace(packed_items),
+            packing=_packing_trace(packed, packed_items),
+            graph_expansions=tuple(graph_trace),
         )
-    )
-    packed_shortlist_ids = tuple(
-        sorted(
-            l1_parent_by_item_id[item.item_id]
-            for item in packed_items
-            if item.item_id in l1_parent_by_item_id
-        )
-    )
-    packed_evidence_ids = tuple(
-        sorted(
-            evidence_by_item_id[item.item_id]
-            for item in packed_items
-            if item.item_id in evidence_by_item_id
-        )
-    )
-
-    trace = CompilationTrace(
-        candidate_count=len(parents),
-        l0_count=sum(1 for i in packed_items if i.representation == "l0"),
-        l1_count=sum(1 for i in packed_items if i.representation == "l1"),
-        l2_count=sum(1 for i in packed_items if i.representation == "l2"),
-        materializations=tuple(materializations),
-        generated_context_enabled=bool(generated_context),
-        duplicate_stems=duplicate_stems,
-        retrieval=RetrievalTrace(
-            candidate_parent_ids=packed_l0_parent_ids,
-            shortlisted_parent_ids=packed_shortlist_ids,
-            evidence_chunk_ids=packed_evidence_ids,
-            missed_parent_ids=missed_parent_ids,
-            missed_evidence_chunk_ids=missed_evidence_ids,
-        ),
-        packing=PackingTrace(
-            packed_item_ids=tuple(item.item_id for item in packed_items),
-            dropped=packed.dropped,
-            ranked_item_ids=packed.ranked_item_ids,
+        return CompiledContext(
+            items=tuple(packed_items),
+            text=packed.text,
+            trace=trace,
             packed_tokens=packed.packed_tokens,
-            counter_source=packed.counter_source,
-            budget_model=packed.budget.model,
-        ),
-        graph_expansions=tuple(graph_trace),
-    )
-    return CompiledContext(
-        items=tuple(packed_items),
-        text=packed.text,
-        trace=trace,
-        packed_tokens=packed.packed_tokens,
-    )
+        )

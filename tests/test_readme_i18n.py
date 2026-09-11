@@ -302,9 +302,10 @@ def test_user_guide_describes_search_signals_conditionally() -> None:
     text = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
 
-    assert "Plain `search_memory.py` always runs BM25" in normalized
-    assert "`--semantic` enables vectors when the optional model is available" in normalized
-    assert "graph-neighbor fusion applies only when graph evidence is available" in normalized
+    assert "reads the active evidence generation first" in normalized
+    assert "Vectors are on by default when the optional model is available; `--no-semantic` turns them off" in normalized
+    assert "Graph-neighbor fusion applies only when graph evidence is available" in normalized
+    assert "`--semantic` enables vectors" not in normalized
     assert "`search_memory.py` runs hybrid BM25 + Vector + Graph fusion." not in normalized
 
 

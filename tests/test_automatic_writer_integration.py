@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -33,7 +35,7 @@ WRITER_TARGETS = [
 ]
 
 TASK14_BEHAVIORAL_ENTRYPOINTS = {
-    "scripts/access_tracking.py:flush_access_to_frontmatter",
+    "scripts/access_tracking.py:_flush_page",
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
     "scripts/blackboard.py:_append_jsonl",
@@ -57,7 +59,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
 }
 
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
-    "scripts/access_tracking.py:flush_access_to_frontmatter",
+    "scripts/access_tracking.py:_flush_page",
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
     "scripts/build_guardrails.py:main",
@@ -1025,7 +1027,7 @@ def test_concurrent_identical_operation_id_converges_once(
             )
             for _ in range(workers)
         ]
-        assert [future.result(timeout=300) for future in futures] == ["committed"] * workers
+        assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * workers
 
     assert target.read_bytes() == content
     coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
@@ -1053,7 +1055,7 @@ def test_concurrent_identical_append_converges_once_during_distinct_event_churn(
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=_bounded_workers(8)) as executor:
         futures = _mixed_append_futures(executor, target, vault, state)
-        assert [future.result(timeout=300) for future in futures] == ["committed"] * 18
+        assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * 18
 
     lines = target.read_text(encoding="utf-8").splitlines()
     assert lines.count("same") == 1
@@ -1105,7 +1107,7 @@ def test_distinct_events_survive_repeated_writer_contention(tmp_path, monkeypatc
             )
             for index in range(18)
         ]
-        assert [future.result(timeout=300) for future in futures] == ["committed"] * 18
+        assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * 18
 
     content = target.read_text(encoding="utf-8")
     assert sorted(content.splitlines()) == sorted(f"event-{index}" for index in range(18))

@@ -164,17 +164,31 @@ jobs:
           if-no-files-found: error
 
   clean-production:
-    name: timing::clean::production-py${{ matrix.python }}
+    name: timing::clean::production-${{ matrix.label }}
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
-    runs-on: ubuntu-24.04
+        include:
+          - os: ubuntu-24.04
+            python: "3.10"
+            label: py3.10
+          - os: ubuntu-24.04
+            python: "3.14"
+            label: py3.14
+          # A clean production install on the two other platforms the
+          # contract names had no CI evidence (audit OPS-14, 2026-09-11).
+          - os: windows-2025
+            python: "3.13"
+            label: windows-py3.13
+          - os: macos-15
+            python: "3.13"
+            label: macos-py3.13
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
-      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-production-${{ matrix.python }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-production-${{ matrix.label }}
       LLM_WIKI_ROOT: ${{ github.workspace }}
-      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-production-state-${{ matrix.python }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-production-state-${{ matrix.label }}
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -255,6 +269,10 @@ jobs:
             platform: linux
           - os: windows-2025
             platform: windows
+          # The LaunchAgent path (install_control.py) had no CI evidence
+          # (audit OPS-14, 2026-09-11); a regression there merged green.
+          - os: macos-15
+            platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:

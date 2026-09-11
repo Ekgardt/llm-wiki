@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -37,24 +38,24 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
                 lease.expires_at.isoformat().replace("+00:00", "Z"),
             )
 
-    def nested_nightly(*, ownership) -> int:
+    def nested_nightly(*, ownership, fence=None) -> int:
         assert ownership == lease
+        assert isinstance(fence, threading.Event)
         assert_outer("nightly")
         return 0
 
     def run_step(_command, _log, name, **_kwargs) -> int:
-        assert _kwargs["ownership"] == lease
         assert_outer(name)
         return 0
 
     monkeypatch.setattr(
         scheduled_weekly,
         "heartbeat_owner",
-        lambda _ownership: contextlib.nullcontext(_ownership),
+        lambda _ownership, **_kwargs: contextlib.nullcontext(_ownership),
     )
 
     monkeypatch.setattr(scheduled_weekly.scheduled_nightly, "run_nightly", nested_nightly)
-    monkeypatch.setattr(scheduled_weekly, "_run_step", run_step)
+    monkeypatch.setattr(scheduled_weekly.scheduled_nightly, "_run_step", run_step)
     monkeypatch.setattr(scheduled_weekly, "_wait_for_compile_idle", lambda _log: None)
     monkeypatch.setattr(scheduled_weekly, "REPORTS_DIR", tmp_path / "logs")
     monkeypatch.setitem(

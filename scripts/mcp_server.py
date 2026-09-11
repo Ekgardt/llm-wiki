@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import contextlib
 import contextvars
 import datetime as dt
 import hashlib
@@ -682,6 +681,7 @@ TOOL_INPUT_SCHEMAS = {
                     "index",
                     "repositories",
                     "changes",
+                    "search",
                 ],
                 "description": "Bounded architecture query mode",
             },
@@ -701,7 +701,12 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 1024,
-                "description": "Symbol for symbol, callers, callees, dependencies, path, provenance, and snippet modes",
+                "description": (
+                    "Symbol for symbol, callers, callees, dependencies, path, "
+                    "provenance, and snippet modes (snippet accepts owner.name); "
+                    "name pattern for search mode (* and ? are globs, otherwise "
+                    "substring)"
+                ),
             },
             "query": {
                 "type": "string",
@@ -715,8 +720,9 @@ TOOL_INPUT_SCHEMAS = {
                 "minimum": 1,
                 "maximum": ARCHITECTURE_MAX_DEPTH,
                 "description": (
-                    "dependencies mode: how many hops to walk. "
-                    "Omitted means the whole reachable set."
+                    "dependencies mode: how many hops to walk; omitted means "
+                    "the whole reachable set. callers and callees modes: walk "
+                    "the CALLS closure this deep; omitted means one hop."
                 ),
             },
             "comparison": {
@@ -736,7 +742,11 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "Repository-relative path for coverage mode and for precise or positioned calls",
+                "description": (
+                    "Repository-relative path for coverage mode and for precise "
+                    "or positioned calls; repository-relative path prefix for "
+                    "search mode"
+                ),
             },
             "line": {"type": "integer", "minimum": 1},
             "character": {"type": "integer", "minimum": 0},
@@ -1072,8 +1082,16 @@ def _record_page_reads(slug: str, evidence: list) -> None:
         events = _page_read_events(best_effort_make_event, kinds)
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
+
+
+def _count_dropped_telemetry(error: BaseException) -> None:
+    """A telemetry event that could not be written is counted, not forgotten."""
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure("telemetry_event", describe_error(error), error=error)
 
 
 def _wiki_overview(*, deadline: float | None = None) -> dict:
@@ -1103,7 +1121,16 @@ def _vault_status(*, deadline: float | None = None) -> dict:
         "last_compile": state.get("last_compile_at", "never"),
         "last_compile_status": state.get("last_compile_status", "unknown"),
         "compile_backlog": _compile_backlog(ROOT, file_hash, compiled, deadline),
+        "warmup": warmup_state(),
+        "retrieval_degradations": _retrieval_degradations(),
     }
+
+
+def _retrieval_degradations() -> dict[str, str]:
+    """Why a retrieval stage fell back in this process, by kind (audit M5/M6)."""
+    from search_memory import degradation_reasons
+
+    return degradation_reasons()
 
 
 def _daily_files(root: Path) -> list[Path]:
@@ -1194,8 +1221,8 @@ def _record_decision_impressions(effective_query: str, results: list) -> None:
         )
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
 
 
 def _get_context(
@@ -1403,8 +1430,8 @@ def _record_context_injections(selected_paths: set) -> None:
         events = _context_injection_events(best_effort_make_event, selected_paths)
         if events:
             best_effort_record_events(events)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
+        _count_dropped_telemetry(exc)
 
 
 def _assess_contradiction_text(
@@ -1675,7 +1702,11 @@ def _architecture_callers(request: dict):
     from trace_ingest import with_trace_callers
 
     answer = find_callers(
-        request["symbol"], request["resolved"], live=request["live"], with_report=True
+        request["symbol"],
+        request["resolved"],
+        live=request["live"],
+        with_report=True,
+        max_depth=request.get("depth"),
     )
     return with_trace_callers(answer, request["symbol"], request["resolved"])
 
@@ -1684,7 +1715,11 @@ def _architecture_callees(request: dict):
     from code_graph import find_callees
 
     return find_callees(
-        request["symbol"], request["resolved"], live=request["live"], with_report=True
+        request["symbol"],
+        request["resolved"],
+        live=request["live"],
+        with_report=True,
+        max_depth=request.get("depth"),
     )
 
 
@@ -1790,6 +1825,144 @@ def _architecture_report(architecture) -> dict:
     }
 
 
+# Issue #24, section A: a structural answer names the commit its generation
+# was built from against the commit the checkout is at, and when they differ
+# the bounded incremental refresh is started detached - once per repository
+# and commit in this process - so the session never waits for it. See
+# `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
+_REFRESH_REQUESTED: dict[str, str] = {}
+_REFRESH_REQUESTED_LOCK = threading.Lock()
+
+
+def _freshness_fields(resolved: Path, architecture) -> dict:
+    """Only answers read from a generation have a commit to compare; an answer
+    without one may be a new worktree of a registered repository (#24, D1)."""
+    if _architecture_report(architecture).get("source_generation") is None:
+        return _worktree_follow_fields(resolved)
+    freshness = _repository_freshness(resolved)
+    return {} if freshness is None else {"freshness": freshness}
+
+
+# Issue #24, section D1: a worktree of a registered repository gets its own
+# generation without anyone running the indexer. The first structural answer
+# that finds none starts the fenced `follow` detached, once per checkout in
+# this process, and says so; the nightly `refresh-all` covers the rest.
+_FOLLOW_REQUESTED: set[str] = set()
+
+
+def _unindexed_worktree(resolved: Path) -> Path | None:
+    import subprocess
+
+    from repository_worktrees import unindexed_worktree_root
+
+    try:
+        return unindexed_worktree_root(resolved, deadline=time.monotonic() + 5.0)
+    except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+        return None
+
+
+def _worktree_follow_fields(resolved: Path) -> dict:
+    if _is_the_vault(resolved):
+        return {}
+    checkout = _unindexed_worktree(resolved)
+    if checkout is None:
+        return {}
+    return {"freshness": {"generation_commit": None, "refresh": _request_worktree_follow(checkout)}}
+
+
+def _follow_log_paths(checkout: Path) -> tuple[Path, Path]:
+    from memory_state import STATE_ROOT
+
+    folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
+    stem = "follow-" + hashlib.sha256(str(checkout).encode("utf-8")).hexdigest()[:16]
+    return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
+
+
+def _request_worktree_follow(checkout: Path) -> str:
+    """Start the fenced worktree index once per checkout; never wait for it."""
+    from memory_state import spawn_detached
+
+    with _REFRESH_REQUESTED_LOCK:
+        if str(checkout) in _FOLLOW_REQUESTED:
+            return "worktree_follow_already_requested"
+        _FOLLOW_REQUESTED.add(str(checkout))
+    out_log, err_log = _follow_log_paths(checkout)
+    script = Path(__file__).resolve().parent / "repository_index.py"
+    pid = spawn_detached(
+        [sys.executable, str(script), "follow", str(checkout)],
+        stdout_path=out_log,
+        stderr_path=err_log,
+    )
+    return "worktree_follow_started" if pid is not None else "spawn_failed"
+
+
+def _repository_freshness(resolved: Path) -> dict | None:
+    import code_graph
+
+    lease = code_graph._active_evidence_graph(resolved)
+    if lease is None:
+        return None
+    try:
+        checkout = getattr(lease, "cached_scope", None)
+        if checkout is None:
+            return None
+        return _freshness_block(resolved, checkout, lease.repository_scope)
+    finally:
+        lease.close()
+
+
+def _freshness_block(resolved: Path, checkout, generation) -> dict:
+    stale = checkout.git_commit != generation.git_commit
+    return {
+        "generation_commit": generation.git_commit,
+        "checkout_commit": checkout.git_commit,
+        "stale_by_commit": stale,
+        "refresh": _refresh_action(resolved, checkout, stale),
+    }
+
+
+def _is_the_vault(resolved: Path) -> bool:
+    from memory_state import ROOT, STATE_ROOT
+
+    return resolved in {Path(ROOT).resolve(), Path(STATE_ROOT).resolve()}
+
+
+def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
+    if not stale:
+        return "not_needed"
+    if _is_the_vault(resolved):
+        # The vault's own generation is rebuilt and activated by the nightly
+        # pass and the freshness watch; a foreign-repository refresh refuses it.
+        return "vault_nightly"
+    return _request_repository_refresh(resolved, checkout)
+
+
+def _refresh_log_paths(repository_id: str) -> tuple[Path, Path]:
+    from memory_state import STATE_ROOT
+
+    folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
+    stem = repository_id.rsplit(":", 1)[-1][:16]
+    return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
+
+
+def _request_repository_refresh(resolved: Path, checkout) -> str:
+    """Start the bounded refresh once per (repository, commit); never wait for it."""
+    from memory_state import spawn_detached
+
+    with _REFRESH_REQUESTED_LOCK:
+        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+            return "already_requested"
+        _REFRESH_REQUESTED[checkout.repository_id] = checkout.git_commit
+    out_log, err_log = _refresh_log_paths(checkout.repository_id)
+    script = Path(__file__).resolve().parent / "repository_index.py"
+    pid = spawn_detached(
+        [sys.executable, str(script), "refresh", str(resolved)],
+        stdout_path=out_log,
+        stderr_path=err_log,
+    )
+    return "started" if pid is not None else "spawn_failed"
+
+
 def _get_architecture_mode(
     directory: str,
     *,
@@ -1826,6 +1999,7 @@ def _get_architecture_mode(
         "mode": mode,
         "architecture": architecture,
         **_architecture_report(architecture),
+        **_freshness_fields(resolved, architecture),
     }
 
 
@@ -3654,13 +3828,20 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "symbol"},
         {"directory", "mode", "symbol", "live"},
     ),
+    # Issue #24, B4: `depth` walks the CALLS closure; omitted is one hop.
     "callers": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "live"},
+        {"directory", "mode", "symbol", "live", "depth"},
     ),
     "callees": (
         {"directory", "mode", "symbol"},
-        {"directory", "mode", "symbol", "live"},
+        {"directory", "mode", "symbol", "live", "depth"},
+    ),
+    # Issue #24, B2: ranked name search over the whole generation; `symbol`
+    # is the pattern and `path` an optional repository-relative prefix.
+    "search": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "path", "limit"},
     ),
     "dependencies": (
         {"directory", "mode", "symbol"},
@@ -4427,20 +4608,21 @@ def _with_trace_state(quality: dict, trace: object) -> dict:
     merged = dict(quality)
     if trace.get("partial"):
         merged["partial"] = True
-    reason = trace.get("fallback_reason")
-    if _fell_back(reason):
-        merged["fallback"] = True
-        merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
+    return _with_fallback_state(merged, trace.get("fallback_reason"))
+
+
+def _with_fallback_state(merged: dict, reason: object) -> dict:
+    if not _fell_back(reason):
+        return merged
+    merged["fallback"] = True
+    merged["warnings"] = [*merged.get("warnings", []), f"Retrieval fell back: {reason}."]
     return merged
 
 
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
     if name not in {"recall", "get_decisions"}:
         return None
-    results = data.get("results", []) if name == "recall" else data
-    quality = _results_quality(results)
-    if name == "recall":
-        quality = _with_trace_state(quality, data.get("retrieval_trace"))
+    quality = _named_results_quality(name, data)
     if not limit_clamped:
         return quality
     return _degrade_quality(
@@ -4449,6 +4631,14 @@ def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
         coverage=0.8,
         confidence=0.8,
     )
+
+
+def _named_results_quality(name: str, data) -> dict:
+    """Recall carries its rows under `results` and a trace; decisions are the rows."""
+    if name != "recall":
+        return _results_quality(data)
+    quality = _results_quality(data.get("results", []))
+    return _with_trace_state(quality, data.get("retrieval_trace"))
 
 
 def _impact_warnings(data, fallback: str) -> list:
@@ -4673,7 +4863,24 @@ def _backlog_quality(backlog) -> dict:
     return {"coverage": 0.9, "confidence": 0.85}
 
 
+def _with_warmup_warning(quality: dict, status: dict) -> dict:
+    """A failed warm-up is in the health answer, not only on a daemon thread."""
+    warmup = status.get("warmup")
+    if not isinstance(warmup, dict) or warmup.get("status") != "failed":
+        return quality
+    warnings = list(quality.get("warnings", []))
+    warnings.append(
+        f"Retrieval warm-up failed at {warmup.get('stage')}: {warmup.get('error')}; "
+        "first answers may fall back to the lexical leg."
+    )
+    return {**quality, "partial": True, "warnings": warnings}
+
+
 def _compile_health_quality(status: dict) -> dict:
+    return _with_warmup_warning(_compile_quality(status), status)
+
+
+def _compile_quality(status: dict) -> dict:
     compile_status = status.get("last_compile_status", "unknown")
     last_compile = status.get("last_compile", "never")
     if compile_status in {None, "unknown"} or last_compile in {None, "never"}:
@@ -4878,12 +5085,39 @@ def _tool_recall(arguments: dict, deadline: float):
         deadline=deadline,
         trace_sink=reported,
     )
+    trace = _retrieval_trace(arguments["query"], results, reported)
     data = {
-        "results": results,
-        "retrieval_trace": _retrieval_trace(arguments["query"], results, reported),
+        "results": [_agent_row(row) for row in results],
+        "retrieval_trace": trace,
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped
+
+
+# What an agent reads from a recall row: the page and its score. The trace is
+# in the envelope once; the per-signal scores are the fusion's own bookkeeping
+# (audit M7, docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md).
+AGENT_ROW_FIELDS = (
+    "candidate_id",
+    "path",
+    "title",
+    "summary",
+    "content",
+    "score",
+    # One per-signal score stays: `_carries_score` reads it to tell a fused
+    # answer from a lexical-only one when no trace was reported.
+    "vector_score",
+    "fused_score",
+    "chunk_id",
+    "heading_ancestry",
+    "project",
+    "timestamp",
+    "source_sha256",
+)
+
+
+def _agent_row(row: Mapping[str, object]) -> dict[str, object]:
+    return {key: row[key] for key in AGENT_ROW_FIELDS if key in row}
 
 
 def _tool_read_page(arguments: dict, deadline: float):
@@ -5000,7 +5234,10 @@ def _precise_architecture_call(arguments: dict, deadline: float):
 
 
 def _impact_architecture_call(arguments: dict, deadline: float):
-    return _analyze_impact(
+    """Diff to graph, plus the code symbols the diff reaches (issue #24, B5)."""
+    from impact_symbols import affected_symbols
+
+    impact = _analyze_impact(
         directory=arguments.get("directory"),
         comparison=arguments.get("comparison", "dirty"),
         base=arguments.get("base"),
@@ -5008,6 +5245,13 @@ def _impact_architecture_call(arguments: dict, deadline: float):
         branch=arguments.get("branch"),
         deadline=deadline,
     )
+    if "error" in impact:
+        return impact
+    directory = Path(arguments["directory"]).resolve()
+    return {
+        **impact,
+        **affected_symbols(directory, impact.get("changed_symbols", []), deadline),
+    }
 
 
 def _summary_architecture_call(arguments: dict, deadline: float):
@@ -5058,6 +5302,21 @@ def _coverage_architecture_call(arguments: dict, deadline: float):
 
     directory = Path(arguments["directory"]).resolve()
     return coverage_for_path(directory, str(arguments["path"]), deadline)
+
+
+def _search_architecture_call(arguments: dict, deadline: float):
+    """Issue #24, B2: ranked qualified names with degree, whole generation."""
+    from symbol_search import search_symbols
+
+    directory = Path(arguments["directory"]).resolve()
+    path_prefix = arguments.get("path")
+    return search_symbols(
+        directory,
+        str(arguments["symbol"]),
+        path_prefix=None if path_prefix is None else str(path_prefix),
+        limit=arguments.get("limit"),
+        deadline=deadline,
+    )
 
 
 def _query_architecture_call(arguments: dict, deadline: float):
@@ -5147,6 +5406,7 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "provenance": _provenance_architecture_call,
         "snippet": _snippet_architecture_call,
         "coverage": _coverage_architecture_call,
+        "search": _search_architecture_call,
         "query": _query_architecture_call,
         "index": _index_architecture_call,
         "repositories": _repositories_architecture_call,
@@ -5515,6 +5775,44 @@ def _warmup_pass(deadline_seconds: float) -> None:
     )
 
 
+# What the warm-up did, for the health resource: not_started, running,
+# warm (with seconds), or failed (stage and a redacted error). Research:
+# docs/research/2026-09-10-a-failed-warm-up-is-in-the-health-answer.md
+_WARMUP_LOCK = threading.Lock()
+_WARMUP: dict[str, object] = {"status": "not_started"}
+
+
+def warmup_state() -> dict[str, object]:
+    with _WARMUP_LOCK:
+        return dict(_WARMUP)
+
+
+def _set_warmup(**fields: object) -> None:
+    with _WARMUP_LOCK:
+        _WARMUP.clear()
+        _WARMUP.update(fields)
+
+
+def _record_warmup_failure(stage: str, error: Exception) -> None:
+    # The client sees the class, the server log the message: exception text
+    # never crosses the MCP boundary (`_safe_exception_text`'s rule).
+    _set_warmup(status="failed", stage=stage, error=type(error).__name__)
+    print(
+        f"mcp_server: retrieval warm-up failed at {stage}: {type(error).__name__}: {error}",
+        file=sys.stderr,
+    )
+
+
+def _warmup_stage(stage: str, run) -> bool:
+    """One stage of the warm-up; a failure is recorded, never raised."""
+    try:
+        run()
+    except Exception as error:  # noqa: BLE001 - recorded in the health answer
+        _record_warmup_failure(stage, error)
+        return False
+    return True
+
+
 def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
     """Load the retrieval path and record what a *warm* optional stage costs.
 
@@ -5539,12 +5837,32 @@ def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> Non
     literature on cold starts does, and the arithmetic here is the same.
 
     It runs where the caller puts it: on a daemon thread for stdio, so serving
-    starts immediately. A failure is never fatal — warming is an optimisation,
-    and an unwarmed path serves exactly as it does today.
+    starts immediately. A failure is never fatal — warming is an optimisation —
+    but it is not silent either: the health resource names the stage and the
+    error, because an unwarmed path answers from the lexical leg alone.
     """
-    for _ in range(WARMUP_PASSES):
-        with contextlib.suppress(BaseException):
-            _warmup_pass(deadline_seconds)
+    started = time.monotonic()
+    _set_warmup(status="running")
+    if not _warmup_stage("reranker", _warm_reranker):
+        return
+    for index in range(WARMUP_PASSES):
+        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds)):
+            return
+    _set_warmup(status="warm", seconds=round(time.monotonic() - started, 3))
+
+
+def _warm_reranker() -> None:
+    """Load the default cross-encoder before a question has to wait for it.
+
+    The reranker is on by default since 2026-09-10 and reranks every
+    question, so a resident server pays its 1.8 s load and the int8
+    quantisation here, once, and never inside a question's optional-stage
+    share. A vault with nothing to rerank yet still gets a resident model;
+    the two passes below then record what a warm stage costs.
+    """
+    from reranker import reranker_available
+
+    reranker_available()
 
 
 def _start_encoder_warmup() -> None:
@@ -5566,11 +5884,7 @@ def _start_encoder_warmup() -> None:
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return
 
-    def warm() -> None:
-        with contextlib.suppress(Exception):
-            warmup_retrieval_path()
-
-    threading.Thread(target=warm, name="encoder-warmup", daemon=True).start()
+    threading.Thread(target=warmup_retrieval_path, name="encoder-warmup", daemon=True).start()
 
 
 def build_server():

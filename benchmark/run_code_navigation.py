@@ -187,14 +187,18 @@ def _check_probe_error(error: BaseException, scenario: str) -> None:
     raise RuntimeError("ownership probe reached the wrong terminal") from error
 
 
-def _check_probe_terminal(
-    outcome: list[tuple[str, object]], scenario: str, dispatched: bool
-) -> None:
-    """What the probe ended with, refusing anything that measured nothing."""
+def _require_single_terminal(outcome: list[tuple[str, object]], dispatched: bool) -> None:
     if not dispatched:
         raise RuntimeError("ownership probe request was not sent")
     if len(outcome) != 1:
         raise RuntimeError("ownership probe did not reach the expected terminal")
+
+
+def _check_probe_terminal(
+    outcome: list[tuple[str, object]], scenario: str, dispatched: bool
+) -> None:
+    """What the probe ended with, refusing anything that measured nothing."""
+    _require_single_terminal(outcome, dispatched)
     if outcome[0][0] != "error":
         # The server answered inside the window between dispatch and the
         # interruption. Nothing was in flight to interrupt, so this attempt
@@ -245,22 +249,22 @@ def _json_equal(left: object, right: object) -> bool:
     return left == right
 
 
+_SCHEMA_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
+    "null": lambda value: value is None,
+    "boolean": lambda value: isinstance(value, bool),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "number": lambda value: _finite_number(value),
+    "string": lambda value: isinstance(value, str),
+    "array": lambda value: isinstance(value, list),
+    "object": lambda value: isinstance(value, dict),
+}
+
+
 def _schema_type_matches(value: object, expected: str) -> bool:
-    if expected == "null":
-        return value is None
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return _finite_number(value)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "object":
-        return isinstance(value, dict)
-    raise _SchemaViolation("unsupported schema type")
+    check = _SCHEMA_TYPE_CHECKS.get(expected)
+    if check is None:
+        raise _SchemaViolation("unsupported schema type")
+    return check(value)
 
 
 def _schema_accepts(value: object, schema: object, root: Mapping[str, object]) -> bool:
@@ -269,6 +273,167 @@ def _schema_accepts(value: object, schema: object, root: Mapping[str, object]) -
     except _SchemaViolation:
         return False
     return True
+
+
+def _reference_step(target: object, component: str) -> object:
+    if not isinstance(target, dict) or component not in target:
+        raise _SchemaViolation("schema reference is unresolved")
+    return target[component]
+
+
+def _resolve_reference(reference: object, root: Mapping[str, object]) -> object:
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        raise _SchemaViolation("only local schema references are supported")
+    target: object = root
+    for component in reference[2:].split("/"):
+        target = _reference_step(target, component)
+    return target
+
+
+def _all_strings(values: object) -> bool:
+    return isinstance(values, list) and all(isinstance(item, str) for item in values)
+
+
+def _expected_types(expected_type: object) -> list[str]:
+    expected_types = [expected_type] if isinstance(expected_type, str) else expected_type
+    if not _all_strings(expected_types) or not expected_types:
+        raise _SchemaViolation("schema type is invalid")
+    return expected_types
+
+
+def _validate_type(value: object, schema: dict) -> None:
+    expected_type = schema.get("type")
+    if expected_type is None:
+        return
+    if not any(_schema_type_matches(value, item) for item in _expected_types(expected_type)):
+        raise _SchemaViolation("value has the wrong type")
+
+
+def _in_enum(value: object, choices: object) -> bool:
+    return isinstance(choices, list) and any(_json_equal(value, item) for item in choices)
+
+
+def _validate_const_enum(value: object, schema: dict) -> None:
+    if "const" in schema and not _json_equal(value, schema["const"]):
+        raise _SchemaViolation("value differs from schema const")
+    if "enum" in schema and not _in_enum(value, schema["enum"]):
+        raise _SchemaViolation("value is outside schema enum")
+
+
+def _require_required_keys(value: dict, required: list) -> None:
+    if any(key not in value for key in required):
+        raise _SchemaViolation("required property is absent")
+
+
+def _require_no_additional(value: dict, schema: dict, properties: dict) -> None:
+    if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+        raise _SchemaViolation("additional property is forbidden")
+
+
+def _validate_properties(value: dict, properties: dict, root: Mapping[str, object]) -> None:
+    for key, child_schema in properties.items():
+        if key in value:
+            _validate_schema_node(value[key], child_schema, root)
+
+
+def _validate_object(value: dict, schema: dict, root: Mapping[str, object]) -> None:
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    if not _all_strings(required):
+        raise _SchemaViolation("schema required list is invalid")
+    if not isinstance(properties, dict):
+        raise _SchemaViolation("schema properties are invalid")
+    _require_required_keys(value, required)
+    _require_no_additional(value, schema, properties)
+    _validate_properties(value, properties, root)
+
+
+def _require_array_length(value: list, schema: dict) -> None:
+    minimum_items = schema.get("minItems")
+    maximum_items = schema.get("maxItems")
+    if isinstance(minimum_items, int) and len(value) < minimum_items:
+        raise _SchemaViolation("array is too short")
+    if isinstance(maximum_items, int) and len(value) > maximum_items:
+        raise _SchemaViolation("array is too long")
+
+
+def _items_unique(value: list) -> bool:
+    encoded = [_canonical_json(item) for item in value]
+    return len(encoded) == len(set(encoded))
+
+
+def _validate_array(value: list, schema: dict, root: Mapping[str, object]) -> None:
+    _require_array_length(value, schema)
+    if schema.get("uniqueItems") is True and not _items_unique(value):
+        raise _SchemaViolation("array items are not unique")
+    if "items" in schema:
+        for item in value:
+            _validate_schema_node(item, schema["items"], root)
+
+
+def _matches_pattern(value: str, pattern: object) -> bool:
+    if pattern is None:
+        return True
+    return isinstance(pattern, str) and re.search(pattern, value) is not None
+
+
+def _validate_string(value: str, schema: dict) -> None:
+    minimum_length = schema.get("minLength")
+    if isinstance(minimum_length, int) and len(value) < minimum_length:
+        raise _SchemaViolation("string is too short")
+    if not _matches_pattern(value, schema.get("pattern")):
+        raise _SchemaViolation("string does not match schema pattern")
+
+
+def _validate_number(value: object, schema: dict) -> None:
+    minimum = schema.get("minimum")
+    maximum = schema.get("maximum")
+    if _finite_number(minimum) and float(value) < float(minimum):
+        raise _SchemaViolation("number is below schema minimum")
+    if _finite_number(maximum) and float(value) > float(maximum):
+        raise _SchemaViolation("number is above schema maximum")
+
+
+def _kind_validators() -> tuple:
+    return (
+        (lambda value: isinstance(value, dict), _validate_object),
+        (lambda value: isinstance(value, list), _validate_array),
+        (lambda value: isinstance(value, str), lambda value, schema, _root: _validate_string(value, schema)),
+        (_finite_number, lambda value, schema, _root: _validate_number(value, schema)),
+    )
+
+
+def _validate_by_kind(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    for applies, validate in _kind_validators():
+        if applies(value):
+            validate(value, schema, root)
+
+
+def _validate_one_of(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    one_of = schema.get("oneOf")
+    if one_of is None:
+        return
+    if not isinstance(one_of, list) or sum(_schema_accepts(value, candidate, root) for candidate in one_of) != 1:
+        raise _SchemaViolation("value does not match exactly one schema branch")
+
+
+def _validate_branch(value: object, branch: object, root: Mapping[str, object]) -> None:
+    if not isinstance(branch, dict):
+        raise _SchemaViolation("schema allOf branch is invalid")
+    condition = branch.get("if")
+    if condition is None:
+        _validate_schema_node(value, branch, root)
+        return
+    selected = branch.get("then", {}) if _schema_accepts(value, condition, root) else branch.get("else", {})
+    _validate_schema_node(value, selected, root)
+
+
+def _validate_all_of(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    all_of = schema.get("allOf", [])
+    if not isinstance(all_of, list):
+        raise _SchemaViolation("schema allOf is invalid")
+    for branch in all_of:
+        _validate_branch(value, branch, root)
 
 
 def _validate_schema_node(
@@ -280,102 +445,13 @@ def _validate_schema_node(
         raise _SchemaViolation("schema node must be an object")
     reference = schema.get("$ref")
     if reference is not None:
-        if not isinstance(reference, str) or not reference.startswith("#/"):
-            raise _SchemaViolation("only local schema references are supported")
-        target: object = root
-        for component in reference[2:].split("/"):
-            if not isinstance(target, dict) or component not in target:
-                raise _SchemaViolation("schema reference is unresolved")
-            target = target[component]
-        _validate_schema_node(value, target, root)
+        _validate_schema_node(value, _resolve_reference(reference, root), root)
         return
-
-    expected_type = schema.get("type")
-    if expected_type is not None:
-        expected_types = [expected_type] if isinstance(expected_type, str) else expected_type
-        if not isinstance(expected_types, list) or not expected_types or not all(
-            isinstance(item, str) for item in expected_types
-        ):
-            raise _SchemaViolation("schema type is invalid")
-        if not any(_schema_type_matches(value, item) for item in expected_types):
-            raise _SchemaViolation("value has the wrong type")
-
-    if "const" in schema and not _json_equal(value, schema["const"]):
-        raise _SchemaViolation("value differs from schema const")
-    if "enum" in schema:
-        choices = schema["enum"]
-        if not isinstance(choices, list) or not any(_json_equal(value, item) for item in choices):
-            raise _SchemaViolation("value is outside schema enum")
-
-    if isinstance(value, dict):
-        required = schema.get("required", [])
-        properties = schema.get("properties", {})
-        if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
-            raise _SchemaViolation("schema required list is invalid")
-        if not isinstance(properties, dict):
-            raise _SchemaViolation("schema properties are invalid")
-        if any(key not in value for key in required):
-            raise _SchemaViolation("required property is absent")
-        if schema.get("additionalProperties") is False and any(
-            key not in properties for key in value
-        ):
-            raise _SchemaViolation("additional property is forbidden")
-        for key, child_schema in properties.items():
-            if key in value:
-                _validate_schema_node(value[key], child_schema, root)
-
-    if isinstance(value, list):
-        minimum_items = schema.get("minItems")
-        maximum_items = schema.get("maxItems")
-        if isinstance(minimum_items, int) and len(value) < minimum_items:
-            raise _SchemaViolation("array is too short")
-        if isinstance(maximum_items, int) and len(value) > maximum_items:
-            raise _SchemaViolation("array is too long")
-        if schema.get("uniqueItems") is True:
-            encoded = [_canonical_json(item) for item in value]
-            if len(encoded) != len(set(encoded)):
-                raise _SchemaViolation("array items are not unique")
-        if "items" in schema:
-            for item in value:
-                _validate_schema_node(item, schema["items"], root)
-
-    if isinstance(value, str):
-        minimum_length = schema.get("minLength")
-        if isinstance(minimum_length, int) and len(value) < minimum_length:
-            raise _SchemaViolation("string is too short")
-        pattern = schema.get("pattern")
-        if pattern is not None:
-            if not isinstance(pattern, str) or re.search(pattern, value) is None:
-                raise _SchemaViolation("string does not match schema pattern")
-
-    if _finite_number(value):
-        minimum = schema.get("minimum")
-        maximum = schema.get("maximum")
-        if _finite_number(minimum) and float(value) < float(minimum):
-            raise _SchemaViolation("number is below schema minimum")
-        if _finite_number(maximum) and float(value) > float(maximum):
-            raise _SchemaViolation("number is above schema maximum")
-
-    one_of = schema.get("oneOf")
-    if one_of is not None:
-        if not isinstance(one_of, list) or sum(
-            _schema_accepts(value, candidate, root) for candidate in one_of
-        ) != 1:
-            raise _SchemaViolation("value does not match exactly one schema branch")
-    all_of = schema.get("allOf", [])
-    if not isinstance(all_of, list):
-        raise _SchemaViolation("schema allOf is invalid")
-    for branch in all_of:
-        if not isinstance(branch, dict):
-            raise _SchemaViolation("schema allOf branch is invalid")
-        condition = branch.get("if")
-        if condition is None:
-            _validate_schema_node(value, branch, root)
-            continue
-        selected = branch.get("then", {}) if _schema_accepts(value, condition, root) else branch.get(
-            "else", {}
-        )
-        _validate_schema_node(value, selected, root)
+    _validate_type(value, schema)
+    _validate_const_enum(value, schema)
+    _validate_by_kind(value, schema, root)
+    _validate_one_of(value, schema, root)
+    _validate_all_of(value, schema, root)
 
 
 def _validate_schema(value: object, schema_path: Path, label: str) -> None:
@@ -414,6 +490,15 @@ def validate_report(value: object) -> None:
     _validate_schema(value, REPORT_SCHEMA, "report")
 
 
+def _prf_from_counts(true_positive: int, false_positive: int, false_negative: int) -> tuple[float, float, float]:
+    actual_count = true_positive + false_positive
+    expected_count = true_positive + false_negative
+    precision = true_positive / actual_count if actual_count else 1.0
+    recall = true_positive / expected_count if expected_count else 1.0
+    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
+
+
 def precision_recall_f1(
     expected: Iterable[object],
     actual: Iterable[object],
@@ -424,11 +509,7 @@ def precision_recall_f1(
     true_positive = len(expected_set & actual_set)
     false_positive = len(actual_set - expected_set)
     false_negative = len(expected_set - actual_set)
-    precision = (
-        true_positive / len(actual_set) if actual_set else (1.0 if not expected_set else 1.0)
-    )
-    recall = true_positive / len(expected_set) if expected_set else 1.0
-    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    precision, recall, f1 = _prf_from_counts(true_positive, false_positive, false_negative)
     return {
         "true_positive": true_positive,
         "false_positive": false_positive,
@@ -439,60 +520,65 @@ def precision_recall_f1(
     }
 
 
+def _ordered_finite_samples(values: Sequence[float]) -> list[float]:
+    ordered = sorted(float(value) for value in values)
+    if not all(math.isfinite(value) for value in ordered):
+        raise ValueError("percentile samples must be finite")
+    return ordered
+
+
 def nearest_rank_percentile(values: Sequence[float], percentile: float) -> float | None:
     """Return the nearest-rank percentile: sorted[ceil(p*n)-1]."""
     if not 0.0 < percentile <= 1.0 or not math.isfinite(percentile):
         raise ValueError("percentile must be finite and in (0, 1]")
     if not values:
         return None
-    ordered = sorted(float(value) for value in values)
-    if not all(math.isfinite(value) for value in ordered):
-        raise ValueError("percentile samples must be finite")
+    ordered = _ordered_finite_samples(values)
     return ordered[max(0, math.ceil(percentile * len(ordered)) - 1)]
 
 
-def _performance_queries(queries: Sequence[GoldQuery]) -> tuple[GoldQuery, ...]:
-    by_capability = {
+def _queries_by_capability(queries: Sequence[GoldQuery]) -> dict[str, tuple[GoldQuery, ...]]:
+    return {
         capability: tuple(query for query in queries if query.capability == capability)
         for capability in ("definition", "references", "calls")
     }
+
+
+def _require_complete_domain(by_capability: dict[str, tuple[GoldQuery, ...]]) -> None:
     expected_counts = {
         "definition": DEFINITION_QUERIES,
         "references": REFERENCE_QUERIES,
         "calls": CALL_QUERIES,
     }
-    if any(
-        len(by_capability[capability]) != expected
-        for capability, expected in expected_counts.items()
-    ):
+    if any(len(by_capability[capability]) != expected for capability, expected in expected_counts.items()):
         raise ValueError("performance sample requires the complete gold query domain")
 
-    def spread(capability: str, count: int) -> tuple[GoldQuery, ...]:
-        candidates = by_capability[capability]
-        denominator = count - 1
-        return tuple(
-            candidates[
-                (index * (len(candidates) - 1) + denominator // 2) // denominator
-            ]
-            for index in range(count)
-        )
 
-    definitions = spread("definition", 10)
-    references = spread("references", 5)
-    calls = spread("calls", 5)
-    selected = tuple(
+def _spread(candidates: tuple[GoldQuery, ...], count: int) -> tuple[GoldQuery, ...]:
+    denominator = count - 1
+    return tuple(
+        candidates[(index * (len(candidates) - 1) + denominator // 2) // denominator]
+        for index in range(count)
+    )
+
+
+def _interleaved(definitions, references, calls) -> tuple[GoldQuery, ...]:
+    return tuple(
         query
         for index in range(5)
-        for query in (
-            definitions[index * 2],
-            references[index],
-            calls[index],
-            definitions[index * 2 + 1],
-        )
+        for query in (definitions[index * 2], references[index], calls[index], definitions[index * 2 + 1])
     )
-    if len(selected) != PERFORMANCE_SAMPLES or len({query.query_id for query in selected}) != len(
-        selected
-    ):
+
+
+def _performance_queries(queries: Sequence[GoldQuery]) -> tuple[GoldQuery, ...]:
+    by_capability = _queries_by_capability(queries)
+    _require_complete_domain(by_capability)
+    selected = _interleaved(
+        _spread(by_capability["definition"], 10),
+        _spread(by_capability["references"], 5),
+        _spread(by_capability["calls"], 5),
+    )
+    if len(selected) != PERFORMANCE_SAMPLES or len({query.query_id for query in selected}) != len(selected):
         raise AssertionError("performance query sample must contain 20 unique queries")
     return selected
 
@@ -504,27 +590,18 @@ def _measure_warm_performance_pair(
     next_deadline: Callable[[], float],
     perf_counter: Callable[[], float] = time.perf_counter,
 ) -> tuple[tuple[object, ...], tuple[object, ...], float, float]:
-    direct_results: list[object] = []
-    facade_results: list[object] = []
-    direct_times: list[float] = []
-    facade_times: list[float] = []
-    for direct_first in (True, False):
-        operations = ("direct", "facade") if direct_first else ("facade", "direct")
-        for operation in operations:
-            started = perf_counter()
-            if operation == "direct":
-                result = runtime.direct_query(request, deadline=next_deadline())
-                direct_results.append(result)
-                direct_times.append((perf_counter() - started) * 1000.0)
-            else:
-                result = runtime.query(request, deadline=next_deadline())
-                facade_results.append(result)
-                facade_times.append((perf_counter() - started) * 1000.0)
+    queries = {"direct": runtime.direct_query, "facade": runtime.query}
+    results: dict[str, list[object]] = {"direct": [], "facade": []}
+    times: dict[str, list[float]] = {"direct": [], "facade": []}
+    for operation in ("direct", "facade", "facade", "direct"):
+        started = perf_counter()
+        results[operation].append(queries[operation](request, deadline=next_deadline()))
+        times[operation].append((perf_counter() - started) * 1000.0)
     return (
-        tuple(direct_results),
-        tuple(facade_results),
-        sum(direct_times) / len(direct_times),
-        sum(facade_times) / len(facade_times),
+        tuple(results["direct"]),
+        tuple(results["facade"]),
+        sum(times["direct"]) / len(times["direct"]),
+        sum(times["facade"]) / len(times["facade"]),
     )
 
 
@@ -567,6 +644,55 @@ def _fresh_cleanup_deadline(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> float:
     return monotonic() + CLEANUP_TIMEOUT_SECONDS
+
+
+def _git_timeout(deadline: float | None, monotonic: Callable[[], float]) -> float:
+    if deadline is None:
+        return 30.0
+    operation_end = _operation_deadline(deadline, monotonic=monotonic)
+    return min(30.0, max(0.001, operation_end - monotonic()))
+
+
+def _git_timeout_error(deadline: float | None, monotonic: Callable[[], float]) -> Exception:
+    if deadline is not None and monotonic() >= deadline:
+        return BenchmarkTimeoutError("benchmark run deadline exceeded")
+    return RuntimeError("deterministic qualification Git command timed out")
+
+
+def _run_git(
+    command: list[str],
+    root: Path,
+    environment: dict[str, str],
+    timeout: float,
+    capture: bool,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _git_timeout_error(deadline, monotonic) from exc
+    if result.returncode != 0:
+        raise RuntimeError("deterministic qualification Git command failed")
+    if deadline is not None:
+        _check_run_deadline(deadline, monotonic=monotonic)
+    return result
+
+
+def _git_stdout(result: subprocess.CompletedProcess, capture: bool) -> str:
+    if not capture:
+        return ""
+    return result.stdout.decode("ascii", errors="strict").strip()
 
 
 def initialize_deterministic_git(
@@ -627,31 +753,11 @@ def initialize_deterministic_git(
         ]
 
         def run(*arguments: str, capture: bool = False) -> str:
-            timeout = 30.0
-            if deadline is not None:
-                operation_end = _operation_deadline(deadline, monotonic=monotonic)
-                timeout = min(timeout, max(0.001, operation_end - monotonic()))
-            try:
-                result = subprocess.run(
-                    [*command_prefix, *arguments],
-                    cwd=root,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    shell=False,
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired as exc:
-                if deadline is not None and monotonic() >= deadline:
-                    raise BenchmarkTimeoutError("benchmark run deadline exceeded") from exc
-                raise RuntimeError("deterministic qualification Git command timed out") from exc
-            if result.returncode != 0:
-                raise RuntimeError("deterministic qualification Git command failed")
-            if deadline is not None:
-                _check_run_deadline(deadline, monotonic=monotonic)
-            return result.stdout.decode("ascii", errors="strict").strip() if capture else ""
+            timeout = _git_timeout(deadline, monotonic)
+            result = _run_git(
+                [*command_prefix, *arguments], root, environment, timeout, capture, deadline, monotonic
+            )
+            return _git_stdout(result, capture)
 
         run(
             "init",
@@ -675,27 +781,29 @@ def initialize_deterministic_git(
         return commit
 
 
+def _require_source_hash(repository: QualificationRepository, manifest: Mapping[str, object]) -> None:
+    current = current_source_manifest_sha256(repository.root)
+    if current != repository.source_manifest_sha256 or current != manifest.get("expected_source_manifest_sha256"):
+        raise FixtureIdentityError("generated source manifest hash does not match manifest")
+
+
+def _require_gold_hash(repository: QualificationRepository, manifest: Mapping[str, object]) -> None:
+    current = current_gold_sha256(repository)
+    if current != repository.gold_sha256 or current != manifest.get("expected_gold_sha256"):
+        raise FixtureIdentityError("generated gold hash does not match manifest")
+
+
 def verify_repository_identity(
     repository: QualificationRepository,
     manifest: Mapping[str, object],
 ) -> None:
     if repository.line_count != manifest.get("fixture_lines"):
         raise FixtureIdentityError("generated fixture line count does not match manifest")
-    current_source_hash = current_source_manifest_sha256(repository.root)
-    if (
-        current_source_hash != repository.source_manifest_sha256
-        or current_source_hash != manifest.get("expected_source_manifest_sha256")
-    ):
-        raise FixtureIdentityError("generated source manifest hash does not match manifest")
-    if (repository.root / WORKLOAD_CATALOG_PATH).read_bytes() != workload_catalog_bytes(
-        repository.workloads
-    ):
+    _require_source_hash(repository, manifest)
+    catalog = (repository.root / WORKLOAD_CATALOG_PATH).read_bytes()
+    if catalog != workload_catalog_bytes(repository.workloads):
         raise FixtureIdentityError("generated workload catalog does not match workloads")
-    current_gold_hash = current_gold_sha256(repository)
-    if current_gold_hash != repository.gold_sha256 or current_gold_hash != manifest.get(
-        "expected_gold_sha256"
-    ):
-        raise FixtureIdentityError("generated gold hash does not match manifest")
+    _require_gold_hash(repository, manifest)
 
 
 def _require_qualified_identity(identity: object, manifest: Mapping[str, object]) -> None:
@@ -771,6 +879,62 @@ def _navigation_assertion_succeeds(
     return result.status in accepted_statuses and actual == expected and citations_current
 
 
+def _expected_hashes(query: GoldQuery) -> dict[tuple[object, ...], str]:
+    return {_expected_key(location): location.source_sha256 for location in query.expected_locations}
+
+
+def _direct_location_key(
+    scope: RepositoryScope, location: object, encoding: PositionEncoding, deadline: float
+) -> tuple[tuple[object, ...], str] | None:
+    """(key, source sha256) for one provider location; None when it cannot be resolved."""
+    if time.monotonic() >= deadline or not isinstance(location, LspLocation):
+        return None
+    source = normalize_provider_uri(scope, location.uri)
+    if source is None:
+        return None
+    try:
+        content = read_repository_source_bytes(
+            scope,
+            source.relative_path,
+            max_bytes=_DIRECT_VALIDATION_MAX_SOURCE_BYTES,
+            deadline=deadline,
+        )
+        document = SourceDocument.from_bytes(source.relative_path, content)
+        range_ = document.to_byte_range(location.range, encoding)
+        line_start, _line_end = document.line_spans[location.range.start.line]
+    except Exception:
+        return None
+    key = (
+        source.relative_path,
+        location.range.start.line + 1,
+        range_.byte_start - line_start,
+        range_.byte_start,
+        range_.byte_end,
+    )
+    return key, document.source_sha256
+
+
+def _resolved_matches(resolved: tuple[tuple[object, ...], str] | None, expected_hashes: dict) -> bool:
+    return resolved is not None and resolved[1] == expected_hashes.get(resolved[0])
+
+
+def _direct_result_keys(
+    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
+) -> set[tuple[object, ...]] | None:
+    if getattr(result, "coverage", None) != "provider_reported":
+        return None
+    locations = getattr(result, "locations", None)
+    if not isinstance(locations, tuple):
+        return None
+    actual: set[tuple[object, ...]] = set()
+    for location in locations:
+        resolved = _direct_location_key(scope, location, encoding, deadline)
+        if not _resolved_matches(resolved, expected_hashes):
+            return None
+        actual.add(resolved[0])
+    return actual
+
+
 def _direct_results_are_exact(
     runtime: object,
     repository: QualificationRepository,
@@ -784,49 +948,29 @@ def _direct_results_are_exact(
     if not isinstance(encoding, PositionEncoding):
         return False
     expected = {_expected_key(location) for location in query.expected_locations}
-    expected_hashes = {
-        _expected_key(location): location.source_sha256
-        for location in query.expected_locations
-    }
+    expected_hashes = _expected_hashes(query)
     for result in results:
-        if getattr(result, "coverage", None) != "provider_reported":
-            return False
-        locations = getattr(result, "locations", None)
-        if not isinstance(locations, tuple):
-            return False
-        actual: set[tuple[object, ...]] = set()
-        for location in locations:
-            if time.monotonic() >= deadline or not isinstance(location, LspLocation):
-                return False
-            source = normalize_provider_uri(scope, location.uri)
-            if source is None:
-                return False
-            try:
-                content = read_repository_source_bytes(
-                    scope,
-                    source.relative_path,
-                    max_bytes=_DIRECT_VALIDATION_MAX_SOURCE_BYTES,
-                    deadline=deadline,
-                )
-                document = SourceDocument.from_bytes(source.relative_path, content)
-                range_ = document.to_byte_range(location.range, encoding)
-                line = location.range.start.line + 1
-                line_start, _line_end = document.line_spans[location.range.start.line]
-            except Exception:
-                return False
-            key = (
-                source.relative_path,
-                line,
-                range_.byte_start - line_start,
-                range_.byte_start,
-                range_.byte_end,
-            )
-            if document.source_sha256 != expected_hashes.get(key):
-                return False
-            actual.add(key)
-        if actual != expected:
+        if _direct_result_keys(scope, result, encoding, expected_hashes, deadline) != expected:
             return False
     return True
+
+
+def _cited_content(repository_root: Path, relative: str) -> bytes:
+    root = repository_root.resolve(strict=True)
+    path = (root / relative).resolve(strict=True)
+    path.relative_to(root)
+    return path.read_bytes()
+
+
+def _citation_span_current(content: bytes, location: NavigationLocation) -> bool:
+    start = location.range.byte_start
+    end = location.range.byte_end
+    if not 0 <= start < end <= len(content):
+        return False
+    content[:start].decode("utf-8", errors="strict")
+    content[start:end].decode("utf-8", errors="strict")
+    line_start = content.rfind(b"\n", 0, start) + 1
+    return content.count(b"\n", 0, start) + 1 == location.line and start - line_start == location.character
 
 
 def _current_citation(
@@ -838,45 +982,29 @@ def _current_citation(
     try:
         if _HEX_SHA256.fullmatch(expected_sha256) is None:
             return False
-        root = repository_root.resolve(strict=True)
-        path = (root / location.path).resolve(strict=True)
-        path.relative_to(root)
-        content = path.read_bytes()
+        content = _cited_content(repository_root, location.path)
         if hashlib.sha256(content).hexdigest() != expected_sha256:
             return False
-        start = location.range.byte_start
-        end = location.range.byte_end
-        if not 0 <= start < end <= len(content):
-            return False
-        content[:start].decode("utf-8", errors="strict")
-        content[start:end].decode("utf-8", errors="strict")
-        line_start = content.rfind(b"\n", 0, start) + 1
-        return (
-            content.count(b"\n", 0, start) + 1 == location.line
-            and start - line_start == location.character
-        )
+        return _citation_span_current(content, location)
     except (OSError, UnicodeError, ValueError):
         return False
+
+
+def _group_location_count(group: object) -> int:
+    if isinstance(group, dict) and isinstance(group.get("locations"), list):
+        return len(group["locations"])
+    return 0
 
 
 def _rendered_item_count(payload: Mapping[str, object]) -> int:
     groups = payload.get("groups", [])
     diagnostics = payload.get("diagnostics", [])
-    locations = 0
-    if isinstance(groups, list):
-        for group in groups:
-            if isinstance(group, dict) and isinstance(group.get("locations"), list):
-                locations += len(group["locations"])
+    locations = sum(_group_location_count(group) for group in groups) if isinstance(groups, list) else 0
     return locations + (len(diagnostics) if isinstance(diagnostics, list) else 0)
 
 
-def _token_record(
-    query: GoldQuery,
-    request: NavigationRequest,
-    result: NavigationResult,
-    rendered: Mapping[str, object],
-) -> dict[str, object]:
-    request_value = {
+def _request_value(request: NavigationRequest) -> dict[str, object]:
+    return {
         "capability": request.capability.value,
         "path": request.path,
         "line": request.line,
@@ -886,35 +1014,52 @@ def _token_record(
         "limit": request.limit,
     }
 
-    def provenance_value(item: object) -> dict[str, str]:
-        return {
-            "source": item.source,
-            "provider": item.provider,
-            "version": item.version,
-            "observation": item.observation,
-        }
 
-    def location_value(location: NavigationLocation) -> dict[str, object]:
-        return {
-            "path": location.path,
-            "range": {
-                "byte_start": location.range.byte_start,
-                "byte_end": location.range.byte_end,
-            },
-            "line": location.line,
-            "character": location.character,
-            "containing_symbol": location.containing_symbol,
-            "signature": location.signature,
-            "resolution": location.resolution.value,
-            "provenance": [provenance_value(item) for item in location.provenance],
-        }
+def _provenance_value(item: object) -> dict[str, str]:
+    return {
+        "source": item.source,
+        "provider": item.provider,
+        "version": item.version,
+        "observation": item.observation,
+    }
 
-    raw_value = {
+
+def _location_value(location: NavigationLocation) -> dict[str, object]:
+    return {
+        "path": location.path,
+        "range": {"byte_start": location.range.byte_start, "byte_end": location.range.byte_end},
+        "line": location.line,
+        "character": location.character,
+        "containing_symbol": location.containing_symbol,
+        "signature": location.signature,
+        "resolution": location.resolution.value,
+        "provenance": [_provenance_value(item) for item in location.provenance],
+    }
+
+
+def _diagnostic_value(diagnostic: object) -> dict[str, object]:
+    return {
+        "path": diagnostic.path,
+        "range": {"byte_start": diagnostic.range.byte_start, "byte_end": diagnostic.range.byte_end},
+        "severity": diagnostic.severity.value,
+        "code": diagnostic.code,
+        "message": diagnostic.message,
+        "related": [_location_value(location) for location in diagnostic.related],
+        "provenance": [_provenance_value(item) for item in diagnostic.provenance],
+    }
+
+
+def _enum_value_or_none(value: object) -> object:
+    if value is None:
+        return None
+    return value.value
+
+
+def _raw_result_value(result: NavigationResult) -> dict[str, object]:
+    return {
         "status": result.status.value,
         "requested_capability": result.requested_capability.value,
-        "effective_capability": (
-            result.effective_capability.value if result.effective_capability is not None else None
-        ),
+        "effective_capability": _enum_value_or_none(result.effective_capability),
         "provider": result.provider,
         "provider_version": result.provider_version,
         "repository_id": result.repository_id,
@@ -922,40 +1067,32 @@ def _token_record(
         "workspace_revision_before": result.workspace_revision_before,
         "workspace_revision_after": result.workspace_revision_after,
         "document_version": result.document_version,
-        "position_encoding": (
-            result.position_encoding.value if result.position_encoding is not None else None
-        ),
+        "position_encoding": _enum_value_or_none(result.position_encoding),
         "readiness": result.readiness,
         "symbol": result.symbol,
         "total": result.total,
         "offset": result.offset,
         "limit": result.limit,
-        "locations": [location_value(location) for location in result.locations],
-        "diagnostics": [
-            {
-                "path": diagnostic.path,
-                "range": {
-                    "byte_start": diagnostic.range.byte_start,
-                    "byte_end": diagnostic.range.byte_end,
-                },
-                "severity": diagnostic.severity.value,
-                "code": diagnostic.code,
-                "message": diagnostic.message,
-                "related": [location_value(location) for location in diagnostic.related],
-                "provenance": [provenance_value(item) for item in diagnostic.provenance],
-            }
-            for diagnostic in result.diagnostics
-        ],
+        "locations": [_location_value(location) for location in result.locations],
+        "diagnostics": [_diagnostic_value(diagnostic) for diagnostic in result.diagnostics],
         "hover": result.hover,
         "resolution": result.resolution.value,
-        "provenance": [provenance_value(item) for item in result.provenance],
+        "provenance": [_provenance_value(item) for item in result.provenance],
         "warnings": list(result.warnings),
     }
+
+
+def _token_record(
+    query: GoldQuery,
+    request: NavigationRequest,
+    result: NavigationResult,
+    rendered: Mapping[str, object],
+) -> dict[str, object]:
     return {
         "query_id": query.query_id,
-        "uncached_input_tokens": estimate_tokens(_canonical_json(request_value)),
+        "uncached_input_tokens": estimate_tokens(_canonical_json(_request_value(request))),
         "cache_read_tokens": 0,
-        "raw_tool_tokens": estimate_tokens(_canonical_json(raw_value)),
+        "raw_tool_tokens": estimate_tokens(_canonical_json(_raw_result_value(result))),
         "output_tokens": estimate_tokens(_canonical_json(rendered)),
     }
 
@@ -1022,6 +1159,205 @@ def _mutation_query(
     )
 
 
+def _check_optional_deadline(run_deadline: float | None, monotonic: Callable[[], float]) -> None:
+    if run_deadline is not None:
+        _check_run_deadline(run_deadline, monotonic=monotonic)
+
+
+def _reset_workload(
+    repository: QualificationRepository, workload, run_deadline: float | None, monotonic: Callable[[], float]
+) -> None:
+    original = repository.root / workload.original_path
+    renamed = repository.root / workload.renamed_path
+    created = repository.root / workload.created_path
+    probe = repository.root / workload.probe_path
+    _check_optional_deadline(run_deadline, monotonic)
+    renamed.unlink(missing_ok=True)
+    created.unlink(missing_ok=True)
+    original.write_bytes(workload.original_content)
+    probe.write_bytes(workload.baseline_probe_content)
+    _check_optional_deadline(run_deadline, monotonic)
+
+
+def _mutation_steps(repository: QualificationRepository, workload) -> tuple:
+    original = repository.root / workload.original_path
+    renamed = repository.root / workload.renamed_path
+    created = repository.root / workload.created_path
+    probe = repository.root / workload.probe_path
+    return (
+        (
+            "create",
+            lambda: (
+                created.write_bytes(workload.created_content),
+                probe.write_bytes(workload.create_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-create",
+                workload.probe_path,
+                workload.create_probe_content,
+                workload.created_symbol,
+                target_path=workload.created_path,
+                target_content=workload.created_content,
+            ),
+        ),
+        (
+            "edit",
+            lambda: (
+                original.write_bytes(workload.edited_content),
+                probe.write_bytes(workload.edit_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-edit",
+                workload.probe_path,
+                workload.edit_probe_content,
+                workload.edited_symbol,
+                target_path=workload.original_path,
+                target_content=workload.edited_content,
+            ),
+        ),
+        (
+            "rename_new",
+            lambda: (
+                original.rename(renamed),
+                probe.write_bytes(workload.rename_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-rename-new",
+                workload.probe_path,
+                workload.rename_probe_content,
+                workload.edited_symbol,
+                target_path=workload.renamed_path,
+                target_content=workload.edited_content,
+            ),
+        ),
+        (
+            "rename_old",
+            lambda: probe.write_bytes(workload.rename_old_probe_content),
+            _mutation_query(
+                f"{workload.workload_id}-rename-old",
+                workload.probe_path,
+                workload.rename_old_probe_content,
+                workload.edited_symbol,
+                target_path=workload.original_path,
+                target_content=None,
+            ),
+        ),
+        (
+            "delete",
+            lambda: (
+                renamed.unlink(),
+                created.unlink(),
+                probe.write_bytes(workload.delete_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-delete",
+                workload.probe_path,
+                workload.delete_probe_content,
+                workload.edited_symbol,
+                target_path=workload.renamed_path,
+                target_content=None,
+            ),
+        ),
+    )
+
+
+def _step_deadline(run_deadline: float | None, monotonic: Callable[[], float]) -> float:
+    if run_deadline is not None:
+        return _operation_deadline(run_deadline, monotonic=monotonic)
+    return monotonic() + QUERY_TIMEOUT_SECONDS
+
+
+class _MutationTally:
+    """What the mutation phase counts: stale answers, clean cycles, checks, latencies."""
+
+    def __init__(self) -> None:
+        self.stale = 0
+        self.cycles_measured = 0
+        self.checks_measured = 0
+        self.latencies: list[float] = []
+
+
+def _citations_current(repository_root: Path, locations, expected_hashes: dict) -> bool:
+    return all(
+        _current_citation(repository_root, location, expected_sha256=expected_hashes.get(_actual_key(location), ""))
+        for location in locations
+    )
+
+
+def _fresh_after_step(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    query: GoldQuery,
+    deadline: float,
+) -> bool:
+    result = runtime.query(_navigation_request(query, scope), deadline=deadline)
+    tally.checks_measured += 1
+    actual = {_actual_key(location) for location in result.locations}
+    expected = {_expected_key(location) for location in query.expected_locations}
+    citations = _citations_current(repository.root, result.locations, _expected_hashes(query))
+    return _navigation_assertion_succeeds(result, expected=expected, actual=actual, citations_current=citations)
+
+
+def _run_mutation_step(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    errors: list[dict[str, str]],
+    step: tuple,
+    run_deadline: float | None,
+    monotonic: Callable[[], float],
+) -> bool:
+    """One mutate-then-query step; False when it raised (the cycle is not clean)."""
+    operation, mutate, query = step
+    started = time.perf_counter()
+    try:
+        deadline = _step_deadline(run_deadline, monotonic)
+        mutate()
+        _check_optional_deadline(run_deadline, monotonic)
+        if _fresh_after_step(runtime, repository, scope, tally, query, deadline):
+            tally.latencies.append((time.perf_counter() - started) * 1000.0)
+        else:
+            tally.stale += 1
+        _check_optional_deadline(run_deadline, monotonic)
+        return True
+    except BenchmarkTimeoutError:
+        raise
+    except Exception as exc:  # benchmark evidence retains a closed code only
+        tally.stale += 1
+        errors.append({"phase": f"mutation_{operation}", "code": type(exc).__name__})
+        _check_optional_deadline(run_deadline, monotonic)
+        return False
+
+
+def _mutate_workload(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    errors: list[dict[str, str]],
+    workload,
+    run_deadline: float | None,
+    monotonic: Callable[[], float],
+) -> None:
+    try:
+        _reset_workload(repository, workload, run_deadline, monotonic)
+    except BenchmarkTimeoutError:
+        raise
+    except Exception as exc:  # benchmark evidence retains a closed code only
+        tally.stale += FRESHNESS_CHECKS_PER_CYCLE
+        errors.append({"phase": "mutation_reset", "code": type(exc).__name__})
+        return
+    outcomes = [
+        _run_mutation_step(runtime, repository, scope, tally, errors, step, run_deadline, monotonic)
+        for step in _mutation_steps(repository, workload)
+    ]
+    if all(outcomes):
+        tally.cycles_measured += 1
+
+
 def _mutate_and_measure(
     runtime: object,
     repository: QualificationRepository,
@@ -1031,167 +1367,50 @@ def _mutate_and_measure(
     run_deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[int, int, int, list[float]]:
-    stale = 0
-    cycles_measured = 0
-    checks_measured = 0
-    latencies: list[float] = []
+    tally = _MutationTally()
     for workload in repository.workloads:
-        original = repository.root / workload.original_path
-        renamed = repository.root / workload.renamed_path
-        created = repository.root / workload.created_path
-        probe = repository.root / workload.probe_path
-        try:
-            if run_deadline is not None:
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-            renamed.unlink(missing_ok=True)
-            created.unlink(missing_ok=True)
-            original.write_bytes(workload.original_content)
-            probe.write_bytes(workload.baseline_probe_content)
-            if run_deadline is not None:
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-        except BenchmarkTimeoutError:
-            raise
-        except Exception as exc:  # benchmark evidence retains a closed code only
-            stale += FRESHNESS_CHECKS_PER_CYCLE
-            errors.append({"phase": "mutation_reset", "code": type(exc).__name__})
-            continue
-        steps = (
-            (
-                "create",
-                lambda: (
-                    created.write_bytes(workload.created_content),
-                    probe.write_bytes(workload.create_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-create",
-                    workload.probe_path,
-                    workload.create_probe_content,
-                    workload.created_symbol,
-                    target_path=workload.created_path,
-                    target_content=workload.created_content,
-                ),
-            ),
-            (
-                "edit",
-                lambda: (
-                    original.write_bytes(workload.edited_content),
-                    probe.write_bytes(workload.edit_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-edit",
-                    workload.probe_path,
-                    workload.edit_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.original_path,
-                    target_content=workload.edited_content,
-                ),
-            ),
-            (
-                "rename_new",
-                lambda: (
-                    original.rename(renamed),
-                    probe.write_bytes(workload.rename_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-rename-new",
-                    workload.probe_path,
-                    workload.rename_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.renamed_path,
-                    target_content=workload.edited_content,
-                ),
-            ),
-            (
-                "rename_old",
-                lambda: probe.write_bytes(workload.rename_old_probe_content),
-                _mutation_query(
-                    f"{workload.workload_id}-rename-old",
-                    workload.probe_path,
-                    workload.rename_old_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.original_path,
-                    target_content=None,
-                ),
-            ),
-            (
-                "delete",
-                lambda: (
-                    renamed.unlink(),
-                    created.unlink(),
-                    probe.write_bytes(workload.delete_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-delete",
-                    workload.probe_path,
-                    workload.delete_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.renamed_path,
-                    target_content=None,
-                ),
-            ),
-        )
-        cycle_ok = True
-        for operation, mutate, query in steps:
-            started = time.perf_counter()
-            try:
-                deadline = (
-                    _operation_deadline(run_deadline, monotonic=monotonic)
-                    if run_deadline is not None
-                    else monotonic() + QUERY_TIMEOUT_SECONDS
-                )
-                mutate()
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                result = runtime.query(
-                    _navigation_request(query, scope),
-                    deadline=deadline,
-                )
-                checks_measured += 1
-                actual = {_actual_key(location) for location in result.locations}
-                expected = {_expected_key(location) for location in query.expected_locations}
-                expected_hashes = {
-                    _expected_key(location): location.source_sha256
-                    for location in query.expected_locations
-                }
-                citations = all(
-                    _current_citation(
-                        repository.root,
-                        location,
-                        expected_sha256=expected_hashes.get(
-                            _actual_key(location),
-                            "",
-                        ),
-                    )
-                    for location in result.locations
-                )
-                fresh = _navigation_assertion_succeeds(
-                    result,
-                    expected=expected,
-                    actual=actual,
-                    citations_current=citations,
-                )
-                if not fresh:
-                    stale += 1
-                else:
-                    latencies.append((time.perf_counter() - started) * 1000.0)
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:  # benchmark evidence retains a closed code only
-                stale += 1
-                cycle_ok = False
-                errors.append(
-                    {
-                        "phase": f"mutation_{operation}",
-                        "code": type(exc).__name__,
-                    }
-                )
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-        if cycle_ok:
-            cycles_measured += 1
-    return stale, cycles_measured, checks_measured, latencies
+        _mutate_workload(runtime, repository, scope, tally, errors, workload, run_deadline, monotonic)
+    return tally.stale, tally.cycles_measured, tally.checks_measured, tally.latencies
+
+
+def _process_alive(popen: object) -> bool:
+    return popen is not None and popen.poll() is None
+
+
+def _coordinator_owns(coordinator: object) -> bool:
+    return coordinator is not None and _coordinator_has_ownership(coordinator)
+
+
+def _lease_exists(lease: Path | None) -> bool:
+    return lease is not None and lease.exists()
+
+
+def _process_handles(process: object) -> tuple[object, object, Path | None]:
+    """(popen, coordinator, lease path) of a live process; Nones when there is none."""
+    if process is None:
+        return None, None, None
+    return process.process, process._coordinator, process.owner_root / "lease.json"
+
+
+def _orphan_evidence_problem(orphan: object) -> str | None:
+    if isinstance(orphan, bool) or orphan not in {0, 1}:
+        return "runtime cleanup returned invalid evidence"
+    if orphan:
+        return "runtime cleanup reported retained ownership"
+    return None
+
+
+def _retry_once_after_oserror(retried: bool, deadline: float) -> bool:
+    """True once: a second OSError, or one past the deadline, propagates."""
+    if retried or time.monotonic() >= deadline:
+        raise
+    return True
+
+
+def _still_not_ready(recovered: object, deadline: float) -> bool:
+    if not isinstance(recovered, NavigationResult):
+        return False
+    return recovered.status is NavigationStatus.NOT_READY and time.monotonic() < deadline
 
 
 class _RealNavigationRuntime:
@@ -1246,27 +1465,23 @@ class _RealNavigationRuntime:
             return self._session.definition(anchor, deadline=deadline)
         if request.capability is Capability.REFERENCES:
             return self._session.references(anchor, deadline=deadline)
-        if request.capability is Capability.CALLS:
-            if request.direction == "incoming":
-                return self._session.incoming_calls(anchor, deadline=deadline)
-            return self._session.outgoing_calls(anchor, deadline=deadline)
-        raise ValueError("unsupported direct qualification capability")
+        return self._direct_calls(request, anchor, deadline)
+
+    def _direct_calls(self, request: NavigationRequest, anchor: object, deadline: float) -> object:
+        if request.capability is not Capability.CALLS:
+            raise ValueError("unsupported direct qualification capability")
+        if request.direction == "incoming":
+            return self._session.incoming_calls(anchor, deadline=deadline)
+        return self._session.outgoing_calls(anchor, deadline=deadline)
 
     @property
     def position_encoding(self) -> PositionEncoding | None:
         return self._session.position_encoding
 
     def _close_and_count(self, deadline: float) -> int:
-        process = self._session._process
-        coordinator = process._coordinator if process is not None else None
-        popen = process.process if process is not None else None
-        lease = process.owner_root / "lease.json" if process is not None else None
+        popen, coordinator, lease = _process_handles(self._session._process)
         self._navigation.close(deadline=deadline)
-        return int(
-            (popen is not None and popen.poll() is None)
-            or (coordinator is not None and _coordinator_has_ownership(coordinator))
-            or (lease is not None and lease.exists())
-        )
+        return int(_process_alive(popen) or _coordinator_owns(coordinator) or _lease_exists(lease))
 
     @property
     def cleanup_failed(self) -> bool:
@@ -1280,23 +1495,22 @@ class _RealNavigationRuntime:
         if isinstance(retried, bool) or retried not in {0, 1}:
             return
 
+    def _fail_cleanup(self) -> None:
+        self._cleanup_failed = True
+        self._retry_retained_cleanup()
+
     def _reset(self, deadline: float) -> int:
         if self.cleanup_failed:
             raise _CleanupProofError("runtime cleanup is terminal")
         try:
             orphan = self._close_and_count(deadline)
         except Exception as exc:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
+            self._fail_cleanup()
             raise _CleanupProofError("runtime cleanup could not be proven") from exc
-        if isinstance(orphan, bool) or orphan not in {0, 1}:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
-            raise _CleanupProofError("runtime cleanup returned invalid evidence")
-        if orphan:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
-            raise _CleanupProofError("runtime cleanup reported retained ownership")
+        problem = _orphan_evidence_problem(orphan)
+        if problem is not None:
+            self._fail_cleanup()
+            raise _CleanupProofError(problem)
         self._open()
         return 0
 
@@ -1328,15 +1542,9 @@ class _RealNavigationRuntime:
             try:
                 recovered = self.query(request, deadline=deadline)
             except OSError:
-                if retried_oserror or time.monotonic() >= deadline:
-                    raise
-                retried_oserror = True
+                retried_oserror = _retry_once_after_oserror(retried_oserror, deadline)
                 continue
-            if not (
-                isinstance(recovered, NavigationResult)
-                and recovered.status is NavigationStatus.NOT_READY
-                and time.monotonic() < deadline
-            ):
+            if not _still_not_ready(recovered, deadline):
                 return recovered
 
     def _prepare_process(self, deadline: float):
@@ -1467,14 +1675,18 @@ class _RealNavigationRuntime:
             self._recover_ownership_scenario()
             return None, False
 
+    def _ownership_attempt_or_stop(self, scenario: str, deadline: float) -> tuple[int | None, bool]:
+        """One attempt, or (None, False) when no attempt may start."""
+        if not self._can_attempt_ownership(deadline):
+            return None, False
+        return self._attempt_ownership_scenario(scenario, deadline)
+
     def _ownership_outcome(
         self, scenario: str, deadline: float
     ) -> dict[str, int | bool | None]:
         """One scenario's result, retrying attempts that measured nothing."""
         for _attempt in range(_OWNERSHIP_PROBE_ATTEMPTS):
-            if not self._can_attempt_ownership(deadline):
-                break
-            orphan, retry = self._attempt_ownership_scenario(scenario, deadline)
+            orphan, retry = self._ownership_attempt_or_stop(scenario, deadline)
             if orphan is not None:
                 return {"available": True, "orphan_count": orphan}
             if not retry:
@@ -1518,61 +1730,60 @@ def _default_dependencies() -> BenchmarkDependencies:
     )
 
 
+def _windows_peak_rss() -> tuple[float, str]:
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    get_process_memory_info = psapi.GetProcessMemoryInfo
+    get_process_memory_info.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessMemoryCounters),
+        wintypes.DWORD,
+    ]
+    get_process_memory_info.restype = wintypes.BOOL
+    handle = get_current_process()
+    if not get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return counters.PeakWorkingSetSize / (1024.0 * 1024.0), "measured-windows-peak-working-set"
+
+
+def _posix_peak_rss() -> tuple[float, str]:
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    multiplier = 1 if sys.platform == "darwin" else 1024
+    return usage * multiplier / (1024.0 * 1024.0), "measured-posix-ru-maxrss"
+
+
 def _peak_rss() -> tuple[float | None, str]:
     if os.name == "nt":
-        try:
-            from ctypes import wintypes
-
-            class ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            counters = ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(counters)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)
-            get_current_process = kernel32.GetCurrentProcess
-            get_current_process.argtypes = []
-            get_current_process.restype = wintypes.HANDLE
-            get_process_memory_info = psapi.GetProcessMemoryInfo
-            get_process_memory_info.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(ProcessMemoryCounters),
-                wintypes.DWORD,
-            ]
-            get_process_memory_info.restype = wintypes.BOOL
-            handle = get_current_process()
-            if not get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
-                raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
-            return (
-                counters.PeakWorkingSetSize / (1024.0 * 1024.0),
-                "measured-windows-peak-working-set",
-            )
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
+        probe, failures = _windows_peak_rss, (AttributeError, OSError, TypeError, ValueError)
     else:
-        try:
-            import resource
-
-            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            multiplier = 1 if sys.platform == "darwin" else 1024
-            return (
-                usage * multiplier / (1024.0 * 1024.0),
-                "measured-posix-ru-maxrss",
-            )
-        except (ImportError, OSError, ValueError):
-            pass
-    return None, "unavailable"
+        probe, failures = _posix_peak_rss, (ImportError, OSError, ValueError)
+    try:
+        return probe()
+    except failures:
+        return None, "unavailable"
 
 
 def _ram_bytes() -> int | None:
@@ -1617,12 +1828,19 @@ def _ram_class() -> str:
     return "128+ GiB"
 
 
+def _first_available(*values: str) -> str:
+    for value in values:
+        if value:
+            return value
+    return "unavailable"
+
+
 def _environment() -> dict[str, object]:
     return {
         "os": platform.system() or os.name,
-        "os_version": platform.version() or platform.release() or "unavailable",
-        "architecture": platform.machine() or "unavailable",
-        "cpu_model": platform.processor() or platform.machine() or "unavailable",
+        "os_version": _first_available(platform.version(), platform.release()),
+        "architecture": _first_available(platform.machine()),
+        "cpu_model": _first_available(platform.processor(), platform.machine()),
         "cpu_core_count": max(1, os.cpu_count() or 1),
         "ram_class": _ram_class(),
     }
@@ -1646,6 +1864,11 @@ def _operator_link_or_reparse(info: object) -> bool:
     )
 
 
+def _require_plain_directory(info: object) -> None:
+    if _operator_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise PermissionError("operator source parent must be a regular directory")
+
+
 def _validate_operator_source_chain(path: Path, root: Path, deadline: float) -> None:
     try:
         path.relative_to(root)
@@ -1654,13 +1877,75 @@ def _validate_operator_source_chain(path: Path, root: Path, deadline: float) -> 
     current = root
     while True:
         _check_run_deadline(deadline)
-        info = current.stat(follow_symlinks=False)
-        if _operator_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
-            raise PermissionError("operator source parent must be a regular directory")
+        _require_plain_directory(current.stat(follow_symlinks=False))
         if current == path.parent:
             return
-        relative = path.parent.relative_to(current)
-        current /= relative.parts[0]
+        current /= path.parent.relative_to(current).parts[0]
+
+
+def _expected_operator_state(source: Path) -> tuple[int, int, int, int, int, int]:
+    before = source.stat(follow_symlinks=False)
+    if _operator_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
+        raise PermissionError("operator source must be a regular file")
+    if before.st_size > OPERATOR_MAX_SOURCE_BYTES:
+        raise ValueError("operator source exceeds the byte limit")
+    return _operator_file_state(before)
+
+
+def _windows_source_state(handle: int) -> tuple[object, ...]:
+    return (
+        _windows_workspace.identity(handle, directory=False),
+        _windows_workspace.file_size(handle),
+        _windows_workspace.file_modified_time_ns(handle),
+    )
+
+
+def _open_operator_source(source: Path, flags: int) -> tuple[int, int | None, tuple[object, ...] | None]:
+    """(descriptor, Windows handle, Windows state); the handle and state are None on POSIX."""
+    if os.name != "nt":
+        descriptor = os.open(source, flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        return descriptor, None, None
+    import msvcrt
+
+    handle = _windows_workspace.open_exclusive_readonly_source_file(source)
+    try:
+        state = _windows_source_state(handle)
+        descriptor = msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        _windows_workspace.close_handle(handle)
+        raise
+    return descriptor, handle, state
+
+
+def _read_operator_chunks(descriptor: int, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= OPERATOR_MAX_SOURCE_BYTES:
+        _check_run_deadline(deadline)
+        chunk = os.read(descriptor, min(OPERATOR_READ_CHUNK_BYTES, OPERATOR_MAX_SOURCE_BYTES + 1 - total))
+        _check_run_deadline(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > OPERATOR_MAX_SOURCE_BYTES:
+        raise ValueError("operator source exceeds the byte limit")
+    return b"".join(chunks)
+
+
+def _require_source_unchanged(
+    descriptor: int, expected_state: tuple, windows_handle: int | None, windows_state: tuple | None
+) -> None:
+    if _operator_file_state(os.fstat(descriptor)) != expected_state:
+        raise PermissionError("operator source changed during read")
+    if windows_handle is not None and _windows_source_state(windows_handle) != windows_state:
+        raise PermissionError("operator source changed during read")
+
+
+def _require_source_not_replaced(source: Path, expected_state: tuple) -> None:
+    current = source.stat(follow_symlinks=False)
+    if _operator_link_or_reparse(current) or _operator_file_state(current) != expected_state:
+        raise PermissionError("operator source was replaced during read")
 
 
 def _read_operator_source(path: Path, operator_root: Path, *, deadline: float) -> bytes:
@@ -1668,77 +1953,50 @@ def _read_operator_source(path: Path, operator_root: Path, *, deadline: float) -
     root = Path(os.path.abspath(os.fspath(operator_root)))
     _validate_operator_source_chain(source, root, deadline)
     _check_run_deadline(deadline)
-    before = source.stat(follow_symlinks=False)
-    if _operator_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
-        raise PermissionError("operator source must be a regular file")
-    if before.st_size > OPERATOR_MAX_SOURCE_BYTES:
-        raise ValueError("operator source exceeds the byte limit")
-    expected_state = _operator_file_state(before)
+    expected_state = _expected_operator_state(source)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    windows_handle: int | None = None
-    windows_state: tuple[object, ...] | None = None
     _check_run_deadline(deadline)
-    if os.name == "nt":
-        import msvcrt
-
-        windows_handle = _windows_workspace.open_exclusive_readonly_source_file(source)
-        try:
-            windows_state = (
-                _windows_workspace.identity(windows_handle, directory=False),
-                _windows_workspace.file_size(windows_handle),
-                _windows_workspace.file_modified_time_ns(windows_handle),
-            )
-            descriptor = msvcrt.open_osfhandle(windows_handle, flags)
-        except BaseException:
-            _windows_workspace.close_handle(windows_handle)
-            raise
-    else:
-        descriptor = os.open(
-            source,
-            flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
+    descriptor, windows_handle, windows_state = _open_operator_source(source, flags)
     try:
         _check_run_deadline(deadline)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _operator_file_state(opened) != expected_state:
             raise PermissionError("operator source changed before open")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= OPERATOR_MAX_SOURCE_BYTES:
-            _check_run_deadline(deadline)
-            chunk = os.read(
-                descriptor,
-                min(
-                    OPERATOR_READ_CHUNK_BYTES,
-                    OPERATOR_MAX_SOURCE_BYTES + 1 - total,
-                ),
-            )
-            _check_run_deadline(deadline)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        if total > OPERATOR_MAX_SOURCE_BYTES:
-            raise ValueError("operator source exceeds the byte limit")
-        after = os.fstat(descriptor)
-        if _operator_file_state(after) != expected_state:
-            raise PermissionError("operator source changed during read")
-        if windows_handle is not None:
-            after_windows_state = (
-                _windows_workspace.identity(windows_handle, directory=False),
-                _windows_workspace.file_size(windows_handle),
-                _windows_workspace.file_modified_time_ns(windows_handle),
-            )
-            if after_windows_state != windows_state:
-                raise PermissionError("operator source changed during read")
+        content = _read_operator_chunks(descriptor, deadline)
+        _require_source_unchanged(descriptor, expected_state, windows_handle, windows_state)
         _check_run_deadline(deadline)
-        current = source.stat(follow_symlinks=False)
-        if _operator_link_or_reparse(current) or _operator_file_state(current) != expected_state:
-            raise PermissionError("operator source was replaced during read")
+        _require_source_not_replaced(source, expected_state)
         _validate_operator_source_chain(source, root, deadline)
-        return b"".join(chunks)
+        return content
     finally:
         os.close(descriptor)
+
+
+def _definition_token_action(token, expect_name: bool) -> str | None:
+    """`start` at def/class, `name` at the name that follows, `reset` at anything else."""
+    if _starts_definition(token):
+        return "start"
+    if not expect_name:
+        return None
+    return _awaited_name_action(token)
+
+
+def _awaited_name_action(token) -> str | None:
+    if token.type == tokenize.NAME:
+        return "name"
+    if token.type not in {tokenize.NL, tokenize.INDENT}:
+        return "reset"
+    return None
+
+
+def _starts_definition(token) -> bool:
+    return token.type == tokenize.NAME and token.string in {"def", "class"}
+
+
+def _definition_position(content: bytes, token, path: Path, root: Path) -> tuple[str, int, int]:
+    line_bytes = content.splitlines()[token.start[0] - 1]
+    prefix = line_bytes.decode("utf-8")[: token.start[1]].encode("utf-8")
+    return path.relative_to(root).as_posix(), token.start[0], len(prefix)
 
 
 def _operator_definition(
@@ -1749,23 +2007,125 @@ def _operator_definition(
     deadline: float,
 ) -> tuple[str, int, int] | None:
     content = _read_operator_source(path, operator_root, deadline=deadline)
-    tokens = tokenize.tokenize(io.BytesIO(content).readline)
     expect_name = False
-    for token in tokens:
-        if token.type == tokenize.NAME and token.string in {"def", "class"}:
-            expect_name = True
-            continue
-        if expect_name and token.type == tokenize.NAME:
-            line_bytes = content.splitlines()[token.start[0] - 1]
-            prefix = line_bytes.decode("utf-8")[: token.start[1]].encode("utf-8")
-            return (
-                path.relative_to(root).as_posix(),
-                token.start[0],
-                len(prefix),
-            )
-        if expect_name and token.type not in {tokenize.NL, tokenize.INDENT}:
-            expect_name = False
+    for token in tokenize.tokenize(io.BytesIO(content).readline):
+        action = _definition_token_action(token, expect_name)
+        if action == "name":
+            return _definition_position(content, token, path, root)
+        if action is not None:
+            expect_name = action == "start"
     return None
+
+
+_REPARSE_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _require_operator_root(requested: Path) -> Path:
+    try:
+        metadata = requested.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator root is unavailable") from exc
+    if requested.is_symlink() or getattr(metadata, "st_file_attributes", 0) & _REPARSE_FLAG or not stat.S_ISDIR(metadata.st_mode):
+        raise _OperatorTraversalError("operator root is not a regular directory")
+    return requested.resolve(strict=True)
+
+
+class _OperatorScan:
+    """A bounded depth-first walk over an operator corpus."""
+
+    def __init__(self, root: Path, deadline: float) -> None:
+        self.root = root
+        self.deadline = deadline
+        self.files: list[Path] = []
+        self.stack: list[tuple[Path, int]] = [(root, 0)]
+        self.visited: set[tuple[int, int]] = set()
+        self.scanned_entries = 0
+
+
+def _directory_identity(current: Path) -> tuple[int, int]:
+    try:
+        metadata = current.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator directory is unavailable") from exc
+    return metadata.st_dev, metadata.st_ino
+
+
+def _scan_entries(scan: _OperatorScan, current: Path) -> list:
+    try:
+        with os.scandir(current) as iterator:
+            entries = []
+            for entry in iterator:
+                _check_run_deadline(scan.deadline)
+                scan.scanned_entries += 1
+                if scan.scanned_entries > OPERATOR_MAX_SCANNED_ENTRIES:
+                    raise _OperatorTraversalError("operator traversal exceeds the entry limit")
+                entries.append(entry)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator directory cannot be scanned") from exc
+    return entries
+
+
+def _entry_metadata(entry):
+    try:
+        return entry.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator entry cannot be inspected") from exc
+
+
+def _entry_is_link(entry, metadata) -> bool:
+    return entry.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_FLAG)
+
+
+def _classify_entry(entry, metadata) -> str:
+    if _entry_is_link(entry, metadata):
+        return "skip"
+    return _unlinked_entry_kind(entry, metadata)
+
+
+def _unlinked_entry_kind(entry, metadata) -> str:
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    if stat.S_ISREG(metadata.st_mode) and Path(entry.path).suffix == ".py":
+        return "python"
+    return "other"
+
+
+def _child_directory(path: Path, depth: int) -> tuple[Path, int]:
+    if depth + 1 > OPERATOR_MAX_DEPTH:
+        raise _OperatorTraversalError("operator traversal exceeds the depth limit")
+    return path, depth + 1
+
+
+def _contained_python_file(path: Path, root: Path) -> Path:
+    try:
+        candidate = path.resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise _OperatorTraversalError("operator file escaped its root") from exc
+    return candidate
+
+
+def _visit_directory(scan: _OperatorScan, current: Path, depth: int) -> None:
+    entries = _scan_entries(scan, current)
+    child_directories: list[tuple[Path, int]] = []
+    for entry in sorted(entries, key=lambda item: item.name):
+        _check_run_deadline(scan.deadline)
+        if _visit_entry(scan, entry, depth, child_directories):
+            break
+    scan.stack.extend(reversed(child_directories))
+
+
+def _visit_entry(scan: _OperatorScan, entry, depth: int, child_directories: list[tuple[Path, int]]) -> bool:
+    """Record one entry; True once the file bound is reached."""
+    kind = _classify_entry(entry, _entry_metadata(entry))
+    path = Path(entry.path)
+    if kind == "directory":
+        child_directories.append(_child_directory(path, depth))
+        return False
+    if kind != "python":
+        return False
+    scan.files.append(_contained_python_file(path, scan.root))
+    return len(scan.files) >= OPERATOR_MAX_PYTHON_FILES
 
 
 def _operator_python_files(
@@ -1773,76 +2133,96 @@ def _operator_python_files(
     *,
     deadline: float,
 ) -> tuple[Path, list[Path]]:
-    requested = Path(operator_root)
-    try:
-        requested_metadata = requested.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise _OperatorTraversalError("operator root is unavailable") from exc
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if (
-        requested.is_symlink()
-        or getattr(requested_metadata, "st_file_attributes", 0) & reparse_flag
-        or not stat.S_ISDIR(requested_metadata.st_mode)
-    ):
-        raise _OperatorTraversalError("operator root is not a regular directory")
-    root = requested.resolve(strict=True)
-    files: list[Path] = []
-    stack = [(root, 0)]
-    visited: set[tuple[int, int]] = set()
-    scanned_entries = 0
-    while stack and len(files) < OPERATOR_MAX_PYTHON_FILES:
+    root = _require_operator_root(Path(operator_root))
+    scan = _OperatorScan(root, deadline)
+    while scan.stack and len(scan.files) < OPERATOR_MAX_PYTHON_FILES:
         _check_run_deadline(deadline)
-        current, depth = stack.pop()
-        try:
-            current_metadata = current.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise _OperatorTraversalError("operator directory is unavailable") from exc
-        identity = (current_metadata.st_dev, current_metadata.st_ino)
-        if identity in visited:
+        current, depth = scan.stack.pop()
+        identity = _directory_identity(current)
+        if identity in scan.visited:
             continue
-        visited.add(identity)
-        try:
-            with os.scandir(current) as iterator:
-                entries = []
-                for entry in iterator:
-                    _check_run_deadline(deadline)
-                    scanned_entries += 1
-                    if scanned_entries > OPERATOR_MAX_SCANNED_ENTRIES:
-                        raise _OperatorTraversalError(
-                            "operator traversal exceeds the entry limit"
-                        )
-                    entries.append(entry)
-        except OSError as exc:
-            raise _OperatorTraversalError("operator directory cannot be scanned") from exc
+        scan.visited.add(identity)
+        _visit_directory(scan, current, depth)
+    return root, scan.files
 
-        child_directories: list[tuple[Path, int]] = []
-        for entry in sorted(entries, key=lambda item: item.name):
-            _check_run_deadline(deadline)
-            try:
-                metadata = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise _OperatorTraversalError("operator entry cannot be inspected") from exc
-            if entry.is_symlink() or getattr(metadata, "st_file_attributes", 0) & reparse_flag:
-                continue
-            path = Path(entry.path)
-            if stat.S_ISDIR(metadata.st_mode):
-                child_depth = depth + 1
-                if child_depth > OPERATOR_MAX_DEPTH:
-                    raise _OperatorTraversalError("operator traversal exceeds the depth limit")
-                child_directories.append((path, child_depth))
-                continue
-            if not stat.S_ISREG(metadata.st_mode) or path.suffix != ".py":
-                continue
-            try:
-                candidate = path.resolve(strict=True)
-                candidate.relative_to(root)
-            except (OSError, ValueError) as exc:
-                raise _OperatorTraversalError("operator file escaped its root") from exc
-            files.append(candidate)
-            if len(files) >= OPERATOR_MAX_PYTHON_FILES:
-                break
-        stack.extend(reversed(child_directories))
-    return root, files
+
+class _ProbeTally:
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.successes = 0
+        self.errors = 0
+        self.available = True
+
+    def fail(self) -> None:
+        self.errors += 1
+        self.available = False
+
+
+def _probe_one_file(
+    navigation: CodeNavigation,
+    scope: RepositoryScope,
+    checkout: Path,
+    root: Path,
+    path: Path,
+    tally: _ProbeTally,
+    deadline: float,
+) -> None:
+    query_deadline = _operation_deadline(deadline)
+    definition = _operator_definition(path, checkout, operator_root=root, deadline=query_deadline)
+    _check_run_deadline(deadline)
+    if definition is None:
+        return
+    relative, line, character = definition
+    tally.attempts += 1
+    result = navigation.query(
+        NavigationRequest(scope, Capability.DEFINITIONS, relative, line, character),
+        deadline=query_deadline,
+    )
+    if result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}:
+        tally.successes += 1
+    _check_run_deadline(deadline)
+
+
+def _probe_files(
+    navigation: CodeNavigation,
+    scope: RepositoryScope,
+    root: Path,
+    files: list[Path],
+    tally: _ProbeTally,
+    deadline: float,
+) -> None:
+    checkout = Path(scope.checkout_root)
+    for path in files:
+        try:
+            _probe_one_file(navigation, scope, checkout, root, path, tally, deadline)
+        except BenchmarkTimeoutError:
+            raise
+        except Exception:
+            tally.fail()
+            return
+
+
+def _open_operator_navigation(root: Path, state_root: Path, deadline: float) -> tuple[CodeNavigation, RepositoryScope]:
+    _check_run_deadline(deadline)
+    scope = resolve_repository_scope(root)
+    identity = discover_pyright(scope, state_root=state_root, deadline=_operation_deadline(deadline))
+    _check_run_deadline(deadline)
+    _require_qualified_identity(identity, load_manifest())
+    session = PyrightSession(scope, identity, state_root=state_root)
+    return CodeNavigation(scope, session, identity), scope
+
+
+def _close_operator_navigation(navigation: CodeNavigation | None, tally: _ProbeTally) -> None:
+    if navigation is None:
+        return
+    try:
+        navigation.close(deadline=_fresh_cleanup_deadline())
+    except Exception:
+        tally.fail()
+        try:
+            navigation.close(deadline=_fresh_cleanup_deadline())
+        except Exception:
+            tally.errors += 1
 
 
 def _probe_operator_corpus(
@@ -1851,98 +2231,42 @@ def _probe_operator_corpus(
     deadline: float,
 ) -> dict[str, object]:
     files: list[Path] = []
-    attempts = 0
-    successes = 0
-    errors = 0
-    available = True
+    tally = _ProbeTally()
     navigation: CodeNavigation | None = None
     try:
         root, files = _operator_python_files(operator_root, deadline=deadline)
-        _check_run_deadline(deadline)
-        scope = resolve_repository_scope(root)
-        discovery_deadline = _operation_deadline(deadline)
-        identity = discover_pyright(
-            scope,
-            state_root=state_root,
-            deadline=discovery_deadline,
-        )
-        _check_run_deadline(deadline)
-        _require_qualified_identity(identity, load_manifest())
-        session = PyrightSession(scope, identity, state_root=state_root)
-        navigation = CodeNavigation(scope, session, identity)
-        checkout = Path(scope.checkout_root)
-        for path in files:
-            try:
-                query_deadline = _operation_deadline(deadline)
-                definition = _operator_definition(
-                    path,
-                    checkout,
-                    operator_root=root,
-                    deadline=query_deadline,
-                )
-                _check_run_deadline(deadline)
-                if definition is None:
-                    continue
-                relative, line, character = definition
-                attempts += 1
-                result = navigation.query(
-                    NavigationRequest(
-                        scope,
-                        Capability.DEFINITIONS,
-                        relative,
-                        line,
-                        character,
-                    ),
-                    deadline=query_deadline,
-                )
-                if result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}:
-                    successes += 1
-                _check_run_deadline(deadline)
-            except BenchmarkTimeoutError:
-                raise
-            except Exception:
-                errors += 1
-                available = False
-                break
+        navigation, scope = _open_operator_navigation(root, state_root, deadline)
+        _probe_files(navigation, scope, root, files, tally, deadline)
     except BenchmarkTimeoutError:
         raise
     except Exception:
-        errors += 1
-        available = False
+        tally.fail()
     finally:
-        if navigation is not None:
-            try:
-                navigation.close(deadline=_fresh_cleanup_deadline())
-            except Exception:
-                errors += 1
-                available = False
-                try:
-                    navigation.close(deadline=_fresh_cleanup_deadline())
-                except Exception:
-                    errors += 1
+        _close_operator_navigation(navigation, tally)
     return {
-        "available": available,
+        "available": tally.available,
         "python_files": len(files),
-        "queries_attempted": attempts,
-        "queries_succeeded": successes,
-        "errors": errors,
+        "queries_attempted": tally.attempts,
+        "queries_succeeded": tally.successes,
+        "errors": tally.errors,
     }
+
+
+def _is_count(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 0
+
+
+def _counts_valid(value: dict, keys: set[str]) -> bool:
+    return all(_is_count(value[key]) for key in keys - {"available"})
 
 
 def _operator_metrics(value: object) -> dict[str, object]:
-    keys = {
-        "available",
-        "python_files",
-        "queries_attempted",
-        "queries_succeeded",
-        "errors",
-    }
+    keys = {"available", "python_files", "queries_attempted", "queries_succeeded", "errors"}
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("operator corpus probe returned a non-aggregate result")
-    if not isinstance(value["available"], bool) or any(
-        isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0
-        for key in keys - {"available"}
-    ):
+    if not isinstance(value["available"], bool) or not _counts_valid(value, keys):
         raise ValueError("operator corpus aggregate metrics are invalid")
     return dict(value)
 
@@ -1981,6 +2305,460 @@ def _close_runtime_with_retry(
     return None
 
 
+def _result_successful(result: object) -> bool:
+    return result is not None and result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}
+
+
+def _actual_keys(result: object, successful: bool) -> set[tuple[object, ...]]:
+    if not successful:
+        return set()
+    return {_actual_key(location) for location in result.locations}
+
+
+def _citation_flags(repository_root: Path, query: GoldQuery, result: NavigationResult) -> list[bool]:
+    expected_hashes = _expected_hashes(query)
+    return [
+        _current_citation(repository_root, location, expected_sha256=expected_hashes.get(_actual_key(location), ""))
+        for location in result.locations
+    ]
+
+
+def _recovered_correctly(recovered: object, repository_root: Path, crash_query: GoldQuery) -> bool:
+    if not isinstance(recovered, NavigationResult):
+        return False
+    locations = {_actual_key(location) for location in recovered.locations}
+    citations = _citations_current(repository_root, recovered.locations, _expected_hashes(crash_query))
+    expected = {_expected_key(location) for location in crash_query.expected_locations}
+    return _navigation_assertion_succeeds(recovered, expected=expected, actual=locations, citations_current=citations)
+
+
+def _unavailable_ownership() -> dict[str, dict[str, int | bool | None]]:
+    return {scenario: {"available": False, "orphan_count": None} for scenario in _OWNERSHIP_SCENARIOS}
+
+
+def _normal_shutdown_measured(normal_shutdown: object) -> bool:
+    if not isinstance(normal_shutdown, dict) or normal_shutdown.get("available") is not True:
+        return False
+    orphan = normal_shutdown.get("orphan_count")
+    return isinstance(orphan, int) and not isinstance(orphan, bool) and orphan in {0, 1}
+
+
+def _record_final_incident(ownership: dict, final_incident: int | None) -> None:
+    normal_shutdown = ownership.get("normal_shutdown")
+    if final_incident is None:
+        ownership["normal_shutdown"] = {"available": False, "orphan_count": None}
+        return
+    if _normal_shutdown_measured(normal_shutdown):
+        normal_shutdown["orphan_count"] = max(normal_shutdown["orphan_count"], final_incident)
+
+
+def _orphan_process_count(orphan_values: list[object]) -> int | None:
+    if len(orphan_values) != len(_OWNERSHIP_SCENARIOS):
+        return None
+    return sum(int(value) for value in orphan_values if isinstance(value, int))
+
+
+def _ownership_summary(ownership: dict) -> tuple[int, int | None]:
+    """(scenarios measured, orphan process count over all scenarios or None)."""
+    measured = [value for value in ownership.values() if isinstance(value, dict) and value.get("available") is True]
+    return len(measured), _orphan_process_count([value.get("orphan_count") for value in measured])
+
+
+def _rate(numerator: float, denominator: float) -> float:
+    if denominator:
+        return numerator / denominator
+    return 0.0
+
+
+def _orphan_rate(orphan_process_count: int | None) -> float | None:
+    if orphan_process_count is None:
+        return None
+    return orphan_process_count / len(_OWNERSHIP_SCENARIOS)
+
+
+_NO_PERFORMANCE = {
+    "available": False,
+    "cold_readiness_seconds": None,
+    "warm_facade_p50_ms": None,
+    "warm_facade_p95_ms": None,
+    "direct_pyright_p95_ms": None,
+    "warm_overhead_p95_ms": None,
+    "sample_count": 0,
+}
+
+
+class _FixtureRun:
+    """One measured fixture run: its phases append to one error list in a fixed order."""
+
+    def __init__(self, repository, scope, runtime, mode, run_deadline, monotonic) -> None:
+        self.repository = repository
+        self.scope = scope
+        self.runtime = runtime
+        self.mode = mode
+        self.run_deadline = run_deadline
+        self.monotonic = monotonic
+        self.definition_attempted = 0
+        self.definition_exact = 0
+        self.reference_expected: set[tuple[object, ...]] = set()
+        self.reference_actual: set[tuple[object, ...]] = set()
+        self.call_expected: set[tuple[object, ...]] = set()
+        self.call_actual: set[tuple[object, ...]] = set()
+        self.query_attempts = 0
+        self.tasks_solved = 0
+        self.citation_total = 0
+        self.citation_correct = 0
+        self.token_tasks: list[dict[str, object]] = []
+        self.default_items = 0
+        self.default_tokens = 0
+        self.errors: list[dict[str, str]] = []
+        self.first_request: NavigationRequest | None = None
+        self.cold_readiness_seconds: float | None = None
+        self.ownership = _unavailable_ownership()
+        self.warm_facade: list[float] = []
+        self.direct_pyright: list[float] = []
+        self.overhead: list[float] = []
+        self.stale = 0
+        self.mutation_cycles = 0
+        self.freshness_checks_measured = 0
+        self.freshness_latencies: list[float] = []
+        self.crash_attempts = 0
+        self.crash_recoveries = 0
+
+    def check(self) -> None:
+        _check_run_deadline(self.run_deadline, monotonic=self.monotonic)
+
+    def operation_deadline(self) -> float:
+        return _operation_deadline(self.run_deadline, monotonic=self.monotonic)
+
+    # --- gold queries ------------------------------------------------------------
+
+    def _query_result(self, request: NavigationRequest) -> NavigationResult | None:
+        try:
+            return self.runtime.query(request, deadline=self.operation_deadline())
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "gold_query", "code": type(exc).__name__})
+            return None
+
+    def _pair_sets(self, capability: str) -> tuple[set, set]:
+        if capability == "references":
+            return self.reference_expected, self.reference_actual
+        return self.call_expected, self.call_actual
+
+    def _tally_correctness(self, query: GoldQuery, expected: set, actual: set) -> None:
+        if query.capability == "definition":
+            self.definition_attempted += 1
+            if actual == expected:
+                self.definition_exact += 1
+            return
+        target_expected, target_actual = self._pair_sets(query.capability)
+        target_expected.update((query.query_id, *item) for item in expected)
+        target_actual.update((query.query_id, *item) for item in actual)
+
+    def _record_rendered(self, index: int, query, request, result, solved: bool, elapsed: float) -> None:
+        if index == 0 and self.mode == "qualification" and solved:
+            self.cold_readiness_seconds = elapsed
+        rendered = render_navigation(result, offset=0, limit=DEFAULT_LIMIT)
+        self.default_items = max(self.default_items, _rendered_item_count(rendered))
+        self.default_tokens = max(self.default_tokens, estimate_tokens(_canonical_json(rendered)))
+        if solved:
+            self.tasks_solved += 1
+            self.token_tasks.append(_token_record(query, request, result, rendered))
+
+    def _gold_query(self, index: int, query: GoldQuery) -> None:
+        request = _navigation_request(query, self.scope)
+        if self.first_request is None:
+            self.first_request = request
+        started = time.perf_counter()
+        self.query_attempts += 1
+        result = self._query_result(request)
+        self.check()
+        elapsed = time.perf_counter() - started
+        expected = {_expected_key(location) for location in query.expected_locations}
+        successful = _result_successful(result)
+        actual = _actual_keys(result, successful)
+        self._tally_correctness(query, expected, actual)
+        if result is None:
+            return
+        citations = _citation_flags(self.repository.root, query, result)
+        self.citation_total += len(citations)
+        self.citation_correct += sum(citations)
+        solved = successful and _navigation_assertion_succeeds(
+            result, expected=expected, actual=actual, citations_current=all(citations)
+        )
+        self._record_rendered(index, query, request, result, solved, elapsed)
+        self.check()
+
+    def gold_phase(self) -> None:
+        for index, query in enumerate(self.repository.gold_queries):
+            self._gold_query(index, query)
+
+    # --- performance sample ------------------------------------------------------
+
+    def _measure_pair(self, request: NavigationRequest):
+        try:
+            measured = _measure_warm_performance_pair(self.runtime, request, next_deadline=self.operation_deadline)
+            self.check()
+            return measured
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "performance_sample", "code": type(exc).__name__})
+            self.check()
+            return None
+
+    def _facade_valid(self, query: GoldQuery, facade_results) -> bool:
+        expected = {_expected_key(location) for location in query.expected_locations}
+        hashes = _expected_hashes(query)
+        for facade_result in facade_results:
+            actual = {_actual_key(location) for location in facade_result.locations}
+            citations = _citations_current(self.repository.root, facade_result.locations, hashes)
+            if not _navigation_assertion_succeeds(facade_result, expected=expected, actual=actual, citations_current=citations):
+                return False
+        return True
+
+    def _pair_error(self, query: GoldQuery, direct_results, facade_results) -> dict[str, str] | None:
+        if not _direct_results_are_exact(
+            self.runtime, self.repository, self.scope, query, direct_results, deadline=self.operation_deadline()
+        ):
+            return {"phase": "performance_direct", "code": "UnsuccessfulDirectResult"}
+        if not self._facade_valid(query, facade_results):
+            return {"phase": "performance_facade", "code": "UnsuccessfulNavigationResult"}
+        return None
+
+    def _performance_query(self, query: GoldQuery) -> None:
+        measured = self._measure_pair(_navigation_request(query, self.scope))
+        if measured is None:
+            return
+        direct_results, facade_results, direct_ms, facade_ms = measured
+        error = self._pair_error(query, direct_results, facade_results)
+        if error is not None:
+            self.errors.append(error)
+            return
+        self.direct_pyright.append(direct_ms)
+        self.warm_facade.append(facade_ms)
+        self.overhead.append(facade_ms - direct_ms)
+
+    def performance_phase(self) -> None:
+        if self.mode != "qualification":
+            return
+        for query in _performance_queries(self.repository.gold_queries):
+            self._performance_query(query)
+
+    # --- mutations, crashes, ownership ------------------------------------------
+
+    def mutation_phase(self) -> None:
+        (
+            self.stale,
+            self.mutation_cycles,
+            self.freshness_checks_measured,
+            self.freshness_latencies,
+        ) = _mutate_and_measure(
+            self.runtime, self.repository, self.scope, self.errors, run_deadline=self.run_deadline, monotonic=self.monotonic
+        )
+
+    def _crash_cycle(self, crash_request: NavigationRequest, crash_query: GoldQuery) -> bool:
+        """One kill-and-recover cycle; False when cleanup became terminal."""
+        self.crash_attempts += 1
+        try:
+            recovered = self.runtime.crash_and_recover(crash_request, deadline=self.operation_deadline())
+            if _recovered_correctly(recovered, self.repository.root, crash_query):
+                self.crash_recoveries += 1
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "crash_recovery", "code": type(exc).__name__})
+        self.check()
+        if getattr(self.runtime, "cleanup_failed", False):
+            self.errors.append({"phase": "cleanup", "code": "CleanupTerminal"})
+            return False
+        return True
+
+    def crash_phase(self) -> None:
+        if self.first_request is None:
+            return
+        crash_query = self.repository.gold_queries[-1]
+        crash_request = _navigation_request(crash_query, self.scope)
+        for _index in range(CRASH_CYCLES):
+            if not self._crash_cycle(crash_request, crash_query):
+                break
+
+    def ownership_phase(self) -> None:
+        if getattr(self.runtime, "cleanup_failed", False):
+            return
+        try:
+            self.ownership = self.runtime.ownership_checks(deadline=self.operation_deadline())
+            self.check()
+            if getattr(self.runtime, "cleanup_failed", False):
+                self.errors.append({"phase": "ownership", "code": "CleanupTerminal"})
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "ownership", "code": type(exc).__name__})
+            self.ownership = _unavailable_ownership()
+            self.check()
+
+    def finish(self) -> None:
+        final_incident = _close_runtime_with_retry(self.runtime, self.errors, monotonic=self.monotonic)
+        _record_final_incident(self.ownership, final_incident)
+
+    # --- report ------------------------------------------------------------------
+
+    def performance(self) -> dict[str, object]:
+        if self.mode != "qualification":
+            return dict(_NO_PERFORMANCE)
+        percentiles = (
+            nearest_rank_percentile(self.warm_facade, 0.5),
+            nearest_rank_percentile(self.warm_facade, 0.95),
+            nearest_rank_percentile(self.direct_pyright, 0.95),
+            nearest_rank_percentile(self.overhead, 0.95),
+        )
+        complete = all(value is not None for value in (self.cold_readiness_seconds, *percentiles))
+        return {
+            "available": len(self.warm_facade) == PERFORMANCE_SAMPLES and complete,
+            "cold_readiness_seconds": self.cold_readiness_seconds,
+            "warm_facade_p50_ms": percentiles[0],
+            "warm_facade_p95_ms": percentiles[1],
+            "direct_pyright_p95_ms": percentiles[2],
+            "warm_overhead_p95_ms": percentiles[3],
+            "sample_count": len(self.warm_facade),
+        }
+
+    def report(self, commit: str, identity: object, operator_metrics, resources: dict) -> dict[str, object]:
+        ownership_checks, orphan_process_count = _ownership_summary(self.ownership)
+        freshness_checks_attempted = MUTATION_CYCLES * FRESHNESS_CHECKS_PER_CYCLE
+        return {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "mode": self.mode,
+            "identity": {
+                "source_manifest_sha256": self.repository.source_manifest_sha256,
+                "gold_sha256": self.repository.gold_sha256,
+                "git_commit": commit,
+                "python_version": platform.python_version(),
+                "pyright_version": getattr(identity, "version"),
+                "pyright_package_sha256": getattr(identity, "package_sha256"),
+                "node_version": getattr(identity, "node_version"),
+                "node_major": getattr(identity, "node_major"),
+            },
+            "environment": _environment(),
+            "workload": {
+                "fixture_seed": FIXTURE_SEED,
+                "fixture_lines": FIXTURE_LINES,
+                "definition_queries": DEFINITION_QUERIES,
+                "reference_queries": REFERENCE_QUERIES,
+                "call_queries": CALL_QUERIES,
+                "edit_rename_delete_cycles": MUTATION_CYCLES,
+                "crash_cycles": CRASH_CYCLES,
+                "default_limit": DEFAULT_LIMIT,
+                "max_estimated_tokens": MAX_ESTIMATED_TOKENS,
+                "freshness_checks": freshness_checks_attempted,
+                "ownership_checks": len(_OWNERSHIP_SCENARIOS),
+                "ownership_scenarios": list(_OWNERSHIP_SCENARIOS),
+            },
+            "evidence": {
+                "measured": True,
+                "runner": RUNNER_EVIDENCE_VERSION,
+                "source_hash_verified": True,
+                "gold_hash_verified": True,
+                "git_commit_verified": self.scope.git_commit == commit,
+                "identity_verified": True,
+                "query_attempts": self.query_attempts,
+                "mutation_cycles": self.mutation_cycles,
+                "crash_attempts": self.crash_attempts,
+                "ownership_checks": ownership_checks,
+            },
+            "correctness": {
+                "definitions": {
+                    "attempted": self.definition_attempted,
+                    "exact": self.definition_exact,
+                    "accuracy": _rate(self.definition_exact, self.definition_attempted),
+                },
+                "references": {"attempted": REFERENCE_QUERIES, **precision_recall_f1(self.reference_expected, self.reference_actual)},
+                "calls": {"attempted": CALL_QUERIES, **precision_recall_f1(self.call_expected, self.call_actual)},
+                "task_success_rate": self.tasks_solved / len(self.repository.gold_queries),
+                "citation_locations_attempted": self.citation_total,
+                "citation_locations_correct": self.citation_correct,
+                "citation_correctness_rate": _rate(self.citation_correct, self.citation_total),
+            },
+            "tokens": {
+                "cache_read_label": "not_applicable_no_result_cache",
+                "tasks": self.token_tasks,
+                "default_items": self.default_items,
+                "max_default_estimated_tokens": self.default_tokens,
+            },
+            "reliability": {
+                "stale_answer_count": self.stale,
+                "freshness_checks_attempted": freshness_checks_attempted,
+                "freshness_checks_measured": self.freshness_checks_measured,
+                "stale_result_rate": self.stale / freshness_checks_attempted,
+                "mutation_cycles_measured": self.mutation_cycles,
+                "edit_to_fresh_p50_ms": nearest_rank_percentile(self.freshness_latencies, 0.5),
+                "edit_to_fresh_p95_ms": nearest_rank_percentile(self.freshness_latencies, 0.95),
+                "crash_recoveries": self.crash_recoveries,
+                "crash_attempts": self.crash_attempts,
+                "recovery_rate": _rate(self.crash_recoveries, self.crash_attempts),
+                "orphan_process_count": orphan_process_count,
+                "orphan_checks_attempted": len(_OWNERSHIP_SCENARIOS),
+                "orphan_checks_measured": ownership_checks,
+                "orphan_process_rate": _orphan_rate(orphan_process_count),
+                "ownership": self.ownership,
+            },
+            "performance": self.performance(),
+            "resources": resources,
+            "operator_corpus": operator_metrics,
+            "errors": self.errors,
+            "market_superiority_claimed": False,
+        }
+
+
+def _prepare_fixture(work_root: Path, state_root: Path, manifest, dependencies, run_deadline: float) -> tuple:
+    """(manifest, repository, commit, scope, identity, runtime) of one generated fixture."""
+    monotonic = dependencies.monotonic
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    manifest_value = dict(load_manifest() if manifest is None else manifest)
+    validate_manifest(manifest_value)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    work_root = Path(work_root)
+    work_root.mkdir(parents=True, exist_ok=False)
+    state_root = Path(state_root).resolve()
+    state_root.mkdir(parents=True, exist_ok=True)
+    repository = generate_qualification_repository(work_root / "qualification")
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    verify_repository_identity(repository, manifest_value)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    commit = initialize_deterministic_git(repository.root, deadline=run_deadline, monotonic=monotonic)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    scope = resolve_repository_scope(repository.root)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    if scope.git_commit != commit:
+        raise FixtureIdentityError("resolved Git commit does not match generated commit")
+    identity = dependencies.discover_identity(scope, state_root, _operation_deadline(run_deadline, monotonic=monotonic))
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    _require_qualified_identity(identity, manifest_value)
+    runtime = dependencies.runtime_factory(repository, scope, identity, state_root)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    return manifest_value, repository, commit, scope, identity, runtime
+
+
+def _operator_corpus_metrics(operator_corpus: Path | None, dependencies, state_root: Path, run: _FixtureRun):
+    if operator_corpus is None:
+        return None
+    probe = dependencies.operator_probe or _probe_operator_corpus
+    metrics = _operator_metrics(probe(operator_corpus, Path(state_root).resolve(), run.operation_deadline()))
+    run.check()
+    return metrics
+
+
+def _resources(mode: str, run: _FixtureRun) -> dict[str, object]:
+    if mode != "qualification":
+        return {"available": False, "client_peak_rss_mib": None, "method": "not_measured_in_correctness_only"}
+    run.check()
+    peak_rss, rss_method = _peak_rss()
+    run.check()
+    return {"available": peak_rss is not None, "client_peak_rss_mib": peak_rss, "method": rss_method}
+
+
 def run_fixture_benchmark(
     work_root: Path,
     *,
@@ -1994,508 +2772,26 @@ def run_fixture_benchmark(
     if mode not in {"correctness-only", "qualification"}:
         raise ValueError("mode must be correctness-only or qualification")
     dependencies = dependencies or _default_dependencies()
-    monotonic = dependencies.monotonic
-    run_deadline = monotonic() + RUN_TIMEOUT_SECONDS
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    manifest_value = dict(load_manifest() if manifest is None else manifest)
-    validate_manifest(manifest_value)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    work_root = Path(work_root)
-    work_root.mkdir(parents=True, exist_ok=False)
-    state_root = Path(state_root).resolve()
-    state_root.mkdir(parents=True, exist_ok=True)
-    repository = generate_qualification_repository(work_root / "qualification")
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    verify_repository_identity(repository, manifest_value)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    commit = initialize_deterministic_git(
-        repository.root,
-        deadline=run_deadline,
-        monotonic=monotonic,
+    run_deadline = dependencies.monotonic() + RUN_TIMEOUT_SECONDS
+    _manifest, repository, commit, scope, identity, runtime = _prepare_fixture(
+        work_root, state_root, manifest, dependencies, run_deadline
     )
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    scope = resolve_repository_scope(repository.root)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    if scope.git_commit != commit:
-        raise FixtureIdentityError("resolved Git commit does not match generated commit")
-    identity = dependencies.discover_identity(
-        scope,
-        state_root,
-        _operation_deadline(run_deadline, monotonic=monotonic),
-    )
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    _require_qualified_identity(identity, manifest_value)
-    runtime = dependencies.runtime_factory(repository, scope, identity, state_root)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-
-    definition_attempted = 0
-    definition_exact = 0
-    reference_expected: set[tuple[object, ...]] = set()
-    reference_actual: set[tuple[object, ...]] = set()
-    call_expected: set[tuple[object, ...]] = set()
-    call_actual: set[tuple[object, ...]] = set()
-    query_attempts = 0
-    tasks_solved = 0
-    citation_total = 0
-    citation_correct = 0
-    token_tasks: list[dict[str, object]] = []
-    default_items = 0
-    default_tokens = 0
-    errors: list[dict[str, str]] = []
-    first_request: NavigationRequest | None = None
-    cold_readiness_seconds: float | None = None
-    ownership: dict[str, dict[str, int | bool | None]] = {
-        scenario: {"available": False, "orphan_count": None} for scenario in _OWNERSHIP_SCENARIOS
-    }
-
+    run = _FixtureRun(repository, scope, runtime, mode, run_deadline, dependencies.monotonic)
     try:
-        for index, query in enumerate(repository.gold_queries):
-            request = _navigation_request(query, scope)
-            if first_request is None:
-                first_request = request
-            started = time.perf_counter()
-            operation_deadline = _operation_deadline(
-                run_deadline,
-                monotonic=monotonic,
-            )
-            query_attempts += 1
-            try:
-                result = runtime.query(
-                    request,
-                    deadline=operation_deadline,
-                )
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:
-                errors.append({"phase": "gold_query", "code": type(exc).__name__})
-                result = None
-            _check_run_deadline(run_deadline, monotonic=monotonic)
-            elapsed = time.perf_counter() - started
-            expected = {_expected_key(location) for location in query.expected_locations}
-            expected_hashes = {
-                _expected_key(location): location.source_sha256
-                for location in query.expected_locations
-            }
-            result_successful = result is not None and result.status in {
-                NavigationStatus.OK,
-                NavigationStatus.PARTIAL,
-            }
-            actual = (
-                {_actual_key(location) for location in result.locations}
-                if result_successful
-                else set()
-            )
-            if query.capability == "definition":
-                definition_attempted += 1
-                if actual == expected:
-                    definition_exact += 1
-            elif query.capability == "references":
-                reference_expected.update((query.query_id, *item) for item in expected)
-                reference_actual.update((query.query_id, *item) for item in actual)
-            else:
-                call_expected.update((query.query_id, *item) for item in expected)
-                call_actual.update((query.query_id, *item) for item in actual)
-            if result is None:
-                continue
-            citations = [
-                _current_citation(
-                    repository.root,
-                    location,
-                    expected_sha256=expected_hashes.get(_actual_key(location), ""),
-                )
-                for location in result.locations
-            ]
-            citation_total += len(citations)
-            citation_correct += sum(citations)
-            solved = result_successful and _navigation_assertion_succeeds(
-                result,
-                expected=expected,
-                actual=actual,
-                citations_current=all(citations),
-            )
-            if index == 0 and mode == "qualification" and solved:
-                cold_readiness_seconds = elapsed
-            rendered = render_navigation(
-                result,
-                offset=0,
-                limit=DEFAULT_LIMIT,
-            )
-            rendered_tokens = estimate_tokens(_canonical_json(rendered))
-            default_items = max(default_items, _rendered_item_count(rendered))
-            default_tokens = max(default_tokens, rendered_tokens)
-            if solved:
-                tasks_solved += 1
-                token_tasks.append(_token_record(query, request, result, rendered))
-            _check_run_deadline(run_deadline, monotonic=monotonic)
-
-        warm_facade: list[float] = []
-        direct_pyright: list[float] = []
-        overhead: list[float] = []
-        if mode == "qualification":
-            for query in _performance_queries(repository.gold_queries):
-                request = _navigation_request(query, scope)
-                try:
-                    direct_results, facade_results, direct_ms, facade_ms = (
-                        _measure_warm_performance_pair(
-                            runtime,
-                            request,
-                            next_deadline=lambda: _operation_deadline(
-                                run_deadline,
-                                monotonic=monotonic,
-                            ),
-                        )
-                    )
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                except BenchmarkTimeoutError:
-                    raise
-                except Exception as exc:
-                    errors.append(
-                        {
-                            "phase": "performance_sample",
-                            "code": type(exc).__name__,
-                        }
-                    )
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                    continue
-                if not _direct_results_are_exact(
-                    runtime,
-                    repository,
-                    scope,
-                    query,
-                    direct_results,
-                    deadline=_operation_deadline(
-                        run_deadline,
-                        monotonic=monotonic,
-                    ),
-                ):
-                    errors.append(
-                        {
-                            "phase": "performance_direct",
-                            "code": "UnsuccessfulDirectResult",
-                        }
-                    )
-                    continue
-                expected = {_expected_key(location) for location in query.expected_locations}
-                expected_hashes = {
-                    _expected_key(location): location.source_sha256
-                    for location in query.expected_locations
-                }
-                facade_valid = True
-                for facade_result in facade_results:
-                    actual = {_actual_key(location) for location in facade_result.locations}
-                    citations = all(
-                        _current_citation(
-                            repository.root,
-                            location,
-                            expected_sha256=expected_hashes.get(
-                                _actual_key(location),
-                                "",
-                            ),
-                        )
-                        for location in facade_result.locations
-                    )
-                    if not _navigation_assertion_succeeds(
-                        facade_result,
-                        expected=expected,
-                        actual=actual,
-                        citations_current=citations,
-                    ):
-                        facade_valid = False
-                        break
-                if not facade_valid:
-                    errors.append(
-                        {
-                            "phase": "performance_facade",
-                            "code": "UnsuccessfulNavigationResult",
-                        }
-                    )
-                    continue
-                direct_pyright.append(direct_ms)
-                warm_facade.append(facade_ms)
-                overhead.append(facade_ms - direct_ms)
-
-        (
-            stale,
-            mutation_cycles,
-            freshness_checks_measured,
-            freshness_latencies,
-        ) = _mutate_and_measure(
-            runtime,
-            repository,
-            scope,
-            errors,
-            run_deadline=run_deadline,
-            monotonic=monotonic,
-        )
-
-        crash_attempts = 0
-        crash_recoveries = 0
-        crash_query = repository.gold_queries[-1]
-        crash_request = _navigation_request(crash_query, scope)
-        crash_expected = {_expected_key(location) for location in crash_query.expected_locations}
-        crash_hashes = {
-            _expected_key(location): location.source_sha256
-            for location in crash_query.expected_locations
-        }
-        if first_request is not None:
-            for _index in range(CRASH_CYCLES):
-                crash_deadline = _operation_deadline(
-                    run_deadline,
-                    monotonic=monotonic,
-                )
-                crash_attempts += 1
-                try:
-                    recovered = runtime.crash_and_recover(
-                        crash_request,
-                        deadline=crash_deadline,
-                    )
-                    recovered_locations = (
-                        set()
-                        if not isinstance(recovered, NavigationResult)
-                        else {_actual_key(location) for location in recovered.locations}
-                    )
-                    recovered_citations = isinstance(recovered, NavigationResult) and all(
-                        _current_citation(
-                            repository.root,
-                            location,
-                            expected_sha256=crash_hashes.get(
-                                _actual_key(location),
-                                "",
-                            ),
-                        )
-                        for location in recovered.locations
-                    )
-                    if isinstance(recovered, NavigationResult) and _navigation_assertion_succeeds(
-                        recovered,
-                        expected=crash_expected,
-                        actual=recovered_locations,
-                        citations_current=recovered_citations,
-                    ):
-                        crash_recoveries += 1
-                except BenchmarkTimeoutError:
-                    raise
-                except Exception as exc:
-                    errors.append({"phase": "crash_recovery", "code": type(exc).__name__})
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-                if getattr(runtime, "cleanup_failed", False):
-                    errors.append({"phase": "cleanup", "code": "CleanupTerminal"})
-                    break
-
-        if not getattr(runtime, "cleanup_failed", False):
-            try:
-                ownership = runtime.ownership_checks(
-                    deadline=_operation_deadline(
-                        run_deadline,
-                        monotonic=monotonic,
-                    )
-                )
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-                if getattr(runtime, "cleanup_failed", False):
-                    errors.append({"phase": "ownership", "code": "CleanupTerminal"})
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:
-                errors.append({"phase": "ownership", "code": type(exc).__name__})
-                ownership = {
-                    scenario: {"available": False, "orphan_count": None}
-                    for scenario in _OWNERSHIP_SCENARIOS
-                }
-                _check_run_deadline(run_deadline, monotonic=monotonic)
+        run.gold_phase()
+        run.performance_phase()
+        run.mutation_phase()
+        run.crash_phase()
+        run.ownership_phase()
     finally:
-        final_incident = _close_runtime_with_retry(
-            runtime,
-            errors,
-            monotonic=monotonic,
-        )
-        normal_shutdown = ownership.get("normal_shutdown")
-        if final_incident is None:
-            ownership["normal_shutdown"] = {
-                "available": False,
-                "orphan_count": None,
-            }
-        elif (
-            isinstance(normal_shutdown, dict)
-            and normal_shutdown.get("available") is True
-            and isinstance(normal_shutdown.get("orphan_count"), int)
-            and not isinstance(normal_shutdown.get("orphan_count"), bool)
-            and normal_shutdown.get("orphan_count") in {0, 1}
-        ):
-            normal_shutdown["orphan_count"] = max(
-                normal_shutdown["orphan_count"],
-                final_incident,
-            )
-
-    ownership_checks = sum(
-        isinstance(value, dict) and value.get("available") is True for value in ownership.values()
-    )
-    orphan_values = [
-        value.get("orphan_count")
-        for value in ownership.values()
-        if isinstance(value, dict) and value.get("available") is True
-    ]
-    orphan_process_count = (
-        sum(int(value) for value in orphan_values if isinstance(value, int))
-        if len(orphan_values) == len(_OWNERSHIP_SCENARIOS)
-        else None
-    )
-    freshness_checks_attempted = MUTATION_CYCLES * FRESHNESS_CHECKS_PER_CYCLE
-    stale_result_rate = stale / freshness_checks_attempted
-    orphan_process_rate = (
-        orphan_process_count / len(_OWNERSHIP_SCENARIOS)
-        if orphan_process_count is not None
-        else None
-    )
-
-    references = precision_recall_f1(reference_expected, reference_actual)
-    calls = precision_recall_f1(call_expected, call_actual)
-    if mode == "qualification":
-        performance = {
-            "available": len(warm_facade) == PERFORMANCE_SAMPLES
-            and all(
-                value is not None
-                for value in (
-                    cold_readiness_seconds,
-                    nearest_rank_percentile(warm_facade, 0.5),
-                    nearest_rank_percentile(warm_facade, 0.95),
-                    nearest_rank_percentile(direct_pyright, 0.95),
-                    nearest_rank_percentile(overhead, 0.95),
-                )
-            ),
-            "cold_readiness_seconds": cold_readiness_seconds,
-            "warm_facade_p50_ms": nearest_rank_percentile(warm_facade, 0.5),
-            "warm_facade_p95_ms": nearest_rank_percentile(warm_facade, 0.95),
-            "direct_pyright_p95_ms": nearest_rank_percentile(direct_pyright, 0.95),
-            "warm_overhead_p95_ms": nearest_rank_percentile(overhead, 0.95),
-            "sample_count": len(warm_facade),
-        }
-    else:
-        performance = {
-            "available": False,
-            "cold_readiness_seconds": None,
-            "warm_facade_p50_ms": None,
-            "warm_facade_p95_ms": None,
-            "direct_pyright_p95_ms": None,
-            "warm_overhead_p95_ms": None,
-            "sample_count": 0,
-        }
-        resources = {
-            "available": False,
-            "client_peak_rss_mib": None,
-            "method": "not_measured_in_correctness_only",
-        }
-
-    operator_metrics: dict[str, object] | None = None
-    if operator_corpus is not None:
-        probe = dependencies.operator_probe or _probe_operator_corpus
-        operator_metrics = _operator_metrics(
-            probe(
-                operator_corpus,
-                state_root,
-                _operation_deadline(run_deadline, monotonic=monotonic),
-            )
-        )
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-
-    if mode == "qualification":
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-        peak_rss, rss_method = _peak_rss()
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-        resources = {
-            "available": peak_rss is not None,
-            "client_peak_rss_mib": peak_rss,
-            "method": rss_method,
-        }
-
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    report: dict[str, object] = {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "mode": mode,
-        "identity": {
-            "source_manifest_sha256": repository.source_manifest_sha256,
-            "gold_sha256": repository.gold_sha256,
-            "git_commit": commit,
-            "python_version": platform.python_version(),
-            "pyright_version": getattr(identity, "version"),
-            "pyright_package_sha256": getattr(identity, "package_sha256"),
-            "node_version": getattr(identity, "node_version"),
-            "node_major": getattr(identity, "node_major"),
-        },
-        "environment": _environment(),
-        "workload": {
-            "fixture_seed": FIXTURE_SEED,
-            "fixture_lines": FIXTURE_LINES,
-            "definition_queries": DEFINITION_QUERIES,
-            "reference_queries": REFERENCE_QUERIES,
-            "call_queries": CALL_QUERIES,
-            "edit_rename_delete_cycles": MUTATION_CYCLES,
-            "crash_cycles": CRASH_CYCLES,
-            "default_limit": DEFAULT_LIMIT,
-            "max_estimated_tokens": MAX_ESTIMATED_TOKENS,
-            "freshness_checks": freshness_checks_attempted,
-            "ownership_checks": len(_OWNERSHIP_SCENARIOS),
-            "ownership_scenarios": list(_OWNERSHIP_SCENARIOS),
-        },
-        "evidence": {
-            "measured": True,
-            "runner": RUNNER_EVIDENCE_VERSION,
-            "source_hash_verified": True,
-            "gold_hash_verified": True,
-            "git_commit_verified": scope.git_commit == commit,
-            "identity_verified": True,
-            "query_attempts": query_attempts,
-            "mutation_cycles": mutation_cycles,
-            "crash_attempts": crash_attempts,
-            "ownership_checks": ownership_checks,
-        },
-        "correctness": {
-            "definitions": {
-                "attempted": definition_attempted,
-                "exact": definition_exact,
-                "accuracy": (
-                    definition_exact / definition_attempted if definition_attempted else 0.0
-                ),
-            },
-            "references": {"attempted": REFERENCE_QUERIES, **references},
-            "calls": {"attempted": CALL_QUERIES, **calls},
-            "task_success_rate": tasks_solved / len(repository.gold_queries),
-            "citation_locations_attempted": citation_total,
-            "citation_locations_correct": citation_correct,
-            "citation_correctness_rate": (
-                citation_correct / citation_total if citation_total else 0.0
-            ),
-        },
-        "tokens": {
-            "cache_read_label": "not_applicable_no_result_cache",
-            "tasks": token_tasks,
-            "default_items": default_items,
-            "max_default_estimated_tokens": default_tokens,
-        },
-        "reliability": {
-            "stale_answer_count": stale,
-            "freshness_checks_attempted": freshness_checks_attempted,
-            "freshness_checks_measured": freshness_checks_measured,
-            "stale_result_rate": stale_result_rate,
-            "mutation_cycles_measured": mutation_cycles,
-            "edit_to_fresh_p50_ms": nearest_rank_percentile(freshness_latencies, 0.5),
-            "edit_to_fresh_p95_ms": nearest_rank_percentile(freshness_latencies, 0.95),
-            "crash_recoveries": crash_recoveries,
-            "crash_attempts": crash_attempts,
-            "recovery_rate": (crash_recoveries / crash_attempts if crash_attempts else 0.0),
-            "orphan_process_count": orphan_process_count,
-            "orphan_checks_attempted": len(_OWNERSHIP_SCENARIOS),
-            "orphan_checks_measured": ownership_checks,
-            "orphan_process_rate": orphan_process_rate,
-            "ownership": ownership,
-        },
-        "performance": performance,
-        "resources": resources,
-        "operator_corpus": operator_metrics,
-        "errors": errors,
-        "market_superiority_claimed": False,
-    }
-    _check_run_deadline(run_deadline, monotonic=monotonic)
+        run.finish()
+    operator_metrics = _operator_corpus_metrics(operator_corpus, dependencies, state_root, run)
+    resources = _resources(mode, run)
+    run.check()
+    report = run.report(commit, identity, operator_metrics, resources)
+    run.check()
     validate_report(report)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
+    run.check()
     return report
 
 
@@ -2521,158 +2817,220 @@ def _finite_number(value: object) -> bool:
 
 
 def _set_metric_consistent(metric: Mapping[str, object]) -> bool:
-    true_positive = metric["true_positive"]
-    false_positive = metric["false_positive"]
-    false_negative = metric["false_negative"]
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in (true_positive, false_positive, false_negative)
-    ):
+    counts = (metric["true_positive"], metric["false_positive"], metric["false_negative"])
+    if any(not _is_count(value) for value in counts):
         return False
-    actual_count = true_positive + false_positive
-    expected_count = true_positive + false_negative
-    precision = true_positive / actual_count if actual_count else 1.0
-    recall = true_positive / expected_count if expected_count else 1.0
-    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    precision, recall, f1 = _prf_from_counts(*counts)
+    return _ratio_equal(metric["precision"], precision) and _ratio_equal(metric["recall"], recall) and _ratio_equal(metric["f1"], f1)
+
+
+def _identity_complete(report: Mapping[str, object], manifest: Mapping[str, object]) -> bool:
+    identity = report["identity"]
     return (
-        _ratio_equal(metric["precision"], precision)
-        and _ratio_equal(metric["recall"], recall)
-        and _ratio_equal(metric["f1"], f1)
+        identity["source_manifest_sha256"] == manifest["expected_source_manifest_sha256"]
+        and identity["gold_sha256"] == manifest["expected_gold_sha256"]
+    )
+
+
+def _evidence_section_complete(evidence: Mapping[str, object]) -> bool:
+    flags = all(
+        evidence[key] is True
+        for key in ("measured", "source_hash_verified", "gold_hash_verified", "git_commit_verified", "identity_verified")
+    )
+    counts = (evidence["query_attempts"], evidence["mutation_cycles"], evidence["crash_attempts"], evidence["ownership_checks"])
+    return flags and counts == (400, 50, 20, 4)
+
+
+def _definitions_complete(definitions: Mapping[str, object]) -> bool:
+    return (
+        definitions["attempted"] == 200
+        and definitions["exact"] <= definitions["attempted"]
+        and _ratio_equal(definitions["accuracy"], definitions["exact"] / definitions["attempted"])
+    )
+
+
+def _reference_metrics_complete(references: Mapping[str, object]) -> bool:
+    return (
+        references["attempted"] == 100
+        and _set_metric_consistent(references)
+        and references["true_positive"] + references["false_negative"] == 500
+    )
+
+
+def _call_metrics_complete(calls: Mapping[str, object]) -> bool:
+    return calls["attempted"] == 100 and _set_metric_consistent(calls) and calls["true_positive"] + calls["false_negative"] == 100
+
+
+def _query_metrics_complete(correctness: Mapping[str, object]) -> bool:
+    return (
+        _definitions_complete(correctness["definitions"])
+        and _reference_metrics_complete(correctness["references"])
+        and _call_metrics_complete(correctness["calls"])
+    )
+
+
+def _required_citation_locations(token_query_ids: list[str]) -> int:
+    return sum(5 if query_id.startswith("references-") else 1 for query_id in token_query_ids)
+
+
+def _citations_complete(correctness: Mapping[str, object], required: int) -> bool:
+    attempted = correctness["citation_locations_attempted"]
+    correct = correctness["citation_locations_correct"]
+    if attempted <= 0 or correct > attempted:
+        return False
+    if attempted < required or correct < required:
+        return False
+    return _ratio_equal(correctness["citation_correctness_rate"], correct / attempted)
+
+
+def _correctness_complete(report: Mapping[str, object]) -> bool:
+    correctness = report["correctness"]
+    token_tasks = report["tokens"]["tasks"]
+    ids = [task["query_id"] for task in token_tasks]
+    return (
+        _query_metrics_complete(correctness)
+        and _ratio_equal(correctness["task_success_rate"], len(token_tasks) / 400)
+        and _citations_complete(correctness, _required_citation_locations(ids))
+    )
+
+
+def _valid_query_ids() -> set[str]:
+    return {
+        *(f"definition-{index:03d}" for index in range(DEFINITION_QUERIES)),
+        *(f"references-{index:03d}" for index in range(REFERENCE_QUERIES)),
+        *(f"calls-{index:03d}" for index in range(CALL_QUERIES)),
+    }
+
+
+def _ids_valid(ids: list[str]) -> bool:
+    return len(ids) == len(set(ids)) and set(ids) <= _valid_query_ids()
+
+
+def _tokens_complete(report: Mapping[str, object]) -> bool:
+    tokens = report["tokens"]
+    ids = [task["query_id"] for task in tokens["tasks"]]
+    return (
+        _ids_valid(ids)
+        and tokens["cache_read_label"] == "not_applicable_no_result_cache"
+        and all(task["cache_read_tokens"] == 0 for task in tokens["tasks"])
+    )
+
+
+def _freshness_complete(reliability: Mapping[str, object]) -> bool:
+    return (
+        reliability["freshness_checks_attempted"] == 250
+        and reliability["freshness_checks_measured"] == 250
+        and reliability["stale_answer_count"] <= 250
+        and _ratio_equal(reliability["stale_result_rate"], reliability["stale_answer_count"] / 250)
+        and reliability["mutation_cycles_measured"] == 50
+    )
+
+
+def _latency_complete(reliability: Mapping[str, object]) -> bool:
+    p50 = reliability["edit_to_fresh_p50_ms"]
+    p95 = reliability["edit_to_fresh_p95_ms"]
+    return _finite_number(p50) and p50 >= 0 and _finite_number(p95) and p95 >= 0 and p50 <= p95
+
+
+def _crash_complete(reliability: Mapping[str, object]) -> bool:
+    return (
+        reliability["crash_attempts"] == 20
+        and reliability["crash_recoveries"] <= reliability["crash_attempts"]
+        and _ratio_equal(reliability["recovery_rate"], reliability["crash_recoveries"] / reliability["crash_attempts"])
+    )
+
+
+def _ownership_measured(ownership: Mapping[str, Mapping[str, object]]) -> bool:
+    return all(
+        ownership[scenario]["available"] is True and ownership[scenario]["orphan_count"] is not None
+        for scenario in _OWNERSHIP_SCENARIOS
+    )
+
+
+def _orphan_totals_consistent(reliability: Mapping[str, object], total: int) -> bool:
+    return reliability["orphan_process_count"] == total and _ratio_equal(reliability["orphan_process_rate"], total / 4)
+
+
+def _ownership_complete(reliability: Mapping[str, object]) -> bool:
+    ownership = reliability["ownership"]
+    total = sum(ownership[scenario]["orphan_count"] for scenario in _OWNERSHIP_SCENARIOS)
+    return (
+        reliability["orphan_checks_attempted"] == 4
+        and reliability["orphan_checks_measured"] == 4
+        and _ownership_measured(ownership)
+        and _orphan_totals_consistent(reliability, total)
+    )
+
+
+def _reliability_complete(report: Mapping[str, object]) -> bool:
+    reliability = report["reliability"]
+    return (
+        _freshness_complete(reliability)
+        and _latency_complete(reliability)
+        and _crash_complete(reliability)
+        and _ownership_complete(reliability)
+    )
+
+
+def _operator_corpus_complete(report: Mapping[str, object]) -> bool:
+    operator_corpus = report["operator_corpus"]
+    if operator_corpus is None:
+        return True
+    return operator_corpus["available"] is True and operator_corpus["errors"] == 0
+
+
+_PERFORMANCE_FIELDS = (
+    "cold_readiness_seconds",
+    "warm_facade_p50_ms",
+    "warm_facade_p95_ms",
+    "direct_pyright_p95_ms",
+    "warm_overhead_p95_ms",
+)
+
+
+def _performance_complete(performance: Mapping[str, object]) -> bool:
+    return (
+        performance["available"] is True
+        and performance["sample_count"] == PERFORMANCE_SAMPLES
+        and all(_finite_number(performance[field]) for field in _PERFORMANCE_FIELDS)
+        and performance["warm_facade_p50_ms"] <= performance["warm_facade_p95_ms"]
+    )
+
+
+def _resources_complete(resources: Mapping[str, object]) -> bool:
+    return resources["available"] is True and _finite_number(resources["client_peak_rss_mib"]) and resources["method"] != "unavailable"
+
+
+def _python_310(identity: Mapping[str, object]) -> bool:
+    version = identity["python_version"]
+    return isinstance(version, str) and _PYTHON_310_VERSION.fullmatch(version) is not None
+
+
+def _qualification_complete(report: Mapping[str, object]) -> bool:
+    if report["mode"] != "qualification":
+        return True
+    return (
+        report["environment"]["os"] == "Linux"
+        and _python_310(report["identity"])
+        and _performance_complete(report["performance"])
+        and _resources_complete(report["resources"])
     )
 
 
 def _evidence_complete(report: Mapping[str, object]) -> bool:
     try:
-        identity = report["identity"]
-        environment = report["environment"]
-        evidence = report["evidence"]
-        correctness = report["correctness"]
-        reliability = report["reliability"]
-        tokens = report["tokens"]
-        ownership = reliability["ownership"]
         manifest = load_manifest()
-        definitions = correctness["definitions"]
-        references = correctness["references"]
-        calls = correctness["calls"]
-        token_tasks = tokens["tasks"]
-        token_query_ids = [task["query_id"] for task in token_tasks]
-        required_citation_locations = sum(
-            5 if query_id.startswith("references-") else 1 for query_id in token_query_ids
+        checks = (
+            _identity_complete(report, manifest),
+            _evidence_section_complete(report["evidence"]),
+            _correctness_complete(report),
+            _tokens_complete(report),
+            _reliability_complete(report),
+            report["errors"] == [],
+            _operator_corpus_complete(report),
+            _qualification_complete(report),
         )
-        valid_query_ids = {
-            *(f"definition-{index:03d}" for index in range(DEFINITION_QUERIES)),
-            *(f"references-{index:03d}" for index in range(REFERENCE_QUERIES)),
-            *(f"calls-{index:03d}" for index in range(CALL_QUERIES)),
-        }
-        ownership_total = sum(
-            ownership[scenario]["orphan_count"] for scenario in _OWNERSHIP_SCENARIOS
-        )
-        complete = (
-            identity["source_manifest_sha256"] == manifest["expected_source_manifest_sha256"]
-            and identity["gold_sha256"] == manifest["expected_gold_sha256"]
-            and evidence["measured"] is True
-            and evidence["source_hash_verified"] is True
-            and evidence["gold_hash_verified"] is True
-            and evidence["git_commit_verified"] is True
-            and evidence["identity_verified"] is True
-            and evidence["query_attempts"] == 400
-            and evidence["mutation_cycles"] == 50
-            and evidence["crash_attempts"] == 20
-            and evidence["ownership_checks"] == 4
-            and correctness["definitions"]["attempted"] == 200
-            and references["attempted"] == 100
-            and calls["attempted"] == 100
-            and definitions["exact"] <= definitions["attempted"]
-            and _ratio_equal(
-                definitions["accuracy"],
-                definitions["exact"] / definitions["attempted"],
-            )
-            and _set_metric_consistent(references)
-            and references["true_positive"] + references["false_negative"] == 500
-            and _set_metric_consistent(calls)
-            and calls["true_positive"] + calls["false_negative"] == 100
-            and _ratio_equal(
-                correctness["task_success_rate"],
-                len(token_tasks) / 400,
-            )
-            and correctness["citation_locations_attempted"] > 0
-            and correctness["citation_locations_correct"]
-            <= correctness["citation_locations_attempted"]
-            and correctness["citation_locations_attempted"] >= required_citation_locations
-            and correctness["citation_locations_correct"] >= required_citation_locations
-            and _ratio_equal(
-                correctness["citation_correctness_rate"],
-                correctness["citation_locations_correct"]
-                / correctness["citation_locations_attempted"],
-            )
-            and len(token_query_ids) == len(set(token_query_ids))
-            and set(token_query_ids) <= valid_query_ids
-            and reliability["freshness_checks_attempted"] == 250
-            and reliability["freshness_checks_measured"] == 250
-            and reliability["stale_answer_count"] <= 250
-            and _ratio_equal(
-                reliability["stale_result_rate"],
-                reliability["stale_answer_count"] / 250,
-            )
-            and reliability["mutation_cycles_measured"] == 50
-            and _finite_number(reliability["edit_to_fresh_p50_ms"])
-            and reliability["edit_to_fresh_p50_ms"] >= 0
-            and _finite_number(reliability["edit_to_fresh_p95_ms"])
-            and reliability["edit_to_fresh_p95_ms"] >= 0
-            and reliability["edit_to_fresh_p50_ms"] <= reliability["edit_to_fresh_p95_ms"]
-            and reliability["crash_attempts"] == 20
-            and reliability["crash_recoveries"] <= reliability["crash_attempts"]
-            and _ratio_equal(
-                reliability["recovery_rate"],
-                reliability["crash_recoveries"] / reliability["crash_attempts"],
-            )
-            and reliability["orphan_checks_attempted"] == 4
-            and reliability["orphan_checks_measured"] == 4
-            and all(
-                ownership[scenario]["available"] is True
-                and ownership[scenario]["orphan_count"] is not None
-                for scenario in _OWNERSHIP_SCENARIOS
-            )
-            and reliability["orphan_process_count"] == ownership_total
-            and _ratio_equal(
-                reliability["orphan_process_rate"],
-                ownership_total / 4,
-            )
-            and tokens["cache_read_label"] == "not_applicable_no_result_cache"
-            and all(task["cache_read_tokens"] == 0 for task in token_tasks)
-            and report["errors"] == []
-        )
-        operator_corpus = report["operator_corpus"]
-        if operator_corpus is not None:
-            complete = (
-                complete and operator_corpus["available"] is True and operator_corpus["errors"] == 0
-            )
-        if report["mode"] == "qualification":
-            performance = report["performance"]
-            resources = report["resources"]
-            complete = (
-                complete
-                and environment["os"] == "Linux"
-                and isinstance(identity["python_version"], str)
-                and _PYTHON_310_VERSION.fullmatch(identity["python_version"]) is not None
-                and performance["available"] is True
-                and performance["sample_count"] == PERFORMANCE_SAMPLES
-                and all(
-                    _finite_number(performance[field])
-                    for field in (
-                        "cold_readiness_seconds",
-                        "warm_facade_p50_ms",
-                        "warm_facade_p95_ms",
-                        "direct_pyright_p95_ms",
-                        "warm_overhead_p95_ms",
-                    )
-                )
-                and performance["warm_facade_p50_ms"] <= performance["warm_facade_p95_ms"]
-                and resources["available"] is True
-                and _finite_number(resources["client_peak_rss_mib"])
-                and resources["method"] != "unavailable"
-            )
-        return bool(complete)
+        return all(checks)
     except (ArithmeticError, KeyError, TypeError, ValueError):
         return False
 
@@ -2699,51 +3057,67 @@ def _gate_values(report: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+_MINIMUM_GATES = frozenset({"definition_accuracy", "reference_f1", "recovery_rate"})
+
+
+def _invalid_evaluation() -> dict[str, object]:
+    return {"passed": False, "schema_valid": False, "evidence_complete": False, "scope": "invalid", "gates": {}}
+
+
+def _gate_value_measured(value: object, measured: bool) -> bool:
+    if not measured or isinstance(value, bool):
+        return False
+    return isinstance(value, (int, float))
+
+
+def _gate_passed(field: str, value: object, threshold: object, measured: bool) -> bool:
+    if not _gate_value_measured(value, measured):
+        return False
+    return _meets_threshold(field, float(value), float(threshold))
+
+
+def _meets_threshold(field: str, value: float, threshold: float) -> bool:
+    if field in _MINIMUM_GATES:
+        return value >= threshold
+    if field == "client_rss_mib":
+        return value < threshold
+    return value <= threshold
+
+
+def _gate_entry(field: str, value: object, complete: bool) -> dict[str, object]:
+    threshold = GATE_THRESHOLDS[field]
+    measured = complete and value is not None
+    return {
+        "measured": measured,
+        "value": value,
+        "threshold": threshold,
+        "passed": _gate_passed(field, value, threshold, measured),
+    }
+
+
+def _evaluation(complete: bool, gates: dict, qualification: bool) -> dict[str, object]:
+    return {
+        "passed": complete and all(item["passed"] for item in gates.values()),
+        "schema_valid": True,
+        "evidence_complete": complete,
+        "scope": "qualification" if qualification else "correctness_reliability",
+        "gates": gates,
+    }
+
+
 def evaluate_gates(report: object) -> dict[str, object]:
     """Fail closed unless a schema-valid measured report has complete evidence."""
     try:
         validate_report(report)
     except (TypeError, ValueError):
-        return {
-            "passed": False,
-            "schema_valid": False,
-            "evidence_complete": False,
-            "scope": "invalid",
-            "gates": {},
-        }
+        return _invalid_evaluation()
     assert isinstance(report, Mapping)
     complete = _evidence_complete(report)
-    mode = report["mode"]
-    scope = "qualification" if mode == "qualification" else "correctness_reliability"
-    fields = _QUALIFICATION_GATES if mode == "qualification" else _CORRECTNESS_GATES
+    qualification = report["mode"] == "qualification"
+    fields = _QUALIFICATION_GATES if qualification else _CORRECTNESS_GATES
     values = _gate_values(report)
-    minimums = {"definition_accuracy", "reference_f1", "recovery_rate"}
-    gates: dict[str, dict[str, object]] = {}
-    for field in fields:
-        value = values[field]
-        threshold = GATE_THRESHOLDS[field]
-        measured = complete and value is not None
-        if not measured or isinstance(value, bool) or not isinstance(value, (int, float)):
-            passed = False
-        elif field in minimums:
-            passed = float(value) >= float(threshold)
-        elif field == "client_rss_mib":
-            passed = float(value) < float(threshold)
-        else:
-            passed = float(value) <= float(threshold)
-        gates[field] = {
-            "measured": measured,
-            "value": value,
-            "threshold": threshold,
-            "passed": passed,
-        }
-    return {
-        "passed": complete and all(item["passed"] for item in gates.values()),
-        "schema_valid": True,
-        "evidence_complete": complete,
-        "scope": scope,
-        "gates": gates,
-    }
+    gates = {field: _gate_entry(field, values[field], complete) for field in fields}
+    return _evaluation(complete, gates, qualification)
 
 
 def resolve_state_root(
@@ -2762,6 +3136,20 @@ def resolve_state_root(
     return value.expanduser().resolve()
 
 
+def _validated_operator_corpus(parser: argparse.ArgumentParser, argument: Path) -> Path:
+    operator_corpus = argument.expanduser()
+    if not operator_corpus.is_absolute():
+        parser.error("--operator-corpus must be absolute")
+    operator_corpus = Path(os.path.abspath(os.fspath(operator_corpus)))
+    try:
+        metadata = operator_corpus.stat(follow_symlinks=False)
+    except OSError:
+        parser.error("--operator-corpus must exist")
+    if _operator_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        parser.error("--operator-corpus must be a directory")
+    return operator_corpus
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run measured Python navigation qualification")
     parser.add_argument("--fixture", action="store_true", help="Use the pinned public fixture")
@@ -2774,21 +3162,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.fixture:
         parser.error("--fixture is required")
+    _validate_path_arguments(parser, args)
+    return args
+
+
+def _validate_path_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.operator_corpus is not None:
-        operator_corpus = args.operator_corpus.expanduser()
-        if not operator_corpus.is_absolute():
-            parser.error("--operator-corpus must be absolute")
-        operator_corpus = Path(os.path.abspath(os.fspath(operator_corpus)))
-        try:
-            metadata = operator_corpus.stat(follow_symlinks=False)
-        except OSError:
-            parser.error("--operator-corpus must exist")
-        if _operator_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            parser.error("--operator-corpus must be a directory")
-        args.operator_corpus = operator_corpus
+        args.operator_corpus = _validated_operator_corpus(parser, args.operator_corpus)
     if args.state_root is not None and not args.state_root.is_absolute():
         parser.error("--state-root must be absolute")
-    return args
+
+
+def _error_exit(code_name: str, exit_code: int) -> int:
+    print(
+        _canonical_json({"status": "error", "code": code_name, "market_superiority_claimed": False}),
+        file=sys.stderr,
+    )
+    return exit_code
+
+
+def _run_and_evaluate(args: argparse.Namespace, mode: str, state_root: Path) -> int:
+    with tempfile.TemporaryDirectory(prefix="code-navigation-fixture-") as temporary:
+        report = run_fixture_benchmark(
+            Path(temporary) / "run",
+            state_root=state_root,
+            mode=mode,
+            operator_corpus=args.operator_corpus,
+        )
+    evaluation = evaluate_gates(report)
+    print(_canonical_json(report))
+    if args.require_gates and not evaluation["passed"]:
+        print(_canonical_json(evaluation), file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2796,55 +3202,13 @@ def main(argv: list[str] | None = None) -> int:
     mode = "qualification" if args.qualification else "correctness-only"
     state_root = resolve_state_root(args.state_root)
     try:
-        with tempfile.TemporaryDirectory(prefix="code-navigation-fixture-") as temporary:
-            report = run_fixture_benchmark(
-                Path(temporary) / "run",
-                state_root=state_root,
-                mode=mode,
-                operator_corpus=args.operator_corpus,
-            )
-        evaluation = evaluate_gates(report)
-        print(_canonical_json(report))
-        if args.require_gates and not evaluation["passed"]:
-            print(_canonical_json(evaluation), file=sys.stderr)
-            return 1
-        return 0
+        return _run_and_evaluate(args, mode, state_root)
     except BenchmarkTimeoutError:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": "BenchmarkTimeout",
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 4
+        return _error_exit("BenchmarkTimeout", 4)
     except (FixtureIdentityError, QualifiedIdentityError) as exc:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": type(exc).__name__,
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 2
+        return _error_exit(type(exc).__name__, 2)
     except Exception as exc:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": type(exc).__name__,
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 3
+        return _error_exit(type(exc).__name__, 3)
 
 
 if __name__ == "__main__":

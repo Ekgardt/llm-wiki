@@ -38,7 +38,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── code_navigation_renderer.py   deterministic compact result windows
 │   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
-│   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
+│   ├── reranker.py                  cross-encoder reranker: bge-reranker-v2-m3, int8, on by default (2026-09-10)
+│   ├── install_models.py            fetch and verify the two pinned models (the one network step for weights)
 │   ├── access_tracking.py           explicit telemetry promotion + decay stats
 │   ├── retrieval_telemetry.py       private bounded retrieval event cache
 │   ├── reflection.py                v4.0: A-MEM page consolidation
@@ -50,6 +51,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── repair_installed_memory.py   proposed target: explicit check/apply migration
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
+│   ├── impact_symbols.py            #24 B5: code symbols a diff reaches, beside impact
+│   ├── symbol_search.py             #24 B2: ranked name search over the generation
+│   ├── symbol_snippet.py            CODE-02 / #24 B3: exact snippet by qualified name
+│   ├── path_coverage.py             CODE-05 / #24 B1: per-path index, freshness, parse ranges
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
 ├── tests/                         CODE — full regression suite (pytest)
@@ -71,7 +76,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
 │
-├── cache/                        RUNTIME — gitignored (FTS5/vector/graph/LanceDB)
+├── cache/                        RUNTIME — gitignored (FTS5/vector/graph)
 │   ├── evidence-graph/              immutable corpus-generation layout
 │   │   ├── catalog.sqlite3            active-generation catalog
 │   │   ├── telemetry.sqlite3          private cross-generation telemetry
@@ -88,6 +93,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── claims.sqlite3               derived claim candidate index
 │   ├── code-tools/                  managed code-tool artifacts
 │   │   └── pyright/1.1.411/           reserved pinned Pyright installation root
+│   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
+│   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 │   ├── access_log.jsonl             legacy bounded read-only access history
 │   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
@@ -302,9 +309,16 @@ canonical admission registry. Queue workers project the same token and epoch int
 `queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
 Expiry permits takeover only with positive process-death proof; unknown liveness
 blocks.
-Legacy `compile.pid` and `maintenance.lock` remain compatibility evidence and
-deletion blockers until a separately approved installed-vault migration removes
-them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
+Since 2026-09-10 the nightly and weekly passes take the `nightly`/`weekly`
+lease through the adopted coordinator's registry (`acquire_scheduled_owner`),
+refresh it with a heartbeat, stop between steps when the fence is lost, and
+record that loss instead of success; `run/maintenance.lock` left by a dead
+owner is reclaimed only with the registry's proof, never by age
+(`knowledge/notes/nightly-takes-the-canonical-fence-decision.md`). On a vault
+without a V3 coordinator the legacy PID marker remains the only fence, and
+`compile.pid` stays the compile's legacy lock: both remain compatibility
+evidence and deletion blockers until a separately approved installed-vault
+migration removes them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
 replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
 adoption disables v3 mutation and requires the vault to remain offline. After complete
 adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor
@@ -387,6 +401,18 @@ adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
 pointer, runtime root, persistent daemon, semantic result cache, or MCP tool.
 Query-time LSP observations are not written into an active generation.
 
+Structural answers read a repository's generation through a process-local reader
+cache (`scripts/evidence_reader_cache.py`, 2026-09-10): a generation is validated
+once per MCP process and reused while `catalog.sqlite3`, the generation's
+`evidence.sqlite3` and the checkout's Git state keep their stat identity. It holds
+no state on disk and adds no runtime root. A foreign repository's generation is
+refreshed incrementally by `repository_index.py refresh` — spawned detached by the
+MCP server once per repository and commit when a structural answer finds the
+checkout's commit ahead of the generation's, and by the nightly `refresh-all`
+step — under the ownership registry's `doctor` role scoped
+`repository:<repository_id>`. It is not a daemon: the process exits when the
+refresh does. Answers carry a `freshness` block naming both commits.
+
 The runtime starts Pyright lazily within the owning MCP process, exposes only
 allowlisted read operations, reports readiness and capability limitations, and falls
 back to existing structural evidence when unavailable. Exact small results use a
@@ -465,7 +491,7 @@ or nonzero active state remains fail-closed.
 - `scripts/` — Python pipeline and host helpers. Central hub:
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
-  `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
+  `maybe_compile.py` (PID-locked spawn), `search_memory.py` (entry point; fusion lives in `retrieval.py`),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
 - `tests/` — full regression suite. Hermetic via `conftest.py` (pins
@@ -473,7 +499,7 @@ or nonzero active state remains fail-closed.
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
   subsystem brief — subordinate to the root `../AGENTS.md` contract),
-  `EXPORTING.md`, `SETUP-COGNEE.md`, `operating-model.md`,
+  `EXPORTING.md`, `operating-model.md`,
   `STRUCTURE.md` (this file).
 - `scripts/queries/` — 12 language-specific Tree-sitter queries for function,
   class/type, call, and import extraction. Grammar packages are optional and
@@ -547,6 +573,15 @@ or nonzero active state remains fail-closed.
   v4.0: `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
+- `cache/code-hints/<checkout-hash>.sqlite3` — issue #24 C1: the classes,
+  functions and methods of one foreign checkout's newest generation, with
+  qualified name, first location and resolved in/out degree, exported once by
+  each index build and read by the `Grep`/`Glob`/`SubagentStart` hook adapter
+  (`scripts/graph_hint.py`) in one indexed query. Disposable and derived: a
+  missing or foreign file answers nothing, `refresh` re-exports it, and
+  `repository_index.py retire` removes the file of a checkout that has no
+  generation left. It is not a generation member and not a second catalog.
+  Research: `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
 - `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
   telemetry generation state, built over `knowledge/` only (the checkout's own
   code and docs are not memory; repositories have their own generations).

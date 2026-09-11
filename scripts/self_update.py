@@ -18,6 +18,8 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from secret_redact import describe_error
+
 FETCH_TIMEOUT_SECONDS = 120.0
 GIT_TIMEOUT_SECONDS = 60.0
 SYNC_TIMEOUT_SECONDS = 600.0
@@ -156,7 +158,7 @@ def update_checkout(root: Path | str) -> dict:
     try:
         return _attempted_update(root)
     except (OSError, subprocess.TimeoutExpired, SelfUpdateError) as error:
-        return _outcome("error", type(error).__name__)
+        return _outcome("error", describe_error(error))
 
 
 def _prepared_update(root: Path) -> tuple[str, str] | dict:

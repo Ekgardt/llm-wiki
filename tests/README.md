@@ -26,7 +26,7 @@ The suite is the **full regression suite**. Highlights:
 | `test_merge_claude_settings.py` | User hooks preserved + ours replaced, env set, permissions union, backup written. |
 | `test_plugin_helpers.py` | Empty/malformed stdin → exit 0; valid payload writes daily-log/state/breadcrumb. |
 | `test_readme_i18n.py` | All 3 READMEs exist and synchronize release, repository, install, reliable-memory, and Python-navigation contracts without brittle suite counts. |
-| `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
+| `test_search_ranking.py` | `search()` goes through `retrieval.retrieve`; limits, source_authority boost, ranking. |
 | `test_benchmark.py` | Versioned legacy-60 corpus, Recall@5 miss reporting, and current/legacy regression floors. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |

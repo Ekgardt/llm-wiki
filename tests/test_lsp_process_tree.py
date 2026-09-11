@@ -16,6 +16,8 @@ import lsp_process_tree
 import pytest
 from lsp_process_tree import ProcessTree
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 
 
@@ -211,10 +213,10 @@ def _ask_fixture_to_clean(tree: ProcessTree) -> None:
 
 def _wait_or_kill(tree: ProcessTree) -> None:
     try:
-        tree.process.wait(timeout=3)
+        tree.process.wait(timeout=SHORT_TIMEOUT)
     except subprocess.TimeoutExpired:
         tree.process.kill()
-        tree.process.wait(timeout=3)
+        tree.process.wait(timeout=SHORT_TIMEOUT)
 
 
 def _fixture_death(tree: ProcessTree) -> str:
@@ -283,7 +285,7 @@ def test_a_dead_fixture_reports_why_it_died(tmp_path: Path) -> None:
         env=dict(os.environ),
     )
     try:
-        tree.process.wait(timeout=10)
+        tree.process.wait(timeout=SHORT_TIMEOUT)
         with pytest.raises(AssertionError) as failure:
             _fixture_line(tree, b"")
     finally:
@@ -360,7 +362,7 @@ def test_posix_spawn_inherits_explicit_verified_descriptor(tmp_path: Path) -> No
         os.close(read_descriptor)
         if tree is not None and tree.process.poll() is None:
             tree.process.kill()
-            tree.process.wait(timeout=5)
+            tree.process.wait(timeout=SHORT_TIMEOUT)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance")
@@ -666,7 +668,7 @@ def test_terminate_cleans_descendant_after_direct_leader_already_exited(
         env=dict(os.environ),
     )
     descendant_pid = _descendant(tree)
-    tree.process.wait(timeout=5)
+    tree.process.wait(timeout=SHORT_TIMEOUT)
     try:
         assert _pid_alive(descendant_pid)
         assert tree.has_live_descendants() is True
@@ -686,7 +688,7 @@ def test_close_retains_group_until_descendant_after_exited_leader_is_gone(
         env=dict(os.environ),
     )
     descendant_pid = _descendant(tree)
-    tree.process.wait(timeout=5)
+    tree.process.wait(timeout=SHORT_TIMEOUT)
     assert _pid_alive(descendant_pid)
 
     with pytest.raises(RuntimeError, match="live|empty"):
@@ -727,7 +729,7 @@ def test_setsid_escape_is_outside_posix_process_group_containment(
         tree.process.stdin.write(b"cleanup\n")
         tree.process.stdin.flush()
         cleanup_record = _process_record(tree)
-        tree.process.wait(timeout=5)
+        tree.process.wait(timeout=SHORT_TIMEOUT)
         tree.close()
     finally:
         _force_cleanup(tree, descendant_pid)
@@ -1100,7 +1102,7 @@ def test_linux_orphan_zombie_does_not_strand_owned_process_group(
         env=dict(os.environ),
     )
     descendant_pid = _descendant(tree)
-    tree.process.wait(timeout=5)
+    tree.process.wait(timeout=SHORT_TIMEOUT)
     state: str | None = None
     settle_deadline = time.monotonic() + 2
     while time.monotonic() < settle_deadline:
@@ -1461,7 +1463,7 @@ def test_windows_close_releases_reaped_process_handle_and_keeps_cached_status(
     assert process._handle.closed is True
     assert process.returncode == returncode
     assert process.poll() == returncode
-    assert process.wait(timeout=0) == returncode
+    assert process.wait(timeout=SHORT_TIMEOUT) == returncode
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process handle retry")

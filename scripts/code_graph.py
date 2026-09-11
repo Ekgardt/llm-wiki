@@ -1381,6 +1381,48 @@ def _active_graph_or_none(
     )
 
 
+def _leased_active_graph(directory, read_only, deadline, cancelled):
+    """The cached validated reader for `directory`, or a fresh one on a miss.
+
+    Measured 2026-09-10: opening a generation cost 458 of a warm answer's
+    521 ms, all of it re-validating an immutable artifact. The cache keeps the
+    validated reader and reuses it while the catalog, the artifact and the
+    checkout's Git state keep their stat identity. See
+    `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md`.
+    """
+    try:
+        from . import evidence_reader_cache
+        from .evidence_graph import EvidenceGraph, SharedEvidenceGraph
+        from .repository_scope import resolve_repository_scope
+    except ImportError:
+        import evidence_reader_cache
+        from evidence_graph import EvidenceGraph, SharedEvidenceGraph
+        from repository_scope import resolve_repository_scope
+
+    if not evidence_reader_cache.shared_readers_supported():
+        return _active_graph_or_none(
+            directory, read_only, deadline, cancelled,
+            EvidenceGraph, resolve_repository_scope,
+        )
+    _check_generation_stop(deadline, cancelled)
+    key = (str(Path(directory).resolve()), bool(read_only))
+    catalog = _generation_catalog_for(directory, read_only, deadline, cancelled)
+    if catalog is None:
+        evidence_reader_cache.forget(key)
+        return None
+    return evidence_reader_cache.leased_graph(
+        key,
+        catalog_path=Path(catalog.catalog_path),
+        resolve_scope=lambda: _bounded_call(
+            resolve_repository_scope, directory, deadline=deadline, cancelled=cancelled
+        ),
+        open_graph=lambda scope: _bounded_call(
+            SharedEvidenceGraph.open_active_for_repository, catalog, scope,
+            deadline=deadline, cancelled=cancelled,
+        ),
+    )
+
+
 def _active_evidence_graph(
     directory: Path,
     *,
@@ -1389,17 +1431,7 @@ def _active_evidence_graph(
     cancelled=None,
 ):
     try:
-        from .evidence_graph import EvidenceGraph
-        from .repository_scope import resolve_repository_scope
-    except ImportError:
-        from evidence_graph import EvidenceGraph
-        from repository_scope import resolve_repository_scope
-
-    try:
-        return _active_graph_or_none(
-            directory, read_only, deadline, cancelled,
-            EvidenceGraph, resolve_repository_scope,
-        )
+        return _leased_active_graph(directory, read_only, deadline, cancelled)
     except TimeoutError:
         raise
     except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
@@ -1645,10 +1677,20 @@ def _live_community_answer(
     )
 
 
+def _observation_count(graph) -> int:
+    """Counted once per generation: the table cannot change after registration."""
+
+    def count() -> int:
+        return graph._database.execute("SELECT count(*) FROM observation").fetchone()[0]
+
+    memoized = getattr(graph, "memoized", None)
+    if memoized is None:
+        return count()
+    return memoized("observation_count", count)
+
+
 def _store_report(graph) -> dict[str, object]:
-    unresolved_count = graph._database.execute(
-        "SELECT count(*) FROM observation"
-    ).fetchone()[0]
+    unresolved_count = _observation_count(graph)
     return {
         "source_generation": graph.generation_id,
         "source_scope": "checkout",
@@ -1688,11 +1730,137 @@ def _with_report(key: str, value, report: dict[str, object], enabled: bool):
 
 
 def _stored_callers(
-    function_name: str, directory: Path, with_report: bool
+    function_name: str, directory: Path, with_report: bool, max_depth: int | None = None
 ) -> list[dict] | dict | None:
+    depth = _call_walk_depth(max_depth)
+    if depth > 1:
+        return _store_walk_calls(function_name, directory, "in", depth, with_report)
     if with_report:
         return _store_find_callers(function_name, directory, with_report=True)
     return _store_find_callers(function_name, directory)
+
+
+# Issue #24, B4: `callers`/`callees` with a depth walk the generation's bounded
+# CALLS closure (`EvidenceGraph.neighbors`, a recursive CTE with depth, work
+# and row ceilings). Depth 1 is the unchanged one-hop path; the walk reports
+# `depth_applied` and `depth_frontier_open` exactly as `dependencies` does.
+CALL_WALK_MAX_DEPTH = 8
+CALL_WALK_MAX_ROWS = 10_000
+CALL_WALK_MAX_WORK = 100_000
+CALL_WALK_MAX_SEEDS = 20
+_LOCATION_CHUNK = 512  # evidence_graph.MAX_NODE_FILTER
+
+
+def _call_walk_depth(max_depth: int | None) -> int:
+    if max_depth is None:
+        return 1
+    return max(1, min(int(max_depth), CALL_WALK_MAX_DEPTH))
+
+
+def _walk_seeds(graph, function_name: str) -> list[str]:
+    nodes = graph.find_nodes(
+        kinds=("function", "method"), name=function_name, max_rows=10_000
+    )
+    return sorted({str(item["node_id"]) for item in nodes})[:CALL_WALK_MAX_SEEDS]
+
+
+def _keep_shallowest(merged: dict, row: dict) -> None:
+    current = merged.get(row["node_id"])
+    if current is None or row["depth"] < current["depth"]:
+        merged[row["node_id"]] = row
+
+
+def _walked_nodes(graph, seeds: list[str], direction: str, depth: int) -> dict:
+    """The CALLS closure of every seed, breadth-first, shallowest depth kept.
+
+    `reachable` and not `neighbors`: the recursive CTE carries its visited set
+    as a string down every path, and measured 2026-09-10 on a 1 020-file
+    fixture (20 seeds) it took 801 ms at depth 3 and 4.0 s at depth 8, where
+    the breadth-first walk expands each node once.
+    """
+    merged: dict = {}
+    for seed in seeds:
+        rows = graph.reachable(
+            seed,
+            edge_types=("CALLS",),
+            reverse=direction == "in",
+            max_depth=depth,
+            max_rows=CALL_WALK_MAX_ROWS,
+            max_work=CALL_WALK_MAX_WORK,
+        )
+        for row in rows:
+            _keep_shallowest(merged, row)
+    return merged
+
+
+def _walk_locations(graph, node_ids: list[str]) -> dict:
+    found: dict = {}
+    for index in range(0, len(node_ids), _LOCATION_CHUNK):
+        found.update(graph.node_locations(node_ids[index : index + _LOCATION_CHUNK]))
+    return found
+
+
+def _walked_row(graph, node: dict, location: dict | None, function_name: str) -> dict:
+    source_root = Path(graph.repository_scope.checkout_root)
+    found = location or {}
+    relative = found.get("relative_path")
+    return {
+        "file": str(source_root / relative) if relative else "",
+        "line": found.get("line", 0),
+        "function": function_name,
+        "name": node["metadata"].get("name", node["identity_key"]),
+        "qualified_name": _stored_qualified_name(node),
+        "depth": node["depth"],
+        "symbol_id": node["node_id"],
+    }
+
+
+def _walked_rows(graph, merged: dict, function_name: str, direction: str) -> list[dict]:
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (item["depth"], _stored_qualified_name(item), item["node_id"]),
+    )
+    locations = _walk_locations(graph, [item["node_id"] for item in ordered])
+    rows = [
+        _walked_row(graph, item, locations.get(item["node_id"]), function_name)
+        for item in ordered
+    ]
+    if direction == "out":
+        for row in rows:
+            row["callee"] = row["name"]
+    return rows
+
+
+def _walk_report(graph, function_name: str, direction: str, seeds: list, rows: list, depth: int) -> dict:
+    report = {
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        **_dependency_reach(rows, depth),
+    }
+    if direction == "in":
+        report.update(_unresolved_caller_fields(graph, function_name))
+    return report
+
+
+def _store_walk_calls(
+    function_name: str, directory: Path, direction: str, depth: int, with_report: bool
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _walk_seeds(graph, function_name)
+        rows = _walked_rows(
+            graph, _walked_nodes(graph, seeds, direction, depth), function_name, direction
+        )
+        report = {
+            **_store_report(graph),
+            **_walk_report(graph, function_name, direction, seeds, rows, depth),
+        }
+        key = "callers" if direction == "in" else "callees"
+        return _with_report(key, rows, report, with_report)
+    finally:
+        graph.close()
 
 
 _SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
@@ -1852,6 +2020,7 @@ def find_callers(
     *,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
@@ -1860,9 +2029,13 @@ def find_callers(
     an empty `callers` list distinguishes "nobody calls it" from "the receiver
     could not be resolved". Both fields need `with_report=True`; the bare list
     form is kept for callers that only want confirmed edges.
+
+    `max_depth` above 1 walks the generation's CALLS closure that deep (issue
+    #24, B4); rows then carry `depth`, and the report `depth_applied` and
+    `depth_frontier_open`. The live fallback answers one hop and says so.
     """
     if not live:
-        stored = _stored_callers(function_name, directory, with_report)
+        stored = _stored_callers(function_name, directory, with_report, max_depth)
         if stored is not None:
             return stored
     callers, unresolved = _live_caller_scan(directory, function_name)
@@ -1921,8 +2094,11 @@ def _store_find_callers(
 
 
 def _stored_callees(
-    function_name: str, directory: Path, with_report: bool
+    function_name: str, directory: Path, with_report: bool, max_depth: int | None = None
 ) -> list[dict] | dict | None:
+    depth = _call_walk_depth(max_depth)
+    if depth > 1:
+        return _store_walk_calls(function_name, directory, "out", depth, with_report)
     if with_report:
         return _store_find_callees(function_name, directory, with_report=True)
     return _store_find_callees(function_name, directory)
@@ -1946,13 +2122,15 @@ def find_callees(
     *,
     live: bool = False,
     with_report: bool = False,
+    max_depth: int | None = None,
 ) -> list[dict] | dict:
     """Find all functions called BY a function (CALLS edge, forward direction).
 
-    Returns list of {file, line, callee}.
+    Returns list of {file, line, callee}. `max_depth` above 1 walks the
+    generation's CALLS closure that deep (issue #24, B4).
     """
     if not live:
-        stored = _stored_callees(function_name, directory, with_report)
+        stored = _stored_callees(function_name, directory, with_report, max_depth)
         if stored is not None:
             return stored
     callees: list[dict] = []
@@ -3458,23 +3636,56 @@ def _print_unresolved_callers(function_name: str, answer: dict) -> None:
         print(f"    {row['file']}:{row['line']}  {row['call_text']} ({row['reason']})")
 
 
+NO_GENERATION_MESSAGE = (
+    "No generation is registered for this repository, so callers cannot be "
+    "answered from an index. Build one with get_architecture mode=index "
+    "(or `python scripts/repository_index.py index <dir>`), or pass --live to "
+    "re-parse every file now, which took 300 s on a 1 026-file repository."
+)
+
+
+def _print_callers(function_name: str, answer: dict) -> None:
+    callers = answer["callers"]
+    print(f"Callers of '{function_name}': {len(callers)} found.")
+    for c in callers[:20]:
+        print(f"  {c['file']}:{c['line']}")
+    _print_unresolved_callers(function_name, answer)
+
+
+def _cli_callers(function_name: str, directory: Path, *, live: bool) -> int:
+    """Answer from the generation; without one, say so instead of re-parsing.
+
+    Issue #24: `--callers` on a repository without a generation silently fell
+    through to the whole-tree parse and timed out at 300 s. An index that
+    is missing is a fact worth stating, not a reason to spend five minutes.
+    """
+    if live:
+        _print_callers(function_name, find_callers(function_name, directory, live=True, with_report=True))
+        return 0
+    stored = _stored_callers(function_name, directory, True)
+    if stored is None:
+        print(NO_GENERATION_MESSAGE)
+        return 2
+    _print_callers(function_name, stored)
+    return 0
+
+
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Code graph — tree-sitter code intelligence.")
     p.add_argument("directory", nargs="?", default=".", help="Directory to index.")
     p.add_argument("--callers", type=str, default=None, help="Find callers of a function.")
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="With --callers: re-parse the whole tree instead of reading the generation.",
+    )
     args = p.parse_args()
 
     directory = Path(args.directory)
 
     if args.callers:
-        answer = find_callers(args.callers, directory, with_report=True)
-        callers = answer["callers"]
-        print(f"Callers of '{args.callers}': {len(callers)} found.")
-        for c in callers[:20]:
-            print(f"  {c['file']}:{c['line']}")
-        _print_unresolved_callers(args.callers, answer)
-        return 0
+        return _cli_callers(args.callers, directory, live=args.live)
 
     index_directory(directory)
     return 0

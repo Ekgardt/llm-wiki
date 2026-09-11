@@ -7,24 +7,30 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from bounded_io import read_stable_bytes
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
 from reliable_memory import canonical_json_bytes, restricted_relative_path, sha256_bytes
 
 MAX_CLAIM_TREE_PAGES = 10_000
 # Eight megabytes: the same ceiling `project_journal.MAX_JOURNAL_BYTES` allows
 # a journal, so a page the journal accepts is never one the claim tree refuses.
 # Measured 2026-09-09: a 4.2 MB journal failed every compile since 09-07.
-MAX_CLAIM_TREE_FILE_BYTES = 8 * 1024 * 1024
+MAX_CLAIM_TREE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_CLAIM_TREE_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_CLAIM_TREE_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_GUARDRAIL_SOURCE_FILES = 10_000
 MAX_GUARDRAIL_INSPECTED_ENTRIES = 50_000
 MAX_GUARDRAIL_SOURCE_DIRECTORIES = 5_000
 MAX_GUARDRAIL_SOURCE_DEPTH = 12
-MAX_GUARDRAIL_SOURCE_FILE_BYTES = 4 * 1024 * 1024
+MAX_GUARDRAIL_SOURCE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_GUARDRAIL_SOURCE_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_GUARDRAIL_SOURCE_MANIFEST_BYTES = 2 * 1024 * 1024
-PROJECT_CLAIM_FILES = frozenset({"context.md", "journal.md", "state.md"})
+# The project files a claim can live in. `journal.md` is the append-only event
+# log the project state is projected from: JSON events after a header, no
+# claim ledger by its own parser, and up to 8 MiB. A read model that scans the
+# raw log couples itself to the write side (Azure event-sourcing pattern,
+# Kurrent on snapshots); it read 4.2 MB per compile and found nothing. See
+# `docs/research/2026-09-10-a-timeout-is-a-hang-bound-not-a-stopwatch.md`.
+PROJECT_CLAIM_FILES = frozenset({"context.md", "state.md"})
 
 _CLAIM_TREE_FIELDS = frozenset({"schema_version", "entries", "absence_generation"})
 _GUARDRAIL_FIELDS = frozenset({"schema_version", "entries", "source_manifest_sha256"})

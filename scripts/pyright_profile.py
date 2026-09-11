@@ -51,12 +51,24 @@ def _freeze_pyright_profile_value(value: object) -> object:
     return value
 
 
+def _thaw_mapping(value: Mapping) -> dict:
+    return {key: thaw_pyright_profile_value(item) for key, item in value.items()}
+
+
+def _thaw_tuple(value: tuple) -> list:
+    return [thaw_pyright_profile_value(item) for item in value]
+
+
 def thaw_pyright_profile_value(value: object) -> object:
     """Return a mutable JSON-domain copy of an immutable profile value."""
     if isinstance(value, Mapping):
-        return {key: thaw_pyright_profile_value(item) for key, item in value.items()}
+        return _thaw_mapping(value)
+    return _thaw_non_mapping(value)
+
+
+def _thaw_non_mapping(value: object) -> object:
     if isinstance(value, tuple):
-        return [thaw_pyright_profile_value(item) for item in value]
+        return _thaw_tuple(value)
     if value is None or isinstance(value, (bool, int, str)):
         return value
     raise TypeError(f"unsupported Pyright profile value: {type(value).__name__}")
@@ -217,30 +229,32 @@ def build_pyright_install_manifest(*, server_sha256: str) -> dict[str, str]:
     }
 
 
+_MANIFEST_CHECKS = (
+    ("schema_version", "pyright_manifest_schema_mismatch"),
+    ("version", "pyright_version_mismatch"),
+    ("package_url", "pyright_package_url_mismatch"),
+    ("package_sha256", "pyright_package_sha256_mismatch"),
+    ("package_integrity", "pyright_integrity_mismatch"),
+    ("server_relative_path", "pyright_server_relative_mismatch"),
+    ("configuration_sha256", "pyright_configuration_mismatch"),
+    ("initialization_options_sha256", "pyright_initialization_options_mismatch"),
+)
+
+
+def _manifest_shape_is_valid(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != _MANIFEST_KEYS:
+        return False
+    if any(not isinstance(item, str) for item in value.values()):
+        return False
+    return _HEX_SHA256.fullmatch(value["server_sha256"]) is not None
+
+
 def validate_pyright_install_manifest(value: object) -> dict[str, str]:
     """Validate the install receipt's closed pinned domain."""
-    if not isinstance(value, dict) or set(value) != _MANIFEST_KEYS:
+    if not _manifest_shape_is_valid(value):
         raise _ManifestValidationError("pyright_manifest_malformed")
-    if any(not isinstance(item, str) for item in value.values()):
-        raise _ManifestValidationError("pyright_manifest_malformed")
-    server_sha256 = value["server_sha256"]
-    if _HEX_SHA256.fullmatch(server_sha256) is None:
-        raise _ManifestValidationError("pyright_manifest_malformed")
-    expected = build_pyright_install_manifest(server_sha256=server_sha256)
-    checks = (
-        ("schema_version", "pyright_manifest_schema_mismatch"),
-        ("version", "pyright_version_mismatch"),
-        ("package_url", "pyright_package_url_mismatch"),
-        ("package_sha256", "pyright_package_sha256_mismatch"),
-        ("package_integrity", "pyright_integrity_mismatch"),
-        ("server_relative_path", "pyright_server_relative_mismatch"),
-        ("configuration_sha256", "pyright_configuration_mismatch"),
-        (
-            "initialization_options_sha256",
-            "pyright_initialization_options_mismatch",
-        ),
-    )
-    for field, code in checks:
+    expected = build_pyright_install_manifest(server_sha256=value["server_sha256"])
+    for field, code in _MANIFEST_CHECKS:
         if value[field] != expected[field]:
             raise _ManifestValidationError(code)
     return {field: value[field] for field in sorted(_MANIFEST_KEYS)}
@@ -263,21 +277,26 @@ def _check_deadline(deadline: float | None) -> None:
         raise TimeoutError("Pyright discovery deadline expired")
 
 
+def _require_environment_entry(name: object, value: object) -> None:
+    if not isinstance(name, str) or not isinstance(value, str):
+        raise TypeError("environment names and values must be strings")
+    if "\0" in name or "\0" in value:
+        raise ValueError("environment names and values must not contain NUL")
+
+
+def _require_windows_system_root(values: Mapping[str, str]) -> None:
+    if os.name != "nt":
+        return
+    system_root = values.get("SYSTEMROOT")
+    if not system_root or not Path(system_root).is_absolute() or not Path(system_root).is_dir():
+        raise ValueError("SYSTEMROOT must be an inherited existing directory on Windows")
+
+
 def _node_environment() -> dict[str, str]:
     values = os.environ
     for name, value in values.items():
-        if not isinstance(name, str) or not isinstance(value, str):
-            raise TypeError("environment names and values must be strings")
-        if "\0" in name or "\0" in value:
-            raise ValueError("environment names and values must not contain NUL")
-    if os.name == "nt":
-        system_root = values.get("SYSTEMROOT")
-        if (
-            not system_root
-            or not Path(system_root).is_absolute()
-            or not Path(system_root).is_dir()
-        ):
-            raise ValueError("SYSTEMROOT must be an inherited existing directory on Windows")
+        _require_environment_entry(name, value)
+    _require_windows_system_root(values)
     return {name: values[name] for name in sorted(_NODE_ENV_ALLOWLIST) if name in values}
 
 
@@ -317,95 +336,163 @@ def _strict_json_object(
     return value
 
 
+def _blank_unless_newline(character: str) -> str:
+    if character in "\r\n":
+        return character
+    return " "
+
+
+class _CommentStripper:
+    """Replace JSONC comments with spaces (newlines kept) outside strings."""
+
+    def __init__(self, text: str, malformed_code: str) -> None:
+        self.text = text
+        self.code = malformed_code
+        self.out: list[str] = []
+        self.index = 0
+        self.in_string = False
+        self.escaped = False
+
+    def run(self) -> list[str]:
+        while self.index < len(self.text):
+            self._step()
+        return self.out
+
+    def _keep(self, character: str) -> None:
+        self.out.append(character)
+        self.index += 1
+
+    def _advance_string_state(self, character: str) -> None:
+        if self.escaped:
+            self.escaped = False
+            return
+        self._unescaped_string_character(character)
+
+    def _unescaped_string_character(self, character: str) -> None:
+        if character == "\\":
+            self.escaped = True
+            return
+        if character == '"':
+            self.in_string = False
+
+    def _step(self) -> None:
+        character = self.text[self.index]
+        if self.in_string:
+            self._advance_string_state(character)
+            self._keep(character)
+            return
+        self._step_outside_string(character)
+
+    def _step_outside_string(self, character: str) -> None:
+        if character == '"':
+            self.in_string = True
+            self._keep(character)
+            return
+        if character != "/" or self.index + 1 >= len(self.text):
+            self._keep(character)
+            return
+        self._comment_or_slash(self.text[self.index + 1], character)
+
+    def _comment_or_slash(self, marker: str, character: str) -> None:
+        if marker == "/":
+            self._skip_line_comment()
+            return
+        if marker != "*":
+            self._keep(character)
+            return
+        self._skip_block_comment()
+
+    def _skip_line_comment(self) -> None:
+        self.out.extend((" ", " "))
+        self.index += 2
+        while self.index < len(self.text) and self.text[self.index] not in "\r\n":
+            self.out.append(" ")
+            self.index += 1
+
+    def _at_block_end(self) -> bool:
+        return self.text[self.index] == "*" and self.text[self.index + 1 : self.index + 2] == "/"
+
+    def _skip_block_comment(self) -> None:
+        self.out.extend((" ", " "))
+        self.index += 2
+        while self.index < len(self.text):
+            if self._at_block_end():
+                self.out.extend((" ", " "))
+                self.index += 2
+                return
+            self.out.append(_blank_unless_newline(self.text[self.index]))
+            self.index += 1
+        raise _MetadataError(self.code)
+
+
+class _TrailingCommaPass:
+    """Blank a comma that directly precedes `}` or `]` outside strings."""
+
+    def __init__(self, normalized: list[str]) -> None:
+        self.normalized = normalized
+        self.pending_comma: int | None = None
+        self.previous: str | None = None
+        self.in_string = False
+        self.escaped = False
+
+    def run(self) -> list[str]:
+        for index, character in enumerate(self.normalized):
+            self._step(index, character)
+        return self.normalized
+
+    def _string_character(self, character: str) -> None:
+        if self.escaped:
+            self.escaped = False
+            return
+        self._unescaped_string_character(character)
+
+    def _unescaped_string_character(self, character: str) -> None:
+        if character == "\\":
+            self.escaped = True
+            return
+        if character == '"':
+            self.in_string = False
+            self.previous = character
+
+    def _comma(self, index: int) -> None:
+        if self.previous in {None, "{", "[", ",", ":"}:
+            self.pending_comma = None
+        else:
+            self.pending_comma = index
+        self.previous = ","
+
+    def _significant(self, character: str) -> None:
+        if character in "}]" and self.pending_comma is not None:
+            self.normalized[self.pending_comma] = " "
+        self.pending_comma = None
+        self.previous = character
+
+    def _step(self, index: int, character: str) -> None:
+        if self.in_string:
+            self._string_character(character)
+            return
+        if character == '"':
+            self.pending_comma = None
+            self.previous = character
+            self.in_string = True
+            return
+        self._step_outside_string(index, character)
+
+    def _step_outside_string(self, index: int, character: str) -> None:
+        if character == ",":
+            self._comma(index)
+            return
+        if character not in " \t\r\n":
+            self._significant(character)
+
+
 def _normalize_jsonc(raw: bytes, malformed_code: str) -> bytes:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise _MetadataError(malformed_code) from exc
-
-    normalized: list[str] = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(text):
-        character = text[index]
-        if in_string:
-            normalized.append(character)
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            index += 1
-            continue
-
-        if character == '"':
-            normalized.append(character)
-            in_string = True
-            index += 1
-            continue
-        if character != "/" or index + 1 >= len(text):
-            normalized.append(character)
-            index += 1
-            continue
-
-        marker = text[index + 1]
-        if marker == "/":
-            normalized.extend((" ", " "))
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                normalized.append(" ")
-                index += 1
-            continue
-        if marker != "*":
-            normalized.append(character)
-            index += 1
-            continue
-
-        normalized.extend((" ", " "))
-        index += 2
-        while index < len(text):
-            if text[index] == "*" and index + 1 < len(text) and text[index + 1] == "/":
-                normalized.extend((" ", " "))
-                index += 2
-                break
-            normalized.append(text[index] if text[index] in "\r\n" else " ")
-            index += 1
-        else:
-            raise _MetadataError(malformed_code)
-
-    pending_comma: int | None = None
-    previous_significant: str | None = None
-    in_string = False
-    escaped = False
-    for index, character in enumerate(normalized):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-                previous_significant = character
-            continue
-        if character == '"':
-            pending_comma = None
-            previous_significant = character
-            in_string = True
-        elif character == ",":
-            pending_comma = (
-                index
-                if previous_significant not in {None, "{", "[", ",", ":"}
-                else None
-            )
-            previous_significant = character
-        elif character not in " \t\r\n":
-            if character in "}]" and pending_comma is not None:
-                normalized[pending_comma] = " "
-            pending_comma = None
-            previous_significant = character
-    return "".join(normalized).encode("utf-8")
+    normalized = _CommentStripper(text, malformed_code).run()
+    return "".join(_TrailingCommaPass(normalized).run()).encode("utf-8")
 
 
 def _read_json_object(
@@ -438,6 +525,42 @@ def _read_json_object(
     )
 
 
+def _require_domain_bounds(nodes: int, depth: int, prefix: str, max_depth: int, max_nodes: int) -> None:
+    if nodes > max_nodes:
+        raise _MetadataError(f"{prefix}_too_many_nodes")
+    if depth > max_depth:
+        raise _MetadataError(f"{prefix}_too_deep")
+
+
+def _object_children(item: dict, prefix: str) -> tuple:
+    if any(not isinstance(key, str) for key in item):
+        raise _MetadataError(f"{prefix}_unsupported_value")
+    return tuple(item.values())
+
+
+def _domain_children(item: object, prefix: str) -> tuple | None:
+    """The children of a container; None for a scalar; a refusal for anything else."""
+    if item is None or isinstance(item, (bool, int, str)):
+        return None
+    return _container_children(item, prefix)
+
+
+def _container_children(item: object, prefix: str) -> tuple:
+    if isinstance(item, dict):
+        return _object_children(item, prefix)
+    if isinstance(item, list):
+        return tuple(item)
+    raise _MetadataError(f"{prefix}_unsupported_value")
+
+
+def _push_domain_children(
+    stack: list, children: tuple, nodes: int, depth: int, prefix: str, max_nodes: int
+) -> None:
+    if nodes + len(stack) + len(children) > max_nodes:
+        raise _MetadataError(f"{prefix}_too_many_nodes")
+    stack.extend((child, depth + 1) for child in reversed(children))
+
+
 def _validate_canonical_domain(
     value: object,
     *,
@@ -451,26 +574,13 @@ def _validate_canonical_domain(
     while stack:
         item, depth = stack.pop()
         nodes += 1
-        if nodes > max_nodes:
-            raise _MetadataError(f"{prefix}_too_many_nodes")
-        if depth > max_depth:
-            raise _MetadataError(f"{prefix}_too_deep")
+        _require_domain_bounds(nodes, depth, prefix, max_depth, max_nodes)
         if nodes & 255 == 0:
             _check_deadline(deadline)
-
-        if item is None or isinstance(item, (bool, int, str)):
+        children = _domain_children(item, prefix)
+        if children is None:
             continue
-        if isinstance(item, dict):
-            if any(not isinstance(key, str) for key in item):
-                raise _MetadataError(f"{prefix}_unsupported_value")
-            children = tuple(item.values())
-        elif isinstance(item, list):
-            children = tuple(item)
-        else:
-            raise _MetadataError(f"{prefix}_unsupported_value")
-        if nodes + len(stack) + len(children) > max_nodes:
-            raise _MetadataError(f"{prefix}_too_many_nodes")
-        stack.extend((child, depth + 1) for child in reversed(children))
+        _push_domain_children(stack, children, nodes, depth, prefix, max_nodes)
     _check_deadline(deadline)
 
 
@@ -511,6 +621,66 @@ def _repository_config_entrypoint(
     return None
 
 
+def _read_config_bytes(path: Path) -> bytes:
+    try:
+        return read_stable_bytes(path, MAX_PYRIGHT_CONFIG_BYTES, label="Pyright repository config")
+    except FileNotFoundError as exc:
+        raise _MetadataError("pyright_repository_config_missing") from exc
+    except PermissionError as exc:
+        raise _MetadataError("pyright_repository_config_unsafe") from exc
+    except ValueError as exc:
+        raise _MetadataError("pyright_repository_config_oversized") from exc
+    except OSError as exc:
+        raise _MetadataError("pyright_repository_config_unreadable") from exc
+
+
+def _validate_repository_domain(configuration: dict[str, object], deadline: float | None) -> None:
+    _validate_canonical_domain(
+        configuration,
+        prefix="pyright_repository_config",
+        max_depth=MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH,
+        max_nodes=MAX_PYRIGHT_CONFIG_DOMAIN_NODES,
+        deadline=deadline,
+    )
+
+
+def _json_repository_config(raw: bytes, deadline: float | None) -> dict[str, object]:
+    configuration = _strict_json_object(
+        _normalize_jsonc(raw, "pyright_repository_config_malformed"),
+        "pyright_repository_config_malformed",
+        recursion_code="pyright_repository_config_too_deep",
+    )
+    _validate_repository_domain(configuration, deadline)
+    return configuration
+
+
+def _toml_document(raw: bytes) -> dict:
+    try:
+        return tomllib.loads(raw.decode("utf-8", errors="strict"))
+    except RecursionError as exc:
+        raise _MetadataError("pyright_repository_config_too_deep") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _MetadataError("pyright_repository_config_malformed") from exc
+
+
+def _toml_pyright_table(document: dict, root_pyproject: bool) -> dict[str, object]:
+    tool = document.get("tool")
+    configuration = tool.get("pyright") if isinstance(tool, dict) else None
+    if isinstance(configuration, dict):
+        return configuration
+    if root_pyproject:
+        raise _MetadataError("pyright_repository_config_ancestor_search")
+    raise _MetadataError("pyright_repository_config_malformed")
+
+
+def _toml_repository_config(
+    raw: bytes, root_pyproject: bool, deadline: float | None
+) -> dict[str, object]:
+    configuration = _toml_pyright_table(_toml_document(raw), root_pyproject)
+    _validate_repository_domain(configuration, deadline)
+    return configuration
+
+
 def _read_repository_config(
     path: Path,
     *,
@@ -520,64 +690,14 @@ def _read_repository_config(
     suffix = path.suffix.casefold()
     if suffix not in {".json", ".toml"}:
         raise _MetadataError("pyright_repository_config_unsupported_format")
-    try:
-        raw = read_stable_bytes(
-            path,
-            MAX_PYRIGHT_CONFIG_BYTES,
-            label="Pyright repository config",
-        )
-    except FileNotFoundError as exc:
-        raise _MetadataError("pyright_repository_config_missing") from exc
-    except PermissionError as exc:
-        raise _MetadataError("pyright_repository_config_unsafe") from exc
-    except ValueError as exc:
-        raise _MetadataError("pyright_repository_config_oversized") from exc
-    except OSError as exc:
-        raise _MetadataError("pyright_repository_config_unreadable") from exc
+    raw = _read_config_bytes(path)
     _check_deadline(deadline)
-
     if suffix == ".json":
-        configuration = _strict_json_object(
-            _normalize_jsonc(raw, "pyright_repository_config_malformed"),
-            "pyright_repository_config_malformed",
-            recursion_code="pyright_repository_config_too_deep",
-        )
-        _validate_canonical_domain(
-            configuration,
-            prefix="pyright_repository_config",
-            max_depth=MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH,
-            max_nodes=MAX_PYRIGHT_CONFIG_DOMAIN_NODES,
-            deadline=deadline,
-        )
-        return configuration, raw
-    try:
-        document = tomllib.loads(raw.decode("utf-8", errors="strict"))
-    except RecursionError as exc:
-        raise _MetadataError("pyright_repository_config_too_deep") from exc
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise _MetadataError("pyright_repository_config_malformed") from exc
-    tool = document.get("tool")
-    configuration = tool.get("pyright") if isinstance(tool, dict) else None
-    if not isinstance(configuration, dict):
-        if root_pyproject:
-            raise _MetadataError("pyright_repository_config_ancestor_search")
-        raise _MetadataError("pyright_repository_config_malformed")
-    _validate_canonical_domain(
-        configuration,
-        prefix="pyright_repository_config",
-        max_depth=MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH,
-        max_nodes=MAX_PYRIGHT_CONFIG_DOMAIN_NODES,
-        deadline=deadline,
-    )
-    return configuration, raw
+        return _json_repository_config(raw, deadline), raw
+    return _toml_repository_config(raw, root_pyproject, deadline), raw
 
 
-def _contained_repository_config_path(
-    value: str,
-    *,
-    current: Path,
-    repository_root: Path,
-) -> Path:
+def _relative_extends_path(value: str) -> Path:
     if not value or "\0" in value:
         raise _MetadataError("pyright_repository_config_extends_invalid")
     try:
@@ -586,6 +706,16 @@ def _contained_repository_config_path(
         raise _MetadataError("pyright_repository_config_extends_invalid") from exc
     if relative.is_absolute():
         raise _MetadataError("pyright_repository_config_extends_absolute")
+    return relative
+
+
+def _contained_repository_config_path(
+    value: str,
+    *,
+    current: Path,
+    repository_root: Path,
+) -> Path:
+    relative = _relative_extends_path(value)
     candidate = _lexical_absolute_path(current.parent / relative)
     try:
         candidate.relative_to(repository_root)
@@ -596,6 +726,57 @@ def _contained_repository_config_path(
     return candidate
 
 
+class _ConfigChain:
+    """The configurations read so far, the files visited, and their total size."""
+
+    def __init__(self) -> None:
+        self.configurations: list[dict[str, object]] = []
+        self.visited: set[Path] = set()
+        self.total_bytes = 0
+
+
+def _require_chain_step(chain: _ConfigChain, current: Path) -> None:
+    if current in chain.visited:
+        raise _MetadataError("pyright_repository_config_extends_cycle")
+    if len(chain.configurations) >= MAX_PYRIGHT_CONFIG_FILES:
+        raise _MetadataError("pyright_repository_config_extends_too_deep")
+
+
+def _record_configuration(
+    chain: _ConfigChain, current: Path, repository_root: Path, configuration: dict, raw: bytes
+) -> None:
+    chain.total_bytes += len(raw)
+    if chain.total_bytes > MAX_PYRIGHT_CONFIG_TOTAL_BYTES:
+        raise _MetadataError("pyright_repository_config_total_oversized")
+    relative_path = current.relative_to(repository_root)
+    chain.configurations.append(
+        {
+            "configuration": configuration,
+            "source_directory": relative_path.parent.as_posix(),
+            "source_path": relative_path.as_posix(),
+        }
+    )
+
+
+def _require_extends(chain: _ConfigChain, extends: object) -> None:
+    if not isinstance(extends, str):
+        raise _MetadataError("pyright_repository_config_extends_invalid")
+    if len(chain.configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
+        raise _MetadataError("pyright_repository_config_extends_too_deep")
+
+
+def _next_extends(
+    chain: _ConfigChain, configuration: dict, current: Path, repository_root: Path
+) -> Path | None:
+    extends = configuration.get("extends")
+    if extends is None:
+        return None
+    _require_extends(chain, extends)
+    return _contained_repository_config_path(
+        extends, current=current, repository_root=repository_root
+    )
+
+
 def _repository_configuration_chain(
     repository: RepositoryScope,
     deadline: float | None,
@@ -604,50 +785,19 @@ def _repository_configuration_chain(
     current = _repository_config_entrypoint(repository_root, deadline)
     if current is None:
         return None
-
-    configurations: list[dict[str, object]] = []
-    visited: set[Path] = set()
-    total_bytes = 0
+    chain = _ConfigChain()
     while current is not None:
         _check_deadline(deadline)
-        if current in visited:
-            raise _MetadataError("pyright_repository_config_extends_cycle")
-        if len(configurations) >= MAX_PYRIGHT_CONFIG_FILES:
-            raise _MetadataError("pyright_repository_config_extends_too_deep")
-        visited.add(current)
+        _require_chain_step(chain, current)
+        chain.visited.add(current)
+        root_pyproject = not chain.configurations and current.name == "pyproject.toml"
         configuration, raw = _read_repository_config(
-            current,
-            root_pyproject=not configurations and current.name == "pyproject.toml",
-            deadline=deadline,
+            current, root_pyproject=root_pyproject, deadline=deadline
         )
-        total_bytes += len(raw)
-        if total_bytes > MAX_PYRIGHT_CONFIG_TOTAL_BYTES:
-            raise _MetadataError("pyright_repository_config_total_oversized")
-        relative_path = current.relative_to(repository_root)
-        source_directory = relative_path.parent.as_posix()
-        configurations.append(
-            {
-                "configuration": configuration,
-                "source_directory": source_directory,
-                "source_path": relative_path.as_posix(),
-            }
-        )
-        extends = configuration.get("extends")
-        if extends is None:
-            current = None
-            continue
-        if not isinstance(extends, str):
-            raise _MetadataError("pyright_repository_config_extends_invalid")
-        if len(configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
-            raise _MetadataError("pyright_repository_config_extends_too_deep")
-        current = _contained_repository_config_path(
-            extends,
-            current=current,
-            repository_root=repository_root,
-        )
-
-    configurations.reverse()
-    return configurations
+        _record_configuration(chain, current, repository_root, configuration, raw)
+        current = _next_extends(chain, configuration, current, repository_root)
+    chain.configurations.reverse()
+    return chain.configurations
 
 
 def _repository_configuration_identity(
@@ -677,11 +827,18 @@ def _repository_configuration_identity(
     return fingerprint, set()
 
 
+def _package_version_codes(observed: object) -> tuple[str | None, set[str]]:
+    if not isinstance(observed, str) or _PACKAGE_VERSION.fullmatch(observed) is None:
+        return None, {"pyright_package_json_malformed"}
+    if observed != PYRIGHT_VERSION:
+        return observed, {"pyright_version_mismatch"}
+    return observed, set()
+
+
 def _package_identity(
     server: Path,
     deadline: float | None,
 ) -> tuple[str | None, set[str]]:
-    codes: set[str] = set()
     try:
         package, _raw = _read_json_object(
             server.with_name("package.json"),
@@ -691,19 +848,12 @@ def _package_identity(
         )
     except _MetadataError as exc:
         return None, {exc.code}
-
+    codes: set[str] = set()
     name = package.get("name")
     if not isinstance(name, str) or name != "pyright":
         codes.add("pyright_package_mismatch")
-    observed = package.get("version")
-    if not isinstance(observed, str) or _PACKAGE_VERSION.fullmatch(observed) is None:
-        codes.add("pyright_package_json_malformed")
-        version = None
-    else:
-        version = observed
-        if version != PYRIGHT_VERSION:
-            codes.add("pyright_version_mismatch")
-    return version, codes
+    version, version_codes = _package_version_codes(package.get("version"))
+    return version, codes | version_codes
 
 
 def _lockfile_path(source: str, server: Path, repository: RepositoryScope) -> Path | None:
@@ -715,44 +865,41 @@ def _lockfile_path(source: str, server: Path, repository: RepositoryScope) -> Pa
     return package_root.parent.parent / "package-lock.json"
 
 
-def _lockfile_codes(
-    source: str,
-    server: Path,
-    repository: RepositoryScope,
-    deadline: float | None,
-) -> set[str]:
-    lockfile = _lockfile_path(source, server, repository)
-    if lockfile is None:
-        return {"pyright_lockfile_missing"}
-    try:
-        value, _raw = _read_json_object(
-            lockfile,
-            MAX_PACKAGE_LOCK_BYTES,
-            prefix="pyright_lockfile",
-            deadline=deadline,
-        )
-    except _MetadataError as exc:
-        return {exc.code}
+def _lockfile_entries(value: dict, lockfile_version: int) -> tuple[object, str] | None:
+    """(the entry table, the pyright key) for a supported lockfile version."""
+    if lockfile_version == 1:
+        return value.get("dependencies"), "pyright"
+    if lockfile_version in {2, 3}:
+        return value.get("packages"), "node_modules/pyright"
+    return None
 
+
+def _pyright_lockfile_entry(entries: object, key: str) -> dict | str:
+    if not isinstance(entries, dict):
+        return "pyright_lockfile_malformed"
+    return _lockfile_entry_or_code(entries.get(key))
+
+
+def _lockfile_entry_or_code(entry: object) -> dict | str:
+    if not isinstance(entry, dict):
+        return "pyright_lockfile_entry_missing"
+    if "link" in entry:
+        return "pyright_lockfile_link"
+    return entry
+
+
+def _lockfile_entry(value: dict) -> dict | str:
+    """The pyright entry of a lockfile, or the degradation code that stands for it."""
     lockfile_version = value.get("lockfileVersion")
     if isinstance(lockfile_version, bool) or not isinstance(lockfile_version, int):
-        return {"pyright_lockfile_malformed"}
-    if lockfile_version == 1:
-        entries = value.get("dependencies")
-        key = "pyright"
-    elif lockfile_version in {2, 3}:
-        entries = value.get("packages")
-        key = "node_modules/pyright"
-    else:
-        return {"pyright_lockfile_unsupported"}
-    if not isinstance(entries, dict):
-        return {"pyright_lockfile_malformed"}
-    entry = entries.get(key)
-    if not isinstance(entry, dict):
-        return {"pyright_lockfile_entry_missing"}
-    if "link" in entry:
-        return {"pyright_lockfile_link"}
+        return "pyright_lockfile_malformed"
+    located = _lockfile_entries(value, lockfile_version)
+    if located is None:
+        return "pyright_lockfile_unsupported"
+    return _pyright_lockfile_entry(*located)
 
+
+def _entry_field_codes(entry: dict) -> set[str]:
     codes: set[str] = set()
     version = entry.get("version")
     integrity = entry.get("integrity")
@@ -767,62 +914,93 @@ def _lockfile_codes(
     return codes
 
 
+def _lockfile_codes(
+    source: str,
+    server: Path,
+    repository: RepositoryScope,
+    deadline: float | None,
+) -> set[str]:
+    lockfile = _lockfile_path(source, server, repository)
+    if lockfile is None:
+        return {"pyright_lockfile_missing"}
+    try:
+        value, _raw = _read_json_object(
+            lockfile, MAX_PACKAGE_LOCK_BYTES, prefix="pyright_lockfile", deadline=deadline
+        )
+    except _MetadataError as exc:
+        return {exc.code}
+    entry = _lockfile_entry(value)
+    if isinstance(entry, str):
+        return {entry}
+    return _entry_field_codes(entry)
+
+
+def _read_managed_manifest(root: Path, deadline: float | None) -> tuple[dict[str, object], bytes]:
+    value, raw = _read_json_object(
+        root / "install-manifest.json",
+        MAX_INSTALL_MANIFEST_BYTES,
+        prefix="pyright_manifest",
+        deadline=deadline,
+        recursion_code="pyright_manifest_too_deep",
+    )
+    _validate_canonical_domain(
+        value,
+        prefix="pyright_manifest",
+        max_depth=MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH,
+        max_nodes=MAX_PYRIGHT_MANIFEST_DOMAIN_NODES,
+        deadline=deadline,
+    )
+    return value, raw
+
+
+def _canonical_form_codes(value: dict, raw: bytes) -> set[str]:
+    try:
+        if canonical_json_bytes(value) != raw:
+            return {"pyright_manifest_noncanonical"}
+    except RecursionError:
+        return {"pyright_manifest_too_deep"}
+    except (TypeError, ValueError):
+        return {"pyright_manifest_unsupported_value"}
+    return set()
+
+
+def _manifest_validation_codes(value: dict) -> set[str]:
+    try:
+        validate_pyright_install_manifest(value)
+    except _ManifestValidationError as exc:
+        return {exc.code}
+    return set()
+
+
+def _hex_digest_or_none(value: object) -> str | None:
+    if isinstance(value, str) and _HEX_SHA256.fullmatch(value) is not None:
+        return value
+    return None
+
+
+def _executable_digest_codes(receipt_server_sha256: object, executable_sha256: str | None) -> set[str]:
+    receipt = _hex_digest_or_none(receipt_server_sha256)
+    if receipt is None or executable_sha256 is None or receipt == executable_sha256:
+        return set()
+    return {"pyright_executable_digest_mismatch"}
+
+
 def _managed_manifest(
     server: Path,
     executable_sha256: str | None,
     deadline: float | None,
 ) -> tuple[str | None, set[str]]:
-    root = server.parent.parent
     codes: set[str] = set()
     if Path(server.parent.name) / server.name != PYRIGHT_SERVER_RELATIVE:
         codes.add("pyright_server_relative_mismatch")
     try:
-        value, raw = _read_json_object(
-            root / "install-manifest.json",
-            MAX_INSTALL_MANIFEST_BYTES,
-            prefix="pyright_manifest",
-            deadline=deadline,
-            recursion_code="pyright_manifest_too_deep",
-        )
+        value, raw = _read_managed_manifest(server.parent.parent, deadline)
     except _MetadataError as exc:
         return None, {exc.code, *codes}
-
-    try:
-        _validate_canonical_domain(
-            value,
-            prefix="pyright_manifest",
-            max_depth=MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH,
-            max_nodes=MAX_PYRIGHT_MANIFEST_DOMAIN_NODES,
-            deadline=deadline,
-        )
-    except _MetadataError as exc:
-        return None, {exc.code, *codes}
-
-    try:
-        if canonical_json_bytes(value) != raw:
-            codes.add("pyright_manifest_noncanonical")
-    except RecursionError:
-        codes.add("pyright_manifest_too_deep")
-    except (TypeError, ValueError):
-        codes.add("pyright_manifest_unsupported_value")
-
-    try:
-        validate_pyright_install_manifest(value)
-    except _ManifestValidationError as exc:
-        codes.add(exc.code)
-
-    package_sha256 = value.get("package_sha256")
-    if not isinstance(package_sha256, str) or _HEX_SHA256.fullmatch(package_sha256) is None:
-        package_sha256 = None
-    receipt_server_sha256 = value.get("server_sha256")
-    if (
-        isinstance(receipt_server_sha256, str)
-        and _HEX_SHA256.fullmatch(receipt_server_sha256) is not None
-        and executable_sha256 is not None
-        and receipt_server_sha256 != executable_sha256
-    ):
-        codes.add("pyright_executable_digest_mismatch")
-    return package_sha256, codes
+    codes |= _canonical_form_codes(value, raw)
+    codes |= _manifest_validation_codes(value)
+    codes |= _executable_digest_codes(value.get("server_sha256"), executable_sha256)
+    return _hex_digest_or_none(value.get("package_sha256")), codes
 
 
 def _reserve_node_probe_owner() -> object | None:
@@ -865,22 +1043,24 @@ def _terminate_node_probe_tree(tree: object, cleanup_deadline: float) -> bool:
     return True
 
 
+def _close_process_stream(process: object, name: str) -> bool:
+    try:
+        stream = getattr(process, name)
+    except _NODE_PROBE_ERRORS:
+        return False
+    if stream is None or getattr(stream, "closed", False):
+        return True
+    try:
+        stream.close()
+    except _NODE_PROBE_ERRORS:
+        return False
+    return True
+
+
 def _release_node_probe_tree(tree: object) -> bool:
-    streams_closed = True
     process = tree.process
-    for name in ("stdin", "stdout", "stderr"):
-        try:
-            stream = getattr(process, name)
-        except _NODE_PROBE_ERRORS:
-            streams_closed = False
-            continue
-        if stream is None or getattr(stream, "closed", False):
-            continue
-        try:
-            stream.close()
-        except _NODE_PROBE_ERRORS:
-            streams_closed = False
-    if not streams_closed:
+    closed = [_close_process_stream(process, name) for name in ("stdin", "stdout", "stderr")]
+    if not all(closed):
         return False
     try:
         tree.close()
@@ -905,6 +1085,22 @@ def _cleanup_node_probe_owner(owned: object, cleanup_deadline: float) -> bool:
     return _release_node_probe_tree(owned)
 
 
+def _retry_one_cleanup(owner: object, owned: object, cleanup_deadline: float) -> None:
+    try:
+        released = _cleanup_node_probe_owner(owned, cleanup_deadline)
+    except BaseException:
+        return
+    if released:
+        _release_node_probe_owner(owner)
+
+
+def _drain_pending_cleanups(cleanup_deadline: float) -> None:
+    for owner, owned in _pending_node_probe_cleanup_items():
+        if time.monotonic() >= cleanup_deadline:
+            return
+        _retry_one_cleanup(owner, owned, cleanup_deadline)
+
+
 def _retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
     """Retry all retained probes within one shared cleanup budget."""
     if not _pending_node_probe_cleanup_snapshot():
@@ -914,15 +1110,7 @@ def _retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
     try:
         if cleanup_deadline is None:
             cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
-        for owner, owned in _pending_node_probe_cleanup_items():
-            if time.monotonic() >= cleanup_deadline:
-                break
-            try:
-                released = _cleanup_node_probe_owner(owned, cleanup_deadline)
-            except BaseException:
-                continue
-            if released:
-                _release_node_probe_owner(owner)
+        _drain_pending_cleanups(cleanup_deadline)
     finally:
         _NODE_PROBE_DRAIN_LOCK.release()
 
@@ -934,80 +1122,104 @@ def _atexit_cleanup_node_probes() -> None:
         pass
 
 
-def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
+def _lstat_is_plain(info: os.stat_result, kind_check) -> bool:
+    """Not a link, not a reparse point, and of the expected kind."""
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        return False
+    return bool(kind_check(info.st_mode))
+
+
+def _parents_are_plain_directories(node: Path, deadline: float | None) -> bool:
+    for parent in node.parents:
+        if parent == Path(parent.anchor):
+            return True
+        _check_deadline(deadline)
+        if not _lstat_is_plain(parent.lstat(), stat.S_ISDIR):
+            return False
+    return True
+
+
+def _node_path_is_plain(node: Path, deadline: float | None) -> bool:
+    if not _parents_are_plain_directories(node, deadline):
+        return False
+    _check_deadline(deadline)
+    if not _lstat_is_plain(node.lstat(), stat.S_ISREG):
+        return False
+    return not _known_network_path(node)
+
+
+def _node_shape_is_safe(node: Path) -> bool:
     if not _is_local_absolute_path(node):
         return False
-    if os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"}:
+    return not (os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"})
+
+
+def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
+    if not _node_shape_is_safe(node):
         return False
     try:
-        for parent in node.parents:
-            if parent == Path(parent.anchor):
-                break
-            _check_deadline(deadline)
-            info = parent.lstat()
-            if (
-                stat.S_ISLNK(info.st_mode)
-                or getattr(info, "st_file_attributes", 0) & 0x400
-                or not stat.S_ISDIR(info.st_mode)
-            ):
-                return False
-        _check_deadline(deadline)
-        info = node.lstat()
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or getattr(info, "st_file_attributes", 0) & 0x400
-            or not stat.S_ISREG(info.st_mode)
-        ):
-            return False
-        if _known_network_path(node):
-            return False
+        plain = _node_path_is_plain(node, deadline)
     except (OSError, TypeError, ValueError, RuntimeError):
+        return False
+    if not plain:
         return False
     _check_deadline(deadline)
     return True
 
 
-def _probe_node(
-    deadline: float | None,
-) -> tuple[Path | None, str | None, int | None, set[str]]:
-    """Probe Node within its deadline plus one fixed tree-cleanup allowance."""
-    _check_deadline(deadline)
-    try:
-        environment = _node_environment()
-    except (OSError, TypeError, ValueError):
-        return None, None, None, {"pyright_node_probe_failed"}
+def _node_from_path(environment: dict[str, str], deadline: float | None) -> tuple[Path | None, str | None]:
+    """(node path, degradation code); the code is set when the probe stops here."""
     try:
         found = shutil.which("node", path=environment.get("PATH", ""))
     except _NODE_PROBE_ERRORS:
-        return None, None, None, {"pyright_node_probe_failed"}
+        return None, "pyright_node_probe_failed"
     _check_deadline(deadline)
     if found is None:
-        return None, None, None, {"pyright_node_missing"}
+        return None, "pyright_node_missing"
     try:
         node = Path(found)
     except (TypeError, ValueError):
-        return None, None, None, {"pyright_node_probe_failed"}
+        return None, "pyright_node_probe_failed"
     if not _node_executable_is_safe(node, deadline):
-        return node, None, None, {"pyright_node_executable_unsafe"}
+        return node, "pyright_node_executable_unsafe"
+    return node, None
 
-    now = time.monotonic()
+
+def _located_node(deadline: float | None) -> tuple[dict[str, str] | None, Path | None, str | None]:
+    try:
+        environment = _node_environment()
+    except (OSError, TypeError, ValueError):
+        return None, None, "pyright_node_probe_failed"
+    node, code = _node_from_path(environment, deadline)
+    return environment, node, code
+
+
+def _probe_deadline(now: float, deadline: float | None) -> float:
     probe_deadline = now + NODE_PROBE_TIMEOUT_SECONDS
     if deadline is not None:
-        probe_deadline = min(probe_deadline, deadline)
-    remaining = probe_deadline - now
-    if remaining <= 0:
-        return node, None, None, {"pyright_node_probe_timeout"}
+        return min(probe_deadline, deadline)
+    return probe_deadline
+
+
+def _probe_window(deadline: float | None) -> tuple[float, float] | None:
+    """(probe deadline, hard cleanup deadline), or None when no time is left."""
+    now = time.monotonic()
+    probe_deadline = _probe_deadline(now, deadline)
+    if probe_deadline - now <= 0:
+        return None
     hard_cleanup_deadline = probe_deadline + NODE_PROBE_CLEANUP_SECONDS
     _retry_node_probe_cleanups(
         min(time.monotonic() + NODE_PROBE_CLEANUP_SECONDS, hard_cleanup_deadline)
     )
     if time.monotonic() >= probe_deadline:
-        return node, None, None, {"pyright_node_probe_timeout"}
-    owner = _reserve_node_probe_owner()
-    if owner is None:
-        return node, None, None, {"pyright_node_probe_failed"}
+        return None
+    return probe_deadline, hard_cleanup_deadline
+
+
+def _spawn_probe(node: Path, environment: dict[str, str], probe_deadline: float, owner: object):
+    """The spawned tree, or None; the owner is released or retained as the failure demands."""
     try:
-        tree = ProcessTree.spawn_with_deadline(
+        return ProcessTree.spawn_with_deadline(
             [str(node), "--version"],
             cwd=node.parent,
             env=environment,
@@ -1015,117 +1227,191 @@ def _probe_node(
         )
     except _lsp_process_tree._ProcessTreeSpawnError as error:
         _retain_node_probe_owner(owner, error.tree if error.tree is not None else error)
-        return node, None, None, {"pyright_node_probe_failed"}
+        return None
     except _NODE_PROBE_ERRORS:
         _release_node_probe_owner(owner)
-        return node, None, None, {"pyright_node_probe_failed"}
+        return None
     except BaseException:
         _release_node_probe_owner(owner)
         raise
 
-    process = tree.process
-    output: bytes | None = None
-    degradation_code: str | None = None
-    stream = None
-    parent_returncode: int | None = None
-    parent_exited = False
-    had_live_descendants = False
-    tree_empty = False
-    cleanup_attempted = False
-    try:
-        try:
-            try:
-                stream = process.stdout
-            except _NODE_PROBE_ERRORS:
-                degradation_code = "pyright_node_probe_failed"
-            try:
-                parent_returncode = process.wait(
-                    timeout=max(0.0, probe_deadline - time.monotonic())
-                )
-            except subprocess.TimeoutExpired:
-                if degradation_code is None:
-                    degradation_code = "pyright_node_probe_timeout"
-            except _NODE_PROBE_ERRORS:
-                degradation_code = "pyright_node_probe_failed"
-            else:
-                try:
-                    observed_returncode = process.returncode
-                except _NODE_PROBE_ERRORS:
-                    degradation_code = "pyright_node_probe_failed"
-                else:
-                    parent_exited = observed_returncode is not None
-                    parent_returncode = observed_returncode
-            if parent_exited:
-                try:
-                    had_live_descendants = tree.has_live_descendants()
-                except _NODE_PROBE_ERRORS:
-                    degradation_code = "pyright_node_probe_failed"
 
-            cleanup_attempted = True
-            cleanup_deadline = min(
-                time.monotonic() + NODE_PROBE_CLEANUP_SECONDS,
-                hard_cleanup_deadline,
-            )
-            tree_empty = _terminate_node_probe_tree(tree, cleanup_deadline)
-            if not tree_empty:
-                degradation_code = "pyright_node_probe_failed"
-            elif degradation_code is None and (
-                had_live_descendants or time.monotonic() >= probe_deadline
-            ):
-                degradation_code = "pyright_node_probe_timeout"
+def _output_code(output: object) -> str | None:
+    if not isinstance(output, bytes):
+        return "pyright_node_probe_failed"
+    if len(output) > MAX_NODE_VERSION_BYTES:
+        return "pyright_node_output_oversized"
+    return None
 
-            if degradation_code is None:
-                if parent_returncode != 0 or stream is None:
-                    degradation_code = "pyright_node_probe_failed"
-                else:
-                    try:
-                        output = stream.read(MAX_NODE_VERSION_BYTES + 1)
-                    except _NODE_PROBE_ERRORS:
-                        degradation_code = "pyright_node_probe_failed"
-                    else:
-                        if not isinstance(output, bytes):
-                            degradation_code = "pyright_node_probe_failed"
-                        elif len(output) > MAX_NODE_VERSION_BYTES:
-                            degradation_code = "pyright_node_output_oversized"
-        except BaseException:
-            if not tree_empty and not cleanup_attempted:
-                try:
-                    cleanup_attempted = True
-                    cleanup_deadline = min(
-                        time.monotonic() + NODE_PROBE_CLEANUP_SECONDS,
-                        hard_cleanup_deadline,
-                    )
-                    tree_empty = _terminate_node_probe_tree(tree, cleanup_deadline)
-                except BaseException:
-                    pass
-            raise
-    finally:
-        if tree_empty:
-            released = False
-            try:
-                released = _release_node_probe_tree(tree)
-            finally:
-                if released:
-                    _release_node_probe_owner(owner)
-                else:
-                    _retain_node_probe_owner(owner, tree)
-                    degradation_code = "pyright_node_probe_failed"
-        else:
-            _retain_node_probe_owner(owner, tree)
 
-    if degradation_code is not None:
-        return node, None, None, {degradation_code}
-    if output is None:
-        return node, None, None, {"pyright_node_probe_failed"}
+def _node_version_result(node: Path, output: bytes) -> tuple[Path, str | None, int | None, set[str]]:
     match = _NODE_VERSION.fullmatch(output)
     if match is None:
         return node, None, None, {"pyright_node_version_malformed"}
     version = output.decode("ascii").rstrip("\r\n")
     major = int(match.group(1))
-    codes = set()
+    codes: set[str] = set()
     if major != QUALIFIED_NODE_MAJOR:
         codes.add("pyright_node_major_mismatch")
     return node, version, major, codes
+
+
+class _ProbeRun:
+    """One spawned `node --version`: observe it, end its tree, grade the outcome."""
+
+    def __init__(self, tree: object, probe_deadline: float, hard_cleanup_deadline: float) -> None:
+        self.tree = tree
+        self.process = tree.process
+        self.probe_deadline = probe_deadline
+        self.hard_cleanup_deadline = hard_cleanup_deadline
+        self.output: bytes | None = None
+        self.degradation_code: str | None = None
+        self.stream = None
+        self.parent_returncode: int | None = None
+        self.parent_exited = False
+        self.had_live_descendants = False
+        self.tree_empty = False
+        self.cleanup_attempted = False
+
+    def observe(self) -> None:
+        self._take_stdout()
+        self._wait_parent()
+        if self.parent_exited:
+            self._check_descendants()
+        self._terminate()
+        if self.degradation_code is None:
+            self._read_output()
+
+    def _take_stdout(self) -> None:
+        try:
+            self.stream = self.process.stdout
+        except _NODE_PROBE_ERRORS:
+            self.degradation_code = "pyright_node_probe_failed"
+
+    def _wait_parent(self) -> None:
+        try:
+            self.parent_returncode = self.process.wait(
+                timeout=max(0.0, self.probe_deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            if self.degradation_code is None:
+                self.degradation_code = "pyright_node_probe_timeout"
+            return
+        except _NODE_PROBE_ERRORS:
+            self.degradation_code = "pyright_node_probe_failed"
+            return
+        self._record_returncode()
+
+    def _record_returncode(self) -> None:
+        try:
+            observed = self.process.returncode
+        except _NODE_PROBE_ERRORS:
+            self.degradation_code = "pyright_node_probe_failed"
+            return
+        self.parent_exited = observed is not None
+        self.parent_returncode = observed
+
+    def _check_descendants(self) -> None:
+        try:
+            self.had_live_descendants = self.tree.has_live_descendants()
+        except _NODE_PROBE_ERRORS:
+            self.degradation_code = "pyright_node_probe_failed"
+
+    def _cleanup_deadline(self) -> float:
+        return min(time.monotonic() + NODE_PROBE_CLEANUP_SECONDS, self.hard_cleanup_deadline)
+
+    def _timed_out(self) -> bool:
+        return self.had_live_descendants or time.monotonic() >= self.probe_deadline
+
+    def _terminate(self) -> None:
+        self.cleanup_attempted = True
+        self.tree_empty = _terminate_node_probe_tree(self.tree, self._cleanup_deadline())
+        if not self.tree_empty:
+            self.degradation_code = "pyright_node_probe_failed"
+            return
+        if self.degradation_code is None and self._timed_out():
+            self.degradation_code = "pyright_node_probe_timeout"
+
+    def _read_output(self) -> None:
+        if self.parent_returncode != 0 or self.stream is None:
+            self.degradation_code = "pyright_node_probe_failed"
+            return
+        try:
+            self.output = self.stream.read(MAX_NODE_VERSION_BYTES + 1)
+        except _NODE_PROBE_ERRORS:
+            self.degradation_code = "pyright_node_probe_failed"
+            return
+        self.degradation_code = _output_code(self.output)
+
+    def terminate_on_error(self) -> None:
+        if self.tree_empty or self.cleanup_attempted:
+            return
+        try:
+            self.cleanup_attempted = True
+            self.tree_empty = _terminate_node_probe_tree(self.tree, self._cleanup_deadline())
+        except BaseException:
+            pass
+
+    def settle(self, owner: object) -> None:
+        """Release the ended tree and its owner, or retain both for a later retry."""
+        if not self.tree_empty:
+            _retain_node_probe_owner(owner, self.tree)
+            return
+        released = False
+        try:
+            released = _release_node_probe_tree(self.tree)
+        finally:
+            if released:
+                _release_node_probe_owner(owner)
+            else:
+                _retain_node_probe_owner(owner, self.tree)
+                self.degradation_code = "pyright_node_probe_failed"
+
+    def result(self, node: Path) -> tuple[Path, str | None, int | None, set[str]]:
+        if self.degradation_code is not None:
+            return node, None, None, {self.degradation_code}
+        if self.output is None:
+            return node, None, None, {"pyright_node_probe_failed"}
+        return _node_version_result(node, self.output)
+
+
+def _run_probe(tree: object, owner: object, probe_deadline: float, hard_cleanup_deadline: float) -> _ProbeRun:
+    run = _ProbeRun(tree, probe_deadline, hard_cleanup_deadline)
+    try:
+        try:
+            run.observe()
+        except BaseException:
+            run.terminate_on_error()
+            raise
+    finally:
+        run.settle(owner)
+    return run
+
+
+def _probe_node(
+    deadline: float | None,
+) -> tuple[Path | None, str | None, int | None, set[str]]:
+    """Probe Node within its deadline plus one fixed tree-cleanup allowance."""
+    _check_deadline(deadline)
+    environment, node, code = _located_node(deadline)
+    if code is not None:
+        return node, None, None, {code}
+    window = _probe_window(deadline)
+    if window is None:
+        return node, None, None, {"pyright_node_probe_timeout"}
+    return _probe_in_window(node, environment, window)
+
+
+def _probe_in_window(
+    node: Path | None, environment: dict, window: tuple[float, float]
+) -> tuple[Path | None, str | None, int | None, set[str]]:
+    owner = _reserve_node_probe_owner()
+    if owner is None:
+        return node, None, None, {"pyright_node_probe_failed"}
+    tree = _spawn_probe(node, environment, window[0], owner)
+    if tree is None:
+        return node, None, None, {"pyright_node_probe_failed"}
+    return _run_probe(tree, owner, window[0], window[1]).result(node)
 
 
 def _candidate_exists(path: Path, deadline: float | None) -> tuple[bool, str | None]:
@@ -1177,6 +1463,19 @@ def _lock_mentions_pyright(
     return isinstance(entries, dict) and key in entries
 
 
+def _project_local_evidence_present(server: Path, repository: RepositoryScope, deadline: float | None) -> bool:
+    evidence = (server.parent, server.with_name("package.json"))
+    if any(_path_exists_no_follow(path, deadline) for path in evidence):
+        return True
+    return _lock_mentions_pyright(Path(repository.checkout_root) / "package-lock.json", deadline)
+
+
+def _managed_evidence_present(server: Path, deadline: float | None) -> bool:
+    root = server.parent.parent
+    evidence = (root, server.parent, server.with_name("package.json"), root / "install-manifest.json")
+    return any(_path_exists_no_follow(path, deadline) for path in evidence)
+
+
 def _candidate_is_present(
     source: str,
     server: Path,
@@ -1187,36 +1486,29 @@ def _candidate_is_present(
     exists, code = _candidate_exists(server, deadline)
     if exists:
         return True, code
+    return _expected_evidence_present(source, server, repository, state_root, deadline), None
+
+
+def _expected_evidence_present(
+    source: str, server: Path, repository: RepositoryScope, state_root: Path, deadline: float | None
+) -> bool:
     expected = _expected_source_server(source, repository, state_root)
     if expected is None or server != expected:
-        return False, None
+        return False
     if source == "project-local":
-        evidence = (
-            server.parent,
-            server.with_name("package.json"),
-        )
-        return (
-            any(_path_exists_no_follow(path, deadline) for path in evidence)
-            or _lock_mentions_pyright(
-                Path(repository.checkout_root) / "package-lock.json", deadline
-            ),
-            None,
-        )
-    root = server.parent.parent
-    evidence = (
-        root,
-        server.parent,
-        server.with_name("package.json"),
-        root / "install-manifest.json",
-    )
-    return any(_path_exists_no_follow(path, deadline) for path in evidence), None
+        return _project_local_evidence_present(server, repository, deadline)
+    return _managed_evidence_present(server, deadline)
+
+
+def _is_path_tuple(values: object) -> bool:
+    return isinstance(values, tuple) and all(isinstance(path, Path) for path in values)
 
 
 def _validate_candidates(candidates: PyrightCandidates) -> None:
     if not isinstance(candidates, PyrightCandidates):
         raise TypeError("candidates must be a PyrightCandidates instance or None")
     for values in (candidates.project_local, candidates.managed, candidates.system):
-        if not isinstance(values, tuple) or any(not isinstance(path, Path) for path in values):
+        if not _is_path_tuple(values):
             raise TypeError("Pyright candidate categories must be tuples of Paths")
 
 
@@ -1232,89 +1524,153 @@ def _expected_source_server(
     return None
 
 
+def _path_is_reserved(path: Path, raw: str) -> bool:
+    is_reserved = getattr(os.path, "isreserved", None)
+    if is_reserved is not None:
+        return bool(is_reserved(raw))
+    return path.is_reserved()
+
+
 def _is_local_absolute_path(path: Path) -> bool:
     raw = os.fspath(path)
-    is_reserved = getattr(os.path, "isreserved", None)
-    reserved = is_reserved(raw) if is_reserved is not None else path.is_reserved()
-    return (
-        path.is_absolute()
-        and not raw.startswith(("\\\\", "//"))
-        and "\0" not in raw
-        and ".." not in path.parts
-        and not reserved
-    )
+    if not path.is_absolute() or raw.startswith(("\\\\", "//")):
+        return False
+    if "\0" in raw or ".." in path.parts:
+        return False
+    return not _path_is_reserved(path, raw)
 
 
 def _lexical_absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(os.path.normpath(os.fspath(path))))
 
 
-def _system_candidate_server(
-    candidate: Path,
-    deadline: float | None,
-) -> tuple[Path | None, set[str], bool]:
-    mismatch = {"pyright_source_path_mismatch"}
-    if not _is_local_absolute_path(candidate):
-        return None, mismatch, True
-    if (
-        candidate.name == "langserver.index.js"
-        and candidate.parent.name == "pyright"
-        and candidate.parent.parent.name == "node_modules"
-    ):
-        return candidate, set(), False
+def _mismatch() -> set[str]:
+    """A fresh set: callers add the presence code to what they receive."""
+    return {"pyright_source_path_mismatch"}
 
-    if candidate.name.casefold() == "pyright-langserver.cmd":
-        if candidate.parent.name == ".bin":
-            node_modules = candidate.parent.parent
-            if node_modules.name != "node_modules":
-                return None, mismatch, False
-            server = node_modules / "pyright/langserver.index.js"
-        else:
-            server = candidate.parent / "node_modules/pyright/langserver.index.js"
-        try:
-            info = candidate.lstat()
-        except FileNotFoundError:
-            return server, set(), False
-        except OSError:
-            return None, mismatch, False
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or getattr(info, "st_file_attributes", 0) & 0x400
-            or not stat.S_ISREG(info.st_mode)
-        ):
-            return None, mismatch, False
-        return server, set(), False
 
-    if candidate.name != "pyright-langserver":
-        return None, mismatch, False
+def _is_node_modules_server(candidate: Path) -> bool:
+    if candidate.name != "langserver.index.js" or candidate.parent.name != "pyright":
+        return False
+    return candidate.parent.parent.name == "node_modules"
+
+
+def _cmd_shim_server(candidate: Path) -> Path | None:
+    """The server a `.cmd` shim stands for, or None when the shim is misplaced."""
+    if candidate.parent.name != ".bin":
+        return candidate.parent / "node_modules/pyright/langserver.index.js"
+    node_modules = candidate.parent.parent
+    if node_modules.name != "node_modules":
+        return None
+    return node_modules / "pyright/langserver.index.js"
+
+
+def _cmd_shim_result(candidate: Path) -> tuple[Path | None, set[str], bool]:
+    server = _cmd_shim_server(candidate)
+    if server is None:
+        return None, _mismatch(), False
     try:
         info = candidate.lstat()
+    except FileNotFoundError:
+        return server, set(), False
     except OSError:
-        return None, mismatch, False
-    if not stat.S_ISLNK(info.st_mode):
-        return None, mismatch, False
+        return None, _mismatch(), False
+    if not _lstat_is_plain(info, stat.S_ISREG):
+        return None, _mismatch(), False
+    return server, set(), False
+
+
+def _symlink_expected_server(candidate: Path) -> Path | None:
     if candidate.parent.name == ".bin":
         node_modules = candidate.parent.parent
         if node_modules.name != "node_modules":
-            return None, mismatch, False
-        expected = node_modules / "pyright/langserver.index.js"
-    elif candidate.parent.name == "bin":
-        expected = candidate.parent.parent / "lib/node_modules/pyright/langserver.index.js"
-    else:
-        return None, mismatch, False
+            return None
+        return node_modules / "pyright/langserver.index.js"
+    if candidate.parent.name == "bin":
+        return candidate.parent.parent / "lib/node_modules/pyright/langserver.index.js"
+    return None
+
+
+def _symlink_is_pyright(candidate: Path) -> bool:
+    try:
+        info = candidate.lstat()
+    except OSError:
+        return False
+    return stat.S_ISLNK(info.st_mode)
+
+
+def _resolved_symlink_target(candidate: Path, deadline: float | None) -> Path | None:
     _check_deadline(deadline)
     try:
         raw_target = os.readlink(candidate)
     except (OSError, ValueError):
-        return None, mismatch, False
+        return None
     target = Path(raw_target)
     if not target.is_absolute():
         target = candidate.parent / target
     target = _lexical_absolute_path(target)
     _check_deadline(deadline)
-    if not _is_local_absolute_path(target) or target != expected:
-        return None, mismatch, False
+    return target
+
+
+def _target_matches(target: Path | None, expected: Path) -> bool:
+    if target is None or not _is_local_absolute_path(target):
+        return False
+    return target == expected
+
+
+def _pyright_symlink_expected(candidate: Path) -> Path | None:
+    if not _symlink_is_pyright(candidate):
+        return None
+    return _symlink_expected_server(candidate)
+
+
+def _symlink_result(candidate: Path, deadline: float | None) -> tuple[Path | None, set[str], bool]:
+    expected = _pyright_symlink_expected(candidate)
+    if expected is None:
+        return None, _mismatch(), False
+    target = _resolved_symlink_target(candidate, deadline)
+    if not _target_matches(target, expected):
+        return None, _mismatch(), False
     return expected, set(), False
+
+
+def _system_candidate_server(
+    candidate: Path,
+    deadline: float | None,
+) -> tuple[Path | None, set[str], bool]:
+    if not _is_local_absolute_path(candidate):
+        return None, _mismatch(), True
+    if _is_node_modules_server(candidate):
+        return candidate, set(), False
+    return _named_system_server(candidate, deadline)
+
+
+def _named_system_server(candidate: Path, deadline: float | None) -> tuple[Path | None, set[str], bool]:
+    if candidate.name.casefold() == "pyright-langserver.cmd":
+        return _cmd_shim_result(candidate)
+    if candidate.name != "pyright-langserver":
+        return None, _mismatch(), False
+    return _symlink_result(candidate, deadline)
+
+
+def _approved_servers(repository: RepositoryScope, state_root: Path) -> set[Path | None]:
+    return {
+        _expected_source_server("project-local", repository, state_root),
+        _expected_source_server("managed", repository, state_root),
+    }
+
+
+def _system_candidate(
+    candidate: Path, repository: RepositoryScope, state_root: Path, deadline: float | None
+) -> tuple[Path | None, set[str], bool]:
+    approved = _approved_servers(repository, state_root)
+    if candidate in approved:
+        return None, _mismatch(), True
+    server, codes, force_present = _system_candidate_server(candidate, deadline)
+    if server in approved:
+        return None, _mismatch(), True
+    return server, codes, force_present
 
 
 def _normalize_candidate(
@@ -1325,26 +1681,39 @@ def _normalize_candidate(
     deadline: float | None,
 ) -> tuple[Path | None, set[str], bool]:
     if source == "system":
-        approved_servers = {
-            _expected_source_server("project-local", repository, state_root),
-            _expected_source_server("managed", repository, state_root),
-        }
-        if candidate in approved_servers:
-            return None, {"pyright_source_path_mismatch"}, True
-        server, codes, force_present = _system_candidate_server(candidate, deadline)
-        if server in approved_servers:
-            return None, {"pyright_source_path_mismatch"}, True
-        return server, codes, force_present
+        return _system_candidate(candidate, repository, state_root, deadline)
+    return _fixed_source_candidate(source, candidate, repository, state_root)
+
+
+def _fixed_source_candidate(
+    source: str, candidate: Path, repository: RepositoryScope, state_root: Path
+) -> tuple[Path | None, set[str], bool]:
     expected = _expected_source_server(source, repository, state_root)
-    if expected is not None:
-        if candidate != expected:
-            return (
-                None,
-                {"pyright_source_path_mismatch"},
-                not _is_local_absolute_path(candidate),
-            )
-        return expected, set(), False
-    raise AssertionError(f"unsupported Pyright source: {source}")
+    if expected is None:
+        raise AssertionError(f"unsupported Pyright source: {source}")
+    if candidate != expected:
+        return None, _mismatch(), not _is_local_absolute_path(candidate)
+    return expected, set(), False
+
+
+def _system_server_evidence(server: Path, repository: RepositoryScope, deadline: float | None) -> bool:
+    evidence = (server.parent, server.with_name("package.json"))
+    if any(_path_exists_no_follow(path, deadline) for path in evidence):
+        return True
+    lockfile = _lockfile_path("system", server, repository)
+    return lockfile is not None and _lock_mentions_pyright(lockfile, deadline)
+
+
+def _system_candidate_present(
+    candidate: Path, server: Path, repository: RepositoryScope, deadline: float | None
+) -> tuple[bool, str | None]:
+    exists, code = _candidate_exists(candidate, deadline)
+    if exists:
+        return True, code
+    exists, code = _candidate_exists(server, deadline)
+    if exists:
+        return True, code
+    return _system_server_evidence(server, repository, deadline), None
 
 
 def _normalized_candidate_is_present(
@@ -1360,28 +1729,20 @@ def _normalized_candidate_is_present(
         return True, None
     if server is None:
         return _candidate_exists(candidate, deadline)
+    return _server_is_present(source, candidate, server, repository, state_root, deadline)
+
+
+def _server_is_present(
+    source: str,
+    candidate: Path,
+    server: Path,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[bool, str | None]:
     if source != "system":
-        return _candidate_is_present(
-            source,
-            server,
-            repository,
-            state_root,
-            deadline,
-        )
-    exists, code = _candidate_exists(candidate, deadline)
-    if exists:
-        return True, code
-    exists, code = _candidate_exists(server, deadline)
-    if exists:
-        return True, code
-    evidence = (server.parent, server.with_name("package.json"))
-    if any(_path_exists_no_follow(path, deadline) for path in evidence):
-        return True, None
-    lockfile = _lockfile_path("system", server, repository)
-    return (
-        lockfile is not None and _lock_mentions_pyright(lockfile, deadline),
-        None,
-    )
+        return _candidate_is_present(source, server, repository, state_root, deadline)
+    return _system_candidate_present(candidate, server, repository, deadline)
 
 
 def _default_paths(
@@ -1474,6 +1835,82 @@ def _inspect_candidate(
     )
 
 
+_SOURCE_ATTRIBUTES = (
+    ("project-local", "project_local"),
+    ("managed", "managed"),
+    ("system", "system"),
+)
+
+
+def _candidate_paths(
+    source: str,
+    attribute: str,
+    candidates: PyrightCandidates | None,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[Path, ...]:
+    if candidates is not None:
+        return getattr(candidates, attribute)
+    return _default_paths(source, repository, state_root, deadline)
+
+
+def _present_candidate(
+    source: str,
+    candidate: Path,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[Path | None, set[str]] | None:
+    """(server, initial codes) when the candidate is present, else None."""
+    server, initial_codes, force_present = _normalize_candidate(
+        source, candidate, repository, state_root, deadline
+    )
+    exists, initial_code = _normalized_candidate_is_present(
+        source, candidate, server, force_present, repository, state_root, deadline
+    )
+    if not exists:
+        return None
+    if initial_code is not None:
+        initial_codes.add(initial_code)
+    return server, initial_codes
+
+
+def _first_present_in_source(
+    source: str,
+    paths: tuple[Path, ...],
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[Path | None, set[str]] | None:
+    for candidate in paths:
+        found = _present_candidate(source, candidate, repository, state_root, deadline)
+        if found is not None:
+            return found
+    return None
+
+
+def _first_present_candidate(
+    candidates: PyrightCandidates | None,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[str, Path | None, set[str]] | None:
+    for source, attribute in _SOURCE_ATTRIBUTES:
+        paths = _candidate_paths(source, attribute, candidates, repository, state_root, deadline)
+        found = _first_present_in_source(source, paths, repository, state_root, deadline)
+        if found is not None:
+            return source, found[0], found[1]
+    return None
+
+
+def _require_discovery_arguments(repository: object, state_root: object) -> None:
+    if not isinstance(repository, RepositoryScope):
+        raise TypeError("repository must be a RepositoryScope")
+    if not isinstance(state_root, Path):
+        raise TypeError("state_root must be a Path")
+
+
 def discover_pyright(
     repository: RepositoryScope,
     *,
@@ -1482,10 +1919,7 @@ def discover_pyright(
     deadline: float | None = None,
 ) -> PyrightIdentity:
     """Discover one candidate by fixed precedence without mutation or installation."""
-    if not isinstance(repository, RepositoryScope):
-        raise TypeError("repository must be a RepositoryScope")
-    if not isinstance(state_root, Path):
-        raise TypeError("state_root must be a Path")
+    _require_discovery_arguments(repository, state_root)
     deadline = _validated_deadline(deadline)
     _check_deadline(deadline)
     configuration_sha256, profile_codes = _repository_configuration_identity(
@@ -1493,47 +1927,13 @@ def discover_pyright(
     )
     if candidates is not None:
         _validate_candidates(candidates)
-
-    for source, attribute in (
-        ("project-local", "project_local"),
-        ("managed", "managed"),
-        ("system", "system"),
-    ):
-        paths = (
-            getattr(candidates, attribute)
-            if candidates is not None
-            else _default_paths(source, repository, state_root, deadline)
-        )
-        for candidate in paths:
-            server, initial_codes, force_present = _normalize_candidate(
-                source,
-                candidate,
-                repository,
-                state_root,
-                deadline,
-            )
-            exists, initial_code = _normalized_candidate_is_present(
-                source,
-                candidate,
-                server,
-                force_present,
-                repository,
-                state_root,
-                deadline,
-            )
-            if exists:
-                if initial_code is not None:
-                    initial_codes.add(initial_code)
-                return _inspect_candidate(
-                    repository,
-                    source,
-                    server,
-                    initial_codes,
-                    configuration_sha256,
-                    profile_codes,
-                    deadline,
-                )
-    return _missing_identity(configuration_sha256, profile_codes)
+    found = _first_present_candidate(candidates, repository, state_root, deadline)
+    if found is None:
+        return _missing_identity(configuration_sha256, profile_codes)
+    source, server, initial_codes = found
+    return _inspect_candidate(
+        repository, source, server, initial_codes, configuration_sha256, profile_codes, deadline
+    )
 
 
 atexit.register(_atexit_cleanup_node_probes)

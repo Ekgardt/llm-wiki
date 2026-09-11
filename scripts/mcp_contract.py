@@ -110,14 +110,22 @@ def build_envelope(
 def _roots(root: Path | None, state_root: Path | None) -> tuple[Path, Path]:
     if root is not None:
         vault_root = Path(root).resolve()
-        return vault_root, Path(state_root or vault_root).resolve()
+        return vault_root, _state_root_or(state_root, vault_root)
+    return _default_roots(state_root)
+
+
+def _state_root_or(state_root: Path | None, fallback: Path) -> Path:
+    return Path(state_root or fallback).resolve()
+
+
+def _default_roots(state_root: Path | None) -> tuple[Path, Path]:
     try:
         from memory_state import ROOT, STATE_ROOT
 
-        return ROOT, Path(state_root or STATE_ROOT).resolve()
+        return ROOT, _state_root_or(state_root, STATE_ROOT)
     except (ImportError, OSError):
         fallback_root = Path(__file__).resolve().parent.parent
-        return fallback_root, Path(state_root or fallback_root).resolve()
+        return fallback_root, _state_root_or(state_root, fallback_root)
 
 
 def _bounded(name: str, value: float) -> float:
@@ -137,22 +145,31 @@ def _components(value: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, 
         return {}
     if not isinstance(value, dict):
         raise TypeError("components must be an object")
-    normalized: dict[str, dict[str, Any]] = {}
-    for name, detail in value.items():
-        if not isinstance(name, str) or not name or len(name) > 64:
-            raise ValueError("component names must be bounded non-empty strings")
-        if not isinstance(detail, dict) or set(detail) != {"generation", "freshness"}:
-            raise ValueError("component details must contain generation and freshness")
-        generation = detail["generation"]
-        freshness = detail["freshness"]
-        if generation is not None and (
-            not isinstance(generation, str) or not generation or len(generation) > 128
-        ):
-            raise ValueError("component generation must be null or a bounded string")
-        if freshness not in COMPONENT_FRESHNESS:
-            raise ValueError("component freshness is invalid")
-        normalized[name] = {"generation": generation, "freshness": freshness}
-    return normalized
+    return {name: _component_detail(name, detail) for name, detail in value.items()}
+
+
+def _component_detail(name: object, detail: object) -> dict[str, Any]:
+    _require_component_name(name)
+    if not isinstance(detail, dict) or set(detail) != {"generation", "freshness"}:
+        raise ValueError("component details must contain generation and freshness")
+    return _generation_and_freshness(detail["generation"], detail["freshness"])
+
+
+def _require_component_name(name: object) -> None:
+    if not isinstance(name, str) or not name or len(name) > 64:
+        raise ValueError("component names must be bounded non-empty strings")
+
+
+def _generation_and_freshness(generation: object, freshness: object) -> dict[str, Any]:
+    if generation is not None and not _bounded_generation(generation):
+        raise ValueError("component generation must be null or a bounded string")
+    if freshness not in COMPONENT_FRESHNESS:
+        raise ValueError("component freshness is invalid")
+    return {"generation": generation, "freshness": freshness}
+
+
+def _bounded_generation(generation: object) -> bool:
+    return isinstance(generation, str) and bool(generation) and len(generation) <= 128
 
 
 def _freshness(components: dict[str, dict[str, Any]]) -> str:
@@ -178,7 +195,9 @@ def _source_commit(root: str) -> str | None:
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
     commit = result.stdout.strip()
-    return commit if result.returncode == 0 and commit else None
+    if result.returncode != 0 or not commit:
+        return None
+    return commit
 
 
 def _json_safe(value: Any) -> Any:
@@ -186,12 +205,24 @@ def _json_safe(value: Any) -> Any:
         return value if math.isfinite(value) else None
     if value is None or isinstance(value, (bool, int, str)):
         return value
+    return _json_safe_structure(value)
+
+
+def _json_safe_structure(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
+    return _json_safe_sequence(value)
+
+
+def _json_safe_sequence(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
+    return _json_or_text(value)
+
+
+def _json_or_text(value: Any) -> Any:
     try:
         json.dumps(value)
     except (TypeError, ValueError):

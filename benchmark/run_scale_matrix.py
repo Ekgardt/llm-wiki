@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import importlib
 import json
 import math
 import os
@@ -98,6 +99,27 @@ class SearchResult:
     scores: tuple[float, ...]
 
 
+def _clustered_unit_vectors(rng: Any, n_chunks: int, dimensions: int) -> Any:
+    """Random unit vectors; every third one sits in one of a few tight clusters."""
+    import numpy as np
+
+    base = rng.normal(size=(n_chunks, dimensions)).astype(np.float32)
+    n_clusters = max(1, min(16, n_chunks // 8))
+    centers = rng.normal(size=(n_clusters, dimensions)).astype(np.float32)
+    for index in range(n_chunks):
+        if index % 3 == 0:
+            center = centers[index % n_clusters]
+            base[index] = center + 0.05 * rng.normal(size=dimensions).astype(np.float32)
+    norms = np.linalg.norm(base, axis=1, keepdims=True) + 1e-10
+    return (base / norms).astype(np.float32)
+
+
+def _status_of(index: int) -> str:
+    if index % 17 == 0:
+        return "superseded"
+    return "active"
+
+
 def generate_corpus(
     *,
     n_chunks: int,
@@ -110,33 +132,18 @@ def generate_corpus(
     import numpy as np
 
     rng = np.random.default_rng(seed)
-    # Mixture of random unit vectors with a few tight clusters for realism.
-    base = rng.normal(size=(n_chunks, dimensions)).astype(np.float32)
-    n_clusters = max(1, min(16, n_chunks // 8))
-    centers = rng.normal(size=(n_clusters, dimensions)).astype(np.float32)
-    for index in range(n_chunks):
-        if index % 3 == 0:
-            center = centers[index % n_clusters]
-            base[index] = center + 0.05 * rng.normal(size=dimensions).astype(np.float32)
-    norms = np.linalg.norm(base, axis=1, keepdims=True) + 1e-10
-    vectors = (base / norms).astype(np.float32)
-
+    vectors = _clustered_unit_vectors(rng, n_chunks, dimensions)
     chunk_ids = tuple(f"chunk-{index:06d}" for index in range(n_chunks))
     parent_ids = tuple(f"page-{index // 3:05d}" for index in range(n_chunks))
     projects = tuple(f"proj-{(index % 7)}" for index in range(n_chunks))
-    status = tuple("superseded" if index % 17 == 0 else "active" for index in range(n_chunks))
-    filters = {
-        "project": projects,
-        "status": status,
-        "parent_id": parent_ids,
-    }
+    status = tuple(_status_of(index) for index in range(n_chunks))
     return ScaleCorpus(
         chunk_ids=chunk_ids,
         parent_ids=parent_ids,
         projects=projects,
         status=status,
         vectors=vectors,
-        filters=filters,
+        filters={"project": projects, "status": status, "parent_id": parent_ids},
     )
 
 
@@ -154,6 +161,62 @@ def selectivity_mask(corpus: ScaleCorpus, *, fraction: float, seed: int) -> Any:
     return mask
 
 
+def _validated_matrix(vectors: Any) -> Any:
+    import numpy as np
+
+    matrix = np.asarray(vectors, dtype=np.float32)
+    if matrix.ndim != 2:
+        raise ValueError("vectors must be 2-D")
+    if matrix.shape[0] < 1 or matrix.shape[1] < 1:
+        raise ValueError("vectors must have positive rows and dimensions")
+    return matrix
+
+
+def _validated_query(query: Any, matrix: Any) -> Any:
+    import numpy as np
+
+    q = np.asarray(query, dtype=np.float32).reshape(-1)
+    if q.shape[0] != matrix.shape[1]:
+        raise ValueError("query dimension mismatch")
+    return q
+
+
+def _validated_ids(ids: Sequence[str] | None, rows: int) -> list[str]:
+    id_list = [f"chunk-{index:06d}" for index in range(rows)] if ids is None else list(ids)
+    if len(id_list) != rows or len(set(id_list)) != len(id_list):
+        raise ValueError("ids must be unique and match vectors")
+    return id_list
+
+
+def _validated_mask(mask: Any | None, matrix: Any) -> Any:
+    import numpy as np
+
+    active = np.ones(matrix.shape[0], dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    if active.ndim != 1 or active.shape[0] != matrix.shape[0]:
+        raise ValueError("mask length mismatch")
+    return active
+
+
+def _ordered_top(scores: Any, active: Any, id_list: list[str], take: int) -> SearchResult:
+    """The top `take` by score then id: a full ordering, because argpartition
+    can choose arbitrary members of a tie that straddles the boundary."""
+    import numpy as np
+
+    ordered = sorted(
+        ((-float(scores[i]), id_list[int(i)], float(scores[i])) for i in np.flatnonzero(active)),
+        key=lambda item: (item[0], item[1]),
+    )[:take]
+    return SearchResult(
+        ids=tuple(item[1] for item in ordered),
+        scores=tuple(item[2] for item in ordered),
+    )
+
+
+def _require_finite_inputs(np, matrix, q) -> None:
+    if not np.isfinite(matrix).all() or not np.isfinite(q).all():
+        raise ValueError("vectors and query must be finite")
+
+
 def exact_numpy_search(
     vectors: Any,
     query: Any,
@@ -165,46 +228,21 @@ def exact_numpy_search(
     """Exact cosine top-k. Larger score is better."""
     import numpy as np
 
-    matrix = np.asarray(vectors, dtype=np.float32)
-    q = np.asarray(query, dtype=np.float32).reshape(-1)
-    if matrix.ndim != 2:
-        raise ValueError("vectors must be 2-D")
-    if matrix.shape[0] < 1 or matrix.shape[1] < 1:
-        raise ValueError("vectors must have positive rows and dimensions")
+    matrix = _validated_matrix(vectors)
     _require_positive_int("k", k)
-    if q.shape[0] != matrix.shape[1]:
-        raise ValueError("query dimension mismatch")
-    if ids is None:
-        id_list = [f"chunk-{index:06d}" for index in range(matrix.shape[0])]
-    else:
-        id_list = list(ids)
-    if len(id_list) != matrix.shape[0] or len(set(id_list)) != len(id_list):
-        raise ValueError("ids must be unique and match vectors")
-    if not np.isfinite(matrix).all() or not np.isfinite(q).all():
-        raise ValueError("vectors and query must be finite")
-    active = np.ones(matrix.shape[0], dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
-    if active.ndim != 1 or active.shape[0] != matrix.shape[0]:
-        raise ValueError("mask length mismatch")
+    q = _validated_query(query, matrix)
+    id_list = _validated_ids(ids, matrix.shape[0])
+    _require_finite_inputs(np, matrix, q)
+    active = _validated_mask(mask, matrix)
     if not bool(active.any()):
         return SearchResult(ids=(), scores=())
-
     qn = q / (np.linalg.norm(q) + 1e-10)
     mn = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-10)
-    scores = mn @ qn
-    scores = np.where(active, scores, -np.inf)
+    scores = np.where(active, mn @ qn, -np.inf)
     take = min(k, int(active.sum()))
     if take <= 0:
         return SearchResult(ids=(), scores=())
-    # Full ordering is required: argpartition can choose arbitrary members of a
-    # tie that straddles the top-k boundary.
-    ordered = sorted(
-        ((-float(scores[i]), id_list[int(i)], float(scores[i])) for i in np.flatnonzero(active)),
-        key=lambda item: (item[0], item[1]),
-    )[:take]
-    return SearchResult(
-        ids=tuple(item[1] for item in ordered),
-        scores=tuple(item[2] for item in ordered),
-    )
+    return _ordered_top(scores, active, id_list, take)
 
 
 def recall_at_k(retrieved: Sequence[str], relevant: Sequence[str], k: int) -> float:
@@ -214,14 +252,23 @@ def recall_at_k(retrieved: Sequence[str], relevant: Sequence[str], k: int) -> fl
     return hit / float(min(k, len(relevant)))
 
 
-def _percentile(values: Sequence[float], q: float) -> float | None:
-    if not values:
-        return None
+def _ordered_finite(values: Sequence[float]) -> list[float]:
     ordered = sorted(float(v) for v in values)
     if not all(math.isfinite(value) for value in ordered):
         raise ValueError("percentile samples must be finite")
+    return ordered
+
+
+def _percentile(values: Sequence[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = _ordered_finite(values)
     if len(ordered) == 1:
         return ordered[0]
+    return _interpolated(ordered, q)
+
+
+def _interpolated(ordered: list[float], q: float) -> float:
     pos = (len(ordered) - 1) * q
     lo = int(math.floor(pos))
     hi = int(math.ceil(pos))
@@ -270,79 +317,75 @@ def _rss_bytes() -> int | None:
     return None
 
 
+def _importable(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+    except ImportError:
+        return False
+    return True
+
+
+_ADAPTER_MODULES = {
+    "exact-numpy": ("numpy",),
+    "sqlite-vec": ("sqlite_vec",),
+    "usearch": ("usearch", "usearch.index"),
+    "lancedb-flat": ("lancedb",),
+    "lancedb-ann": ("lancedb",),
+}
+
+
 def _adapter_available(adapter_id: str) -> bool:
-    if adapter_id == "exact-numpy":
-        try:
-            import numpy  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
-    if adapter_id == "sqlite-vec":
-        try:
-            import sqlite_vec  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
-    if adapter_id == "usearch":
-        try:
-            import usearch  # noqa: F401
-
-            return True
-        except ImportError:
-            try:
-                from usearch.index import Index  # noqa: F401
-
-                return True
-            except ImportError:
-                return False
-    if adapter_id in {"lancedb-flat", "lancedb-ann"}:
-        try:
-            import lancedb  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
-    return False
+    modules = _ADAPTER_MODULES.get(adapter_id)
+    if modules is None:
+        return False
+    return any(_importable(name) for name in modules)
 
 
-def evaluate_adoption_gate(
-    *,
-    recall_at_10: float,
-    recall_at_50: float,
-    exact_p95_ms: float,
-    candidate_p95_ms: float,
-) -> dict[str, Any]:
-    """Fail-closed ANN adoption gate. Never promotes to product default."""
-    reasons: list[str] = []
-    values = {
-        "recall_at_10": recall_at_10,
-        "recall_at_50": recall_at_50,
-        "exact_p95_ms": exact_p95_ms,
-        "candidate_p95_ms": candidate_p95_ms,
-    }
+def _measured_number(name: str, value: object) -> tuple[float | None, str | None]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, f"{name} is not a measured number"
+    number = float(value)
+    if not math.isfinite(number):
+        return None, f"{name} is nonfinite"
+    return number, None
+
+
+def _valid_gate_values(values: dict[str, object]) -> tuple[dict[str, float], list[str]]:
     valid: dict[str, float] = {}
+    reasons: list[str] = []
     for name, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            reasons.append(f"{name} is not a measured number")
-            continue
-        number = float(value)
-        if not math.isfinite(number):
-            reasons.append(f"{name} is nonfinite")
+        number, reason = _measured_number(name, value)
+        if reason is not None:
+            reasons.append(reason)
             continue
         valid[name] = number
-    for name in ("recall_at_10", "recall_at_50"):
-        value = valid.get(name)
-        if value is not None and not 0.0 <= value <= 1.0:
-            reasons.append(f"{name} must be in [0, 1]")
-        elif value is not None and value < ADOPTION_RECALL_FLOOR:
-            reasons.append(f"{name} {value:.4f} < {ADOPTION_RECALL_FLOOR}")
+    return valid, reasons
+
+
+def _recall_reason(name: str, value: float | None) -> str | None:
+    if value is None:
+        return None
+    return _measured_recall_reason(name, value)
+
+
+def _measured_recall_reason(name: str, value: float) -> str | None:
+    if not 0.0 <= value <= 1.0:
+        return f"{name} must be in [0, 1]"
+    if value < ADOPTION_RECALL_FLOOR:
+        return f"{name} {value:.4f} < {ADOPTION_RECALL_FLOOR}"
+    return None
+
+
+def _positive_reasons(valid: dict[str, float]) -> list[str]:
+    reasons = []
     for name in ("exact_p95_ms", "candidate_p95_ms"):
         if name in valid and valid[name] <= 0:
             reasons.append(f"{name} must be positive")
-    exact = valid.get("exact_p95_ms")
-    candidate = valid.get("candidate_p95_ms")
+    return reasons
+
+
+def _target_reasons(exact: float | None, candidate: float | None) -> list[str]:
+    reasons = []
     material_threshold = PRODUCT_P95_TARGET_MS * MATERIAL_EXCEED_RATIO
     if exact is not None and exact <= material_threshold:
         reasons.append(
@@ -354,17 +397,57 @@ def evaluate_adoption_gate(
             f"candidate p95 misses product p95 target "
             f"({candidate:.3f}ms > {PRODUCT_P95_TARGET_MS:.3f}ms)"
         )
-    speedup = None
-    if exact is not None and candidate is not None and exact > 0 and candidate > 0:
-        speedup = exact / candidate
-        if not math.isfinite(speedup):
-            reasons.append("latency speedup is nonfinite")
-            speedup = None
-        elif speedup < ADOPTION_LATENCY_SPEEDUP_FLOOR:
-            reasons.append(f"latency speedup {speedup:.3f}x < {ADOPTION_LATENCY_SPEEDUP_FLOOR}x")
-    adopt = not reasons
+    return reasons
+
+
+def _both_positive(exact: float | None, candidate: float | None) -> bool:
+    if exact is None or candidate is None:
+        return False
+    return exact > 0 and candidate > 0
+
+
+def _speedup(exact: float | None, candidate: float | None) -> tuple[float | None, str | None]:
+    if not _both_positive(exact, candidate):
+        return None, None
+    return _speedup_verdict(exact / candidate)
+
+
+def _speedup_verdict(speedup: float) -> tuple[float | None, str | None]:
+    if not math.isfinite(speedup):
+        return None, "latency speedup is nonfinite"
+    if speedup < ADOPTION_LATENCY_SPEEDUP_FLOOR:
+        return speedup, f"latency speedup {speedup:.3f}x < {ADOPTION_LATENCY_SPEEDUP_FLOOR}x"
+    return speedup, None
+
+
+def evaluate_adoption_gate(
+    *,
+    recall_at_10: float,
+    recall_at_50: float,
+    exact_p95_ms: float,
+    candidate_p95_ms: float,
+) -> dict[str, Any]:
+    """Fail-closed ANN adoption gate. Never promotes to product default."""
+    values = {
+        "recall_at_10": recall_at_10,
+        "recall_at_50": recall_at_50,
+        "exact_p95_ms": exact_p95_ms,
+        "candidate_p95_ms": candidate_p95_ms,
+    }
+    valid, reasons = _valid_gate_values(values)
+    for name in ("recall_at_10", "recall_at_50"):
+        reason = _recall_reason(name, valid.get(name))
+        if reason is not None:
+            reasons.append(reason)
+    reasons.extend(_positive_reasons(valid))
+    exact = valid.get("exact_p95_ms")
+    candidate = valid.get("candidate_p95_ms")
+    reasons.extend(_target_reasons(exact, candidate))
+    speedup, speedup_reason = _speedup(exact, candidate)
+    if speedup_reason is not None:
+        reasons.append(speedup_reason)
     return {
-        "adopt": adopt,
+        "adopt": not reasons,
         "becomes_default": False,
         "requires_measurement": True,
         "reasons": reasons,
@@ -372,6 +455,17 @@ def evaluate_adoption_gate(
         "product_p95_target_ms": PRODUCT_P95_TARGET_MS,
         "material_exceed_ratio": MATERIAL_EXCEED_RATIO,
     }
+
+
+_EXACT_RECALL_UNAVAILABLE = {
+    "recall_at_10": "ground_truth_backend",
+    "recall_at_50": "ground_truth_backend",
+}
+
+
+def _require_finite_metric(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(f"metric {name} must be finite or null")
 
 
 def _metric_provenance(
@@ -390,46 +484,51 @@ def _metric_provenance(
                 "source": None,
                 "reason": unavailable.get(name, "not_measured"),
             }
-        else:
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-            ):
-                raise ValueError(f"metric {name} must be finite or null")
-            provenance[name] = {"status": "measured", "source": source, "reason": None}
+            continue
+        _require_finite_metric(name, value)
+        provenance[name] = {"status": "measured", "source": source, "reason": None}
     return provenance
+
+
+def _filter_implementation(adapter: object) -> str:
+    if isinstance(adapter, str) and adapter.startswith("lancedb"):
+        return "lancedb-prefilter"
+    if adapter == "exact-numpy":
+        return "numpy-mask"
+    return "postfilter"
+
+
+def _default_index_metadata(adapter: str) -> dict[str, str | None]:
+    if adapter == "exact-numpy":
+        return {
+            "requested": "exact",
+            "status": "flat",
+            "type": "exact-numpy",
+            "verified_by": "implementation",
+            "reason": None,
+        }
+    return {
+        "requested": "optional",
+        "status": "unavailable",
+        "type": None,
+        "verified_by": None,
+        "reason": "adapter_did_not_report_index",
+    }
 
 
 def _finalize_cell(
     cell: dict[str, Any], *, corpus: ScaleCorpus, mask: Any | None
 ) -> dict[str, Any]:
-    selected = len(_masked_ids(corpus, mask))
+    adapter = cell["adapter"]
     cell["filter_methodology"] = {
         "indexed_corpus_size": len(corpus.chunk_ids),
-        "selected_corpus_size": selected,
+        "selected_corpus_size": len(_masked_ids(corpus, mask)),
         "application": "query_time",
         "equivalent_predicate": "selected = true",
-        "implementation": (
-            "lancedb-prefilter"
-            if cell["adapter"].startswith("lancedb")
-            else "numpy-mask"
-            if cell["adapter"] == "exact-numpy"
-            else "postfilter"
-        ),
+        "implementation": _filter_implementation(adapter),
     }
-    metrics = cell["metrics"]
-    cell.setdefault("metric_provenance", _metric_provenance(metrics, source=cell["adapter"]))
-    cell.setdefault(
-        "index",
-        {
-            "requested": "exact" if cell["adapter"] == "exact-numpy" else "optional",
-            "status": "flat" if cell["adapter"] == "exact-numpy" else "unavailable",
-            "type": "exact-numpy" if cell["adapter"] == "exact-numpy" else None,
-            "verified_by": "implementation" if cell["adapter"] == "exact-numpy" else None,
-            "reason": None if cell["adapter"] == "exact-numpy" else "adapter_did_not_report_index",
-        },
-    )
+    cell.setdefault("metric_provenance", _metric_provenance(cell["metrics"], source=adapter))
+    cell.setdefault("index", _default_index_metadata(adapter))
     return cell
 
 
@@ -455,6 +554,77 @@ def _time_search(
     return samples, last
 
 
+def _timed_pass(queries: Any, one_query: Any, *, repeats: int) -> list[float]:
+    """One pass over the queries; every sample of every query, in order."""
+    samples: list[float] = []
+    for q in queries:
+        taken, _result = _time_search(lambda qq=q: one_query(qq), repeats=repeats)
+        samples.extend(taken)
+    return samples
+
+
+def _concurrent_reader_samples(matrix: Any, queries: Any, k: int, mask: Any, ids: Any) -> list[float]:
+    """Two readers over the immutable matrix at once; their per-query latencies."""
+
+    def reader_job():
+        local = []
+        for q in queries:
+            t0 = time.perf_counter()
+            exact_numpy_search(matrix, q, k=min(5, k), mask=mask, ids=ids)
+            local.append((time.perf_counter() - t0) * 1000.0)
+        return local
+
+    samples: list[float] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for future in [pool.submit(reader_job) for _ in range(2)]:
+            samples.extend(future.result())
+    return samples
+
+
+def _batch_qps(warm_samples: list[float]) -> float | None:
+    if not warm_samples:
+        return None
+    return len(warm_samples) / (sum(warm_samples) / 1000.0)
+
+
+def _latency_profile(samples: list[float]) -> dict[str, float | None]:
+    return {
+        "p50_ms": _percentile(samples, 0.50),
+        "p95_ms": _percentile(samples, 0.95),
+        "p99_ms": _percentile(samples, 0.99),
+    }
+
+
+def _exact_metrics(
+    *, build_ms: float, warm_samples: list[float], concurrent_samples: list[float]
+) -> dict[str, Any]:
+    return {
+        "latency_ms": _percentile(warm_samples, 0.5),
+        "rss_bytes": _rss_bytes(),
+        "disk_bytes": None,
+        "build_ms": build_ms,
+        "update_ms": None,
+        "delete_ms": None,
+        "startup_ms": None,
+        "concurrent_reader_p95_ms": _percentile(concurrent_samples, 0.95),
+        # The exact backend is the ground truth the other cells are graded
+        # against; graded against itself it read 1.0 by construction (audit
+        # M11), so it reports no recall and says why.
+        "recall_at_10": None,
+        "recall_at_50": None,
+        "batch_throughput_qps": _batch_qps(warm_samples),
+    }
+
+
+# Exact backend is always the default; adoption of itself is N/A as ANN.
+_EXACT_ADOPTION = {
+    "adopt": False,
+    "becomes_default": False,
+    "requires_measurement": True,
+    "reasons": ["exact-numpy is the default ground-truth backend"],
+}
+
+
 def _run_exact_cell(
     *,
     corpus: ScaleCorpus,
@@ -473,55 +643,12 @@ def _run_exact_cell(
     def one_query(q):
         return exact_numpy_search(matrix, q, k=k, mask=mask, ids=corpus.chunk_ids)
 
-    # Cold: first pass.
-    cold_samples: list[float] = []
-    warm_samples: list[float] = []
-    retrieved_sets: list[tuple[str, ...]] = []
-    truth_sets: list[tuple[str, ...]] = []
-    for q in queries:
-        samples, result = _time_search(lambda qq=q: one_query(qq), repeats=1)
-        cold_samples.extend(samples)
-        retrieved_sets.append(result.ids)
-        truth = exact_numpy_search(matrix, q, k=k, mask=mask, ids=corpus.chunk_ids)
-        truth_sets.append(truth.ids)
-    # Warm: repeat.
-    for q in queries:
-        samples, _result = _time_search(lambda qq=q: one_query(qq), repeats=3)
-        warm_samples.extend(samples)
-
-    # Concurrent readers against immutable matrix.
-    def reader_job():
-        local = []
-        for q in queries:
-            t0 = time.perf_counter()
-            exact_numpy_search(matrix, q, k=min(5, k), mask=mask, ids=corpus.chunk_ids)
-            local.append((time.perf_counter() - t0) * 1000.0)
-        return local
-
-    concurrent_samples: list[float] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(reader_job) for _ in range(2)]
-        for fut in futures:
-            concurrent_samples.extend(fut.result())
-
-    recalls10 = [recall_at_k(ret, truth, 10) for ret, truth in zip(retrieved_sets, truth_sets)]
-    recalls50 = [recall_at_k(ret, truth, 50) for ret, truth in zip(retrieved_sets, truth_sets)]
-    warm_p95 = _percentile(warm_samples, 0.95) or 0.0
-    batch_qps = (len(warm_samples) / (sum(warm_samples) / 1000.0)) if warm_samples else None
-    adoption = evaluate_adoption_gate(
-        recall_at_10=1.0,
-        recall_at_50=1.0,
-        exact_p95_ms=max(warm_p95, 1e-9),
-        candidate_p95_ms=max(warm_p95, 1e-9),
+    cold_samples = _timed_pass(queries, one_query, repeats=1)
+    warm_samples = _timed_pass(queries, one_query, repeats=3)
+    concurrent_samples = _concurrent_reader_samples(matrix, queries, k, mask, corpus.chunk_ids)
+    metrics = _exact_metrics(
+        build_ms=build_ms, warm_samples=warm_samples, concurrent_samples=concurrent_samples
     )
-    # Exact backend is always the default; adoption of itself is N/A as ANN.
-    adoption = {
-        "adopt": False,
-        "becomes_default": False,
-        "requires_measurement": True,
-        "reasons": ["exact-numpy is the default ground-truth backend"],
-    }
-
     return _finalize_cell(
         {
             "adapter": "exact-numpy",
@@ -529,33 +656,16 @@ def _run_exact_cell(
             "selectivity": selectivity,
             "status": "ok",
             "reason": None,
-            "metrics": {
-                "latency_ms": _percentile(warm_samples, 0.5),
-                "rss_bytes": _rss_bytes(),
-                "disk_bytes": None,
-                "build_ms": build_ms,
-                "update_ms": None,
-                "delete_ms": None,
-                "startup_ms": None,
-                "concurrent_reader_p95_ms": _percentile(concurrent_samples, 0.95),
-                "recall_at_10": float(sum(recalls10) / len(recalls10)) if recalls10 else None,
-                "recall_at_50": float(sum(recalls50) / len(recalls50)) if recalls50 else None,
-                "batch_throughput_qps": batch_qps,
-            },
+            "metrics": metrics,
+            "metric_provenance": _metric_provenance(
+                metrics, source="exact-numpy", unavailable=_EXACT_RECALL_UNAVAILABLE
+            ),
             "latency_profiles": {
-                "cold": {
-                    "p50_ms": _percentile(cold_samples, 0.50),
-                    "p95_ms": _percentile(cold_samples, 0.95),
-                    "p99_ms": _percentile(cold_samples, 0.99),
-                },
-                "warm": {
-                    "p50_ms": _percentile(warm_samples, 0.50),
-                    "p95_ms": _percentile(warm_samples, 0.95),
-                    "p99_ms": _percentile(warm_samples, 0.99),
-                },
+                "cold": _latency_profile(cold_samples),
+                "warm": _latency_profile(warm_samples),
             },
-            "adoption": adoption,
-            "_exact_p95_ms": warm_p95,
+            "adoption": dict(_EXACT_ADOPTION, reasons=list(_EXACT_ADOPTION["reasons"])),
+            "_exact_p95_ms": _percentile(warm_samples, 0.95) or 0.0,
         },
         corpus=corpus,
         mask=mask,
@@ -607,6 +717,46 @@ def _unavailable_cell(
     return _finalize_cell(cell, corpus=corpus, mask=mask)
 
 
+def _require_adapter_arguments(adapter_id: str, queries: Any, k: int, selectivity: float) -> None:
+    if adapter_id not in ADAPTER_IDS:
+        raise ValueError(f"unknown adapter: {adapter_id}")
+    _require_positive_int("k", k)
+    if len(queries) < 1:
+        raise ValueError("queries must be non-empty")
+    _require_fraction("selectivity", selectivity)
+
+
+def _flat_cell_runner(adapter_id: str):
+    runners = {"usearch": _run_usearch_cell, "sqlite-vec": _run_sqlite_vec_cell}
+    if adapter_id not in runners:
+        raise RuntimeError(f"adapter not implemented: {adapter_id}")
+    return runners[adapter_id]
+
+
+def _run_optional_cell(adapter_id: str, **cell_arguments: Any) -> dict[str, Any]:
+    if adapter_id.startswith("lancedb"):
+        return _run_lancedb_cell(**cell_arguments, ann=adapter_id.endswith("ann"))
+    return _flat_cell_runner(adapter_id)(**cell_arguments)
+
+
+def _adoption_for(cell: dict[str, Any], exact_p95_ms: float | None) -> dict[str, Any]:
+    cand_p95 = cell["latency_profiles"]["warm"]["p95_ms"]
+    baseline = cand_p95 if exact_p95_ms is None else exact_p95_ms
+    adoption = evaluate_adoption_gate(
+        recall_at_10=cell["metrics"]["recall_at_10"],
+        recall_at_50=cell["metrics"]["recall_at_50"],
+        exact_p95_ms=baseline,
+        candidate_p95_ms=cand_p95,
+    )
+    reasons = ["measured_gate_passed_but_not_product_default"] if adoption["adopt"] else adoption["reasons"]
+    return {
+        "adopt": adoption["adopt"],
+        "becomes_default": False,
+        "requires_measurement": True,
+        "reasons": reasons,
+    }
+
+
 def run_adapter(
     adapter_id: str,
     *,
@@ -619,12 +769,7 @@ def run_adapter(
     exact_p95_ms: float | None = None,
 ) -> dict[str, Any]:
     """Run one adapter cell. Missing optional deps are fail-closed skips."""
-    if adapter_id not in ADAPTER_IDS:
-        raise ValueError(f"unknown adapter: {adapter_id}")
-    _require_positive_int("k", k)
-    if len(queries) < 1:
-        raise ValueError("queries must be non-empty")
-    _require_fraction("selectivity", selectivity)
+    _require_adapter_arguments(adapter_id, queries, k, selectivity)
     if adapter_id != "exact-numpy" and not _adapter_available(adapter_id):
         return _unavailable_cell(
             adapter_id,
@@ -634,33 +779,15 @@ def run_adapter(
             status="skipped",
             reason="dependency_unavailable",
         )
-
     if adapter_id == "exact-numpy":
         return _run_exact_cell(
             corpus=corpus, queries=queries, k=k, mask=mask, selectivity=selectivity
         )
-
     # Optional adapters: measure if present, still never silent-default.
     try:
-        if adapter_id == "usearch":
-            cell = _run_usearch_cell(
-                corpus=corpus, queries=queries, k=k, mask=mask, selectivity=selectivity
-            )
-        elif adapter_id.startswith("lancedb"):
-            cell = _run_lancedb_cell(
-                corpus=corpus,
-                queries=queries,
-                k=k,
-                mask=mask,
-                selectivity=selectivity,
-                ann=adapter_id.endswith("ann"),
-            )
-        elif adapter_id == "sqlite-vec":
-            cell = _run_sqlite_vec_cell(
-                corpus=corpus, queries=queries, k=k, mask=mask, selectivity=selectivity
-            )
-        else:
-            raise RuntimeError(f"adapter not implemented: {adapter_id}")
+        cell = _run_optional_cell(
+            adapter_id, corpus=corpus, queries=queries, k=k, mask=mask, selectivity=selectivity
+        )
     except Exception as exc:
         return _unavailable_cell(
             adapter_id,
@@ -670,26 +797,10 @@ def run_adapter(
             status="failed",
             reason=f"adapter_error:{type(exc).__name__}: {exc}",
         )
-
     cell = _finalize_cell(cell, corpus=corpus, mask=mask)
-    cand_p95 = cell["latency_profiles"]["warm"]["p95_ms"]
-    baseline = exact_p95_ms if exact_p95_ms is not None else cand_p95
-    adoption = evaluate_adoption_gate(
-        recall_at_10=cell["metrics"]["recall_at_10"],
-        recall_at_50=cell["metrics"]["recall_at_50"],
-        exact_p95_ms=baseline,
-        candidate_p95_ms=cand_p95,
-    )
-    cell["adoption"] = {
-        "adopt": adoption["adopt"],
-        "becomes_default": False,
-        "requires_measurement": True,
-        "reasons": adoption["reasons"]
-        if not adoption["adopt"]
-        else ["measured_gate_passed_but_not_product_default"],
-    }
+    cell["adoption"] = _adoption_for(cell, exact_p95_ms)
     cell["is_default"] = False
-    cell["adopted"] = adoption["adopt"]
+    cell["adopted"] = cell["adoption"]["adopt"]
     return cell
 
 
@@ -711,7 +822,95 @@ def _truth_for_queries(corpus: ScaleCorpus, queries: Any, k: int, mask: Any | No
     ]
 
 
-def _run_usearch_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any]:
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _recall_pair(retrieved: list[tuple[str, ...]], truth: Any) -> tuple[float | None, float | None]:
+    r10 = [recall_at_k(r, t, 10) for r, t in zip(retrieved, truth)]
+    r50 = [recall_at_k(r, t, 50) for r, t in zip(retrieved, truth)]
+    return _mean_or_none(r10), _mean_or_none(r50)
+
+
+def _ann_metrics(
+    *,
+    warm: list[float],
+    build_ms: float,
+    disk_bytes: int | None,
+    recall10: float | None,
+    recall50: float | None,
+) -> dict[str, Any]:
+    return {
+        "latency_ms": _percentile(warm, 0.5),
+        "rss_bytes": _rss_bytes(),
+        "disk_bytes": disk_bytes,
+        "build_ms": build_ms,
+        "update_ms": None,
+        "delete_ms": None,
+        "startup_ms": None,
+        "concurrent_reader_p95_ms": None,
+        "recall_at_10": recall10,
+        "recall_at_50": recall50,
+        "batch_throughput_qps": _batch_qps(warm),
+    }
+
+
+def _measurement_only_adoption() -> dict[str, Any]:
+    return {"adopt": False, "becomes_default": False, "requires_measurement": True, "reasons": []}
+
+
+def _adapter_cell(
+    adapter: str,
+    corpus: ScaleCorpus,
+    selectivity: float,
+    metrics: dict[str, Any],
+    cold: list[float],
+    warm: list[float],
+    index: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "adapter": adapter,
+        "corpus_size": len(corpus.chunk_ids),
+        "selectivity": selectivity,
+        "status": "ok",
+        "reason": None,
+        "metrics": metrics,
+        "latency_profiles": {"cold": _latency_profile(cold), "warm": _latency_profile(warm)},
+        "adoption": _measurement_only_adoption(),
+        "index": index,
+    }
+
+
+def _is_positive_int(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 1
+
+
+def _is_exact_int(value: object, expected: int) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value == expected
+
+
+def _require_verified_usearch_index(index: Any, expected_size: int) -> None:
+    connectivity = getattr(index, "connectivity", None)
+    metric = getattr(index, "metric", None)
+    indexed_size = getattr(index, "size", None)
+    if (
+        not _is_positive_int(connectivity)
+        or not _is_exact_int(indexed_size, expected_size)
+        or "cos" not in str(metric).lower()
+    ):
+        raise RuntimeError(
+            "unverified USEARCH HNSW cosine index: "
+            f"connectivity={connectivity!r}, size={indexed_size!r}, metric={metric!r}"
+        )
+
+
+def _usearch_index(corpus: ScaleCorpus) -> Any:
     import numpy as np
 
     try:
@@ -719,274 +918,269 @@ def _run_usearch_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any
     except ImportError:
         from usearch import Index  # type: ignore
 
-    dims = int(corpus.vectors.shape[1])
-    build_started = time.perf_counter()
-    index = Index(ndim=dims, metric="cos")
-    active = set(_masked_ids(corpus, mask))
+    index = Index(ndim=int(corpus.vectors.shape[1]), metric="cos")
     keys = np.arange(len(corpus.chunk_ids), dtype=np.int64)
-    vectors = np.ascontiguousarray(corpus.vectors, dtype=np.float32)
-    index.add(keys, vectors)
-    connectivity = getattr(index, "connectivity", None)
-    metric = getattr(index, "metric", None)
-    indexed_size = getattr(index, "size", None)
-    if (
-        isinstance(connectivity, bool)
-        or not isinstance(connectivity, int)
-        or connectivity < 1
-        or isinstance(indexed_size, bool)
-        or not isinstance(indexed_size, int)
-        or indexed_size != len(corpus.chunk_ids)
-        or "cos" not in str(metric).lower()
-    ):
-        raise RuntimeError(
-            "unverified USEARCH HNSW cosine index: "
-            f"connectivity={connectivity!r}, size={indexed_size!r}, metric={metric!r}"
-        )
-    build_ms = (time.perf_counter() - build_started) * 1000.0
+    index.add(keys, np.ascontiguousarray(corpus.vectors, dtype=np.float32))
+    _require_verified_usearch_index(index, len(corpus.chunk_ids))
+    return index
 
-    truth = _truth_for_queries(corpus, queries, k, mask)
+
+def _usearch_keys(matches: Any) -> list[int]:
+    # usearch Matches: .keys / .distances
+    key_list = list(getattr(matches, "keys", matches))
+    if key_list and hasattr(key_list[0], "key"):
+        return [int(item.key) for item in key_list]
+    return [int(item) for item in key_list]
+
+
+def _usearch_search(index: Any, q: Any, count: int) -> list[int]:
+    import numpy as np
+
+    return _usearch_keys(index.search(np.ascontiguousarray(q, dtype=np.float32), count))
+
+
+def _usearch_cold_pass(
+    index: Any, corpus: ScaleCorpus, queries: Any, active: set[int], k: int
+) -> tuple[list[float], list[tuple[str, ...]]]:
     cold: list[float] = []
-    warm: list[float] = []
     retrieved: list[tuple[str, ...]] = []
     for q in queries:
         t0 = time.perf_counter()
-        matches = index.search(np.ascontiguousarray(q, dtype=np.float32), len(corpus.chunk_ids))
-        # usearch Matches: .keys / .distances
-        key_list = list(getattr(matches, "keys", matches))
-        if key_list and hasattr(key_list[0], "key"):
-            key_list = [int(item.key) for item in key_list]
-        else:
-            key_list = [int(item) for item in key_list]
-        retrieved.append(tuple(corpus.chunk_ids[i] for i in key_list if i in active)[:k])
+        keys = _usearch_search(index, q, len(corpus.chunk_ids))
+        retrieved.append(tuple(corpus.chunk_ids[i] for i in keys if i in active)[:k])
         cold.append((time.perf_counter() - t0) * 1000.0)
+    return cold, retrieved
+
+
+def _usearch_warm_pass(
+    index: Any, corpus: ScaleCorpus, queries: Any, active: set[int], k: int
+) -> list[float]:
+    warm: list[float] = []
     for q in queries:
         for _ in range(3):
             t0 = time.perf_counter()
-            matches = index.search(np.ascontiguousarray(q, dtype=np.float32), len(corpus.chunk_ids))
-            key_list = list(getattr(matches, "keys", matches))
-            if key_list and hasattr(key_list[0], "key"):
-                key_list = [int(item.key) for item in key_list]
-            else:
-                key_list = [int(item) for item in key_list]
-            _ = tuple(item for item in key_list if item in active)[:k]
+            keys = _usearch_search(index, q, len(corpus.chunk_ids))
+            _ = tuple(item for item in keys if item in active)[:k]
             warm.append((time.perf_counter() - t0) * 1000.0)
+    return warm
 
-    r10 = [recall_at_k(r, t, 10) for r, t in zip(retrieved, truth)]
-    r50 = [recall_at_k(r, t, 50) for r, t in zip(retrieved, truth)]
-    metrics = {
-        "latency_ms": _percentile(warm, 0.5),
-        "rss_bytes": _rss_bytes(),
-        "disk_bytes": None,
-        "build_ms": build_ms,
-        "update_ms": None,
-        "delete_ms": None,
-        "startup_ms": None,
-        "concurrent_reader_p95_ms": None,
-        "recall_at_10": float(sum(r10) / len(r10)) if r10 else None,
-        "recall_at_50": float(sum(r50) / len(r50)) if r50 else None,
-        "batch_throughput_qps": (len(warm) / (sum(warm) / 1000.0)) if warm else None,
-    }
-    return {
-        "adapter": "usearch",
-        "corpus_size": len(corpus.chunk_ids),
-        "selectivity": selectivity,
-        "status": "ok",
-        "reason": None,
-        "metrics": metrics,
-        "latency_profiles": {
-            "cold": {
-                "p50_ms": _percentile(cold, 0.50),
-                "p95_ms": _percentile(cold, 0.95),
-                "p99_ms": _percentile(cold, 0.99),
-            },
-            "warm": {
-                "p50_ms": _percentile(warm, 0.50),
-                "p95_ms": _percentile(warm, 0.95),
-                "p99_ms": _percentile(warm, 0.99),
-            },
-        },
-        "adoption": {
-            "adopt": False,
-            "becomes_default": False,
-            "requires_measurement": True,
-            "reasons": [],
-        },
-        "metric_provenance": _metric_provenance(metrics, source="usearch_runtime"),
-        "index": {
+
+def _run_usearch_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any]:
+    active = set(_masked_ids(corpus, mask))
+    build_started = time.perf_counter()
+    index = _usearch_index(corpus)
+    build_ms = (time.perf_counter() - build_started) * 1000.0
+    truth = _truth_for_queries(corpus, queries, k, mask)
+    cold, retrieved = _usearch_cold_pass(index, corpus, queries, active, k)
+    warm = _usearch_warm_pass(index, corpus, queries, active, k)
+    recall10, recall50 = _recall_pair(retrieved, truth)
+    metrics = _ann_metrics(
+        warm=warm, build_ms=build_ms, disk_bytes=None, recall10=recall10, recall50=recall50
+    )
+    cell = _adapter_cell(
+        "usearch",
+        corpus,
+        selectivity,
+        metrics,
+        cold,
+        warm,
+        {
             "requested": "ann",
             "status": "ann",
             "type": "HNSW",
             "verified_by": "usearch.Index.connectivity/size",
             "reason": None,
         },
+    )
+    cell["metric_provenance"] = _metric_provenance(metrics, source="usearch_runtime")
+    return cell
+
+
+def _lancedb_table(db: Any, corpus: ScaleCorpus, active: set[int]) -> Any:
+    import pyarrow as pa
+
+    rows = {
+        "id": list(corpus.chunk_ids),
+        "vector": [vector.tolist() for vector in corpus.vectors],
+        "selected": [index in active for index in range(len(corpus.chunk_ids))],
     }
+    return db.create_table("chunks", pa.table(rows))
+
+
+def _create_lancedb_index(table: Any, partitions: int) -> None:
+    try:
+        from lancedb.index import IvfPq
+    except ImportError:
+        # LanceDB 0.20 supports only the legacy index builder.
+        table.create_index(index_type="IVF_PQ", metric="cosine", num_partitions=partitions)
+        return
+    table.create_index("vector", config=IvfPq(distance_type="cosine", num_partitions=partitions))
+
+
+def _index_descriptor_type(table: Any, descriptor: Any) -> tuple[Any, Any, Any]:
+    """(name, stats, index type) of one LanceDB index descriptor."""
+    candidate_name = getattr(descriptor, "name", None)
+    candidate_stats = table.index_stats(candidate_name) if candidate_name is not None else None
+    candidate_type = getattr(descriptor, "index_type", None)
+    if candidate_type is None and candidate_stats is not None:
+        candidate_type = getattr(candidate_stats, "index_type", None)
+    return candidate_name, candidate_stats, candidate_type
+
+
+def _ann_index_descriptor(table: Any, indices: list) -> tuple[Any, Any, Any] | None:
+    for descriptor in indices:
+        name, stats, index_type = _index_descriptor_type(table, descriptor)
+        normalized = str(index_type or "").upper()
+        if any(token in normalized for token in ("IVF", "HNSW")):
+            return name, stats, index_type
+    return None
+
+
+def _ann_index_found(found: tuple[Any, Any, Any] | None) -> bool:
+    if found is None:
+        return False
+    return found[0] is not None and found[1] is not None
+
+
+def _require_complete_ann_index(stats: Any, corpus_size: int) -> None:
+    indexed_rows = getattr(stats, "num_indexed_rows", None)
+    unindexed_rows = getattr(stats, "num_unindexed_rows", None)
+    if indexed_rows != corpus_size or unindexed_rows not in {0, None}:
+        raise RuntimeError(
+            f"incomplete LanceDB ANN index: indexed={indexed_rows!r}, "
+            f"unindexed={unindexed_rows!r}"
+        )
+
+
+def _verified_ann_metadata(table: Any, corpus_size: int) -> dict[str, Any]:
+    indices = list(table.list_indices())
+    if not indices:
+        raise RuntimeError("LanceDB reported no vector index after creation")
+    found = _ann_index_descriptor(table, indices)
+    if not _ann_index_found(found):
+        raise RuntimeError("LanceDB reported no verifiable ANN vector index")
+    _require_complete_ann_index(found[1], corpus_size)
+    return {
+        "requested": "ann",
+        "status": "ann",
+        "type": str(found[2]),
+        "verified_by": "list_indices/index_stats indexed rows",
+        "reason": None,
+    }
+
+
+def _flat_index_metadata(ann: bool) -> dict[str, Any]:
+    return {
+        "requested": "ann" if ann else "flat",
+        "status": "flat",
+        "type": "flat-scan",
+        "verified_by": "no_vector_index_requested",
+        "reason": None,
+    }
+
+
+def _lancedb_index_metadata(table: Any, corpus_size: int, ann: bool) -> dict[str, Any]:
+    if not ann:
+        return _flat_index_metadata(False)
+    partitions = max(1, min(16, corpus_size // 4 or 1))
+    _create_lancedb_index(table, partitions)
+    return _verified_ann_metadata(table, corpus_size)
+
+
+def _lancedb_hits(table: Any, q: Any, k: int) -> list:
+    import numpy as np
+
+    return (
+        table.search(np.asarray(q, dtype=np.float32))
+        .where("selected = true", prefilter=True)
+        .limit(k)
+        .to_list()
+    )
+
+
+def _lancedb_cold_pass(table: Any, queries: Any, k: int) -> tuple[list[float], list[tuple[str, ...]]]:
+    cold: list[float] = []
+    retrieved: list[tuple[str, ...]] = []
+    for q in queries:
+        t0 = time.perf_counter()
+        hits = _lancedb_hits(table, q, k)
+        cold.append((time.perf_counter() - t0) * 1000.0)
+        retrieved.append(tuple(str(h.get("id")) for h in hits))
+    return cold, retrieved
+
+
+def _lancedb_warm_pass(table: Any, queries: Any, k: int) -> list[float]:
+    warm: list[float] = []
+    for q in queries:
+        for _ in range(3):
+            t0 = time.perf_counter()
+            _lancedb_hits(table, q, k)
+            warm.append((time.perf_counter() - t0) * 1000.0)
+    return warm
+
+
+def _directory_bytes(path: str) -> int:
+    return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
+
+
+def _lancedb_measured_cell(
+    table: Any,
+    tmp: str,
+    corpus: ScaleCorpus,
+    queries: Any,
+    k: int,
+    mask: Any,
+    selectivity: float,
+    ann: bool,
+    build_ms: float,
+    index_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    truth = _truth_for_queries(corpus, queries, k, mask)
+    cold, retrieved = _lancedb_cold_pass(table, queries, k)
+    warm = _lancedb_warm_pass(table, queries, k)
+    recall10, recall50 = _recall_pair(retrieved, truth)
+    metrics = _ann_metrics(
+        warm=warm,
+        build_ms=build_ms,
+        disk_bytes=int(_directory_bytes(tmp)),
+        recall10=recall10,
+        recall50=recall50,
+    )
+    adapter = "lancedb-ann" if ann else "lancedb-flat"
+    return _adapter_cell(adapter, corpus, selectivity, metrics, cold, warm, index_metadata)
 
 
 def _run_lancedb_cell(*, corpus, queries, k, mask, selectivity, ann: bool) -> dict[str, Any]:
     import lancedb
-    import numpy as np
-    import pyarrow as pa
 
     active = set(_masked_ids(corpus, mask))
     build_started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="scale-lance-") as tmp:
-        db = lancedb.connect(tmp)
-        rows = {
-            "id": list(corpus.chunk_ids),
-            "vector": [vector.tolist() for vector in corpus.vectors],
-            "selected": [index in active for index in range(len(corpus.chunk_ids))],
-        }
-        table = db.create_table("chunks", pa.table(rows))
-        index_metadata = {
-            "requested": "ann" if ann else "flat",
-            "status": "flat",
-            "type": "flat-scan",
-            "verified_by": "no_vector_index_requested",
-            "reason": None,
-        }
-        if ann:
-            try:
-                partitions = max(1, min(16, len(corpus.chunk_ids) // 4 or 1))
-                try:
-                    from lancedb.index import IvfPq
-                except ImportError:
-                    # LanceDB 0.20 supports only the legacy index builder.
-                    table.create_index(
-                        index_type="IVF_PQ",
-                        metric="cosine",
-                        num_partitions=partitions,
-                    )
-                else:
-                    table.create_index(
-                        "vector",
-                        config=IvfPq(
-                            distance_type="cosine",
-                            num_partitions=partitions,
-                        ),
-                    )
-                indices = list(table.list_indices())
-                if not indices:
-                    raise RuntimeError("LanceDB reported no vector index after creation")
-                index_name = None
-                index_type = None
-                stats = None
-                for descriptor in indices:
-                    candidate_name = getattr(descriptor, "name", None)
-                    candidate_stats = (
-                        table.index_stats(candidate_name) if candidate_name is not None else None
-                    )
-                    candidate_type = getattr(descriptor, "index_type", None)
-                    if candidate_type is None and candidate_stats is not None:
-                        candidate_type = getattr(candidate_stats, "index_type", None)
-                    normalized = str(candidate_type or "").upper()
-                    if any(token in normalized for token in ("IVF", "HNSW")):
-                        index_name = candidate_name
-                        index_type = candidate_type
-                        stats = candidate_stats
-                        break
-                if index_name is None or stats is None:
-                    raise RuntimeError("LanceDB reported no verifiable ANN vector index")
-                indexed_rows = getattr(stats, "num_indexed_rows", None)
-                unindexed_rows = getattr(stats, "num_unindexed_rows", None)
-                if indexed_rows != len(corpus.chunk_ids) or unindexed_rows not in {0, None}:
-                    raise RuntimeError(
-                        f"incomplete LanceDB ANN index: indexed={indexed_rows!r}, "
-                        f"unindexed={unindexed_rows!r}"
-                    )
-                index_metadata = {
-                    "requested": "ann",
-                    "status": "ann",
-                    "type": str(index_type),
-                    "verified_by": "list_indices/index_stats indexed rows",
-                    "reason": None,
-                }
-            except Exception as exc:
-                return _unavailable_cell(
-                    "lancedb-ann",
-                    corpus=corpus,
-                    mask=mask,
-                    selectivity=selectivity,
-                    status="skipped",
-                    reason=f"ann_index_unavailable:{type(exc).__name__}: {exc}",
-                )
-        build_ms = (time.perf_counter() - build_started) * 1000.0
-        truth = _truth_for_queries(corpus, queries, k, mask)
-        cold: list[float] = []
-        warm: list[float] = []
-        retrieved: list[tuple[str, ...]] = []
-        for q in queries:
-            t0 = time.perf_counter()
-            hits = (
-                table.search(np.asarray(q, dtype=np.float32))
-                .where("selected = true", prefilter=True)
-                .limit(k)
-                .to_list()
+        table = _lancedb_table(lancedb.connect(tmp), corpus, active)
+        try:
+            index_metadata = _lancedb_index_metadata(table, len(corpus.chunk_ids), ann)
+        except Exception as exc:
+            return _unavailable_cell(
+                "lancedb-ann",
+                corpus=corpus,
+                mask=mask,
+                selectivity=selectivity,
+                status="skipped",
+                reason=f"ann_index_unavailable:{type(exc).__name__}: {exc}",
             )
-            cold.append((time.perf_counter() - t0) * 1000.0)
-            retrieved.append(tuple(str(h.get("id")) for h in hits))
-        for q in queries:
-            for _ in range(3):
-                t0 = time.perf_counter()
-                (
-                    table.search(np.asarray(q, dtype=np.float32))
-                    .where("selected = true", prefilter=True)
-                    .limit(k)
-                    .to_list()
-                )
-                warm.append((time.perf_counter() - t0) * 1000.0)
-        r10 = [recall_at_k(r, t, 10) for r, t in zip(retrieved, truth)]
-        r50 = [recall_at_k(r, t, 50) for r, t in zip(retrieved, truth)]
-        disk = sum(p.stat().st_size for p in Path(tmp).rglob("*") if p.is_file())
-        return {
-            "adapter": "lancedb-ann" if ann else "lancedb-flat",
-            "corpus_size": len(corpus.chunk_ids),
-            "selectivity": selectivity,
-            "status": "ok",
-            "reason": None,
-            "metrics": {
-                "latency_ms": _percentile(warm, 0.5),
-                "rss_bytes": _rss_bytes(),
-                "disk_bytes": int(disk),
-                "build_ms": build_ms,
-                "update_ms": None,
-                "delete_ms": None,
-                "startup_ms": None,
-                "concurrent_reader_p95_ms": None,
-                "recall_at_10": float(sum(r10) / len(r10)) if r10 else None,
-                "recall_at_50": float(sum(r50) / len(r50)) if r50 else None,
-                "batch_throughput_qps": (len(warm) / (sum(warm) / 1000.0)) if warm else None,
-            },
-            "latency_profiles": {
-                "cold": {
-                    "p50_ms": _percentile(cold, 0.50),
-                    "p95_ms": _percentile(cold, 0.95),
-                    "p99_ms": _percentile(cold, 0.99),
-                },
-                "warm": {
-                    "p50_ms": _percentile(warm, 0.50),
-                    "p95_ms": _percentile(warm, 0.95),
-                    "p99_ms": _percentile(warm, 0.99),
-                },
-            },
-            "adoption": {
-                "adopt": False,
-                "becomes_default": False,
-                "requires_measurement": True,
-                "reasons": [],
-            },
-            "index": index_metadata,
-        }
+        build_ms = (time.perf_counter() - build_started) * 1000.0
+        return _lancedb_measured_cell(
+            table, tmp, corpus, queries, k, mask, selectivity, ann, build_ms, index_metadata
+        )
 
 
-def _run_sqlite_vec_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any]:
+def _sqlite_vec_connection(corpus: ScaleCorpus) -> Any:
     import sqlite3
 
     import numpy as np
     import sqlite_vec
 
-    active = _masked_ids(corpus, mask)
     dims = int(corpus.vectors.shape[1])
-    build_started = time.perf_counter()
     con = sqlite3.connect(":memory:")
     con.enable_load_extension(True)
     sqlite_vec.load(con)
@@ -997,81 +1191,103 @@ def _run_sqlite_vec_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, 
     for i in range(len(corpus.chunk_ids)):
         blob = np.ascontiguousarray(corpus.vectors[i], dtype=np.float32).tobytes()
         con.execute("INSERT INTO vec(id, embedding) VALUES (?, ?)", (corpus.chunk_ids[i], blob))
-    build_ms = (time.perf_counter() - build_started) * 1000.0
+    return con
 
-    truth = _truth_for_queries(corpus, queries, k, mask)
+
+def _query_blob(q: Any) -> bytes:
+    import numpy as np
+
+    return np.ascontiguousarray(q, dtype=np.float32).tobytes()
+
+
+def _sqlite_vec_rows(con: Any, qblob: bytes, count: int) -> list:
+    return con.execute(
+        "SELECT id FROM vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+        (qblob, count),
+    ).fetchall()
+
+
+def _chunk_ordinal(row_id: object) -> int:
+    return int(str(row_id).rsplit("-", 1)[1])
+
+
+def _sqlite_vec_cold_pass(
+    con: Any, corpus: ScaleCorpus, queries: Any, active: list[int], k: int
+) -> tuple[list[float], list[tuple[str, ...]]]:
     cold: list[float] = []
-    warm: list[float] = []
     retrieved: list[tuple[str, ...]] = []
     for q in queries:
-        qblob = np.ascontiguousarray(q, dtype=np.float32).tobytes()
+        qblob = _query_blob(q)
         t0 = time.perf_counter()
-        rows = con.execute(
-            "SELECT id FROM vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-            (qblob, len(corpus.chunk_ids)),
-        ).fetchall()
-        retrieved.append(
-            tuple(str(row[0]) for row in rows if int(str(row[0]).rsplit("-", 1)[1]) in active)[:k]
-        )
+        rows = _sqlite_vec_rows(con, qblob, len(corpus.chunk_ids))
+        retrieved.append(tuple(str(row[0]) for row in rows if _chunk_ordinal(row[0]) in active)[:k])
         cold.append((time.perf_counter() - t0) * 1000.0)
+    return cold, retrieved
+
+
+def _sqlite_vec_warm_pass(
+    con: Any, corpus: ScaleCorpus, queries: Any, active: list[int], k: int
+) -> list[float]:
+    warm: list[float] = []
     for q in queries:
-        qblob = np.ascontiguousarray(q, dtype=np.float32).tobytes()
+        qblob = _query_blob(q)
         for _ in range(3):
             t0 = time.perf_counter()
-            rows = con.execute(
-                "SELECT id FROM vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-                (qblob, len(corpus.chunk_ids)),
-            ).fetchall()
-            _ = tuple(row[0] for row in rows if int(str(row[0]).rsplit("-", 1)[1]) in active)[:k]
+            rows = _sqlite_vec_rows(con, qblob, len(corpus.chunk_ids))
+            _ = tuple(row[0] for row in rows if _chunk_ordinal(row[0]) in active)[:k]
             warm.append((time.perf_counter() - t0) * 1000.0)
+    return warm
+
+
+def _run_sqlite_vec_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any]:
+    active = _masked_ids(corpus, mask)
+    build_started = time.perf_counter()
+    con = _sqlite_vec_connection(corpus)
+    build_ms = (time.perf_counter() - build_started) * 1000.0
+    truth = _truth_for_queries(corpus, queries, k, mask)
+    cold, retrieved = _sqlite_vec_cold_pass(con, corpus, queries, active, k)
+    warm = _sqlite_vec_warm_pass(con, corpus, queries, active, k)
     con.close()
-    r10 = [recall_at_k(r, t, 10) for r, t in zip(retrieved, truth)]
-    r50 = [recall_at_k(r, t, 50) for r, t in zip(retrieved, truth)]
-    return {
-        "adapter": "sqlite-vec",
-        "corpus_size": len(corpus.chunk_ids),
-        "selectivity": selectivity,
-        "status": "ok",
-        "reason": None,
-        "metrics": {
-            "latency_ms": _percentile(warm, 0.5),
-            "rss_bytes": _rss_bytes(),
-            "disk_bytes": None,
-            "build_ms": build_ms,
-            "update_ms": None,
-            "delete_ms": None,
-            "startup_ms": None,
-            "concurrent_reader_p95_ms": None,
-            "recall_at_10": float(sum(r10) / len(r10)) if r10 else None,
-            "recall_at_50": float(sum(r50) / len(r50)) if r50 else None,
-            "batch_throughput_qps": (len(warm) / (sum(warm) / 1000.0)) if warm else None,
-        },
-        "latency_profiles": {
-            "cold": {
-                "p50_ms": _percentile(cold, 0.50),
-                "p95_ms": _percentile(cold, 0.95),
-                "p99_ms": _percentile(cold, 0.99),
-            },
-            "warm": {
-                "p50_ms": _percentile(warm, 0.50),
-                "p95_ms": _percentile(warm, 0.95),
-                "p99_ms": _percentile(warm, 0.99),
-            },
-        },
-        "adoption": {
-            "adopt": False,
-            "becomes_default": False,
-            "requires_measurement": True,
-            "reasons": [],
-        },
-        "index": {
+    recall10, recall50 = _recall_pair(retrieved, truth)
+    metrics = _ann_metrics(
+        warm=warm, build_ms=build_ms, disk_bytes=None, recall10=recall10, recall50=recall50
+    )
+    return _adapter_cell(
+        "sqlite-vec",
+        corpus,
+        selectivity,
+        metrics,
+        cold,
+        warm,
+        {
             "requested": "flat",
             "status": "flat",
             "type": "sqlite-vec-vec0",
             "verified_by": "virtual_table_creation",
             "reason": None,
         },
-    }
+    )
+
+
+_FSYNC_UNSUPPORTED_ERRNOS = frozenset({errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM})
+
+
+def _unsupported_fsync(exc: OSError, extra: frozenset[int] = frozenset()) -> tuple[bool, str] | None:
+    """The (False, reason) outcome for an errno that means "not supported here"."""
+    if exc.errno in _FSYNC_UNSUPPORTED_ERRNOS or exc.errno in extra:
+        return False, f"directory_fsync_unsupported:{exc.errno}"
+    return None
+
+
+def _fsync_descriptor(descriptor: int) -> tuple[bool, str | None]:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        unsupported = _unsupported_fsync(exc, frozenset({errno.EBADF}))
+        if unsupported is None:
+            raise
+        return unsupported
+    return True, None
 
 
 def _fsync_directory(path: Path) -> tuple[bool, str | None]:
@@ -1079,45 +1295,45 @@ def _fsync_directory(path: Path) -> tuple[bool, str | None]:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
-            return False, f"directory_fsync_unsupported:{exc.errno}"
-        raise
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EBADF, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
-                return False, f"directory_fsync_unsupported:{exc.errno}"
+        unsupported = _unsupported_fsync(exc)
+        if unsupported is None:
             raise
+        return unsupported
+    try:
+        return _fsync_descriptor(descriptor)
     finally:
         os.close(descriptor)
-    return True, None
 
 
-def _crash_worker(point: str, root: Path) -> None:
-    staging = root / "staging"
-    active = root / "active"
-    staging.mkdir()
-    payload = staging / "vectors.bin"
+def _exit_unless_synced(synced: bool, reason: str | None, fallback: str, code: int) -> None:
+    if synced:
+        return
+    sys.stderr.write(reason or fallback)
+    sys.stderr.flush()
+    os._exit(code)
+
+
+def _write_crash_payload(payload: Path, point: str) -> None:
     with payload.open("wb") as handle:
         handle.write(b"scale-matrix-crash-payload")
         handle.flush()
         if point == "before_fsync":
             os._exit(91)
         os.fsync(handle.fileno())
+
+
+def _crash_worker(point: str, root: Path) -> None:
+    staging = root / "staging"
+    active = root / "active"
+    staging.mkdir()
+    _write_crash_payload(staging / "vectors.bin", point)
     staging_synced, reason = _fsync_directory(staging)
-    if not staging_synced:
-        sys.stderr.write(reason or "staging_directory_fsync_unavailable")
-        sys.stderr.flush()
-        os._exit(81)
+    _exit_unless_synced(staging_synced, reason, "staging_directory_fsync_unavailable", 81)
     if point == "before_activation":
         os._exit(92)
     os.replace(staging, active)
     root_synced, reason = _fsync_directory(root)
-    if not root_synced:
-        sys.stderr.write(reason or "activation_directory_fsync_unavailable")
-        sys.stderr.flush()
-        os._exit(82)
+    _exit_unless_synced(root_synced, reason, "activation_directory_fsync_unavailable", 82)
     os._exit(93)
 
 
@@ -1140,23 +1356,137 @@ def unavailable_crash_matrix(reason: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def _windows_volume_name(path: Path) -> str | None:
+    try:
+        import ctypes
+
+        name = ctypes.create_unicode_buffer(64)
+        root = Path(path.anchor or path.resolve().anchor)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            str(root), None, 0, None, None, None, name, len(name)
+        )
+    except (AttributeError, OSError):
+        return None
+    if ok and name.value:
+        return name.value
+    return None
+
+
 def _filesystem_description(path: Path) -> str:
     if os.name == "nt":
-        try:
-            import ctypes
-
-            name = ctypes.create_unicode_buffer(64)
-            root = Path(path.anchor or path.resolve().anchor)
-            ok = ctypes.windll.kernel32.GetVolumeInformationW(
-                str(root), None, 0, None, None, None, name, len(name)
-            )
-            if ok and name.value:
-                return name.value
-        except (AttributeError, OSError):
-            pass
+        name = _windows_volume_name(path)
+        if name is not None:
+            return name
     stats = os.statvfs(path) if hasattr(os, "statvfs") else None
     detail = f"block_size={stats.f_bsize}" if stats is not None else "type_unavailable"
     return f"local_temp:{detail}"
+
+
+_EXPECTED_CRASH_RETURNCODES = {
+    "before_fsync": 91,
+    "before_activation": 92,
+    "after_activation": 93,
+}
+
+
+def _crash_base(root: Path) -> dict[str, Any]:
+    return {
+        "injected": False,
+        "worker_returncode": None,
+        "recovered_cleanly": False,
+        "partial_activation": False,
+        "status": "failed",
+        "platform": sys.platform,
+        "filesystem": _filesystem_description(root),
+        "file_fsync": "unavailable",
+        "directory_fsync": "unavailable",
+        "recovery_directory_fsync": "not_reached",
+        "detail": None,
+    }
+
+
+def _run_crash_worker(point: str, root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--crash-worker", point, str(root)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def _note_fsync_outcome(base: dict[str, Any], point: str, returncode: int) -> None:
+    if returncode == _EXPECTED_CRASH_RETURNCODES[point]:
+        reached = "not_reached" if point == "before_fsync" else "performed"
+        base["file_fsync"] = reached
+        base["directory_fsync"] = reached
+        return
+    if returncode in {81, 82}:
+        base["file_fsync"] = "performed"
+        base["directory_fsync"] = "unavailable"
+
+
+def _active_is_valid(active: Path, payload: Path, expected_active: bool) -> bool:
+    if expected_active and payload.is_file():
+        return active.is_dir() and payload.read_bytes() == b"scale-matrix-crash-payload"
+    return not active.exists()
+
+
+def _recover_staging(base: dict[str, Any], root: Path, staging: Path) -> str | None:
+    """Remove a leftover staging directory; the reason when the root sync was unavailable."""
+    if not staging.exists():
+        return None
+    import shutil
+
+    shutil.rmtree(staging)
+    recovered_synced, recovery_reason = _fsync_directory(root)
+    base["recovery_directory_fsync"] = "performed" if recovered_synced else "unavailable"
+    return recovery_reason
+
+
+def _fsyncs_available(base: dict[str, Any]) -> bool:
+    return base["directory_fsync"] != "unavailable" and base["recovery_directory_fsync"] != "unavailable"
+
+
+def _crash_status(base: dict[str, Any], recovered: bool, returncode: int) -> str:
+    if recovered and _fsyncs_available(base):
+        return "passed"
+    if recovered or returncode in {81, 82}:
+        return "unavailable"
+    return "failed"
+
+
+def _crash_detail(recovery_reason: str | None, stderr: str) -> str:
+    return recovery_reason or stderr.strip() or "subprocess_terminated_and_recovered"
+
+
+def _inspect_crash_outcome(
+    base: dict[str, Any], point: str, root: Path, result: subprocess.CompletedProcess
+) -> None:
+    base["injected"] = result.returncode in {91, 92, 93}
+    base["worker_returncode"] = result.returncode
+    _note_fsync_outcome(base, point, result.returncode)
+    active = root / "active"
+    payload = active / "vectors.bin"
+    active_valid = _active_is_valid(active, payload, point == "after_activation")
+    partial = active.exists() and not active_valid
+    recovery_reason = _recover_staging(base, root, root / "staging")
+    recovered = bool(base["injected"] and active_valid and not partial)
+    base["recovered_cleanly"] = recovered
+    base["partial_activation"] = partial
+    base["status"] = _crash_status(base, recovered, result.returncode)
+    base["detail"] = _crash_detail(recovery_reason, result.stderr)
+
+
+def _crash_point_outcome(point: str) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="scale-crash-") as tmp:
+        root = Path(tmp)
+        base = _crash_base(root)
+        try:
+            _inspect_crash_outcome(base, point, root, _run_crash_worker(point, root))
+        except Exception as exc:
+            base["detail"] = f"{type(exc).__name__}: {exc}"
+        return base
 
 
 def run_crash_matrix(
@@ -1174,93 +1504,58 @@ def run_crash_matrix(
     for point in points:
         if point not in CRASH_POINTS:
             raise ValueError(f"unknown crash point: {point}")
-        with tempfile.TemporaryDirectory(prefix="scale-crash-") as tmp:
-            root = Path(tmp)
-            base = {
-                "injected": False,
-                "worker_returncode": None,
-                "recovered_cleanly": False,
-                "partial_activation": False,
-                "status": "failed",
-                "platform": sys.platform,
-                "filesystem": _filesystem_description(root),
-                "file_fsync": "unavailable",
-                "directory_fsync": "unavailable",
-                "recovery_directory_fsync": "not_reached",
-                "detail": None,
-            }
-            try:
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        str(Path(__file__).resolve()),
-                        "--crash-worker",
-                        point,
-                        str(root),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=30,
-                )
-                base["injected"] = result.returncode in {91, 92, 93}
-                base["worker_returncode"] = result.returncode
-                expected_returncode = {
-                    "before_fsync": 91,
-                    "before_activation": 92,
-                    "after_activation": 93,
-                }[point]
-                if result.returncode == expected_returncode:
-                    base["file_fsync"] = "not_reached" if point == "before_fsync" else "performed"
-                    base["directory_fsync"] = (
-                        "not_reached"
-                        if point == "before_fsync"
-                        else "performed"
-                    )
-                elif result.returncode in {81, 82}:
-                    base["file_fsync"] = "performed"
-                    base["directory_fsync"] = "unavailable"
-                active = root / "active"
-                staging = root / "staging"
-                expected_active = point == "after_activation"
-                payload = active / "vectors.bin"
-                active_valid = (
-                    active.is_dir() and payload.read_bytes() == b"scale-matrix-crash-payload"
-                    if expected_active and payload.is_file()
-                    else not active.exists()
-                )
-                partial = active.exists() and not active_valid
-                if staging.exists():
-                    import shutil
-
-                    shutil.rmtree(staging)
-                    recovered_synced, recovery_reason = _fsync_directory(root)
-                    base["recovery_directory_fsync"] = (
-                        "performed" if recovered_synced else "unavailable"
-                    )
-                else:
-                    recovery_reason = None
-                recovered = bool(base["injected"] and active_valid and not partial)
-                base["recovered_cleanly"] = recovered
-                base["partial_activation"] = partial
-                base["status"] = (
-                    "passed"
-                    if recovered
-                    and base["directory_fsync"] != "unavailable"
-                    and base["recovery_directory_fsync"] != "unavailable"
-                    else "unavailable"
-                    if recovered or result.returncode in {81, 82}
-                    else "failed"
-                )
-                base["detail"] = (
-                    recovery_reason
-                    or result.stderr.strip()
-                    or "subprocess_terminated_and_recovered"
-                )
-            except Exception as exc:
-                base["detail"] = f"{type(exc).__name__}: {exc}"
-            outcomes[point] = base
+        outcomes[point] = _crash_point_outcome(point)
     return outcomes
+
+
+def _valid_sizes(sizes: Sequence[int]) -> bool:
+    return bool(sizes) and all(_is_positive_int(size) for size in sizes)
+
+
+def _valid_adapters(adapters: Sequence[str]) -> bool:
+    return bool(adapters) and all(adapter in ADAPTER_IDS for adapter in adapters)
+
+
+def _require_plan_inputs(
+    corpus_sizes: Sequence[int], adapters: Sequence[str], selectivity: Sequence[float]
+) -> None:
+    if not _valid_sizes(corpus_sizes):
+        raise ValueError("corpus_sizes must be non-empty and positive")
+    if not _valid_adapters(adapters):
+        raise ValueError("adapters must be non-empty and known")
+    _require_selectivity(selectivity)
+
+
+def _require_selectivity(selectivity: Sequence[float]) -> None:
+    if not selectivity:
+        raise ValueError("selectivity must be non-empty and in (0, 1]")
+    for fraction in selectivity:
+        _require_fraction("selectivity", fraction)
+
+
+def _execution(parallel: bool, heavy: bool) -> str:
+    if parallel and not heavy:
+        return "parallel"
+    return "serial"
+
+
+def _plan(
+    corpus_sizes: Sequence[int],
+    adapters: Sequence[str],
+    selectivity: Sequence[float],
+    *,
+    parallel_allowed: bool,
+    execution: str,
+    reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "parallel_allowed": parallel_allowed,
+        "execution": execution,
+        "reason": reason,
+        "corpus_sizes": list(corpus_sizes),
+        "adapters": list(adapters),
+        "selectivity": list(selectivity),
+    }
 
 
 def plan_matrix(
@@ -1271,34 +1566,33 @@ def plan_matrix(
     parallel: bool = False,
 ) -> dict[str, Any]:
     """Heavy runs are always serial regardless of requested parallelism."""
-    if not corpus_sizes or any(
-        isinstance(size, bool) or not isinstance(size, int) or size < 1 for size in corpus_sizes
-    ):
-        raise ValueError("corpus_sizes must be non-empty and positive")
-    if not adapters or any(adapter not in ADAPTER_IDS for adapter in adapters):
-        raise ValueError("adapters must be non-empty and known")
-    if not selectivity:
-        raise ValueError("selectivity must be non-empty and in (0, 1]")
-    for fraction in selectivity:
-        _require_fraction("selectivity", fraction)
+    _require_plan_inputs(corpus_sizes, adapters, selectivity)
     heavy = any(size >= 1000 for size in corpus_sizes)
     if heavy and parallel:
-        return {
-            "parallel_allowed": False,
-            "execution": "serial",
-            "reason": "heavy_runs_must_be_serial",
-            "corpus_sizes": list(corpus_sizes),
-            "adapters": list(adapters),
-            "selectivity": list(selectivity),
-        }
-    return {
-        "parallel_allowed": bool(parallel) and not heavy,
-        "execution": "parallel" if parallel and not heavy else "serial",
-        "reason": None,
-        "corpus_sizes": list(corpus_sizes),
-        "adapters": list(adapters),
-        "selectivity": list(selectivity),
-    }
+        return _plan(
+            corpus_sizes,
+            adapters,
+            selectivity,
+            parallel_allowed=False,
+            execution="serial",
+            reason="heavy_runs_must_be_serial",
+        )
+    return _plan(
+        corpus_sizes,
+        adapters,
+        selectivity,
+        parallel_allowed=bool(parallel) and not heavy,
+        execution=_execution(parallel, heavy),
+        reason=None,
+    )
+
+
+def _exact_p95_of(exact_cell: dict[str, Any]) -> float:
+    """The warm p95 the ANN cells are measured against, from the exact cell."""
+    measured = exact_cell.get("_exact_p95_ms")
+    if measured:
+        return float(measured)
+    return float(exact_cell["latency_profiles"]["warm"]["p95_ms"] or 0.0)
 
 
 def run_smoke(
@@ -1310,8 +1604,6 @@ def run_smoke(
     adapters: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Deterministic offline smoke matrix (exact + optional adapters)."""
-    import numpy as np
-
     _require_positive_int("corpus_size", corpus_size)
     _require_positive_int("dimensions", dimensions)
     _require_positive_int("queries", queries)
@@ -1333,11 +1625,8 @@ def run_smoke(
         mask=mask,
         selectivity=1.0,
     )
-    exact_p95 = float(
-        exact_cell.get("_exact_p95_ms") or exact_cell["latency_profiles"]["warm"]["p95_ms"] or 0.0
-    )
+    exact_p95 = _exact_p95_of(exact_cell)
     cells.append(_public_cell(exact_cell))
-
     for adapter_id in chosen_adapters:
         if adapter_id == "exact-numpy":
             continue
@@ -1368,9 +1657,24 @@ def run_smoke(
         cells=cells,
         crash_matrix=crash,
     )
-    # Keep numpy out of unused warning in constrained environments.
-    _ = np
     return report
+
+
+def _require_report_inputs(
+    mode: str, executed_corpus_sizes: Sequence[int], dimensions: int, queries: int
+) -> None:
+    if mode not in {"smoke", "full"}:
+        raise ValueError("mode must be smoke or full")
+    _require_positive_int("dimensions", dimensions)
+    _require_positive_int("queries", queries)
+    if not _valid_sizes(executed_corpus_sizes):
+        raise ValueError("executed_corpus_sizes must be non-empty and positive")
+
+
+def _measurement_status(cells: Sequence[dict[str, Any]]) -> str:
+    if cells:
+        return "measured"
+    return "unavailable"
 
 
 def build_report(
@@ -1383,15 +1687,7 @@ def build_report(
     cells: Sequence[dict[str, Any]],
     crash_matrix: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    if mode not in {"smoke", "full"}:
-        raise ValueError("mode must be smoke or full")
-    _require_positive_int("dimensions", dimensions)
-    _require_positive_int("queries", queries)
-    if not executed_corpus_sizes or any(
-        isinstance(size, bool) or not isinstance(size, int) or size < 1
-        for size in executed_corpus_sizes
-    ):
-        raise ValueError("executed_corpus_sizes must be non-empty and positive")
+    _require_report_inputs(mode, executed_corpus_sizes, dimensions, queries)
     return {
         "schema_version": f"scale-matrix-{mode}/v1",
         "mode": mode,
@@ -1412,7 +1708,7 @@ def build_report(
             "platform": sys.platform,
             "python": platform.python_version(),
             "harness": "benchmark/run_scale_matrix.py",
-            "measurement_status": "measured" if cells else "unavailable",
+            "measurement_status": _measurement_status(cells),
         },
         "adoption_policy": {
             "recall_floor": ADOPTION_RECALL_FLOOR,
@@ -1425,91 +1721,134 @@ def build_report(
     }
 
 
+def _json_children(value: Any, path: str) -> list[tuple[str, Any]]:
+    if isinstance(value, dict):
+        return [(f"{path}.{key}", child) for key, child in value.items()]
+    if isinstance(value, list):
+        return [(f"{path}[{index}]", child) for index, child in enumerate(value)]
+    return []
+
+
 def _assert_finite_json(value: Any, path: str = "$") -> None:
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"nonfinite report value at {path}")
-    if isinstance(value, dict):
-        for key, child in value.items():
-            _assert_finite_json(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _assert_finite_json(child, f"{path}[{index}]")
+    for child_path, child in _json_children(value, path):
+        _assert_finite_json(child, child_path)
+
+
+def _measured_consistent(metric_provenance: dict[str, Any]) -> bool:
+    return bool(metric_provenance.get("source")) and metric_provenance.get("reason") is None
+
+
+def _unavailable_consistent(metric_provenance: dict[str, Any]) -> bool:
+    return metric_provenance.get("source") is None and bool(metric_provenance.get("reason"))
+
+
+def _provenance_consistent(value: Any, metric_provenance: dict[str, Any]) -> bool:
+    status = metric_provenance.get("status")
+    if (value is None) != (status == "unavailable"):
+        return False
+    return _status_consistent(status, metric_provenance)
+
+
+def _status_consistent(status: object, metric_provenance: dict[str, Any]) -> bool:
+    if status == "measured":
+        return _measured_consistent(metric_provenance)
+    if status == "unavailable":
+        return _unavailable_consistent(metric_provenance)
+    return True
+
+
+def _validate_cell_provenance(cell_index: int, cell: dict[str, Any]) -> None:
+    metrics = cell.get("metrics", {})
+    provenance = cell.get("metric_provenance", {})
+    for metric in METRIC_KEYS:
+        if not _provenance_consistent(metrics.get(metric), provenance.get(metric, {})):
+            raise ValueError(f"metric provenance mismatch at cells[{cell_index}].{metric}")
 
 
 def _validate_metric_provenance(report: dict[str, Any]) -> None:
     for cell_index, cell in enumerate(report.get("cells", [])):
-        metrics = cell.get("metrics", {})
-        provenance = cell.get("metric_provenance", {})
-        for metric in METRIC_KEYS:
-            value = metrics.get(metric)
-            metric_provenance = provenance.get(metric, {})
-            status = metric_provenance.get("status")
-            if (value is None) != (status == "unavailable"):
-                raise ValueError(f"metric provenance mismatch at cells[{cell_index}].{metric}")
-            if status == "measured" and (
-                not metric_provenance.get("source") or metric_provenance.get("reason") is not None
-            ):
-                raise ValueError(f"metric provenance mismatch at cells[{cell_index}].{metric}")
-            if status == "unavailable" and (
-                metric_provenance.get("source") is not None
-                or not metric_provenance.get("reason")
-            ):
-                raise ValueError(f"metric provenance mismatch at cells[{cell_index}].{metric}")
+        _validate_cell_provenance(cell_index, cell)
+
+
+def _observed_cells(cells: Sequence[dict[str, Any]]) -> list[tuple[Any, Any, Any]]:
+    return [(cell.get("corpus_size"), cell.get("selectivity"), cell.get("adapter")) for cell in cells]
+
+
+def _require_full_matrix(observed: list[tuple[Any, Any, Any]]) -> None:
+    expected = [
+        (size, fraction, adapter)
+        for size in CORPUS_SIZES
+        for fraction in SELECTIVITY_FRACTIONS
+        for adapter in ADAPTER_IDS
+    ]
+    if sorted(observed, key=str) != sorted(expected, key=str):
+        raise ValueError("full matrix cells must contain each declared combination exactly once")
+
+
+def _one_cell_per_adapter(smoke_adapters: list[Any]) -> bool:
+    return len(smoke_adapters) == len(set(smoke_adapters)) and smoke_adapters.count("exact-numpy") == 1
+
+
+def _all_at_full_selectivity(observed: list[tuple[Any, Any, Any]], size: Any) -> bool:
+    return not any(cell_size != size or fraction != 1.0 for cell_size, fraction, _ in observed)
+
+
+def _smoke_cells_are_valid(observed: list[tuple[Any, Any, Any]], executed_sizes: list[Any]) -> bool:
+    if len(executed_sizes) != 1:
+        return False
+    if not _one_cell_per_adapter([adapter for _size, _fraction, adapter in observed]):
+        return False
+    return _all_at_full_selectivity(observed, executed_sizes[0])
+
+
+def _require_smoke_matrix(observed: list[tuple[Any, Any, Any]], report: dict[str, Any]) -> None:
+    if not _smoke_cells_are_valid(observed, report.get("executed_corpus_sizes", [])):
+        raise ValueError("smoke matrix cells must contain one cell per adapter at full selectivity")
+
+
+def _require_selected_size(cell_index: int, cell: dict[str, Any], methodology: dict[str, Any]) -> None:
+    size = cell.get("corpus_size")
+    fraction = cell.get("selectivity")
+    if not isinstance(size, int) or not isinstance(fraction, (int, float)):
+        return
+    if methodology.get("selected_corpus_size") != max(1, round(size * fraction)):
+        raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
+
+
+def _require_cell_methodology(cell_index: int, cell: dict[str, Any]) -> None:
+    methodology = cell.get("filter_methodology", {})
+    if methodology.get("indexed_corpus_size") != cell.get("corpus_size"):
+        raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
+    if methodology.get("implementation") != _filter_implementation(cell.get("adapter")):
+        raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
+    _require_selected_size(cell_index, cell, methodology)
 
 
 def _validate_report_semantics(report: dict[str, Any], *, mode: str) -> None:
     cells = report.get("cells", [])
-    observed = [
-        (cell.get("corpus_size"), cell.get("selectivity"), cell.get("adapter"))
-        for cell in cells
-    ]
+    observed = _observed_cells(cells)
     if mode == "full":
-        expected = [
-            (size, fraction, adapter)
-            for size in CORPUS_SIZES
-            for fraction in SELECTIVITY_FRACTIONS
-            for adapter in ADAPTER_IDS
-        ]
-        if sorted(observed, key=str) != sorted(expected, key=str):
-            raise ValueError("full matrix cells must contain each declared combination exactly once")
+        _require_full_matrix(observed)
     else:
-        executed_sizes = report.get("executed_corpus_sizes", [])
-        smoke_adapters = [adapter for _size, _fraction, adapter in observed]
-        if (
-            len(executed_sizes) != 1
-            or len(smoke_adapters) != len(set(smoke_adapters))
-            or smoke_adapters.count("exact-numpy") != 1
-            or any(size != executed_sizes[0] or fraction != 1.0 for size, fraction, _ in observed)
-        ):
-            raise ValueError("smoke matrix cells must contain one cell per adapter at full selectivity")
+        _require_smoke_matrix(observed, report)
     for cell_index, cell in enumerate(cells):
-        methodology = cell.get("filter_methodology", {})
-        if methodology.get("indexed_corpus_size") != cell.get("corpus_size"):
-            raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
-        adapter = cell.get("adapter")
-        expected_implementation = (
-            "lancedb-prefilter"
-            if isinstance(adapter, str) and adapter.startswith("lancedb")
-            else "numpy-mask"
-            if adapter == "exact-numpy"
-            else "postfilter"
-        )
-        if methodology.get("implementation") != expected_implementation:
-            raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
-        size = cell.get("corpus_size")
-        fraction = cell.get("selectivity")
-        if isinstance(size, int) and isinstance(fraction, (int, float)):
-            expected_selected = max(1, round(size * fraction))
-            if methodology.get("selected_corpus_size") != expected_selected:
-                raise ValueError(f"filter methodology mismatch at cells[{cell_index}]")
+        _require_cell_methodology(cell_index, cell)
+
+
+def _report_schema(mode: str) -> Any:
+    if mode == "smoke":
+        return SMOKE_REPORT_SCHEMA
+    if mode == "full":
+        return FULL_REPORT_SCHEMA
+    return None
 
 
 def write_report_atomic(report: dict[str, Any], output: Path, *, mode: str) -> None:
     from reliable_memory import validate_schema
 
-    schema = (
-        SMOKE_REPORT_SCHEMA if mode == "smoke" else FULL_REPORT_SCHEMA if mode == "full" else None
-    )
+    schema = _report_schema(mode)
     if schema is None:
         raise ValueError("mode must be smoke or full")
     _assert_finite_json(report)
@@ -1534,13 +1873,17 @@ def write_report_atomic(report: dict[str, Any], output: Path, *, mode: str) -> N
         temporary.unlink(missing_ok=True)
 
 
-def main(argv: list[str] | None = None) -> int:
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if raw_argv and raw_argv[0] == "--crash-worker":
-        if len(raw_argv) != 3 or raw_argv[1] not in CRASH_POINTS:
-            return 2
-        _crash_worker(raw_argv[1], Path(raw_argv[2]))
-        return 1
+def _crash_worker_entry(raw_argv: list[str]) -> int | None:
+    """Exit code of the crash-worker mode, or None when this is not that mode."""
+    if not raw_argv or raw_argv[0] != "--crash-worker":
+        return None
+    if len(raw_argv) != 3 or raw_argv[1] not in CRASH_POINTS:
+        return 2
+    _crash_worker(raw_argv[1], Path(raw_argv[2]))
+    return 1
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scale and failure matrix harness (Task 28)")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--smoke", action="store_true", help="Deterministic offline smoke only")
@@ -1557,58 +1900,88 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run declared heavy sizes serially (slow; not for ordinary CI)",
     )
-    args = parser.parse_args(raw_argv)
+    return parser
 
+
+def _require_argument_bounds(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     for name in ("corpus_size", "dimensions", "queries"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be >= 1")
-
     if args.full and args.queries > min(CORPUS_SIZES):
         parser.error(f"--queries must be <= {min(CORPUS_SIZES)} for --full")
 
+
+def _exact_p95_after(adapter_id: str, cell: dict[str, Any], exact_p95: float | None) -> float | None:
+    """The exact cell hands its warm p95 to the ANN cells that follow it."""
+    if adapter_id != "exact-numpy":
+        return exact_p95
+    value = _exact_p95_of(cell)
+    cell.pop("_exact_p95_ms", None)
+    return value
+
+
+def _size_cells(size: int, args: argparse.Namespace) -> list[dict[str, Any]]:
+    corpus = generate_corpus(n_chunks=size, dimensions=args.dimensions, seed=args.seed)
+    queries = corpus.vectors[: max(1, min(args.queries, size))]
+    cells: list[dict[str, Any]] = []
+    exact_p95 = None
+    for fraction in SELECTIVITY_FRACTIONS:
+        mask = selectivity_mask(corpus, fraction=fraction, seed=args.seed)
+        for adapter_id in ADAPTER_IDS:
+            cell = run_adapter(
+                adapter_id,
+                corpus=corpus,
+                queries=queries,
+                k=50,
+                mask=mask,
+                selectivity=fraction,
+                exact_p95_ms=exact_p95,
+            )
+            exact_p95 = _exact_p95_after(adapter_id, cell, exact_p95)
+            cells.append(cell)
+    return cells
+
+
+def _full_report(args: argparse.Namespace) -> dict[str, Any]:
+    # Serial heavy path — never parallel.
+    plan = plan_matrix(
+        corpus_sizes=CORPUS_SIZES,
+        adapters=ADAPTER_IDS,
+        selectivity=SELECTIVITY_FRACTIONS,
+        parallel=True,
+    )
+    assert plan["execution"] == "serial"
+    cells = [cell for size in CORPUS_SIZES for cell in _size_cells(size, args)]
+    return build_report(
+        mode="full",
+        executed_corpus_sizes=CORPUS_SIZES,
+        dimensions=args.dimensions,
+        queries=args.queries,
+        seed=args.seed,
+        cells=cells,
+        crash_matrix=run_crash_matrix(seed=args.seed),
+    )
+
+
+def _emit_report(report: dict[str, Any], args: argparse.Namespace) -> None:
+    _assert_finite_json(report)
+    text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    if args.output is not None:
+        write_report_atomic(report, args.output, mode=report["mode"])
+    if args.json or args.output is None:
+        sys.stdout.write(text)
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    worker_exit = _crash_worker_entry(raw_argv)
+    if worker_exit is not None:
+        return worker_exit
+    parser = _build_parser()
+    args = parser.parse_args(raw_argv)
+    _require_argument_bounds(parser, args)
     if args.full:
-        # Serial heavy path — never parallel.
-        plan = plan_matrix(
-            corpus_sizes=CORPUS_SIZES,
-            adapters=ADAPTER_IDS,
-            selectivity=SELECTIVITY_FRACTIONS,
-            parallel=True,
-        )
-        assert plan["execution"] == "serial"
-        cells: list[dict[str, Any]] = []
-        for size in CORPUS_SIZES:
-            corpus = generate_corpus(n_chunks=size, dimensions=args.dimensions, seed=args.seed)
-            queries = corpus.vectors[: max(1, min(args.queries, size))]
-            exact_p95 = None
-            for fraction in SELECTIVITY_FRACTIONS:
-                mask = selectivity_mask(corpus, fraction=fraction, seed=args.seed)
-                for adapter_id in ADAPTER_IDS:
-                    cell = run_adapter(
-                        adapter_id,
-                        corpus=corpus,
-                        queries=queries,
-                        k=50,
-                        mask=mask,
-                        selectivity=fraction,
-                        exact_p95_ms=exact_p95,
-                    )
-                    if adapter_id == "exact-numpy":
-                        exact_p95 = float(
-                            cell.get("_exact_p95_ms")
-                            or cell["latency_profiles"]["warm"]["p95_ms"]
-                            or 0.0
-                        )
-                        cell.pop("_exact_p95_ms", None)
-                    cells.append(cell)
-        report = build_report(
-            mode="full",
-            executed_corpus_sizes=CORPUS_SIZES,
-            dimensions=args.dimensions,
-            queries=args.queries,
-            seed=args.seed,
-            cells=cells,
-            crash_matrix=run_crash_matrix(seed=args.seed),
-        )
+        report = _full_report(args)
     else:
         report = run_smoke(
             corpus_size=args.corpus_size,
@@ -1616,13 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             queries=args.queries,
         )
-
-    _assert_finite_json(report)
-    text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    if args.output is not None:
-        write_report_atomic(report, args.output, mode=report["mode"])
-    if args.json or args.output is None:
-        sys.stdout.write(text)
+    _emit_report(report, args)
     return 0
 
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -116,30 +115,6 @@ def _opens_daily_append(src: str) -> bool:
     if not _calls_near(src, r'\.open\s*\(\s*["\']a', "daily"):
         return False
     return "locked_append" not in src and "append_daily" not in src
-
-
-def _start_threads(threads: list) -> None:
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-
-def _assert_triple_contiguous(lines: list[str], index: int) -> None:
-    assert lines[index].startswith("START-"), (
-        f"Expected START at line {index}, got: {lines[index]!r}"
-    )
-    _, tid, num = lines[index].split("-")
-    assert lines[index + 1] == f"MIDDLE-{tid}-{num}", (
-        f"Interleaving detected: line {index + 1} expected MIDDLE-{tid}-{num}, "
-        f"got {lines[index + 1]!r}"
-    )
-    assert lines[index + 2] == f"END-{tid}-{num}", (
-        f"Interleaving detected: line {index + 2} expected END-{tid}-{num}, "
-        f"got {lines[index + 2]!r}"
-    )
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 
 # ---------------------------------------------------------------------------
@@ -528,68 +503,6 @@ class TestNoLegacyPaths:
             f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
             "Update to current three-zone paths."
         )
-
-
-# ---------------------------------------------------------------------------
-# INVARIANT 8: Daily-log lock actually provides exclusivity
-# (BEHAVIORAL test — would have caught H-001/H-002 rename-based lock)
-# ---------------------------------------------------------------------------
-
-
-class TestDailyLockExclusivity:
-    """The daily-log lock must ACTUALLY prevent concurrent writes.
-
-    Previous presence-tests checked that ``_daily_lock`` is imported, but
-    the lock itself was broken (rename overwrites on POSIX). This test
-    proves the lock provides real exclusivity by spawning concurrent
-    writers and asserting no interleaving.
-    """
-
-    def test_concurrent_writers_do_not_interleave(self, tmp_path, monkeypatch):
-        """N threads write to the same daily file under _daily_lock —
-        each write must be atomic (no line interleaving)."""
-        import threading
-
-        import daily_log_append
-
-        # Redirect STATE_ROOT so the lock file lives in tmp
-        lock_dir = tmp_path / "run"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        monkeypatch.setattr(daily_log_append, "STATE_ROOT", tmp_path)
-
-        daily_path = tmp_path / "daily.md"
-
-        def writer(thread_id: int):
-            for i in range(10):
-                line = f"START-{thread_id}-{i}\nMIDDLE-{thread_id}-{i}\nEND-{thread_id}-{i}\n"
-                with daily_log_append._daily_lock(timeout=30.0):
-                    with daily_path.open("a", encoding="utf-8") as f:
-                        f.write(line)
-
-        threads = [threading.Thread(target=writer, args=(t,)) for t in range(5)]
-        _start_threads(threads)
-
-        # Verify: each START/MIDDLE/END triple must be contiguous
-        lines = daily_path.read_text(encoding="utf-8").strip().splitlines()
-        for index in range(0, len(lines), 3):
-            _assert_triple_contiguous(lines, index)
-
-    def test_lock_is_fail_closed(self, tmp_path, monkeypatch):
-        """If lock can't be acquired, it must raise (not silently write)."""
-        import daily_log_append
-
-        lock_dir = tmp_path / "run"
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = lock_dir / "daily-append.lock"
-        monkeypatch.setattr(daily_log_append, "STATE_ROOT", tmp_path)
-
-        # Pre-create a fresh lock owned by a "live" PID (ours)
-        lock_file.write_text(str(__import__("os").getpid()), encoding="utf-8")
-
-        # Should raise TimeoutError, not silently proceed
-        with pytest.raises(TimeoutError):
-            with daily_log_append._daily_lock(timeout=0.5):
-                pass
 
 
 # ---------------------------------------------------------------------------

@@ -689,6 +689,58 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
     assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
 
 
+def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
+    """2026-09-11: the next plan for a pending quarantined daily differed elsewhere
+    (new action key) but proposed the same claim; the candidate create met the file
+    written on 2026-09-07 and the whole compile failed with FileExistsError."""
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from claims import ClaimIndex
+
+    old = _claim_record(root, claim_id="old", value="blue", text="The prior state is blue.", authority="user")
+    (root / "knowledge/notes/existing.md").write_bytes(
+        b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+        + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]})
+        + b"\n```\n"
+    )
+    new = _claim_record(root, claim_id="new", value="red", text="A durable exact-byte observation.", authority="inferred")
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create",
+            "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    ClaimIndex(state_root, vault=root).rebuild()
+    coordinator = MarkdownCoordinator(root, state_root)
+    compile_memory.apply_compile_plan(
+        inputs, plan, action_key="9" * 64, trigger="manual",
+        coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+    )
+    candidates = sorted((root / "knowledge/inbox/claims").glob("*.md"))
+    before = candidates[0].read_bytes()
+
+    with pytest.raises(compile_memory.CandidatesAlreadyQuarantined) as raised:
+        compile_memory.apply_compile_plan(
+            inputs, plan, action_key="8" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-15T12:00:00Z",
+        )
+
+    assert raised.value.paths == (candidates[0].relative_to(root).as_posix(),)
+    assert sorted((root / "knowledge/inbox/claims").glob("*.md")) == candidates
+    assert candidates[0].read_bytes() == before
+    selected = compile_memory.select_dailies(Namespace(file=None, all=False), {}, coordinator=coordinator)
+    assert selected == [daily]
+    outcome = compile_memory._still_quarantined_outcome(raised.value)
+    assert (outcome.status, outcome.outcome, outcome.paths) == (0, "quarantined", 0)
+    assert "batch still quarantined: 1 candidate(s)" in capsys.readouterr().out
+
+
 def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quarantines(vault):
     root, state_root = vault
     daily = _daily(root)

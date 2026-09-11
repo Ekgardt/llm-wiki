@@ -701,6 +701,10 @@ def _filesystem_locality(path: Path, deadline: float) -> tuple[str, str, bool]:
     if sys.platform == "darwin":
         filesystem, source, flags = _darwin_filesystem_details(path, deadline)
         return filesystem, source, bool(flags & _DARWIN_MNT_LOCAL)
+    return _other_platform_locality(path, deadline)
+
+
+def _other_platform_locality(path: Path, deadline: float) -> tuple[str, str, bool]:
     if sys.platform.startswith("linux"):
         filesystem, source = _linux_filesystem_details(path, deadline)
         return filesystem, source, True
@@ -857,6 +861,10 @@ def _identity(handle: _Handle) -> tuple[object, ...]:
         return tuple(
             _windows_workspace.identity(handle.value, directory=handle.directory)
         )
+    return _posix_identity(handle)
+
+
+def _posix_identity(handle: _Handle) -> tuple[object, ...]:
     info = os.fstat(handle.value)
     expected = stat.S_ISDIR(info.st_mode) if handle.directory else stat.S_ISREG(info.st_mode)
     if not expected:
@@ -897,14 +905,11 @@ def _posix_entry_kind(parent: _Handle, name: str) -> str | None:
     return _stat_kind(info.st_mode)
 
 
+_STAT_KINDS = ((stat.S_ISLNK, "link"), (stat.S_ISDIR, "directory"), (stat.S_ISREG, "file"))
+
+
 def _stat_kind(mode: int) -> str:
-    if stat.S_ISLNK(mode):
-        return "link"
-    if stat.S_ISDIR(mode):
-        return "directory"
-    if stat.S_ISREG(mode):
-        return "file"
-    return "other"
+    return next((kind for is_kind, kind in _STAT_KINDS if is_kind(mode)), "other")
 
 
 def _open_child_directory(
@@ -1524,6 +1529,10 @@ def _remove_held_lock(lock: _OwnedLock, handle: _Handle) -> bool:
     if os.name == "nt":
         _windows_workspace.delete_handle(handle.value)
         return True
+    return _unlink_owned_posix_lock(lock)
+
+
+def _unlink_owned_posix_lock(lock: _OwnedLock) -> bool:
     if _named_identity(lock.parent, lock.name, directory=False) != lock.identity:
         return False
     os.unlink(lock.name, dir_fd=lock.parent.value)
@@ -1572,6 +1581,12 @@ def _quarantined_stale_lock(
     _check_deadline(deadline)
     if not _lock_unchanged(stale, stale_identity, initial_raw, metadata):
         return None
+    return _moved_stale_lock(parent, stale, stale_identity)
+
+
+def _moved_stale_lock(
+    parent: _Handle, stale: _Handle, stale_identity: tuple[object, ...]
+) -> _OwnedFile | None:
     quarantine_name = f"{_SCRATCH_PREFIX}stale-lock-{secrets.token_hex(16)}"
     if not _quarantine_stale_lock(parent, stale, stale_identity, quarantine_name):
         return None
@@ -1625,6 +1640,12 @@ def _quarantine_stale_lock(
     if os.name == "nt":
         _windows_workspace.publish_file(stale.value, parent.value, quarantine_name)
         return True
+    return _rename_stale_posix_lock(parent, stale_identity, quarantine_name)
+
+
+def _rename_stale_posix_lock(
+    parent: _Handle, stale_identity: tuple[object, ...], quarantine_name: str
+) -> bool:
     if _named_identity(parent, _LOCK_NAME, directory=False) != stale_identity:
         return False
     os.rename(
@@ -1642,6 +1663,11 @@ def _try_create_lock(parent: _Handle, deadline: float) -> _OwnedLock | None:
     owned = _create_owned_lock(parent, deadline)
     if owned is not None:
         return owned
+    return _lock_after_collision(parent, deadline)
+
+
+def _lock_after_collision(parent: _Handle, deadline: float) -> _OwnedLock | None:
+    """Someone held the name: create it if it has gone, reclaim it if abandoned."""
     kind = _entry_kind(parent, _LOCK_NAME)
     if kind is None:
         return _create_owned_lock(parent, deadline)
@@ -1700,6 +1726,10 @@ def _json_children(item: object, depth: int, code: str) -> list[tuple[object, in
         return []
     if isinstance(item, dict):
         return _json_mapping_children(item, depth, code)
+    return _json_list_children(item, depth, code)
+
+
+def _json_list_children(item: object, depth: int, code: str) -> list[tuple[object, int]]:
     if isinstance(item, list):
         return [(child, depth + 1) for child in item]
     raise PyrightInstallError(code)
@@ -1930,14 +1960,16 @@ def _require_safe_member_name(
     name: str, child_parts: tuple[str, ...], relative: str
 ) -> None:
     encoded, component_bytes = _encoded_member_name(name, relative)
-    if not _member_name_is_safe(name):
+    if not _member_name_is_safe(name) or _member_path_oversized(encoded, component_bytes, child_parts):
         raise PyrightInstallError("pyright_existing_install_invalid")
-    if len(component_bytes) > MAX_PATH_COMPONENT_BYTES:
-        raise PyrightInstallError("pyright_existing_install_invalid")
-    if len(encoded) > MAX_PATH_BYTES:
-        raise PyrightInstallError("pyright_existing_install_invalid")
-    if len(child_parts) > MAX_PATH_COMPONENTS:
-        raise PyrightInstallError("pyright_existing_install_invalid")
+
+
+def _member_path_oversized(encoded: bytes, component_bytes: bytes, child_parts: tuple[str, ...]) -> bool:
+    return (
+        len(component_bytes) > MAX_PATH_COMPONENT_BYTES
+        or len(encoded) > MAX_PATH_BYTES
+        or len(child_parts) > MAX_PATH_COMPONENTS
+    )
 
 
 def _require_unique_folded_path(folded_paths: dict[str, str], relative: str) -> None:
@@ -1986,42 +2018,57 @@ def _validate_existing_tree(
     root: _Handle,
     deadline: float,
 ) -> dict[str, _ExistingEntry]:
-    count = 0
-    total_bytes = 0
-    folded_paths: dict[str, str] = {}
-    snapshots: dict[str, _ExistingEntry] = {}
+    walk = _ExistingTreeWalk(deadline)
+    walk.visit(root, ())
+    return walk.snapshots
 
-    def visit(directory: _Handle, parts: tuple[str, ...]) -> None:
-        _check_deadline(deadline)
+
+class _ExistingTreeWalk:
+    """One bounded, identity-checked walk of an installed tree."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.count = 0
+        self.total_bytes = 0
+        self.folded_paths: dict[str, str] = {}
+        self.snapshots: dict[str, _ExistingEntry] = {}
+
+    def visit(self, directory: _Handle, parts: tuple[str, ...]) -> None:
+        _check_deadline(self.deadline)
         entries = _existing_directory_entries(directory)
         _require_expected_root_entries(parts, entries)
         for entry in entries:
-            _check_deadline(deadline)
-            visit_entry(directory, parts, entry)
+            _check_deadline(self.deadline)
+            self.visit_entry(directory, parts, entry)
 
     def visit_entry(
-        directory: _Handle, parts: tuple[str, ...], entry: _ExistingEntry
+        self, directory: _Handle, parts: tuple[str, ...], entry: _ExistingEntry
     ) -> None:
-        nonlocal count, total_bytes
-        count += 1
-        if count > MAX_MEMBERS + 2:
-            raise PyrightInstallError("pyright_existing_install_invalid")
+        self._count_entry()
         child_parts = (*parts, entry.name)
         relative = "/".join(child_parts)
         _require_safe_member_name(entry.name, child_parts, relative)
-        _require_unique_folded_path(folded_paths, relative)
+        _require_unique_folded_path(self.folded_paths, relative)
         _require_expected_root_kind(parts, entry)
         if entry.kind == "directory":
-            snapshots[relative] = entry
-            visit_directory(directory, entry, child_parts)
+            self.snapshots[relative] = entry
+            self.visit_directory(directory, entry, child_parts)
             return
+        self._visit_file(entry, relative)
+
+    def _count_entry(self) -> None:
+        self.count += 1
+        if self.count > MAX_MEMBERS + 2:
+            raise PyrightInstallError("pyright_existing_install_invalid")
+
+    def _visit_file(self, entry: _ExistingEntry, relative: str) -> None:
         if entry.kind != "file":
             raise PyrightInstallError("pyright_existing_install_invalid")
-        total_bytes = _visited_file_bytes(entry, total_bytes)
-        _record_interesting_file(snapshots, relative, entry)
+        self.total_bytes = _visited_file_bytes(entry, self.total_bytes)
+        _record_interesting_file(self.snapshots, relative, entry)
 
     def visit_directory(
-        directory: _Handle, entry: _ExistingEntry, child_parts: tuple[str, ...]
+        self, directory: _Handle, entry: _ExistingEntry, child_parts: tuple[str, ...]
     ) -> None:
         if entry.identity is None:
             raise PyrightInstallError("pyright_existing_install_invalid")
@@ -2033,14 +2080,11 @@ def _validate_existing_tree(
         )
         identity = _identity(child)
         try:
-            visit(child, child_parts)
+            self.visit(child, child_parts)
         finally:
             child.close()
         if _child_directory_identity(directory, entry.name) != identity:
             raise PyrightInstallError("pyright_existing_install_invalid")
-
-    visit(root, ())
-    return snapshots
 
 
 def _existing_entry_kind(parent: _Handle) -> str | None:
@@ -2301,9 +2345,7 @@ def _require_unchanged_source(
 ) -> None:
     if _file_size(source) != before.st_size:
         raise PermissionError("artifact changed before open")
-    if before_posix_identity is None:
-        return
-    if _posix_source_identity(os.fstat(source.value)) != before_posix_identity:
+    if before_posix_identity is not None and _posix_source_identity(os.fstat(source.value)) != before_posix_identity:
         raise PermissionError("artifact changed before open")
 
 
@@ -2643,11 +2685,7 @@ def _require_safe_archive_name(name: str) -> None:
 
 
 def _require_package_root(parts: tuple[str, ...]) -> None:
-    if len(parts) > MAX_PATH_COMPONENTS:
-        raise PyrightInstallError("pyright_archive_path_unsafe")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise PyrightInstallError("pyright_archive_path_unsafe")
-    if parts[0] != "package":
+    if len(parts) > MAX_PATH_COMPONENTS or any(part in {"", ".", ".."} for part in parts) or parts[0] != "package":
         raise PyrightInstallError("pyright_archive_path_unsafe")
 
 
@@ -2659,12 +2697,14 @@ def _archive_component_size(part: str) -> int:
 
 
 def _require_safe_archive_component(part: str) -> None:
-    if _archive_component_size(part) > MAX_PATH_COMPONENT_BYTES:
+    if _archive_component_size(part) > MAX_PATH_COMPONENT_BYTES or _unsafe_archive_spelling(part):
         raise PyrightInstallError("pyright_archive_path_unsafe")
+
+
+def _unsafe_archive_spelling(part: str) -> bool:
     if part != part.rstrip(" .") or ":" in part:
-        raise PyrightInstallError("pyright_archive_path_unsafe")
-    if part.rstrip(" .").split(".", 1)[0].casefold() in _WINDOWS_RESERVED:
-        raise PyrightInstallError("pyright_archive_path_unsafe")
+        return True
+    return part.rstrip(" .").split(".", 1)[0].casefold() in _WINDOWS_RESERVED
 
 
 def _member_parts(member: tarfile.TarInfo) -> tuple[str, ...]:
@@ -2810,17 +2850,21 @@ def _account_member(member: tarfile.TarInfo, state: dict[str, int]) -> None:
         - member.offset
         - tarfile.BLOCKSIZE
     )
-    if hidden_metadata < 0 or hidden_metadata > MAX_PAX_BYTES:
-        raise PyrightInstallError("pyright_archive_pax_limit")
-    state["metadata"] += hidden_metadata
-    if state["metadata"] > MAX_EXTENDED_METADATA_BYTES:
-        raise PyrightInstallError("pyright_archive_pax_limit")
+    _charge_hidden_metadata(state, hidden_metadata)
     state["offset"] = member.offset_data + (
         (member.size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE * tarfile.BLOCKSIZE
     )
     state["members"] += 1
     if state["members"] > MAX_MEMBERS:
         raise PyrightInstallError("pyright_archive_member_count_limit")
+
+
+def _charge_hidden_metadata(state: dict[str, int], hidden_metadata: int) -> None:
+    if hidden_metadata < 0 or hidden_metadata > MAX_PAX_BYTES:
+        raise PyrightInstallError("pyright_archive_pax_limit")
+    state["metadata"] += hidden_metadata
+    if state["metadata"] > MAX_EXTENDED_METADATA_BYTES:
+        raise PyrightInstallError("pyright_archive_pax_limit")
 
 
 def _account_member_size(member: tarfile.TarInfo, state: dict[str, int]) -> None:
@@ -2950,12 +2994,14 @@ def _require_extracted_server(
 ) -> None:
     if package_json is None:
         raise PyrightInstallError("pyright_package_json_missing")
-    if server_sha256 is None:
-        raise PyrightInstallError("pyright_server_missing")
-    if names.kinds.get(_profile.PYRIGHT_SERVER_RELATIVE.as_posix()) != "file":
-        raise PyrightInstallError("pyright_server_missing")
+    _require_server_file(server_sha256, names)
     if server_sha256 == hashlib.sha256(b"").hexdigest():
         raise PyrightInstallError("pyright_server_empty")
+
+
+def _require_server_file(server_sha256: str | None, names: _ArchiveNames) -> None:
+    if server_sha256 is None or names.kinds.get(_profile.PYRIGHT_SERVER_RELATIVE.as_posix()) != "file":
+        raise PyrightInstallError("pyright_server_missing")
 
 
 def _digests_match(

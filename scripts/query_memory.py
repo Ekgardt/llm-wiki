@@ -168,7 +168,7 @@ def _detached_provider(
     def invoke() -> None:
         try:
             outcome.put((True, generator(prompt, system_prompt, QA_MAX_OUTPUT_TOKENS)))
-        except BaseException as exc:  # noqa: BLE001 - preserve provider isolation
+        except Exception as exc:  # noqa: BLE001 - preserve provider isolation
             outcome.put((False, exc))
 
     threading.Thread(target=invoke, name="grounded-qa-provider", daemon=True).start()
@@ -320,7 +320,10 @@ def _whole_entry_limit(requested: int | None = None) -> int | None:
     """
     if requested is not None:
         return requested
-    raw = os.environ.get(WHOLE_ENTRIES_ENV, "").strip().casefold()
+    return _operator_whole_entries(os.environ.get(WHOLE_ENTRIES_ENV, "").strip().casefold())
+
+
+def _operator_whole_entries(raw: str) -> int | None:
     if raw == "all":
         return None
     if raw.isdigit():
@@ -1037,7 +1040,10 @@ def _require_citation_touches_claim(
     claim_tokens = _content_tokens(claim_text)
     if not claim_tokens:
         return
-    span_tokens = _content_tokens(span_text)
+    _require_token_overlap(claim_tokens, _content_tokens(span_text))
+
+
+def _require_token_overlap(claim_tokens: set[str], span_tokens: set[str]) -> None:
     if claim_tokens & span_tokens:
         return
     _require_surviving_overlap(claim_tokens, span_tokens)

@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
@@ -1771,7 +1771,6 @@ def test_deferred_flush_operation_is_appended_once_under_lock(
     (tmp_path / "knowledge" / "notes").mkdir(parents=True)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(daily_log_append, "_daily_lock", nullcontext)
     assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is True
     assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is False
     content = daily.read_text(encoding="utf-8")

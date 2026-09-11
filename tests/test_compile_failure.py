@@ -30,7 +30,6 @@ def isolated_compile_state(tmp_path, monkeypatch):
     state_file = state_dir / "state.json"
     state_dir.mkdir(parents=True)
     state_file.write_text("{}\n", encoding="utf-8")
-    owner_before = maybe_compile._current_owner
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
     monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
@@ -38,7 +37,6 @@ def isolated_compile_state(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
     monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
     monkeypatch.setattr(maybe_compile, "STATE_ROOT", state_root)
-    monkeypatch.setattr(maybe_compile, "_current_owner", None)
     monkeypatch.setattr(maybe_compile, "LOCK_FILE", state_dir / "compile.pid")
     monkeypatch.setattr(
         maybe_compile, "LOG_OUT", state_root / "logs" / "maybe-compile-last.log"
@@ -47,7 +45,6 @@ def isolated_compile_state(tmp_path, monkeypatch):
         maybe_compile, "LOG_ERR", state_root / "logs" / "maybe-compile-last.err.log"
     )
     return {
-        "owner_before": owner_before,
         "state_root": state_root,
         "state_file": state_file,
         "state_before": "{}\n",
@@ -57,7 +54,6 @@ def isolated_compile_state(tmp_path, monkeypatch):
 
 def test_failed_compile_does_not_mark_hash(isolated_compile_state, monkeypatch):
     import compile_memory  # noqa: WPS433
-    import maybe_compile
 
     state_snapshot = isolated_compile_state
     vault = state_snapshot["log_md"].parent / "vault"
@@ -139,7 +135,6 @@ def test_failed_compile_does_not_mark_hash(isolated_compile_state, monkeypatch):
     assert failure["error_code"] == "RuntimeError"
 
     monkeypatch.undo()
-    assert maybe_compile._current_owner == state_snapshot["owner_before"]
 
 
 def _attempt(monkeypatch, outcomes: list[str]):
@@ -212,3 +207,35 @@ def test_the_validation_retry_is_bounded(monkeypatch):
 
     assert attempt.resolve(replace(candidate)) is None
     assert len(calls) == compile_memory.VALIDATION_RETRIES + 1
+
+
+def test_a_lock_that_cannot_be_read_refuses_the_run_and_says_why(
+    isolated_compile_state, monkeypatch
+):
+    """Doubt refuses: a lock failure is not "the spawner owns it" (audit H4)."""
+    import compile_memory
+    import maybe_compile
+
+    def unreadable() -> bool:
+        raise OSError("run/compile.pid: permission denied")
+
+    monkeypatch.setattr(maybe_compile, "_try_claim_lock", unreadable)
+
+    outcome, reason = compile_memory._acquire_compile_lock()
+
+    assert (outcome, reason) == (
+        None,
+        "compile lock unavailable (OSError: run/compile.pid: permission denied)",
+    )
+
+
+def test_a_held_lock_names_its_holder(isolated_compile_state, monkeypatch):
+    import compile_memory
+    import maybe_compile
+
+    monkeypatch.setattr(maybe_compile, "_try_claim_lock", lambda: False)
+    monkeypatch.setattr(maybe_compile, "_lock_state", lambda: ("live", "running pid=7 since t"))
+
+    outcome, reason = compile_memory._acquire_compile_lock()
+
+    assert (outcome, reason) == (None, "lock held by another compile (running pid=7 since t)")

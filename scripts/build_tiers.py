@@ -31,6 +31,7 @@ import stat
 import sys
 import tempfile
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
@@ -68,24 +69,24 @@ def _validate_source(source: CapturedSource) -> CapturedSource:
     return source
 
 
+_LINE_BREAKING = frozenset("\x00\r\n")
+
+
+def _bounded_text(value: object) -> bool:
+    """A non-empty single-line string of at most 128 characters."""
+    if not isinstance(value, str) or not value:
+        return False
+    return len(value) <= 128 and _LINE_BREAKING.isdisjoint(value)
+
+
 def _extractor_version(value: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 128
-        or any(character in value for character in "\x00\r\n")
-    ):
+    if not _bounded_text(value):
         raise ValueError("extractor_version must be a bounded non-empty string")
     return value
 
 
 def _bounded_model_value(value: object, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 128
-        or any(character in value for character in "\x00\r\n")
-    ):
+    if not _bounded_text(value):
         raise ValueError(f"{label} must be a bounded non-empty string")
     return value
 
@@ -94,12 +95,19 @@ def _model_provenance(
     use_llm: bool, model_descriptor: object | None, model_revision: str | None
 ) -> dict[str, object] | None:
     if not use_llm:
-        if model_descriptor is not None or model_revision is not None:
-            raise ValueError("model descriptor and revision require LLM generation")
+        _require_no_model(model_descriptor, model_revision)
         return None
     if model_descriptor is None or model_revision is None:
         raise ValueError("LLM generation requires a model descriptor and revision")
+    return _bounded_provenance(model_descriptor, model_revision)
 
+
+def _require_no_model(model_descriptor: object | None, model_revision: str | None) -> None:
+    if model_descriptor is not None or model_revision is not None:
+        raise ValueError("model descriptor and revision require LLM generation")
+
+
+def _bounded_provenance(model_descriptor: object, model_revision: str) -> dict[str, object]:
     from llm_client import ProviderDescriptor
 
     if not isinstance(model_descriptor, ProviderDescriptor):
@@ -128,19 +136,31 @@ def _fsync_directory(path: Path) -> None:
 
 def get_l0_for_source(source: CapturedSource) -> str:
     """Get L0 from immutable captured source bytes without live filesystem I/O."""
-    content = _captured_text(source)
-    body = FRONTMATTER_RE.sub("", content, count=1)
+    body = FRONTMATTER_RE.sub("", _captured_text(source), count=1)
+    l0 = _body_l0(body)
+    if l0 is not None:
+        return l0
+    return Path(source.record.relative_path).stem.replace("-", " ")
+
+
+def _body_l0(body: str) -> str | None:
+    """The page's one-sentence summary, else its first prose line after the H1."""
     match = SUMMARY_RE.search(body)
     if match:
         return match.group(1).strip()
+    return _first_prose_line(body)
 
-    lines = body.splitlines()
-    for line in lines[1:]:
+
+def _first_prose_line(body: str) -> str | None:
+    for line in body.splitlines()[1:]:
         stripped = line.strip()
-        if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
+        if _is_prose(stripped):
             return stripped
+    return None
 
-    return Path(source.record.relative_path).stem.replace("-", " ")
+
+def _is_prose(stripped: str) -> bool:
+    return bool(stripped) and not stripped.startswith("#") and not stripped.startswith("---")
 
 
 def generate_l1_for_source(
@@ -201,7 +221,7 @@ def tier_artifact_key(
     """Return the content/version-bound identity for one source's tier data."""
     source = _validate_source(source)
     version = _extractor_version(extractor_version)
-    use_llm = model_descriptor is not None or model_revision is not None or generated_l1 is not None
+    use_llm = any(value is not None for value in (model_descriptor, model_revision, generated_l1))
     model = _model_provenance(use_llm, model_descriptor, model_revision)
     if use_llm and not isinstance(generated_l1, str):
         raise ValueError("LLM artifact identity requires generated L1 bytes")
@@ -266,6 +286,16 @@ def _tier_artifact_bytes(
     return encoded
 
 
+@dataclass(frozen=True)
+class _TierRequest:
+    """How every source of one snapshot gets its tiers."""
+
+    use_llm: bool
+    version: str
+    model_descriptor: object | None
+    model_revision: str | None
+
+
 def build_snapshot_tiers(
     snapshot: CorpusSnapshot,
     generation_dir: Path,
@@ -276,83 +306,122 @@ def build_snapshot_tiers(
     model_revision: str | None = None,
 ) -> list[dict[str, object]]:
     """Build deterministic tier artifacts for exactly one immutable snapshot."""
+    _require_bounded_snapshot(snapshot)
+    version = _extractor_version(extractor_version)
+    model = _model_provenance(use_llm, model_descriptor, model_revision)
+    generation = Path(generation_dir)
+    output = _unpublished_tier_output(generation)
+    request = _TierRequest(use_llm, version, model_descriptor, model_revision)
+    staging = Path(tempfile.mkdtemp(prefix=".tiers-", dir=generation))
+    try:
+        entries = _tier_entries(snapshot.sources, request)
+        content = _tier_artifact_bytes(entries, version, model)
+        descriptors = _staged_tier_artifact(staging, content)
+        _publish_tiers(staging, output, generation)
+        return descriptors
+    finally:
+        _remove_staging(staging)
+
+
+def _require_bounded_snapshot(snapshot: object) -> None:
     from corpus_snapshot import CorpusSnapshot
 
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
     if len(snapshot.sources) > MAX_TIER_SOURCES:
         raise ValueError("snapshot has too many sources for tier artifacts")
-    version = _extractor_version(extractor_version)
-    model = _model_provenance(use_llm, model_descriptor, model_revision)
-    generation = Path(generation_dir)
+
+
+def _unpublished_tier_output(generation: Path) -> Path:
     metadata = generation.lstat()
     if not stat.S_ISDIR(metadata.st_mode) or generation.is_symlink():
         raise ValueError("generation_dir must be a regular unpublished directory")
     output = generation / "tiers"
     if output.exists() or output.is_symlink():
         raise FileExistsError("tier output already exists")
+    return output
 
-    staging = Path(tempfile.mkdtemp(prefix=".tiers-", dir=generation))
+
+def _tier_entries(sources: object, request: _TierRequest) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     seen_sources: set[str] = set()
-    published = False
+    for source in sources:
+        source = _validate_source(source)
+        _claim_logical_id(seen_sources, source.record.logical_id)
+        entries.append(_source_tier_entry(source, request))
+    entries.sort(key=lambda item: str(item["source"]["logical_id"]))  # type: ignore[index]
+    return entries
+
+
+def _claim_logical_id(seen_sources: set[str], logical_id: str) -> None:
+    if logical_id in seen_sources:
+        raise ValueError("snapshot contains duplicate logical source IDs")
+    seen_sources.add(logical_id)
+
+
+def _source_tier_entry(source: CapturedSource, request: _TierRequest) -> dict[str, object]:
+    l1 = generate_l1_for_source(
+        source,
+        use_llm=request.use_llm,
+        model_descriptor=request.model_descriptor,
+        model_revision=request.model_revision,
+    )
+    key = tier_artifact_key(
+        source,
+        extractor_version=request.version,
+        model_descriptor=request.model_descriptor,
+        model_revision=request.model_revision,
+        generated_l1=l1 if request.use_llm else None,
+    )
+    tiers = {
+        "l0": get_l0_for_source(source),
+        "l1": l1,
+        "l2": get_l2_for_source(source),
+    }
+    return _tier_entry(source, key, tiers)
+
+
+def _staged_tier_artifact(staging: Path, content: bytes) -> list[dict[str, object]]:
+    name = "tiers.json"
+    with (staging / name).open("xb") as artifact:
+        artifact.write(content)
+        artifact.flush()
+        os.fsync(artifact.fileno())
+    _fsync_directory(staging)
+    return [
+        {
+            "path": f"tiers/{name}",
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
+
+
+def _publish_tiers(staging: Path, output: Path, generation: Path) -> None:
+    """Rename the staged tiers into place; withdraw them if the rename cannot be made durable."""
+    if output.exists() or output.is_symlink():
+        raise FileExistsError("tier output already exists")
+    staging.replace(output)
     try:
-        for source in snapshot.sources:
-            source = _validate_source(source)
-            if source.record.logical_id in seen_sources:
-                raise ValueError("snapshot contains duplicate logical source IDs")
-            seen_sources.add(source.record.logical_id)
-            l1 = generate_l1_for_source(
-                source,
-                use_llm=use_llm,
-                model_descriptor=model_descriptor,
-                model_revision=model_revision,
-            )
-            key = tier_artifact_key(
-                source,
-                extractor_version=version,
-                model_descriptor=model_descriptor,
-                model_revision=model_revision,
-                generated_l1=l1 if use_llm else None,
-            )
-            tiers = {
-                "l0": get_l0_for_source(source),
-                "l1": l1,
-                "l2": get_l2_for_source(source),
-            }
-            entries.append(_tier_entry(source, key, tiers))
-        entries.sort(key=lambda item: str(item["source"]["logical_id"]))  # type: ignore[index]
-        content = _tier_artifact_bytes(entries, version, model)
-        name = "tiers.json"
-        with (staging / name).open("xb") as artifact:
-            artifact.write(content)
-            artifact.flush()
-            os.fsync(artifact.fileno())
-        _fsync_directory(staging)
-        descriptors = [
-            {
-                "path": f"tiers/{name}",
-                "size": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
-            }
-        ]
-        if output.exists() or output.is_symlink():
-            raise FileExistsError("tier output already exists")
-        staging.replace(output)
-        published = True
         _fsync_directory(generation)
-        return descriptors
     except BaseException:
-        if published and output.exists() and not output.is_symlink():
-            shutil.rmtree(output)
-            try:
-                _fsync_directory(generation)
-            except OSError:
-                pass
+        _withdraw_tiers(output, generation)
         raise
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+
+
+def _withdraw_tiers(output: Path, generation: Path) -> None:
+    if not output.exists() or output.is_symlink():
+        return
+    shutil.rmtree(output)
+    try:
+        _fsync_directory(generation)
+    except OSError:
+        pass
+
+
+def _remove_staging(staging: Path) -> None:
+    if staging.exists():
+        shutil.rmtree(staging)
 
 
 def get_l0(slug: str) -> str:
@@ -364,21 +433,10 @@ def get_l0(slug: str) -> str:
     page_path = KNOWLEDGE_DIR / f"{slug}.md"
     if not page_path.exists():
         return ""
-
     content = page_path.read_text(encoding="utf-8", errors="ignore")
-    body = FRONTMATTER_RE.sub("", content, count=1)
-
-    m = SUMMARY_RE.search(body)
-    if m:
-        return m.group(1).strip()
-
-    # Fallback: first sentence after H1.
-    lines = body.splitlines()
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
-            return stripped
-
+    l0 = _body_l0(FRONTMATTER_RE.sub("", content, count=1))
+    if l0 is not None:
+        return l0
     return slug.replace("-", " ")
 
 
@@ -455,27 +513,44 @@ def _safe_cache_slug(value: str) -> str:
     return value
 
 
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)}
+)
+_FORBIDDEN_PART_CHARACTERS = frozenset("\\:\x00")
+
+
 def _safe_logical_path(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
     posix = PurePosixPath(normalized)
-    windows = PureWindowsPath(normalized)
-    reserved = {"con", "prn", "aux", "nul"} | {
-        f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
-    }
-    if (
-        not value
-        or normalized != value
-        or posix.is_absolute()
-        or windows.is_absolute()
-        or windows.drive
-        or any(part in {"", ".", ".."} for part in posix.parts)
-        or posix.as_posix() != value
-        or any(part.rstrip(". ") != part for part in posix.parts)
-        or any(PurePosixPath(part).stem.casefold() in reserved for part in posix.parts)
-        or any("\\" in part or ":" in part or "\x00" in part for part in posix.parts)
-    ):
+    if _unsafe_path_text(value, normalized, posix) or _unsafe_path_parts(posix.parts):
         raise ValueError("logical_path must be a normalized safe relative path")
     return posix.as_posix()
+
+
+def _unsafe_path_text(value: str, normalized: str, posix: PurePosixPath) -> bool:
+    if not value or normalized != value:
+        return True
+    return _absolute_path_text(normalized, posix) or posix.as_posix() != value
+
+
+def _absolute_path_text(normalized: str, posix: PurePosixPath) -> bool:
+    windows = PureWindowsPath(normalized)
+    return posix.is_absolute() or windows.is_absolute() or bool(windows.drive)
+
+
+def _unsafe_path_parts(parts: tuple[str, ...]) -> bool:
+    return any(_unsafe_path_part(part) for part in parts)
+
+
+def _unsafe_path_part(part: str) -> bool:
+    if part in {"", ".", ".."} or part.rstrip(". ") != part:
+        return True
+    return _reserved_device_part(part) or not _FORBIDDEN_PART_CHARACTERS.isdisjoint(part)
+
+
+def _reserved_device_part(part: str) -> bool:
+    return PurePosixPath(part).stem.casefold() in _RESERVED_DEVICE_NAMES
 
 
 def get_l2(slug: str) -> str:
@@ -528,25 +603,20 @@ def generate_l1(
     page_path = KNOWLEDGE_DIR / f"{slug}.md"
     if not page_path.exists():
         return None
-
     content = page_path.read_text(encoding="utf-8", errors="ignore")
     body = FRONTMATTER_RE.sub("", content, count=1)
     l0 = get_l0(slug)
-
     if not use_llm or os_env_fake():
         return _deterministic_l1(slug, body, l0)
+    return _llm_l1(slug, body, l0)
 
-    # LLM-based L1 generation.
+
+def _llm_l1(slug: str, body: str, l0: str) -> str:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         from llm_client import call_llm
     except ImportError:
         return _deterministic_l1(slug, body, l0)
-
-    # Skip for fake provider (tests).
-    if os_env_fake():
-        return _deterministic_l1(slug, body, l0)
-
     prompt = f"""Summarize this knowledge page into a structured overview.
 Keep it under 500 words. Include:
 - Key points (bulleted)
@@ -559,11 +629,9 @@ Keep it under 500 words. Include:
 === OUTPUT ===
 Return ONLY the overview markdown (no title, no commentary).
 """
-
     result = call_llm(prompt, "You are a knowledge summarizer.", max_tokens=1000)
     if not result or not result.strip():
         return _deterministic_l1(slug, body, l0)
-
     return result.strip()
 
 
@@ -588,29 +656,35 @@ def write_l1(
 
 def _deterministic_l1(slug: str, body: str, l0: str) -> str:
     """Generate L1 without LLM — extract first sections."""
-    lines = body.splitlines()
     overview_lines = [l0, ""]
     char_count = len(l0)
-
-    for line in lines[1:]:  # Skip H1
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("## History"):
-            break  # Stop at history section
+    for line in _overview_candidates(body):
         # Check limit BEFORE adding.
         if char_count + len(line) >= 2000:
             overview_lines.append("\n...(truncated, see full page for more)")
             break
-        if stripped.startswith("## "):
-            overview_lines.append("")
-            overview_lines.append(stripped)
-            char_count += len(stripped)
-        else:
-            overview_lines.append(line)
-            char_count += len(line)
-
+        char_count += _append_overview_line(overview_lines, line)
     return "\n".join(overview_lines)
+
+
+def _overview_candidates(body: str):
+    """Non-blank body lines after the H1, stopping at the History section."""
+    for line in body.splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.startswith("## History"):
+            return
+        if stripped:
+            yield line
+
+
+def _append_overview_line(overview_lines: list[str], line: str) -> int:
+    """Append one line (a section heading gets a blank line before it); its counted length."""
+    stripped = line.strip()
+    if stripped.startswith("## "):
+        overview_lines.extend(("", stripped))
+        return len(stripped)
+    overview_lines.append(line)
+    return len(line)
 
 
 def os_env_fake() -> bool:
@@ -633,68 +707,65 @@ def build_all_tiers(use_llm: bool = False, verbose: bool = True) -> dict:
             "LLM generation requires an explicit model descriptor and revision; "
             "legacy tier batch generation is unavailable"
         )
-
     TIERS_DIR.mkdir(parents=True, exist_ok=True)
-
-    stats = {"generated": 0, "skipped": 0, "errors": 0}
-
     if not KNOWLEDGE_DIR.exists():
-        return stats
+        return {"generated": 0, "skipped": 0, "errors": 0}
+    return _build_page_tiers(verbose)
 
+
+def _build_page_tiers(verbose: bool) -> dict:
+    stats = {"generated": 0, "skipped": 0, "errors": 0}
     for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
         if md.name in SKIP_NAMES or "archive" in md.parts:
             continue
-
-        # Skip superseded pages.
-        try:
-            captured = md.read_bytes()
-            content = captured.decode("utf-8", errors="strict")
-            if "status: superseded" in content or "status: archived" in content:
-                stats["skipped"] += 1
-                continue
-        except OSError:
-            stats["errors"] += 1
-            continue
-
-        slug = md.stem
-        source_sha256 = hashlib.sha256(captured).hexdigest()
-        logical_path = md.relative_to(KNOWLEDGE_DIR).as_posix()
-
-        if not _needs_l1_regeneration(
-            slug, md, source_sha256, logical_path=logical_path
-        ):
-            stats["skipped"] += 1
-            continue
-
-        try:
-            body = FRONTMATTER_RE.sub("", content, count=1)
-            summary_match = SUMMARY_RE.search(body)
-            l0 = summary_match.group(1).strip() if summary_match else slug.replace("-", " ")
-            l1 = (
-                _deterministic_l1(slug, body, l0)
-                if not use_llm or os_env_fake()
-                else generate_l1(slug, use_llm=True, source_sha256=source_sha256)
-            )
-            if l1:
-                write_l1(
-                    slug,
-                    l1,
-                    source_sha256=source_sha256,
-                    logical_path=logical_path,
-                )
-                stats["generated"] += 1
-                if verbose:
-                    print(f"  Generated L1: {slug}")
-            else:
-                stats["errors"] += 1
-        except Exception:
-            stats["errors"] += 1
-
+        stats[_build_page_tier(md, verbose)] += 1
     if verbose:
         print(f"\nL1 tier generation: {stats['generated']} generated, "
               f"{stats['skipped']} skipped, {stats['errors']} errors.")
-
     return stats
+
+
+def _build_page_tier(md: Path, verbose: bool) -> str:
+    """The stats bucket of one page: generated, skipped or errors."""
+    try:
+        captured = md.read_bytes()
+    except OSError:
+        return "errors"
+    content = captured.decode("utf-8", errors="strict")
+    if "status: superseded" in content or "status: archived" in content:
+        return "skipped"
+    return _refresh_page_tier(md, captured, content, verbose)
+
+
+def _refresh_page_tier(md: Path, captured: bytes, content: str, verbose: bool) -> str:
+    slug = md.stem
+    source_sha256 = hashlib.sha256(captured).hexdigest()
+    logical_path = md.relative_to(KNOWLEDGE_DIR).as_posix()
+    if not _needs_l1_regeneration(slug, md, source_sha256, logical_path=logical_path):
+        return "skipped"
+    try:
+        _write_page_l1(slug, content, source_sha256, logical_path)
+        _announce_generated(slug, verbose)
+    except Exception:
+        return "errors"
+    return "generated"
+
+
+def _write_page_l1(slug: str, content: str, source_sha256: str, logical_path: str) -> None:
+    body = FRONTMATTER_RE.sub("", content, count=1)
+    summary_match = SUMMARY_RE.search(body)
+    l0 = summary_match.group(1).strip() if summary_match else slug.replace("-", " ")
+    write_l1(
+        slug,
+        _deterministic_l1(slug, body, l0),
+        source_sha256=source_sha256,
+        logical_path=logical_path,
+    )
+
+
+def _announce_generated(slug: str, verbose: bool) -> None:
+    if verbose:
+        print(f"  Generated L1: {slug}")
 
 
 def get_tier(slug: str, level: str = "auto") -> dict:
@@ -710,68 +781,98 @@ def get_tier(slug: str, level: str = "auto") -> dict:
     l0 = get_l0(slug)
     l1 = get_l1(slug)
     l2 = get_l2(slug)
+    view = _TIER_VIEWS.get(level, _auto_tier)
+    return view(l0, l1, l2)
 
-    if level == "l0":
-        return {"level": "l0", "content": l0, "available": ["l0"]}
-    elif level == "l1":
-        return {"level": "l1", "content": l1 or l0, "available": ["l0"] + (["l1"] if l1 else [])}
-    elif level == "l2":
-        return {"level": "l2", "content": l2, "available": ["l0"] + (["l1"] if l1 else []) + ["l2"]}
-    else:  # auto
-        content = l0
-        if l1:
-            content = l1
-        return {
-            "level": "l1" if l1 else "l0",
-            "content": content,
-            "l0": l0,
-            "available": ["l0"] + (["l1"] if l1 else []) + (["l2"] if l2 else []),
-        }
+
+def _levels_through_l1(l1: str | None) -> list[str]:
+    return ["l0", "l1"] if l1 else ["l0"]
+
+
+def _l0_tier(l0: str, l1: str | None, l2: str) -> dict:
+    return {"level": "l0", "content": l0, "available": ["l0"]}
+
+
+def _l1_tier(l0: str, l1: str | None, l2: str) -> dict:
+    return {"level": "l1", "content": l1 or l0, "available": _levels_through_l1(l1)}
+
+
+def _l2_tier(l0: str, l1: str | None, l2: str) -> dict:
+    return {"level": "l2", "content": l2, "available": [*_levels_through_l1(l1), "l2"]}
+
+
+def _auto_tier(l0: str, l1: str | None, l2: str) -> dict:
+    return {
+        "level": "l1" if l1 else "l0",
+        "content": l1 or l0,
+        "l0": l0,
+        "available": _levels_through_l1(l1) + (["l2"] if l2 else []),
+    }
+
+
+_TIER_VIEWS = {"l0": _l0_tier, "l1": _l1_tier, "l2": _l2_tier}
 
 
 def main() -> int:
+    parser = _argument_parser()
+    args = parser.parse_args()
+    if args.llm:
+        parser.error("--llm is unavailable without explicit model descriptor and revision")
+    for flag, action in (("status", _print_status), ("slug", _generate_one), ("get", _print_tier)):
+        if getattr(args, flag):
+            return action(args)
+    build_all_tiers(use_llm=False)
+    return 0
+
+
+def _argument_parser():
     import argparse
+
     p = argparse.ArgumentParser(description="L0/L1/L2 tiered knowledge loading.")
     p.add_argument("--slug", type=str, default=None, help="Generate L1 for one page.")
     p.add_argument("--all", action="store_true", help="Generate L1 for all pages.")
     p.add_argument("--llm", action="store_true", help="Unavailable without explicit model provenance.")
     p.add_argument("--status", action="store_true", help="Show cache statistics.")
     p.add_argument("--get", type=str, default=None, help="Get content at tier level.")
-    args = p.parse_args()
+    return p
 
-    if args.llm:
-        p.error("--llm is unavailable without explicit model descriptor and revision")
 
-    if args.status:
-        if not TIERS_DIR.exists():
-            print("No L1 cache. Run --all to generate.")
-            return 0
-        l1_files = list(TIERS_DIR.glob("*.l1.md"))
-        pages = list(KNOWLEDGE_DIR.rglob("*.md")) if KNOWLEDGE_DIR.exists() else []
-        page_count = sum(1 for p in pages if p.name not in SKIP_NAMES and "archive" not in p.parts)
-        print(f"L1 cache: {len(l1_files)} / {page_count} pages")
+def _print_status(args) -> int:
+    if not TIERS_DIR.exists():
+        print("No L1 cache. Run --all to generate.")
         return 0
+    l1_files = list(TIERS_DIR.glob("*.l1.md"))
+    print(f"L1 cache: {len(l1_files)} / {_tier_page_count()} pages")
+    return 0
 
-    if args.slug:
-        l1 = generate_l1(args.slug, use_llm=False)
-        if l1:
-            write_l1(args.slug, l1)
-            print(f"Generated L1 for {args.slug}: {len(l1)} chars.")
-        else:
-            print(f"Failed to generate L1 for {args.slug}.")
-        return 0
 
-    if args.get:
-        result = get_tier(args.get)
-        print(f"Level: {result['level']}")
-        print(f"Available: {result['available']}")
-        print(f"Content ({len(result['content'])} chars):")
-        print(result['content'][:500])
+def _tier_page_count() -> int:
+    if not KNOWLEDGE_DIR.exists():
         return 0
+    return sum(
+        1
+        for page in KNOWLEDGE_DIR.rglob("*.md")
+        if page.name not in SKIP_NAMES and "archive" not in page.parts
+    )
 
-    if args.all or True:  # Default: build all
-        build_all_tiers(use_llm=False)
+
+def _generate_one(args) -> int:
+    l1 = generate_l1(args.slug, use_llm=False)
+    if not l1:
+        print(f"Failed to generate L1 for {args.slug}.")
         return 0
+    write_l1(args.slug, l1)
+    print(f"Generated L1 for {args.slug}: {len(l1)} chars.")
+    return 0
+
+
+def _print_tier(args) -> int:
+    result = get_tier(args.get)
+    print(f"Level: {result['level']}")
+    print(f"Available: {result['available']}")
+    print(f"Content ({len(result['content'])} chars):")
+    print(result['content'][:500])
+    return 0
 
 
 if __name__ == "__main__":

@@ -387,10 +387,12 @@ def _announce(host: str, port: int, token_path: Path) -> None:
 
 
 def _shutdown() -> None:
-    with contextlib.suppress(BaseException):
+    try:
         mcp_server._close_navigation_session_manager(
             time.monotonic() + mcp_server.MCP_OPERATION_SECONDS
         )
+    except Exception as error:  # noqa: BLE001 - reported, never hidden
+        print(f"mcp_http: navigation sessions not closed cleanly: {error}", file=sys.stderr)
 
 
 # How long the warm-up may take before we give up and serve anyway. It is not a

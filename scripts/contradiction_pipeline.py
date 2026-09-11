@@ -603,6 +603,60 @@ def _commit_assessment(
     )
 
 
+_CANDIDATE_JSON_RE = re.compile(rb"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
+_CANDIDATE_IDENTITY_KEYS = ("id", "fingerprint", "evidence")
+
+
+def _assessment_order(item: ClaimAssessment) -> tuple[str, str]:
+    return (str(item.claim.record["id"]), str(item.claim.record["fingerprint"]))
+
+
+def _first_path(paths: tuple[str, ...]) -> str | None:
+    if not paths:
+        return None
+    return paths[0]
+
+
+def _existing_candidate_bytes(target: Path) -> bytes | None:
+    try:
+        metadata = target.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+    return read_stable_bytes(target, MAX_CLAIM_PAGE_BYTES, label="claim candidate")
+
+
+def _embedded_candidate_claim(raw: bytes) -> Mapping[str, object] | None:
+    matches = _CANDIDATE_JSON_RE.findall(raw)
+    if len(matches) != 1:
+        return None
+    try:
+        candidate = json.loads(matches[0])
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(candidate, dict) or candidate.get("schema_version") != "claim-candidate/v1":
+        return None
+    return _dict_or_none(candidate.get("claim"))
+
+
+def _dict_or_none(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _candidate_present(target: Path, record: Mapping[str, object]) -> bool:
+    """A regular file at the candidate path embedding the same claim identity."""
+    raw = _existing_candidate_bytes(target)
+    if raw is None:
+        return False
+    embedded = _embedded_candidate_claim(raw)
+    if embedded is None:
+        return False
+    return all(embedded.get(key) == record[key] for key in _CANDIDATE_IDENTITY_KEYS)
+
+
 def _commit_operation_id(path: str | None, decision: LifecycleDecision) -> str:
     return "contradiction:" + sha256_bytes(
         canonical_json_bytes(
@@ -953,12 +1007,14 @@ class ContradictionPipeline:
         claim_tree_manifest: Mapping[str, object] | None = None,
     ) -> str | None:
         self._require_writer()
-        changes, preconditions, candidate_paths = self.plan_changes(
+        changes, preconditions, created, present = self.plan_candidate_changes(
             (_commit_assessment(claim, decision),)
         )
+        path = _first_path(created + present)
+        if not changes:
+            return path
         if claim_tree_manifest is not None:
             preconditions["claim_tree_manifest"] = dict(claim_tree_manifest)
-        path = candidate_paths[0] if candidate_paths else None
         self._write_candidate(changes, preconditions, path, decision)
         return path
 
@@ -999,45 +1055,62 @@ class ContradictionPipeline:
     def plan_changes(
         self, assessments: Sequence[ClaimAssessment]
     ) -> tuple[list[MarkdownChange], dict[str, object], tuple[str, ...]]:
+        changes, preconditions, created, _present = self.plan_candidate_changes(assessments)
+        return changes, preconditions, created
+
+    def plan_candidate_changes(
+        self, assessments: Sequence[ClaimAssessment]
+    ) -> tuple[list[MarkdownChange], dict[str, object], tuple[str, ...], tuple[str, ...]]:
+        """Changes, preconditions, candidates to create, and candidates already on disk.
+
+        A candidate path names one claim over one evidence span; a file there that
+        embeds the same claim identity is that review item, so it is not created
+        twice (docs/research/2026-09-11-a-quarantined-claim-is-written-once.md).
+        """
         if self.vault is None:
             raise ValueError("mutation planning requires a vault")
         changes: list[MarkdownChange] = []
-        candidate_paths = []
+        created: list[str] = []
+        present: list[str] = []
         mutations = set()
-        for assessment in sorted(
-            assessments, key=lambda item: (str(item.claim.record["id"]), str(item.claim.record["fingerprint"]))
-        ):
+        for assessment in sorted(assessments, key=_assessment_order):
             mutations.update(assessment.lifecycle_mutations)
             if assessment.recommendation != "quarantine":
                 continue
-            claim = assessment.claim
-            quarantined = NormalizedClaim({**claim.record, "lifecycle": "quarantined"})
-            validate_claim_record(quarantined.record)
-            candidate = {
-                "schema_version": "claim-candidate/v1",
-                "status": "quarantined",
-                "reason": "contradiction assessment requires manual review",
-                "claim": quarantined.record,
-                "source_page": self.source_page,
-                "created_at": claim.record["observed_at"],
-            }
-            validate_schema(candidate, CANDIDATE_SCHEMA)
-            identity = sha256_bytes(
-                canonical_json_bytes(
-                    {"id": claim.record["id"], "evidence": claim.record["evidence"]}
-                )
-            )[:20]
-            path = f"knowledge/inbox/claims/{claim.record['fingerprint']}-{identity}.md"
-            content = (
-                "---\ntype: claim-candidate\nstatus: quarantined\n---\n"
-                f"# Quarantined claim {claim.record['id']}\n\n"
-                "```json\n" + canonical_json_bytes(candidate).decode("utf-8") + "\n```\n"
-            ).encode("utf-8")
+            path, content, record = self._candidate_file(assessment.claim)
+            if _candidate_present(self.vault / path, record):
+                present.append(path)
+                continue
             changes.append(MarkdownChange.create(path, content))
-            candidate_paths.append(path)
+            created.append(path)
         lifecycle_changes, preconditions = self._lifecycle_changes(sorted(mutations))
         changes.extend(lifecycle_changes)
-        return changes, preconditions, tuple(candidate_paths)
+        return changes, preconditions, tuple(created), tuple(present)
+
+    def _candidate_file(self, claim: NormalizedClaim) -> tuple[str, bytes, dict[str, object]]:
+        quarantined = NormalizedClaim({**claim.record, "lifecycle": "quarantined"})
+        validate_claim_record(quarantined.record)
+        candidate = {
+            "schema_version": "claim-candidate/v1",
+            "status": "quarantined",
+            "reason": "contradiction assessment requires manual review",
+            "claim": quarantined.record,
+            "source_page": self.source_page,
+            "created_at": claim.record["observed_at"],
+        }
+        validate_schema(candidate, CANDIDATE_SCHEMA)
+        identity = sha256_bytes(
+            canonical_json_bytes(
+                {"id": claim.record["id"], "evidence": claim.record["evidence"]}
+            )
+        )[:20]
+        path = f"knowledge/inbox/claims/{claim.record['fingerprint']}-{identity}.md"
+        content = (
+            "---\ntype: claim-candidate\nstatus: quarantined\n---\n"
+            f"# Quarantined claim {claim.record['id']}\n\n"
+            "```json\n" + canonical_json_bytes(candidate).decode("utf-8") + "\n```\n"
+        ).encode("utf-8")
+        return path, content, quarantined.record
 
     def ensure_candidate_parent(self) -> Path:
         self._require_candidate_parent_ownership()

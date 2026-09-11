@@ -22,6 +22,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def _sleep_processor(task: dict) -> bool:
     time.sleep(task["payload"]["seconds"])
@@ -54,7 +56,7 @@ def test_a_spawned_child_of_this_module_starts_and_reports_back() -> None:
         assert receiver.recv_bytes(1) == b"R"
     finally:
         process.terminate()
-        process.join(30)
+        process.join(SHORT_TIMEOUT)
         receiver.close()
 
 
@@ -81,7 +83,7 @@ def test_a_spawned_child_that_only_sleeps_is_still_alive_five_seconds_later() ->
         assert alive, f"sleeping child exited {exitcode} on its own"
     finally:
         process.terminate()
-        process.join(30)
+        process.join(SHORT_TIMEOUT)
 
 
 def _result_processor(task: dict) -> memory_queue.DeferredResult:
@@ -276,7 +278,7 @@ def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
 
     def heartbeat_wait(stop, interval: float) -> bool:
         intervals.append(interval)
-        return stop.wait(1)
+        return stop.wait(SHORT_TIMEOUT)
 
     queue = MemoryQueue(
         tmp_path,

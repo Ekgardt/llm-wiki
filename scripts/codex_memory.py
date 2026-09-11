@@ -370,15 +370,13 @@ def command_hook(args: argparse.Namespace) -> int:
 
 
 def _is_llm_wiki_hook(handler: object) -> bool:
+    """Ours when either platform's command is one of ours (`codex_hook_identity`)."""
+    from codex_hook_identity import is_our_codex_command
+
     if not isinstance(handler, dict):
         return False
     commands = (handler.get("command"), handler.get("commandWindows"))
-    return any(
-        isinstance(command, str)
-        and "codex_memory.py" in command
-        and command.rstrip().endswith(" hook")
-        for command in commands
-    )
+    return any(is_our_codex_command(command) for command in commands)
 
 
 def _invalid_hooks_config() -> ValueError:
@@ -486,11 +484,15 @@ def _codex_hooks_feature_value(features: dict[str, Any]) -> object:
     return features.get("codex_hooks", True)
 
 
-def _codex_hooks_feature_state(document: dict[str, Any]) -> str:
+def _codex_features(document: dict[str, Any]) -> dict[str, Any]:
     features = document.get("features", {})
     if not isinstance(features, dict):
         raise ValueError("invalid Codex config")
-    enabled = _codex_hooks_feature_value(features)
+    return features
+
+
+def _codex_hooks_feature_state(document: dict[str, Any]) -> str:
+    enabled = _codex_hooks_feature_value(_codex_features(document))
     if not isinstance(enabled, bool):
         raise ValueError("invalid Codex config")
     if enabled:
@@ -508,7 +510,10 @@ def codex_hooks_feature_state(config: Path) -> str:
 def _inline_hook_state(config: Path, template: dict[str, Any]) -> str:
     if not config.exists():
         return "absent"
-    document = _read_codex_toml(config)
+    return _document_hook_state(_read_codex_toml(config), template)
+
+
+def _document_hook_state(document: dict[str, Any], template: dict[str, Any]) -> str:
     if _codex_hooks_feature_state(document) == "disabled":
         return "disabled"
     if not _has_active_inline_hooks(document):
@@ -530,7 +535,10 @@ def _mcp_entry(document: dict[str, Any]) -> dict[str, Any] | str:
     servers = _mcp_servers(document)
     if isinstance(servers, str):
         return servers
-    table = servers.get("llm-wiki")
+    return _llm_wiki_table(servers.get("llm-wiki"))
+
+
+def _llm_wiki_table(table: object) -> dict[str, Any] | str:
     if table is None:
         return "absent"
     if not isinstance(table, dict):
@@ -572,7 +580,10 @@ def codex_mcp_config_state(config: Path, vault_root: Path) -> str:
     """Classify the existing Codex MCP entry without modifying TOML."""
     if not config.exists():
         return "absent"
-    document = _read_codex_document(config)
+    return _document_mcp_state(_read_codex_document(config), vault_root)
+
+
+def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path) -> str:
     if isinstance(document, str):
         return document
     entry = _mcp_entry(document)

@@ -486,8 +486,13 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
 $claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
 if ($claudeDetected) {
-    $claudeAutomatic = $true
-    Ok "Claude settings owned by the install transaction -> $claudeConfig\settings.json"
+    # Owned only when step 6 committed; a failed transaction wrote nothing.
+    $claudeAutomatic = -not $schedulerWarning
+    if ($claudeAutomatic) {
+        Ok "Claude settings owned by the install transaction -> $claudeConfig\settings.json"
+    } else {
+        Warn "Claude settings not written: the install ownership transaction failed"
+    }
     $claudeMcp = $claudeUserConfig
     $claudeEntryObject = [ordered]@{
         command = "uv"
@@ -511,7 +516,7 @@ if ($claudeDetected) {
     if ($claudeAutomatic) {
         $agents += "Claude Code: active automatic"
     } else {
-        $agents += "Claude Code: conflict or unverified"
+        $agents += "Claude Code: not wired (install transaction failed)"
     }
 }
 
@@ -532,6 +537,16 @@ switch ($syncExit) {
     0 { Ok "Runtime state synchronized" }
     1 { $syncWarning = $true; Warn "Runtime synchronization completed with warnings" }
     default { Fail "Runtime synchronization failed" }
+}
+
+# --- 8a. Pinned model weights ------------------------------------
+# The read path loads weights local-only; with the semantic extra installed,
+# fetch the two pinned models now, verified.
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
+switch ($LASTEXITCODE) {
+    0 { Ok "Pinned model weights present" }
+    2 { Info "Semantic search not installed; model weights are fetched once it is" }
+    default { Warn "Model weights incomplete; run: uv run python scripts/install_models.py" }
 }
 
 # --- 9. Summary ---------------------------------------------------

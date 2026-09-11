@@ -5093,11 +5093,15 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     if row is None:
         raise KeyError(task_id)
+    _require_redrivable(row)
+    return row
+
+
+def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
     if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
         raise QueueOperationError("redrive_generations_exhausted")
-    return row
 
 
 _SQLITE_FILE_MAGIC = b"SQLite format 3\x00"
@@ -13875,6 +13879,19 @@ def retained_queue_state() -> bool:
     return _queue().retains_run_directory()
 
 
+# A heartbeat thread may sit inside SQLite for `queue_busy_ms` (5 s); the
+# join bound is twice the heartbeat with a floor above that wait, and a
+# thread still alive past it is refused by name (audit OPS-18,
+# docs/research/2026-09-11-a-join-has-a-bound-and-a-benchmark-does-not-grade-itself.md).
+HEARTBEAT_STOP_FLOOR_SECONDS = 10.0
+
+
+def _join_heartbeat_or_refuse(thread: threading.Thread, heartbeat_seconds: float) -> None:
+    thread.join(timeout=max(2.0 * heartbeat_seconds, HEARTBEAT_STOP_FLOOR_SECONDS))
+    if thread.is_alive():
+        raise QueueOperationError("heartbeat_stop_timeout")
+
+
 class _SourceFenceHeartbeat:
     def __init__(
         self,
@@ -13902,7 +13919,7 @@ class _SourceFenceHeartbeat:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join()
+        _join_heartbeat_or_refuse(self._thread, self._heartbeat_seconds)
 
     def current(self) -> SourceFence:
         with self._lock:
@@ -13960,7 +13977,7 @@ class _LeaseHeartbeat:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join()
+        _join_heartbeat_or_refuse(self._thread, self._heartbeat_seconds)
 
     def _run(self) -> None:
         while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam

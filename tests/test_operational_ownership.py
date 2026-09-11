@@ -12,6 +12,8 @@ import operational_ownership as ownership
 import pytest
 from reliable_memory import capture_runtime_file_identity, sha256_bytes
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 ALL_ROLES = (
     "capture",
     "project",
@@ -476,7 +478,7 @@ def test_scheduled_owner_heartbeat_covers_the_body(
     monkeypatch.setattr(ownership, "_join_owner_heartbeat", lambda thread, _timeout: thread.join())
 
     with ownership.heartbeat_owner(lease):
-        assert wake.wait(2)
+        assert wake.wait(SHORT_TIMEOUT)
 
     assert calls[0].heartbeat_at >= lease.heartbeat_at
     ownership.release_marker_owner(calls[-1], marker)

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree_with_content  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     ABSENT,
@@ -54,7 +54,7 @@ SUMMARY_RE = re.compile(r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 SKIP_NAMES = {"README.md", "index.md", "log.md"}
-MAX_PAGE_BYTES = 4 * 1024 * 1024
+MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_PAGE_COUNT = 2_000
 MAX_TOTAL_PAGE_BYTES = 32 * 1024 * 1024

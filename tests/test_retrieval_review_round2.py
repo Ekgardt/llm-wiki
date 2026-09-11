@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -685,7 +687,7 @@ def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypa
             )
         monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
         release.set()
-        assert finished.wait(1)
+        assert finished.wait(SHORT_TIMEOUT)
         assert acquired_slots.acquire(blocking=False)
         assert rebound_slots.acquire(blocking=False)
 

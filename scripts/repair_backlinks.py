@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from lint_memory import (  # noqa: E402
     NOTES,
     VAULT,
@@ -36,7 +36,7 @@ from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # One page is never large enough to justify an unbounded read.
-MAX_PAGE_BYTES = 512 * 1024
+MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 
 # The headings a page already uses for its outward links, most specific first.
 RELATED_HEADINGS = ("## Related", "## Links", "## Related pages")

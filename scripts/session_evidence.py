@@ -171,9 +171,12 @@ def _bounded(body: str) -> str:
 
 def render_session_document(fields: Mapping[str, object], transcript: str) -> str:
     """The whole page: frontmatter, a title that names the session, the turns."""
+    return _document_from_body(fields, render_transcript(transcript).strip())
+
+
+def _document_from_body(fields: Mapping[str, object], body: str) -> str:
     session = str(fields.get("session") or "unknown session")
     title = f"# Session {session}"
-    body = render_transcript(transcript).strip()
     return _bounded(f"{_frontmatter(fields)}\n{title}\n\n{body}\n")
 
 
@@ -228,13 +231,16 @@ def write_session_evidence(
     """Write the session record; returns the path, or None when there is nothing.
 
     Never raises: losing the record is bad, but breaking capture is worse, and the
-    tier decision that follows must not depend on this write.
+    tier decision that follows must not depend on this write. A lost record is
+    written to the capture-failure trail, so it is never silent (audit H5,
+    `docs/research/2026-09-10-a-lost-session-record-is-written-down.md`).
     """
     from markdown_transaction import stable_operation_id
 
-    document = render_session_document(fields, transcript)
-    if not render_transcript(transcript).strip():
+    body = render_transcript(transcript).strip()
+    if not body:
         return None
+    document = _document_from_body(fields, body)
     relative = evidence_relative_path(_capture_day(fields), str(fields.get("session") or ""))
     path = Path(vault) / relative
     encoded = document.encode("utf-8")
@@ -245,9 +251,21 @@ def write_session_evidence(
             coordinator,
             owner,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - recorded, never raised
+        _record_lost_record(exc, str(fields.get("session") or ""))
         return None
     return path
+
+
+def _record_lost_record(error: BaseException, session_id: str) -> None:
+    from capture_diagnostics import record_capture_failure
+
+    record_capture_failure(
+        "session_evidence",
+        f"{type(error).__name__}: {error}",
+        error=error,
+        session_id=session_id or None,
+    )
 
 
 def _write_record(

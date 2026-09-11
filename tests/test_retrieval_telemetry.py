@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -145,7 +147,7 @@ def test_concurrent_process_writers_do_not_lose_events(tmp_path):
         "candidate_id='page-'+i, rank=None, generation='legacy', source_tool='writer'), db_path=p)"
     )
     processes = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=env) for i in range(8)]
-    assert [process.wait(timeout=20) for process in processes] == [0] * 8
+    assert [process.wait(timeout=SHORT_TIMEOUT) for process in processes] == [0] * 8
     assert len(retrieval_telemetry.read_events(limit=8, db_path=database)) == 8
 
 
@@ -341,7 +343,7 @@ def test_concurrent_ingestion_respects_row_ceiling(tmp_path):
         "db_path=p, max_rows=5)"
     )
     processes = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=env) for i in range(10)]
-    assert [process.wait(timeout=30) for process in processes] == [0] * 10
+    assert [process.wait(timeout=SHORT_TIMEOUT) for process in processes] == [0] * 10
     assert len(retrieval_telemetry.read_events(limit=10, db_path=database)) == 5
 
 

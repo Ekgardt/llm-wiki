@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -85,129 +86,183 @@ def _record(
     return extraction, normalized
 
 
-def build_corpus() -> dict[str, object]:
-    specifications = []
-    blocks = ["# 2026-01-01\n"]
+class _CaseShape(NamedTuple):
+    old_semantic: dict
+    new_semantic: dict
+    old_authority: str
+    new_authority: str
+    expected_class: str
+    expected_lifecycle: str
+    negative: bool
+
+
+def _default_case(case_id: str) -> _CaseShape:
+    return _CaseShape(
+        _semantic(case_id, "blue"), _semantic(case_id, "blue"), "web", "user", "equivalent", "keep-both", True
+    )
+
+
+def _interval_case(case_id: str) -> _CaseShape:
+    return _CaseShape(
+        _semantic(case_id, "blue", start="2026-01-01", end="2026-02-01"),
+        _semantic(case_id, "red", start="2026-02-01"),
+        "web",
+        "user",
+        "temporal-distinct",
+        "keep-both",
+        True,
+    )
+
+
+def _functional_relation_case(case_id: str) -> _CaseShape:
+    return _CaseShape(
+        _semantic(case_id, "blue"), _semantic(case_id, "red"), "web", "user", "contradiction", "supersede", False
+    )
+
+
+def _authority_lifecycle_case(case_id: str) -> _CaseShape:
+    return _CaseShape(
+        _semantic(case_id, "blue"), _semantic(case_id, "red"), "user", "inferred", "contradiction", "quarantine", True
+    )
+
+
+def _keep_both_refine_case(case_id: str, index: int) -> _CaseShape:
+    if index < 20:
+        return _CaseShape(
+            _semantic(case_id, "blue", relation="uses"),
+            _semantic(case_id, "red", relation="uses"),
+            "web",
+            "user",
+            "compatible",
+            "keep-both",
+            True,
+        )
+    return _CaseShape(
+        _semantic(case_id, "blue", start=None),
+        _semantic(case_id, "blue", start="2026-02-01"),
+        "web",
+        "user",
+        "refinement",
+        "refine",
+        True,
+    )
+
+
+def _quarantine_case(case_id: str) -> _CaseShape:
+    return _CaseShape(
+        _semantic(case_id, "blue", relation="depends-on"),
+        _semantic(case_id, "blue", relation="uses"),
+        "web",
+        "user",
+        "compatible",
+        "quarantine",
+        True,
+    )
+
+
+_CASE_BUILDERS = {
+    "interval": _interval_case,
+    "functional-relation": _functional_relation_case,
+    "authority-lifecycle": _authority_lifecycle_case,
+    "quarantine": _quarantine_case,
+}
+
+
+def _case_shape(category: str, index: int, case_id: str) -> _CaseShape:
+    if category == "keep-both-refine":
+        return _keep_both_refine_case(case_id, index)
+    return _CASE_BUILDERS.get(category, _default_case)(case_id)
+
+
+class _CaseSpec(NamedTuple):
+    case_id: str
+    category: str
+    block_id: str
+    shape: _CaseShape
+    old_text: str
+    new_text: str
+
+
+def _specification(category: str, index: int, ordinal: int) -> _CaseSpec:
+    case_id = f"{category}-{index:02d}"
+    shape = _case_shape(category, index, case_id)
+    hour, minute = divmod(ordinal, 60)
+    old = shape.old_semantic
+    new = shape.new_semantic
+    return _CaseSpec(
+        case_id,
+        category,
+        f"{hour:02d}:{minute:02d}:00",
+        shape,
+        f"old {case_id}: {old['relation']} {old['value']['value']}",
+        f"new {case_id}: {new['relation']} {new['value']['value']}",
+    )
+
+
+def _specifications() -> list[_CaseSpec]:
+    specifications: list[_CaseSpec] = []
     ordinal = 0
     for category in CATEGORIES:
         for index in range(40):
-            case_id = f"{category}-{index:02d}"
-            old_semantic = _semantic(case_id, "blue")
-            new_semantic = _semantic(case_id, "blue")
-            old_authority, new_authority = "web", "user"
-            expected_class, expected_lifecycle = "equivalent", "keep-both"
-            negative = True
-            if category == "interval":
-                old_semantic = _semantic(
-                    case_id, "blue", start="2026-01-01", end="2026-02-01"
-                )
-                new_semantic = _semantic(case_id, "red", start="2026-02-01")
-                expected_class = "temporal-distinct"
-            elif category == "functional-relation":
-                new_semantic = _semantic(case_id, "red")
-                expected_class, expected_lifecycle, negative = (
-                    "contradiction",
-                    "supersede",
-                    False,
-                )
-            elif category == "authority-lifecycle":
-                old_authority, new_authority = "user", "inferred"
-                new_semantic = _semantic(case_id, "red")
-                expected_class, expected_lifecycle = "contradiction", "quarantine"
-            elif category == "keep-both-refine":
-                if index < 20:
-                    old_semantic = _semantic(case_id, "blue", relation="uses")
-                    new_semantic = _semantic(case_id, "red", relation="uses")
-                    expected_class = "compatible"
-                else:
-                    old_semantic = _semantic(case_id, "blue", start=None)
-                    new_semantic = _semantic(case_id, "blue", start="2026-02-01")
-                    expected_class, expected_lifecycle = "refinement", "refine"
-            elif category == "quarantine":
-                old_semantic = _semantic(case_id, "blue", relation="depends-on")
-                new_semantic = _semantic(case_id, "blue", relation="uses")
-                expected_class, expected_lifecycle = "compatible", "quarantine"
-            hour, minute = divmod(ordinal, 60)
-            block_id = f"{hour:02d}:{minute:02d}:00"
-            old_text = f"old {case_id}: {old_semantic['relation']} {old_semantic['value']['value']}"
-            new_text = f"new {case_id}: {new_semantic['relation']} {new_semantic['value']['value']}"
-            blocks.append(
-                f"## [{block_id}] benchmark\n{old_text}\n{new_text}\n"
-            )
-            specifications.append(
-                (
-                    case_id,
-                    category,
-                    block_id,
-                    old_semantic,
-                    new_semantic,
-                    old_authority,
-                    new_authority,
-                    old_text,
-                    new_text,
-                    expected_class,
-                    expected_lifecycle,
-                    negative,
-                )
-            )
+            specifications.append(_specification(category, index, ordinal))
             ordinal += 1
-    source = "".join(blocks)
+    return specifications
+
+
+def _source_text(specifications: list[_CaseSpec]) -> str:
+    blocks = ["# 2026-01-01\n"]
+    for spec in specifications:
+        blocks.append(f"## [{spec.block_id}] benchmark\n{spec.old_text}\n{spec.new_text}\n")
+    return "".join(blocks)
+
+
+def _reference(source_bytes: bytes, source_digest: str, block_id: str, text: str) -> str:
+    start = source_bytes.index(text.encode())
+    return (
+        f"daily:2026-01-01 sha256:{source_digest} block:{block_id} "
+        f"bytes:{start}-{start + len(text.encode())}"
+    )
+
+
+def _case(spec: _CaseSpec, source_bytes: bytes, source_digest: str) -> dict[str, object]:
+    shape = spec.shape
+    new_extraction, expected_new = _record(
+        f"new-{spec.case_id}",
+        shape.new_semantic,
+        spec.new_text,
+        shape.new_authority,
+        _reference(source_bytes, source_digest, spec.block_id, spec.new_text),
+        spec.block_id,
+    )
+    _old_extraction, existing = _record(
+        f"old-{spec.case_id}",
+        shape.old_semantic,
+        spec.old_text,
+        shape.old_authority,
+        _reference(source_bytes, source_digest, spec.block_id, spec.old_text),
+        spec.block_id,
+    )
+    return {
+        "id": spec.case_id,
+        "category": spec.category,
+        "block_id": spec.block_id,
+        "new_extraction": new_extraction,
+        "expected_new_claim": expected_new,
+        "existing_claim": existing,
+        "existing_page": f"knowledge/notes/{spec.case_id}.md",
+        "retrievable": True,
+        "expected_class": shape.expected_class,
+        "expected_lifecycle": shape.expected_lifecycle,
+        "expected_provenance_valid": True,
+        "negative_control": shape.negative,
+    }
+
+
+def build_corpus() -> dict[str, object]:
+    specifications = _specifications()
+    source = _source_text(specifications)
     source_bytes = source.encode()
     source_digest = sha256_bytes(source_bytes)
-    cases = []
-    for (
-        case_id,
-        category,
-        block_id,
-        old_semantic,
-        new_semantic,
-        old_authority,
-        new_authority,
-        old_text,
-        new_text,
-        expected_class,
-        expected_lifecycle,
-        negative,
-    ) in specifications:
-        def reference(text: str) -> str:
-            start = source_bytes.index(text.encode())
-            return (
-                f"daily:2026-01-01 sha256:{source_digest} block:{block_id} "
-                f"bytes:{start}-{start + len(text.encode())}"
-            )
-
-        new_extraction, expected_new = _record(
-            f"new-{case_id}",
-            new_semantic,
-            new_text,
-            new_authority,
-            reference(new_text),
-            block_id,
-        )
-        _old_extraction, existing = _record(
-            f"old-{case_id}",
-            old_semantic,
-            old_text,
-            old_authority,
-            reference(old_text),
-            block_id,
-        )
-        cases.append(
-            {
-                "id": case_id,
-                "category": category,
-                "block_id": block_id,
-                "new_extraction": new_extraction,
-                "expected_new_claim": expected_new,
-                "existing_claim": existing,
-                "existing_page": f"knowledge/notes/{case_id}.md",
-                "retrievable": True,
-                "expected_class": expected_class,
-                "expected_lifecycle": expected_lifecycle,
-                "expected_provenance_valid": True,
-                "negative_control": negative,
-            }
-        )
     return {
         "version": "contradiction-v1",
         "provider": "fake",
@@ -224,8 +279,36 @@ def build_corpus() -> dict[str, object]:
             "non_functional": ["member-of", "uses", "depends-on"],
         },
         "source": source,
-        "cases": cases,
+        "cases": [_case(spec, source_bytes, source_digest) for spec in specifications],
     }
+
+
+def _write_corpus(path: Path) -> None:
+    corpus = build_corpus()
+    validate_schema(corpus, SCHEMA)
+    path.write_bytes(canonical_json_bytes(corpus) + b"\n")
+
+
+def _load_canonical_corpus(path: Path) -> dict:
+    raw = path.read_bytes()
+    corpus = json.loads(raw)
+    validate_schema(corpus, SCHEMA)
+    if canonical_json_bytes(corpus) + b"\n" != raw:
+        raise ValueError("corpus is not restricted canonical JSON")
+    return corpus
+
+
+def _gates_pass(metrics) -> bool:
+    exact = (
+        metrics.extraction_f1,
+        metrics.candidate_recall,
+        metrics.class_macro_f1,
+        metrics.lifecycle_macro_f1,
+        metrics.provenance_correctness,
+    )
+    if any(value != 1 for value in exact):
+        return False
+    return metrics.quarantine_risk == 0 and metrics.false_supersession <= 0.01
 
 
 def main() -> int:
@@ -236,27 +319,11 @@ def main() -> int:
     parser.add_argument("--generate", action="store_true")
     args = parser.parse_args()
     if args.generate:
-        corpus = build_corpus()
-        validate_schema(corpus, SCHEMA)
-        args.corpus.write_bytes(canonical_json_bytes(corpus) + b"\n")
+        _write_corpus(args.corpus)
         return 0
-    raw = args.corpus.read_bytes()
-    corpus = json.loads(raw)
-    validate_schema(corpus, SCHEMA)
-    if canonical_json_bytes(corpus) + b"\n" != raw:
-        raise ValueError("corpus is not restricted canonical JSON")
-    metrics = run_frozen_benchmark(corpus)
+    metrics = run_frozen_benchmark(_load_canonical_corpus(args.corpus))
     print(json.dumps(metrics.canonical(), sort_keys=True, indent=2))
-    gates = (
-        metrics.extraction_f1 == 1
-        and metrics.candidate_recall == 1
-        and metrics.class_macro_f1 == 1
-        and metrics.lifecycle_macro_f1 == 1
-        and metrics.provenance_correctness == 1
-        and metrics.quarantine_risk == 0
-        and metrics.false_supersession <= 0.01
-    )
-    return 0 if gates else 1
+    return 0 if _gates_pass(metrics) else 1
 
 
 if __name__ == "__main__":

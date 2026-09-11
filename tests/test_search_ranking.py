@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -43,61 +45,6 @@ def _build_search_index_worker(root: str, builds: int) -> bool:
     for _ in range(builds):
         search_memory._build_index([page])
     return True
-
-
-def test_rrf_fuse_triple_weights():
-    """Weighted RRF: BM25 weight=2 should dominate Vector weight=1."""
-    import search_memory
-
-    bm25 = [
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 10, "project": "", "timestamp": ""},
-        {"path": "page_b.md", "title": "B", "summary": "", "score": 5, "project": "", "timestamp": ""},
-    ]
-    vector = [
-        {"path": "page_b.md", "title": "B", "summary": "", "score": 8, "project": "", "timestamp": ""},
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 3, "project": "", "timestamp": ""},
-    ]
-
-    result = search_memory._rrf_fuse_triple(bm25, vector, None)
-
-    # BM25 rank=1 for A should dominate Vector rank=2 for A
-    assert result[0]["path"] == "page_a.md"
-    assert result[0]["fused_score"] > result[1]["fused_score"]
-
-
-def test_rrf_fuse_triple_graph_boost():
-    """Graph boost adds score but doesn't overtake BM25 rank=1."""
-    import search_memory
-
-    bm25 = [
-        {"path": "page_a.md", "title": "A", "summary": "", "score": 10, "project": "", "timestamp": ""},
-    ]
-    graph = [
-        {"path": "page_b.md", "graph_boost": 0.15},
-    ]
-
-    result = search_memory._rrf_fuse_triple(bm25, None, graph)
-    assert result[0]["path"] == "page_a.md"  # BM25 wins over graph-only
-
-
-def test_rrf_fuse_triple_empty_inputs():
-    """Empty inputs don't crash."""
-    import search_memory
-
-    result = search_memory._rrf_fuse_triple([], None, None)
-    assert result == []
-
-
-def test_rrf_fuse_basic_two_signals():
-    """Basic 2-signal RRF (BM25 + Vector) via triple-fusion with no graph."""
-    import search_memory
-
-    bm25 = [{"path": "a.md", "title": "A", "summary": "", "score": 5, "project": "", "timestamp": ""}]
-    vector = [{"path": "b.md", "title": "B", "summary": "", "score": 3, "project": "", "timestamp": ""}]
-
-    result = search_memory._rrf_fuse_triple(bm25, vector, None)
-    assert len(result) == 2
-    assert result[0]["path"] == "a.md"
 
 
 def test_extract_title_and_summary():
@@ -448,11 +395,6 @@ def test_search_rejects_invalid_limit_before_dispatch(limit, monkeypatch):
         "_active_generation_catalog",
         lambda: pytest.fail("invalid limit reached generation selection"),
     )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("invalid limit reached legacy search"),
-    )
 
     with pytest.raises(ValueError, match="limit"):
         search_memory.search("needle", limit=limit)
@@ -461,11 +403,6 @@ def test_search_rejects_invalid_limit_before_dispatch(limit, monkeypatch):
 def test_search_rejects_limit_above_ceiling_before_dispatch(monkeypatch):
     import search_memory
 
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("oversized limit reached SQL"),
-    )
 
     with pytest.raises(ValueError, match="limit"):
         search_memory.search("needle", limit=search_memory.MAX_SEARCH_LIMIT + 1)
@@ -536,7 +473,7 @@ def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
         connection = real_connect(database, *args, **kwargs)
         with opened_lock:
             opened.append(Path(database))
-        barrier.wait(timeout=2)
+        barrier.wait(timeout=SHORT_TIMEOUT)
         return connection
 
     with monkeypatch.context() as context:
@@ -578,7 +515,7 @@ def test_stale_legacy_builder_cannot_replace_newer_source_index(
     def ordered_lock(*args, **kwargs):
         if threading.current_thread().name.startswith("old-builder"):
             old_ready.set()
-            assert release_old.wait(10)
+            assert release_old.wait(SHORT_TIMEOUT)
         with real_lock(*args, **kwargs):
             yield
 
@@ -586,12 +523,12 @@ def test_stale_legacy_builder_cannot_replace_newer_source_index(
 
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="old-builder") as pool:
         old = pool.submit(search_memory._build_index, [page])
-        assert old_ready.wait(10)
+        assert old_ready.wait(SHORT_TIMEOUT)
         page.write_text("# Page\nnew generation\n", encoding="utf-8")
         with ThreadPoolExecutor(max_workers=1) as newer_pool:
-            newer_pool.submit(search_memory._build_index, [page]).result(timeout=10)
+            newer_pool.submit(search_memory._build_index, [page]).result(timeout=SHORT_TIMEOUT)
         release_old.set()
-        old.result(timeout=10)
+        old.result(timeout=SHORT_TIMEOUT)
 
     with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
         assert "new generation" in database.execute(
@@ -621,8 +558,8 @@ def test_freshness_reader_never_observes_mixed_index_manifest_pair(
         with search_memory._index_swap_lock():
             manifest.unlink()
             freshness = pool.submit(search_memory._needs_rebuild, [page])
-            time.sleep(0.1)
-            assert not freshness.done()
+            # No "still blocked" sleep: the False below is possible only if
+            # the probe read the manifest written after the lock was released.
             manifest.write_text(
                 json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
             )
@@ -758,7 +695,7 @@ def test_repeated_thread_and_process_index_builds_leave_valid_index(
                 executor.submit(_build_search_index_worker, str(tmp_path), 4)
                 for _ in range(4)
             ]
-            assert [future.result(timeout=30) for future in futures] == [True] * 4
+            assert [future.result(timeout=SHORT_TIMEOUT) for future in futures] == [True] * 4
 
         with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
             assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
@@ -918,11 +855,6 @@ def _orchestrated_legacy_marker(monkeypatch, search_memory):
     )
     monkeypatch.setattr(
         search_memory, "_legacy_dense_hits", lambda *args, **kwargs: None
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("public search bypassed retrieve()"),
     )
 
 
@@ -1775,11 +1707,6 @@ def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
     monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
     monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
     monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     results = search_memory.search(
         "Needle content",
         catalog=Catalog(),
@@ -2144,11 +2071,6 @@ def test_corrupt_active_generation_falls_back_without_querying_it(tmp_path, monk
     artifact = generation / "search.sqlite3"
     content = artifact.read_bytes()
     artifact.write_bytes(b"X" + content[1:])
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     # Provide a real legacy lexical path for recovery.
     vault = tmp_path / "vault"
     if not (vault / "knowledge" / "notes").exists():
@@ -2208,11 +2130,6 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
                 "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
             }
 
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_search",
-        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
-    )
     # Point ROOT at the snapshot vault so legacy lexical can recover.
     vault = _vault
     monkeypatch.setattr(search_memory, "ROOT", vault)
@@ -2611,7 +2528,7 @@ def test_publication_holds_one_writer_gate_through_validate_register_and_activat
                 name="cooperating-writer",
             )
             writer.start()
-            assert writer_attempted.wait(timeout=1)
+            assert writer_attempted.wait(timeout=SHORT_TIMEOUT)
             assert writer_entered.is_set() is False
 
         def activate(self, generation_id, *, expected_active):
@@ -2631,7 +2548,7 @@ def test_publication_holds_one_writer_gate_through_validate_register_and_activat
         coordinator=coordinator,
     )
     assert writer is not None
-    writer.join(timeout=1)
+    writer.join(timeout=SHORT_TIMEOUT)
     assert writer.is_alive() is False
     assert coordinator.gate_calls == 2
     assert events == [
@@ -2900,3 +2817,84 @@ def test_the_vector_path_boosts_a_project_match_by_one_and_a_half(monkeypatch, t
     by_id = {item["chunk_id"]: item["score"] for item in scored}
     assert by_id["a"] == round(0.4 * 1.5, 4)
     assert by_id["b"] == round(0.4, 4)
+
+
+def test_status_names_the_active_generation_before_the_legacy_index(monkeypatch, capsys):
+    """Audit M3: the status says what an answer reads first."""
+    import search_memory
+
+    class _Catalog:
+        def get_active(self):
+            return {
+                "generation_id": "generation-1",
+                "extractor_version": "markdown-heading-extractor/v3",
+                "vector_state": "complete",
+                "embedding_model_id": "intfloat/multilingual-e5-small",
+            }
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: _Catalog())
+    monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
+    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
+
+    assert search_memory._print_index_status() == 0
+    lines = capsys.readouterr().out.splitlines()
+
+    assert lines[0] == (
+        "Active generation: generation-1 (markdown-heading-extractor/v3, "
+        "vectors complete, model intfloat/multilingual-e5-small)"
+    )
+    assert lines[1] == "Index: not built (0 pages would be indexed)"
+
+
+def test_status_says_when_there_is_no_generation(monkeypatch, capsys):
+    import search_memory
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
+    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
+
+    search_memory._print_index_status()
+
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "Active generation: none (search falls back to the legacy index)"
+    )
+
+
+class TestASilentFallbackNamesItsCause:
+    """Audit M5/M6: a vector or generation stage that raises records why."""
+
+    def test_an_encode_that_raises_is_named(self, monkeypatch, capsys):
+        import search_memory
+
+        class _Broken:
+            def encode(self, *_a, **_k):
+                raise RuntimeError("tokenizer exploded")
+
+        monkeypatch.setattr(search_memory, "_get_embedder", lambda: _Broken())
+        search_memory._DEGRADATIONS.clear()
+
+        assert search_memory._embed_texts(["a question"]) is None
+
+        assert search_memory.degradation_reasons() == {
+            "vector_encode": "RuntimeError: tokenizer exploded"
+        }
+        assert "vector_encode degraded — RuntimeError: tokenizer exploded" in capsys.readouterr().err
+
+    def test_an_unreadable_catalog_is_named(self, monkeypatch):
+        import retrieval
+        import search_memory
+
+        class _Catalog:
+            def get_active_for_repository(self, *_a, **_k):
+                raise ValueError("catalog.sqlite3: file is not a database")
+
+        search_memory._DEGRADATIONS.clear()
+        answer = retrieval._active_manifest_for(
+            _Catalog(), search_memory, deadline=None, cancelled=None, stop={}
+        )
+
+        assert answer is None
+        assert search_memory.degradation_reasons()["generation_manifest"].startswith(
+            "ValueError: catalog.sqlite3"
+        )
+

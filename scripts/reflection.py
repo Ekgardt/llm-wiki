@@ -47,39 +47,44 @@ def find_reflection_candidates() -> list[dict]:
 
     Returns list of dicts: {path, slug, title, update_count}.
     """
-    candidates = []
     if not KNOWLEDGE.exists():
-        return candidates
+        return []
+    candidates = (_reflection_candidate(md) for md in sorted(KNOWLEDGE.rglob("*.md")))
+    return [candidate for candidate in candidates if candidate is not None]
 
-    for md in sorted(KNOWLEDGE.rglob("*.md")):
-        if md.name in SKIP_NAMES:
-            continue
-        if "archive" in md.parts:
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
 
-        # Skip superseded/archived pages.
-        if "status: superseded" in content or "status: archived" in content:
-            continue
-        # Skip already-reflected pages (have ## History section).
-        if "## History" in content:
-            continue
+def _reflection_candidate(md: Path) -> dict | None:
+    content = _unreflected_text(md)
+    if content is None:
+        return None
+    updates = UPDATE_SECTION_RE.findall(content)
+    if len(updates) < REFLECTION_THRESHOLD:
+        return None
+    title_match = H1_RE.search(content)
+    return {
+        "path": md,
+        "slug": md.stem,
+        "title": title_match.group(1) if title_match else md.stem,
+        "update_count": len(updates),
+    }
 
-        updates = UPDATE_SECTION_RE.findall(content)
-        if len(updates) >= REFLECTION_THRESHOLD:
-            title_match = H1_RE.search(content)
-            title = title_match.group(1) if title_match else md.stem
-            candidates.append({
-                "path": md,
-                "slug": md.stem,
-                "title": title,
-                "update_count": len(updates),
-            })
 
-    return candidates
+def _unreflected_text(md: Path) -> str | None:
+    """The text of an active page that has not been reflected yet; None otherwise."""
+    if md.name in SKIP_NAMES or "archive" in md.parts:
+        return None
+    try:
+        content = md.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    if _retired_or_reflected(content):
+        return None
+    return content
+
+
+def _retired_or_reflected(content: str) -> bool:
+    # Superseded/archived pages, and pages that already carry a ## History section.
+    return "status: superseded" in content or "status: archived" in content or "## History" in content
 
 
 def reflect_page(md: Path, apply: bool = False) -> str:
@@ -92,26 +97,52 @@ def reflect_page(md: Path, apply: bool = False) -> str:
     )
     content = source_bytes.decode("utf-8")
     updates = UPDATE_SECTION_RE.findall(content)
-    if len(updates) < REFLECTION_THRESHOLD:
-        return f"  {md.stem}: only {len(updates)} updates, skipping."
+    frontmatter, body = _split_frontmatter(content)
+    rewritten, message = _reflection(md, body, len(updates), apply)
+    if rewritten is None:
+        return message
+    encoded = redact_secrets(_reflected_page(md, frontmatter, body, rewritten)).encode("utf-8")
+    mutate_knowledge(
+        stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
+        {md: encoded},
+        preconditions={
+            md.relative_to(ROOT).as_posix(): sha256_bytes(source_bytes)
+        },
+    )
+    return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
 
-    # Split content into frontmatter + body.
+
+def _split_frontmatter(content: str) -> tuple[str, str]:
     fm_match = FRONTMATTER_RE.match(content)
     frontmatter = fm_match.group(0) if fm_match else ""
-    body = content[len(frontmatter):]
+    return frontmatter, content[len(frontmatter):]
 
+
+def _reflection(md: Path, body: str, update_count: int, apply: bool) -> tuple[str | None, str]:
+    """(rewritten body, "") when there is one to write; else (None, the line saying why not)."""
+    if update_count < REFLECTION_THRESHOLD:
+        return None, f"  {md.stem}: only {update_count} updates, skipping."
     # For dry-run, just report.
     if not apply:
-        return f"  {md.stem}: {len(updates)} updates, candidate for reflection."
+        return None, f"  {md.stem}: {update_count} updates, candidate for reflection."
+    return _llm_reflection(md, body)
 
-    # Call LLM to rewrite the body.
+
+def _llm_reflection(md: Path, body: str) -> tuple[str | None, str]:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         from llm_client import call_llm
     except ImportError:
-        return f"  {md.stem}: llm_client not available."
+        return None, f"  {md.stem}: llm_client not available."
+    system = "You are a knowledge consolidation engine. Output markdown only."
+    rewritten = call_llm(_reflection_prompt(body), system, max_tokens=3000)
+    if not rewritten or not rewritten.strip():
+        return None, f"  {md.stem}: LLM returned empty response."
+    return rewritten, ""
 
-    prompt = f"""You are a knowledge editor. Rewrite the page below by integrating
+
+def _reflection_prompt(body: str) -> str:
+    return f"""You are a knowledge editor. Rewrite the page below by integrating
 all Update sections into the main narrative. The result should read as a
 single coherent page, not a series of patches.
 
@@ -130,38 +161,23 @@ Return the COMPLETE rewritten page body (starting after the H1 title).
 Include a ## History section at the end with the original body.
 Return ONLY the rewritten markdown — no commentary.
 """
-    system = "You are a knowledge consolidation engine. Output markdown only."
-    rewritten = call_llm(prompt, system, max_tokens=3000)
 
-    if not rewritten or not rewritten.strip():
-        return f"  {md.stem}: LLM returned empty response."
 
-    # Build the new page: frontmatter + rewritten body.
-    # The rewritten body should start with the H1 title.
-    if not rewritten.strip().startswith("# "):
-        # Extract title from original and prepend.
-        title_match = H1_RE.search(body)
-        title = title_match.group(0) if title_match else f"# {md.stem}"
-        rewritten = f"{title}\n\n{rewritten}"
-
-    new_content = frontmatter + rewritten.rstrip() + "\n"
-
-    # Add History section with original body.
+def _reflected_page(md: Path, frontmatter: str, body: str, rewritten: str) -> str:
+    """Frontmatter, the titled rewrite, then the original body under a dated History section."""
+    new_content = frontmatter + _titled(rewritten, body, md.stem).rstrip() + "\n"
     now = datetime.now().strftime("%Y-%m-%d")
     history_header = f"\n\n## History (pre-reflection {now})\n"
-    # Find where the rewritten content ends (before any existing History).
-    history_body = body  # The original full body.
-    new_content += f"{history_header}<details>\n<summary>Original page before reflection</summary>\n\n{history_body}\n\n</details>\n"
+    return new_content + f"{history_header}<details>\n<summary>Original page before reflection</summary>\n\n{body}\n\n</details>\n"
 
-    encoded = redact_secrets(new_content).encode("utf-8")
-    mutate_knowledge(
-        stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
-        {md: encoded},
-        preconditions={
-            md.relative_to(ROOT).as_posix(): sha256_bytes(source_bytes)
-        },
-    )
-    return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
+
+def _titled(rewritten: str, body: str, stem: str) -> str:
+    """The rewritten body should start with the H1 title; take it from the original if not."""
+    if rewritten.strip().startswith("# "):
+        return rewritten
+    title_match = H1_RE.search(body)
+    title = title_match.group(0) if title_match else f"# {stem}"
+    return f"{title}\n\n{rewritten}"
 
 
 def main() -> int:

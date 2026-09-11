@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import errno
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -26,13 +26,16 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
+from evidence_resolver import _daily_part_bounds
 from install_control import validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
 )
+from secret_redact import describe_error
 
 try:
     import tomllib as STDLIB_TOML
@@ -1283,6 +1286,8 @@ def _scan_transaction_database(
     deadline: float,
     details: dict,
     states: dict[str, int],
+    *,
+    vault_root: Path | None = None,
 ) -> dict | None:
     """Fill in the counters; return a result only when the schema is incomplete."""
     with _readonly_database(path, state_root, deadline=deadline) as database:
@@ -1312,7 +1317,9 @@ def _scan_transaction_database(
             states=states,
         )
         details["quarantined_unresolved"] = _unresolved_quarantine(
-            database, transaction_columns
+            database,
+            transaction_columns,
+            _CompiledDaySupersession(vault_root, state_root),
         )
         return None
 
@@ -1451,13 +1458,126 @@ def _outcome_was_written(
     return intended <= committed_creates
 
 
+_COMPILE_RECEIPT_PREFIX = "knowledge/daily/receipts/v3-"
+_STAGED_ARTIFACT_RE = re.compile(r"after/[0-9]{6}\.bin")
+_DAILY_LOGICAL_PATH_RE = re.compile(r"knowledge/daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md")
+_RECEIPT_RECORD_RE = re.compile(rb"(?s)```json\n(.*?)\n```")
+_MAX_STAGED_PLAN_BYTES = 4 * 1024 * 1024
+_MAX_STAGED_RECEIPT_BYTES = 1024 * 1024
+_MAX_DAY_BYTES = 4 * 1024 * 1024
+
+
+def _intended_creates(database: sqlite3.Connection, identifier: str) -> set[str]:
+    return {
+        row[0]
+        for row in database.execute(
+            "SELECT path FROM operation WHERE transaction_id = ? AND kind = 'create'",
+            (identifier,),
+        )
+    }
+
+
+def _only_compile_receipts(paths: set[str]) -> bool:
+    return bool(paths) and all(path.startswith(_COMPILE_RECEIPT_PREFIX) for path in paths)
+
+
+def _mapping_field(value: object, key: str) -> object:
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
+
+
+def _daily_logical_path(value: object) -> str | None:
+    if isinstance(value, str) and _DAILY_LOGICAL_PATH_RE.fullmatch(value) is not None:
+        return value
+    return None
+
+
+def _staged_receipt_day(raw: bytes) -> str | None:
+    """The day a staged compile receipt names, or None when it is not one."""
+    match = _RECEIPT_RECORD_RE.search(raw)
+    if match is None:
+        return None
+    source = _mapping_field(json.loads(match[1]), "source")
+    return _daily_logical_path(_mapping_field(source, "logical_path"))
+
+
+def _part_receipt_path(logical_path: str, part: bytes) -> str:
+    identity = hashlib.sha256(
+        reliable_memory.canonical_json_bytes([logical_path, hashlib.sha256(part).hexdigest()])
+    ).hexdigest()
+    return f"{_COMPILE_RECEIPT_PREFIX}{identity}.md"
+
+
+class _CompiledDaySupersession:
+    """The fourth proof: a refused compile of days that are compiled now.
+
+    A refused attempt that meant to create only compile receipts is history
+    when every day its staged receipts name is compiled as it stands today:
+    each part of the day's current bytes has a committed receipt. The refused
+    snapshots' own receipts can never appear, because a day is only ever
+    compiled at its current bytes (docs/research/2026-09-11-a-refused-compile-of-a-day-since-compiled-is-history.md).
+    Anything unreadable or unexpected leaves the finding in place.
+    """
+
+    def __init__(self, vault_root: Path | None, state_root: Path) -> None:
+        self.vault_root = vault_root
+        self.state_root = state_root
+
+    def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
+        intended = _intended_creates(database, identifier)
+        if self.vault_root is None or not _only_compile_receipts(intended):
+            return False
+        try:
+            return self._staged_days_compiled(identifier, intended, committed_creates)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
+        days = self._staged_days(identifier, intended)
+        return bool(days) and all(self._day_compiled(day, committed_creates) for day in days)
+
+    def _staged_days(self, identifier: str, intended: set[str]) -> set[str]:
+        directory = self.state_root / "run" / "transactions" / identifier
+        plan = json.loads(
+            read_runtime_bytes(directory / "plan.json", self.state_root, max_bytes=_MAX_STAGED_PLAN_BYTES)
+        )
+        staged = {
+            operation["path"]: operation["after"]["artifact"]
+            for operation in plan["operations"]
+            if operation["path"] in intended
+        }
+        if set(staged) != intended:
+            raise ValueError("refused attempt does not stage every receipt it names")
+        return {self._staged_day(directory, artifact) for artifact in staged.values()}
+
+    def _staged_day(self, directory: Path, artifact: str) -> str:
+        if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
+            raise ValueError("staged artifact path is not a plain after/ artifact")
+        raw = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        day = _staged_receipt_day(raw)
+        if day is None:
+            raise ValueError("staged artifact is not a compile receipt for a day")
+        return day
+
+    def _day_compiled(self, logical_path: str, committed_creates: set[str]) -> bool:
+        content = read_stable_bytes(self.vault_root / logical_path, _MAX_DAY_BYTES, label="daily source")
+        bounds = _daily_part_bounds(content)
+        return bool(bounds) and all(
+            _part_receipt_path(logical_path, content[start:end]) in committed_creates
+            for start, end in bounds
+        )
+
+
 def _resolved_by_lineage(database: sqlite3.Connection) -> set[str]:
     """Both records of the same fact: a retry of this attempt committed."""
     return _chain_resolved_ids(database) | _ordinal_resolved_ids(database)
 
 
 def _unresolved_quarantine(
-    database: sqlite3.Connection, transaction_columns: set[str]
+    database: sqlite3.Connection,
+    transaction_columns: set[str],
+    supersession: _CompiledDaySupersession | None = None,
 ) -> int:
     """Quarantined attempts whose work never happened.
 
@@ -1484,9 +1604,21 @@ def _unresolved_quarantine(
         return 0
     committed_creates = _committed_created_paths(database)
     return sum(
-        0 if _outcome_was_written(database, identifier, committed_creates) else 1
+        1
         for identifier in open_attempts
+        if not _attempt_is_history(database, identifier, committed_creates, supersession)
     )
+
+
+def _attempt_is_history(
+    database: sqlite3.Connection,
+    identifier: str,
+    committed_creates: set[str],
+    supersession: _CompiledDaySupersession | None,
+) -> bool:
+    if _outcome_was_written(database, identifier, committed_creates):
+        return True
+    return supersession is not None and supersession.resolves(database, identifier, committed_creates)
 
 
 def _quarantined_total(database: sqlite3.Connection) -> int:
@@ -1556,18 +1688,16 @@ def _unsettled_count(states: dict[str, int]) -> int:
 
 
 def _attention_parts(states: dict[str, int], invalid_state: bool, details: dict) -> list[str]:
-    parts = []
     unsettled = _unsettled_count(states)
-    if unsettled:
-        parts.append(f"{unsettled} transaction(s) still unsettled")
-    if details["quarantined_unresolved"]:
-        parts.append(
-            f"{details['quarantined_unresolved']} refused attempt(s) whose work "
-            "never happened"
-        )
-    if invalid_state:
-        parts.append("a transaction in a state this runtime does not define")
-    return parts
+    candidates = (
+        (unsettled, f"{unsettled} transaction(s) still unsettled"),
+        (
+            details["quarantined_unresolved"],
+            f"{details['quarantined_unresolved']} refused attempt(s) whose work never happened",
+        ),
+        (invalid_state, "a transaction in a state this runtime does not define"),
+    )
+    return [text for present, text in candidates if present]
 
 
 def _transaction_message(
@@ -1638,7 +1768,13 @@ def _unusable_transaction_database(
     return None
 
 
-def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
+def _transaction_check(
+    state_root: Path,
+    now: datetime,
+    deadline: float = float("inf"),
+    *,
+    vault_root: Path | None = None,
+) -> dict:
     path = _operational_database_path(state_root, "coordinator")
     details, states = _empty_transaction_details()
     kind, _ = _safe_kind(path, state_root)
@@ -1649,7 +1785,7 @@ def _transaction_check(state_root: Path, now: datetime, deadline: float = float(
         return unusable
     try:
         incomplete = _scan_transaction_database(
-            path, state_root, now, deadline, details, states
+            path, state_root, now, deadline, details, states, vault_root=vault_root
         )
     except (OSError, sqlite3.Error, TimeoutError, ValueError):
         return _unreadable_transactions(details, "Transaction state is unreadable.")
@@ -4957,6 +5093,41 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
+def _models_check() -> dict:
+    """Name the pinned model weights the cache lacks, with the command that fetches them.
+
+    Without them the vault answers by words alone and only the trace says so.
+    Presence at the pinned revision is what is checked here; the digest is
+    verified by `install_models.py` when it fetches.
+    """
+    from install_models import hub_library, missing_models, pinned_models
+
+    hub = hub_library()
+    if hub is None:
+        return _result(
+            "models",
+            "ok",
+            "Semantic search is not installed; no model weights are expected.",
+            {"installed": False, "missing": []},
+        )
+    missing = [f"{model.repo_id}@{model.revision[:12]}" for model in missing_models(hub)]
+    details = {
+        "installed": True,
+        "missing": missing,
+        "expected": [model.repo_id for model in pinned_models()],
+        "command": "uv run python scripts/install_models.py",
+    }
+    if not missing:
+        return _result("models", "ok", "Pinned model weights are in the local cache.", details)
+    return _result(
+        "models",
+        "degraded",
+        "Model weights missing: " + ", ".join(missing)
+        + "; search answers by words alone until `uv run python scripts/install_models.py` runs.",
+        details,
+    )
+
+
 def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
@@ -5308,7 +5479,34 @@ def _nightly_freshness_result(
     """Whether a recorded, non-failed nightly run is still current."""
     if _nightly_is_current(state, status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
-    return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
+    return _result("scheduler", "degraded", _stale_nightly_message(state), details)
+
+
+def _stale_nightly_message(state: dict) -> str:
+    """A pass that ran and skipped says so, with its reason (audit OPS-23)."""
+    skip = _fresh_skip(state)
+    if skip is None:
+        return "Nightly maintenance is stale."
+    reason = skip.get("reason") or "unknown"
+    when = _skip_moment(skip)[:10]
+    return f"Nightly maintenance is stale; the last pass skipped: {reason} ({when})."
+
+
+def _fresh_skip(state: dict) -> dict | None:
+    """The recorded skip when it is newer than the last recorded run."""
+    skip = state.get("last_nightly_skip")
+    if not isinstance(skip, dict):
+        return None
+    return skip if _skip_is_newer_than_run(state, skip) else None
+
+
+def _skip_moment(skip: dict) -> str:
+    return str(skip.get("skipped_at") or skip.get("date") or "")
+
+
+def _skip_is_newer_than_run(state: dict, skip: dict) -> bool:
+    ran_at = str(state.get("last_nightly_at") or state.get("last_nightly_date") or "")
+    return _skip_moment(skip) >= ran_at
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
@@ -5827,10 +6025,10 @@ def _codex_hook_list(entry: dict) -> list | None:
 
 
 def _codex_owned_hook(hook: dict) -> bool:
-    command = hook.get("command")
-    if not isinstance(command, str) or "codex_memory.py" not in command:
-        return False
-    return command.rstrip().endswith(" hook")
+    """The installer's own ownership rule, not a second one (#24, C2)."""
+    from codex_hook_identity import is_our_codex_command
+
+    return is_our_codex_command(hook.get("command"))
 
 
 def _codex_owned_hooks(hooks: list) -> list:
@@ -5858,9 +6056,17 @@ def _rendered_codex_hook_command(root: Path, command: str) -> str:
     ])
     rendered = command.removeprefix("uv ")
     rendered = rendered.replace('"$LLM_WIKI_ROOT"', shlex.quote(str(root)))
-    script = root / "scripts" / "codex_memory.py"
-    rendered = rendered.replace('"$LLM_WIKI_ROOT/scripts/codex_memory.py"', shlex.quote(str(script)))
-    return f"{prefix} {rendered}"
+    return f"{prefix} {_rendered_script_paths(rendered, root)}"
+
+
+def _rendered_script_paths(rendered: str, root: Path) -> str:
+    """Each of our scripts as the installer spells it: its quoted absolute path."""
+    from codex_hook_identity import OUR_CODEX_SCRIPTS
+
+    for name in OUR_CODEX_SCRIPTS:
+        script = shlex.quote(str(root / "scripts" / name))
+        rendered = rendered.replace(f'"$LLM_WIKI_ROOT/scripts/{name}"', script)
+    return rendered
 
 
 def _codex_hook_commands(root: Path, command: str) -> set[str]:
@@ -5871,7 +6077,8 @@ def _codex_hook_commands(root: Path, command: str) -> set[str]:
 
 def _canonical_codex_event(event: object) -> object:
     return {"sessionStart": "SessionStart", "preCompact": "PreCompact",
-            "postCompact": "PostCompact", "stop": "Stop"}.get(str(event), event)
+            "postCompact": "PostCompact", "stop": "Stop",
+            "postToolUse": "PostToolUse", "subagentStart": "SubagentStart"}.get(str(event), event)
 
 
 def _codex_hook_matches(wanted: dict, hook: dict, root: Path) -> bool:
@@ -6098,107 +6305,15 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
             repaired.append({"action": "create_runtime_directory", "directory": relative})
 
 
-def _windows_process_state(pid: int) -> str:
-    """Ask the kernel directly; a missing process is dead, anything else unknown."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        open_process.restype = wintypes.HANDLE
-        get_exit_code = kernel32.GetExitCodeProcess
-        get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        get_exit_code.restype = wintypes.BOOL
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = [wintypes.HANDLE]
-        close_handle.restype = wintypes.BOOL
-        handle = open_process(0x1000, False, pid)
-        if not handle:
-            return _windows_open_failure_state(ctypes.get_last_error())
-        try:
-            return _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle)
-        finally:
-            close_handle(handle)
-    except (AttributeError, OSError, OverflowError, ValueError):
-        return "unknown"
-
-
-def _windows_open_failure_state(last_error: int) -> str:
-    if last_error in {87, 1168}:
-        return "dead"
-    return "unknown"
-
-
-def _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle) -> str:
-    exit_code = wintypes.DWORD()
-    if not get_exit_code(handle, ctypes.byref(exit_code)):
-        return "unknown"
-    if exit_code.value == 259:
-        return "alive"
-    return "dead"
-
-
-def _os_error_process_state(exc: OSError) -> str:
-    if exc.errno == errno.ESRCH:
-        return "dead"
-    return "unknown"
-
-
-def _posix_process_state(pid: int) -> str:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        return "unknown"
-    except OSError as exc:
-        return _os_error_process_state(exc)
-    except (OverflowError, ValueError):
-        return "unknown"
-    return "alive"
-
-
 def _lsp_pid_state(pid: int) -> str:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        return "unknown"
-    if sys.platform == "win32":
-        return _windows_process_state(pid)
-    return _posix_process_state(pid)
-
-
-def _windows_exit_code_is_active(ctypes, handle) -> bool:
-    still_active = 259
-    exit_code = ctypes.c_ulong()
-    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-        return False
-    return exit_code.value == still_active
-
-
-def _windows_pid_alive(pid: int) -> bool:
-    import ctypes
-
-    process_query = 0x1000
-    handle = ctypes.windll.kernel32.OpenProcess(process_query, False, pid)
-    if not handle:
-        return False
-    try:
-        return _windows_exit_code_is_active(ctypes, handle)
-    finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+    return process_liveness.process_state(pid)
 
 
 def _pid_alive(pid: int) -> bool:
+    """The legacy boolean: only a provably dead process is dead (`process_liveness`)."""
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        return _windows_pid_alive(pid)
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, OverflowError, ValueError):
-        return False
+    return process_liveness.pid_alive(pid)
 
 
 def _lock_metadata(pid: int, token: str, now: datetime) -> bytes:
@@ -7758,6 +7873,7 @@ def _build_or_refresh_generation(
     force_rebuild: bool,
     coordinator: object | None = None,
     code_roots: tuple[str, ...] | None = None,
+    phases: dict[str, float] | None = None,
 ) -> dict:
     from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
     from evidence_graph_builder import (
@@ -7768,26 +7884,29 @@ def _build_or_refresh_generation(
     from generation_catalog import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
-    repository_scope = resolve_repository_scope(
-        root, deadline=deadline, cancelled=cancelled
-    )
+    with _timed_phase(phases, "scope"):
+        repository_scope = resolve_repository_scope(
+            root, deadline=deadline, cancelled=cancelled
+        )
     extractor_version = _maintenance_extractor_identity()
-    snapshot = collect_corpus(
-        root,
-        code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
-        max_files=max_sources,
-        deadline=deadline,
-    )
+    with _timed_phase(phases, "snapshot"):
+        snapshot = collect_corpus(
+            root,
+            code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
+            max_files=max_sources,
+            deadline=deadline,
+        )
     if len(snapshot.sources) > max_sources:
         raise ValueError("corpus source limit exceeded")
 
     catalog = GenerationCatalog(state_root)
-    parent = catalog.get_active(deadline=deadline)
-    parent_id = _active_generation_id(parent)
-    workspace_sha256 = _workspace_manifest_sha256(snapshot)
-    parent_workspace_sha256 = _parent_workspace_manifest(
-        catalog, parent_id, deadline, cancelled
-    )
+    with _timed_phase(phases, "parent"):
+        parent = catalog.get_active(deadline=deadline)
+        parent_id = _active_generation_id(parent)
+        workspace_sha256 = _workspace_manifest_sha256(snapshot)
+        parent_workspace_sha256 = _parent_workspace_manifest(
+            catalog, parent_id, deadline, cancelled
+        )
     if _parent_is_current(
         parent,
         force_rebuild,
@@ -7814,26 +7933,46 @@ def _build_or_refresh_generation(
         schema_version=GRAPH_SCHEMA_VERSION,
         workspace_manifest_sha256=workspace_sha256,
     )
-    built = build_incremental_generation(
-        catalog,
-        sources=_generation_source_rows(snapshot),
-        source_bytes=_generation_source_bytes(snapshot),
-        extractor=_generation_source_extractor(
-            snapshot, repository_scope.repository_id
-        ),
-        reuse_config=config,
-        generation_id=_fresh_generation_id(catalog),
-        parent_generation_id=_reuse_parent_id(force_rebuild, parent_id),
-        policy=_corpus_policy(snapshot),
-        expected_active=parent_id,
-        deadline=deadline,
-        cancelled=cancelled,
-        repository_scope=repository_scope,
-        snapshot=snapshot,
-        publication_root=root,
-        coordinator=coordinator,
-    )
+    with _timed_phase(phases, "build"):
+        built = build_incremental_generation(
+            catalog,
+            sources=_generation_source_rows(snapshot),
+            source_bytes=_generation_source_bytes(snapshot),
+            extractor=_generation_source_extractor(
+                snapshot, repository_scope.repository_id
+            ),
+            reuse_config=config,
+            generation_id=_fresh_generation_id(catalog),
+            parent_generation_id=_reuse_parent_id(force_rebuild, parent_id),
+            policy=_corpus_policy(snapshot),
+            expected_active=parent_id,
+            deadline=deadline,
+            cancelled=cancelled,
+            repository_scope=repository_scope,
+            snapshot=snapshot,
+            publication_root=root,
+            coordinator=coordinator,
+        )
     return _generation_build_result(built, snapshot)
+
+
+@contextlib.contextmanager
+def _timed_phase(phases: dict[str, float] | None, name: str):
+    """Record what this phase cost, so a deferred build can say where its time went.
+
+    A refresh that stopped at its budget used to report `time_limit` and
+    nothing else; on a hosted Windows runner a two-file build passed 60 s and
+    no one could say in which phase. See
+    `docs/research/2026-09-10-a-timeout-is-a-hang-bound-not-a-stopwatch.md`.
+    """
+    if phases is None:
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        phases[name] = round(time.monotonic() - started, 3)
 
 
 def _maintenance_outcome(
@@ -7936,6 +8075,7 @@ def _refreshed_generation(
     force_rebuild: bool,
     repaired: list[dict],
     code_roots: tuple[str, ...] | None = None,
+    phases: dict[str, float] | None = None,
 ) -> dict:
     with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
         guard.run(
@@ -7955,8 +8095,10 @@ def _refreshed_generation(
             force_rebuild=force_rebuild,
             coordinator=coordinator,
             code_roots=code_roots,
+            phases=phases,
         )
         result["repairs"] = repaired
+        result["details"] = {"phase_seconds": dict(phases or {})}
         return result
 
 
@@ -8079,6 +8221,7 @@ def _attempted_generation_refresh(
     repaired,
     code_roots=None,
 ) -> dict:
+    phases: dict[str, float] = {}
     try:
         return _refreshed_generation(
             root_path,
@@ -8090,10 +8233,15 @@ def _attempted_generation_refresh(
             force_rebuild,
             repaired,
             code_roots=code_roots,
+            phases=phases,
         )
     except TimeoutError:
         return _maintenance_outcome(
-            "deferred", "time_limit", partial=True, repairs=repaired
+            "deferred",
+            "time_limit",
+            partial=True,
+            repairs=repaired,
+            details={"phase_seconds": phases},
         )
     except _corpus_changed_error():
         # The vault was written to while its snapshot was being validated. That
@@ -8472,7 +8620,7 @@ def _guarded_index_rebuild(guard: Any, context, index_lock: Path, lock_token) ->
         _rebuild_and_verify_index(guard, context)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("index", []).append(
-            f"Index repair failed: {type(exc).__name__}"
+            f"Index repair failed: {describe_error(exc)}"
         )
     finally:
         guard.cleanup(
@@ -8600,7 +8748,7 @@ def _release_unentered_maintenance(
         _release_maintenance_owner(*maintenance)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
-            f"Maintenance owner release failed: {type(exc).__name__}"
+            f"Maintenance owner release failed: {describe_error(exc)}"
         )
 
 
@@ -8624,7 +8772,7 @@ def _run_repairs(context: _RepairContext) -> None:
                 _repair_derived_actions(guard, context, queue_v2_ready)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
-            f"Repair failed: {type(exc).__name__}"
+            f"Repair failed: {describe_error(exc)}"
         )
     finally:
         _release_unentered_maintenance(maintenance, guard_entered, context)
@@ -8659,6 +8807,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),
         ("mcp", lambda _budget: _mcp_check(root_path)),
@@ -8708,7 +8857,7 @@ def _collect_checks(
         _environment_check(root_path, state_path),
         _runtime_check(state_path),
         _filesystem_check(state_path, deadline),
-        _transaction_check(state_path, generated_at, deadline),
+        _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
         _queue_check(state_path, generated_at, deadline),
         _archive_check(root_path, state_path, deadline),
         _claim_check(root_path, state_path, deadline),

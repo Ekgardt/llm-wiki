@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 
 def _generation_directory(state_root: Path, result: dict) -> Path:
     """The built generation, naming the whole result when there is none."""
@@ -43,11 +45,9 @@ def _vault(tmp_path: Path) -> tuple[Path, Path]:
     return root, state
 
 
-def _graph_tables(state: Path, generation_id: str) -> dict[str, list[tuple]]:
-    database_path = (
-        state / "cache" / "evidence-graph" / "generations" / generation_id
-        / "evidence.sqlite3"
-    )
+def _graph_tables(state: Path, result: dict) -> dict[str, list[tuple]]:
+    """The graph of a built generation; a build that produced none names its outcome."""
+    database_path = _generation_directory(state, result) / "evidence.sqlite3"
     with sqlite3.connect(database_path) as database:
         return {
             table: database.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
@@ -83,12 +83,12 @@ def test_production_opencode_plugin_progresses_through_generation_validation(tmp
 
     result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert result["status"] == "built"
-    generation = state / "cache/evidence-graph/generations" / result["generation_id"]
+    generation = _generation_directory(state, result)
     validate_generation_artifact(
         generation,
         GenerationCatalog(state).get_active(),
@@ -189,7 +189,7 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
 
     root, state = _vault(tmp_path)
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     result = doctor._generation_check(
@@ -213,14 +213,9 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
 
     root, state = _vault(tmp_path)
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
-    search = (
-        state
-        / "cache/evidence-graph/generations"
-        / built["generation_id"]
-        / "search.sqlite3"
-    )
+    search = _generation_directory(state, built) / "search.sqlite3"
     if damage == "missing":
         search.unlink()
     else:
@@ -417,7 +412,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     built = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -428,7 +423,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     current = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -442,7 +437,7 @@ def test_bounded_builder_builds_then_defers_when_source_limit_is_exceeded(tmp_pa
     deferred = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=1,
     )
 
@@ -464,7 +459,7 @@ def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, mon
     )
 
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     active = GenerationCatalog(state).get_active()
     monkeypatch.setattr(search_memory, "ROOT", root)
@@ -491,28 +486,19 @@ def test_matching_hash_v2_with_missing_search_is_rebuilt(tmp_path):
 
     root, state = _vault(tmp_path)
     first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
-    first_path = (
-        state
-        / "cache/evidence-graph/generations"
-        / first["generation_id"]
-    )
+    first_path = _generation_directory(state, first)
     (first_path / "search.sqlite3").unlink()
 
     rebuilt = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert rebuilt["status"] == "built"
     assert rebuilt["generation_id"] != first["generation_id"]
     assert GenerationCatalog(state).get_active()["generation_id"] == rebuilt["generation_id"]
-    assert (
-        state
-        / "cache/evidence-graph/generations"
-        / rebuilt["generation_id"]
-        / "search.sqlite3"
-    ).is_file()
+    assert (_generation_directory(state, rebuilt) / "search.sqlite3").is_file()
 
 
 def _generation_directories(path) -> set[str]:
@@ -542,7 +528,7 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
 
     root, state = _vault(tmp_path)
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     (root / "knowledge/notes/new.md").write_text(
         "---\ntype: concept\n---\n# New\nnew term\n", encoding="utf-8"
@@ -578,17 +564,17 @@ def test_incremental_search_contains_new_chunks_and_no_old_text(tmp_path):
         "---\ntype: concept\n---\n# Changing\noldonlyterm\n", encoding="utf-8"
     )
     first = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text(
         "---\ntype: concept\n---\n# Changing\nnewonlyterm\n", encoding="utf-8"
     )
     second = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert first["status"] == second["status"] == "built"
-    search = state / "cache/evidence-graph/generations" / second["generation_id"] / "search.sqlite3"
+    search = _generation_directory(state, second) / "search.sqlite3"
     with sqlite3.connect(search) as database:
         text = "\n".join(row[0] for row in database.execute("SELECT content FROM chunks"))
         assert database.execute(
@@ -609,7 +595,7 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
     page = root / "knowledge/notes/drift.md"
     page.write_text("---\ntype: concept\n---\n# Drift\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Drift\nsecond\n", encoding="utf-8")
     before = {path.name for path in GenerationCatalog(state).generations_path.iterdir()}
@@ -650,7 +636,7 @@ def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
     page = root / "knowledge/notes/cancel.md"
     page.write_text("---\ntype: concept\n---\n# Cancel\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Cancel\nsecond\n", encoding="utf-8")
     cancelled = False
@@ -698,7 +684,7 @@ def test_expired_deadline_after_registration_leaves_only_an_unregistered_orphan(
     page = root / "knowledge/notes/deadline.md"
     page.write_text("---\ntype: concept\n---\n# Deadline\nfirst\n", encoding="utf-8")
     prior = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     page.write_text("---\ntype: concept\n---\n# Deadline\nsecond\n", encoding="utf-8")
 
@@ -855,12 +841,12 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
 
     first = doctor.run_generation_maintenance(code_roots=_code_roots(first_root), root=first_root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     second = doctor.run_generation_maintenance(code_roots=_code_roots(second_root), root=second_root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -874,7 +860,7 @@ def test_maintenance_scopes_same_basename_roots_and_repository_nodes(tmp_path):
     active = GenerationCatalog(state).get_active()
     assert active["repository_scope"] == second_scope.as_dict()
     database_path = (
-        state / "cache" / "evidence-graph" / "generations" / second["generation_id"]
+        _generation_directory(state, second)
         / "evidence.sqlite3"
     )
     with sqlite3.connect(database_path) as database:
@@ -895,7 +881,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
 
     result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -906,7 +892,7 @@ def test_maintenance_extracts_python_and_records_current_extractor_inputs(tmp_pa
     assert active["extractor_version"] == corpus_snapshot.EXTRACTOR_VERSION
     assert active["graph_extractor_version"] == doctor._maintenance_extractor_identity()
     database_path = (
-        state / "cache" / "evidence-graph" / "generations" / result["generation_id"]
+        _generation_directory(state, result)
         / "evidence.sqlite3"
     )
     with sqlite3.connect(database_path) as database:
@@ -949,13 +935,13 @@ def test_maintenance_extracts_workspace_once_and_partitions_cross_file_ownership
 
     result = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert result["status"] == "built"
     assert calls == [("scripts/app.py", "scripts/dep.py")]
-    generation = state / "cache/evidence-graph/generations" / result["generation_id"]
+    generation = _generation_directory(state, result)
     manifest = json.loads((generation / "incremental-manifest.json").read_bytes())
     entries = {entry["relative_path"]: entry for entry in manifest["sources"]}
     app = entries["scripts/app.py"]
@@ -1016,22 +1002,22 @@ def test_maintenance_cross_file_incremental_equals_clean_rebuild(tmp_path, initi
 
     root, incremental_state = _vault(tmp_path)
     _write_python_workspace(root, initial)
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     _write_python_workspace(root, updated)
-    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=60, max_sources=10
+    incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=incremental_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     clean_state = tmp_path / "clean-state"
-    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=clean_state, time_budget_seconds=60, max_sources=10
+    clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=clean_state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert first["status"] == "built"
     assert incremental["status"] == "built"
     assert clean["status"] == "built"
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     unresolved = {
         (row[2], row[4]) for row in tables["observation"]
         if row[2] in {"IMPORTS", "CALLS"}
@@ -1053,27 +1039,27 @@ def test_package_init_relative_import_incremental_equals_clean_rebuild(tmp_path)
     )
     doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     (package / "dep.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
 
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert {row[2] for row in tables["assertion"]} >= {"IMPORTS", "CALLS"}
     generation = (
         incremental_state
@@ -1123,7 +1109,7 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     dependency.write_text("VALUE = 1\n", encoding="utf-8")
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     first_generation = _generation_directory(incremental_state, first)
@@ -1138,20 +1124,20 @@ def test_from_dot_import_dependency_invalidates_and_matches_clean_rebuild(
     _apply_dependency_change(change, dependency, package)
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert not _import_assertions(tables)
     assert _has_missing_dependency_observation(tables)
 
@@ -1173,7 +1159,7 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
 
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     first_generation = _generation_directory(incremental_state, first)
@@ -1197,20 +1183,20 @@ def test_maintenance_ambiguous_candidates_invalidate_referencing_source(tmp_path
     alternate.write_text("def other():\n    return 2\n", encoding="utf-8")
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert any(row[2] == "CALLS" and row[7] == "resolved" for row in tables["assertion"])
 
 
@@ -1229,7 +1215,7 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
     )
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     tests_root = root / "tests"
@@ -1240,22 +1226,22 @@ def test_module_addition_rebuilds_unique_reference_into_ambiguity_and_matches_cl
 
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert first["status"] == "built"
     assert incremental["rebuilt_sources"] == incremental["sources"]
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert not [row for row in tables["assertion"] if row[2] == "CALLS"]
     assert any(
         row[2] == "CALLS" and row[4] == "ambiguous_target"
@@ -1282,28 +1268,28 @@ def test_module_removal_rebuilds_ambiguous_reference_to_unique_and_matches_clean
     alternate.write_text("def helper():\n    return 2\n", encoding="utf-8")
     doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     alternate.unlink()
 
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert incremental["rebuilt_sources"] == incremental["sources"]
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert any(row[2] == "CALLS" and row[7] == "resolved" for row in tables["assertion"])
 
 
@@ -1326,7 +1312,7 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
 
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     first_generation = _generation_directory(incremental_state, first)
@@ -1353,20 +1339,20 @@ def test_module_file_package_collision_is_ambiguous_then_resolves_incrementally(
     (root / "scripts/foo.py").unlink()
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert {row[2] for row in tables["assertion"]} >= {"IMPORTS", "CALLS"}
 
 
@@ -1389,7 +1375,7 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
 
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     first_generation = _generation_directory(incremental_state, first)
@@ -1418,20 +1404,20 @@ def test_duplicate_tables_are_ambiguous_and_incremental_matches_clean_rebuild(tm
     )
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert any(row[2] == "READS" and row[7] == "resolved" for row in tables["assertion"])
 
 
@@ -1452,7 +1438,7 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
     )
     doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     (root / "scripts/models.py").write_text(
@@ -1461,20 +1447,20 @@ def test_missing_table_rechecks_when_existing_code_source_adds_definition(tmp_pa
 
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert any(row[2] == "READS" and row[7] == "resolved" for row in tables["assertion"])
 
 
@@ -1493,7 +1479,7 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
     )
     doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     (root / "scripts/future_dep.py").write_text(
@@ -1502,22 +1488,22 @@ def test_missing_python_symbol_rechecks_all_code_sources_on_module_addition(
 
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert incremental["reused_sources"] == 0
     assert incremental["rebuilt_sources"] == incremental["sources"]
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
-    tables = _graph_tables(incremental_state, incremental["generation_id"])
+    tables = _graph_tables(incremental_state, incremental)
     assert {row[2] for row in tables["assertion"]} >= {"IMPORTS", "CALLS"}
 
 
@@ -1537,7 +1523,7 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
     (shared / "b.py").write_text("def second():\n    return 2\n", encoding="utf-8")
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     first_generation = _generation_directory(incremental_state, first)
@@ -1552,19 +1538,19 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
         first_file.unlink()
     incremental = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=incremental_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     clean_state = tmp_path / "clean-state"
     clean = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=clean_state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
     assert incremental["status"] == "built"
-    assert _graph_tables(incremental_state, incremental["generation_id"]) == _graph_tables(
-        clean_state, clean["generation_id"]
+    assert _graph_tables(incremental_state, incremental) == _graph_tables(
+        clean_state, clean
     )
     shared_nodes = set(
         first_entries["scripts/shared/a.py"]["records"]["nodes"]
@@ -1577,7 +1563,7 @@ def test_shared_structural_nodes_survive_owner_removal_and_match_clean_rebuild(
         catalog = GenerationCatalog(state)
         manifest = catalog.get_active()
         generation = (
-            state / "cache/evidence-graph/generations" / result["generation_id"]
+            _generation_directory(state, result)
         )
         evidence_graph.validate_generation_artifact(
             generation,
@@ -1700,7 +1686,7 @@ def test_workspace_partition_receives_generation_deadline_and_cancellation(
 
     built = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -1751,7 +1737,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
             "ordinary.py": "def ordinary():\n    return 2\n",
         },
     )
-    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=60, max_sources=10
+    first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     real_collect = corpus_snapshot.collect_corpus
 
@@ -1762,7 +1748,7 @@ def test_maintenance_language_membership_change_forces_workspace_reresolution(
         return snapshot
 
     monkeypatch.setattr(corpus_snapshot, "collect_corpus", reclassified)
-    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=60, max_sources=10
+    second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
 
     assert first["status"] == "built"
@@ -1781,7 +1767,7 @@ def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monk
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     monkeypatch.setattr(code_extractor, "EXTRACTOR_VERSION", "code-extractor/freshness-test")
@@ -1789,7 +1775,7 @@ def test_maintenance_rebuilds_when_code_extractor_version_changes(tmp_path, monk
     second = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -1808,7 +1794,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
     first = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     monkeypatch.setattr(
@@ -1820,7 +1806,7 @@ def test_maintenance_rebuilds_when_classifier_identity_changes(tmp_path, monkeyp
     second = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -1845,7 +1831,7 @@ def test_maintenance_passes_budget_to_scope_resolution_and_defers(tmp_path, monk
     result = doctor.run_generation_maintenance(
         root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -1867,7 +1853,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
     _write_python_workspace(root, {"app.py": "def app():\n    return 1\n"})
     first = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
     _write_python_workspace(root, {"app.py": "def app():\n    return 2\n"})
@@ -1886,7 +1872,7 @@ def test_workspace_extraction_deadline_defers_without_replacing_prior_generation
 
     second = doctor.run_generation_maintenance(code_roots=_code_roots(root), root=root,
         state_root=state,
-        time_budget_seconds=60,
+        time_budget_seconds=LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -2221,10 +2207,10 @@ def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
         path.write_text("checkout content\n", encoding="utf-8")
 
     built = doctor.run_generation_maintenance(
-        root=root, state_root=state, time_budget_seconds=60, max_sources=10
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
     )
     manifest = json.loads(
-        (state / "cache/evidence-graph/generations" / built["generation_id"]
+        (_generation_directory(state, built)
          / "source-manifest.json").read_text(encoding="utf-8")
     )
     paths = sorted(item["relative_path"] for item in manifest["sources"])
@@ -2233,3 +2219,35 @@ def test_the_vault_generation_holds_memory_not_the_checkouts_code(tmp_path):
     assert paths == ["knowledge/notes/mine.md"]
     assert manifest["policy"]["code_roots"] == []
     assert GenerationCatalog(state).get_active()["generation_id"] == built["generation_id"]
+
+
+def test_a_build_names_the_seconds_each_phase_cost(tmp_path):
+    """Built or deferred, the outcome says where the time went, so a runner that
+    passes its budget can be read instead of guessed at."""
+    import doctor
+    import evidence_graph_builder
+
+    root, state = _vault(tmp_path)
+    (root / "knowledge" / "notes" / "a.md").write_text("# A\n\nfact\n", encoding="utf-8")
+    built = doctor.run_generation_maintenance(
+        root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+    )
+    assert built["status"] == "built", built
+    phases = built["details"]["phase_seconds"]
+    assert set(phases) == {"scope", "snapshot", "parent", "build"}
+    assert all(seconds >= 0 for seconds in phases.values())
+
+    def out_of_time(*_args, **_kwargs):
+        raise TimeoutError("generation build deadline reached")
+
+    (root / "knowledge" / "notes" / "b.md").write_text("# B\n\nmore\n", encoding="utf-8")
+    original = evidence_graph_builder.build_incremental_generation
+    evidence_graph_builder.build_incremental_generation = out_of_time
+    try:
+        deferred = doctor.run_generation_maintenance(
+            root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10
+        )
+    finally:
+        evidence_graph_builder.build_incremental_generation = original
+    assert (deferred["status"], deferred["reason"]) == ("deferred", "time_limit")
+    assert set(deferred["details"]["phase_seconds"]) == {"scope", "snapshot", "parent", "build"}

@@ -6,8 +6,345 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **The graph meets the agent where it searches (#24, C).** A Claude Code
+  `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
+  indexed repository gets a hint of at most three definitions (qualified name,
+  path:line, resolved in/out degree) and the `mcp__llm-wiki__get_architecture`
+  call that answers authoritatively; `SubagentStart` (Claude Code, Codex) and
+  every session start get one line naming the code tools; the OpenCode plugin
+  appends the hint to its `grep`/`glob` output (best effort: OpenCode does not
+  document that this reaches the model). One adapter, `scripts/graph_hint.py`,
+  reads `cache/code-hints/<checkout-hash>.sqlite3`, a per-checkout table each
+  index build exports from its generation through the new
+  `EvidenceGraph.symbol_page` (the validated reader costs ~2 s cold; a hook
+  cannot). Measured, one fresh process per call, 558-source fixture: 56 ms p50
+  / 58 ms p95 for a hit or a miss, 33 ms for a literal, plus ~9 ms for
+  `uv run`. Silent on anything else and on every error; never blocks a tool
+  call; the text is labelled as repository data. Codex ownership recognises the
+  new handlers through one rule (`scripts/codex_hook_identity.py`) shared by the
+  installer merge and the doctor's runtime-hook check, which would otherwise
+  have called every installed Codex `runtime_hooks_mismatch`; the OpenCode plugin was rewritten under the complexity gate
+  with unchanged lifecycle behaviour. Tool names stay `mcp__llm-wiki__*` (C3).
+- **Repository indexes follow worktrees, and are retired (#24, D1).** The
+  nightly `refresh-all` indexes up to eight new worktrees of every registered
+  repository with their sibling's code roots, and the first structural answer
+  in a new worktree starts the fenced `repository_index.py follow` detached. A
+  new nightly step, `repository_index.py retire`, removes every generation of
+  a checkout whose root is gone or that is marked not indexed, and all but the
+  newest two of a live one — foreign generations were never activated, so the
+  pruner had kept every one — each repository under its refresh fence, the
+  vault's own generations never considered; hint tables without a generation
+  go with them. `git config branch.<name>.llmwikiIndex false` or
+  `llmwiki.index false` marks a checkout; `index`, `refresh` and `follow`
+  refuse it by name. Cross-repository routes (D2) are not done: the graph has
+  no route nodes. Research:
+  `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
+- CI installs the production profile into a clean environment on Windows and macOS too, and runs the install smoke there (audit OPS-14).
+- One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
+- **The query surface answers the whole graph (#24, B).** `get_architecture`
+  gains `mode=search` — ranked qualified names with in/out degree, exact
+  `total` and `has_more`, globs, a path prefix — and `depth` (1–8) on
+  `callers`/`callees`, a breadth-first CALLS closure reporting
+  `depth_applied` and `depth_frontier_open`. `mode=snippet` accepts
+  `owner.name` and cuts the block out of the generation's stored bytes at the
+  exact definition span (`precision: "exact"`, `freshness` against the
+  working tree). `mode=coverage` now answers `indexed` and `freshness` from
+  the generation's own source row — a foreign repository's indexed file
+  answered `indexed=false` beside a real node count — and adds a `parse`
+  block naming the `ERROR`/`MISSING` ranges (tree-sitter) or `SyntaxError`
+  line (Python) the extractor could not read. `mode=impact` adds
+  `affected_symbols`: the code symbols a dirty diff reaches within eight
+  hops, beside the unchanged `affected` groups. No new tool, no generation
+  format change. Measured warm on a 1 020-file fixture: search ~99 ms,
+  snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
+  `data_flow`/`cross_service` tracing is not feasible on the current graph
+  (no `DATA_FLOWS` or route-call edges) and is named as such. New modules
+  `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
+  `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
+- **The weights arrive with the install.** `scripts/install_models.py`
+  fetches the encoder and the default reranker at their pinned commits,
+  only the files the loaders read, verifies `model.safetensors` against the
+  size and SHA-256 recorded beside each revision, removes a file that does
+  not match, and never fetches a present file again. The installer runs it
+  when the semantic extra is present, the nightly pass runs it every night
+  (a no-op once the weights are there), and `doctor` reports `models:
+  degraded` with the command while they are missing. Before this nothing in
+  the product downloaded a model: a fresh install answered by words alone
+  and only the trace said so.
+- **Background incremental refresh of repository indexes (#24, A).**
+  `repository_index.py refresh <dir>` hashes a registered repository's sources
+  against its newest generation and rebuilds only when something changed,
+  reusing every unchanged record (one edited file in a 1 022-file fixture:
+  100 rebuilt, 922 reused, 16 s against 60 s for the full build), fenced under
+  the ownership registry's `doctor` role scoped to that one repository. The
+  MCP server spawns it detached once per repository and commit when a
+  structural answer finds the checkout's commit ahead of the generation's; the
+  nightly pass runs `refresh-all`. Structural answers carry a `freshness`
+  block naming both commits and what was done. `repository_index.py` gains a
+  command line (`index`, `list`, `detect`, `refresh`, `refresh-all`).
+
+
+### Changed
+
+- Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
+- The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
+- Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
+
+- The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).
+- The navigation stand obeys the complexity gate: schema validation is one function per keyword, the fixture run is one object with a phase per measurement, the evidence check is a list of named predicates, the gates are one entry per field; reports, error order and gate verdicts unchanged (audit L13).
+- The comparative stand obeys the complexity gate: one check per manifest section, one finding collector per preflight probe, the paired statistics as named steps; messages, codes and RNG consumption unchanged (audit L13).
+- The scale stand obeys the complexity gate: the three optional adapter cells share one cell shape, the crash matrix is one outcome per point with named steps; reports and adoption reasons unchanged (audit L13).
+- The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
+- `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
+- `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
+- `lsp_security` obeys the complexity gate: the no-follow walk, the provider URI check and the path redaction scanners are pipelines of named steps; every containment message and refusal order is unchanged (audit OPS-15).
+- `sync_memory`, `install_smoke` and `lsp_positions` obey the complexity gate: the sync run is a table of actions over one `_SyncRun`, the three `uv` steps are one step record, the file-URI parser is a pipeline of named checks; behaviour and messages unchanged (audit OPS-15).
+- Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
+- The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
+- The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).
+- Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
+- **A `recall` row carries its page, not the trace.** Through MCP each row
+  repeated the twelve trace fields and thirteen per-signal scores the
+  envelope already reports once; rows now carry the page, its score and
+  one per-signal score. Measured on one five-row call: a row 1 112 → 541
+  bytes, the envelope 8 849 → 4 996 (audit M7, rule 4). Research:
+  `docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md`.
+- **The installer job runs on macOS too.** The LaunchAgent path had no CI
+  evidence (audit OPS-14); `macos-15` joins the installer matrix. Research:
+  `docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`.
+- **The shipped Claude Code allowlist grants only read-only forms.** `Bash(sed *)`,
+  `Bash(xargs *)`, `Bash(sort *)` and `Bash(uv run --directory *)` let an
+  agent rewrite files or run any Python without a prompt under a
+  read-only-looking name; they are gone, `sed -n *` stays, and the built-in
+  read-only commands (`ls`, `cat`, `grep`, `find`, …) need no entry. The
+  settings merge retires exactly those four strings from an installed
+  `~/.claude/settings.json` on the next install or sync (audit OPS-12).
+  Research: `docs/research/2026-09-10-an-allowlist-that-reads-as-read-only-must-be-read-only.md`.
+- **The nightly and weekly passes take the canonical fence.** On an adopted
+  vault they hold the registry's `nightly`/`weekly` lease with a heartbeat,
+  so the doctor and the `run/` deletion contract see a running pass; a lost
+  fence stops the pass before its next step and is recorded as
+  `owner_fence_lost` instead of success; a marker a dead owner left behind
+  is reclaimed only with the registry's proof (expired lease and a provably
+  dead process, or an ownerless marker naming a PID that no longer exists),
+  never by age. A vault without a V3 coordinator keeps the legacy marker. The
+  `inspect.signature` ownership plumbing that no step ever received is gone
+  (audit OPS-02, OPS-03; owner's yes 2026-09-10). Decision:
+  `knowledge/notes/nightly-takes-the-canonical-fence-decision.md`; research:
+  `docs/research/2026-09-10-the-nightly-and-the-fence-it-never-takes.md`.
+- **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`
+  at its matrix-pinned revision is the product default when the environment
+  names no reranker (`LLMWIKI_RERANKER_MODEL=off` switches it off), it
+  reranks every question in a rerank profile instead of waiting for a
+  trigger a Russian question over English pages never matched, its depth is
+  10 over the fused pool of 20, and the MCP server loads it at start-up so no
+  question pays the load. Measured on the 45-query cross-lingual corpus:
+  cross-language MRR 0.60 → 0.98 on the shipped encoder, where swapping the
+  encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
+  once and not retried per question.
+- **Structural code answers are warm (#24, A).** The validated Evidence Graph
+  reader is kept per MCP process and reused while the catalog, the artifact
+  and the checkout's Git state keep their stat identity, instead of the
+  catalog re-validating the generation three times per open and hashing every
+  artifact each time. Same 44.7 MB generation, warm p50: `callers` 42 ms (was
+  511), `callees` 23 ms (249), `symbol` 86 ms (1 007), snippet 21 ms (335),
+  coverage 21 ms (258).
+- **`code_graph.py --callers` no longer re-parses a repository without a
+  generation** (300 s on 1 026 files in #24): it names `mode=index` and exits
+  2; `--live` opts into the scan.
+
+### Fixed
+
+- **A capture worker that loses its intent fence no longer counts a lost capture.** Every `adapter_capture_worker` "lost" row since 2026-09-07 carried `QueueOperationError: intent_fence_lost`, and on 2026-09-11 every intent those rows named had a succeeded task, with no ready intent left without one. Losing the fence moves authority, not data: the intent is durable, a lapsed lease is recovered, an undispatched intent is adopted. That code is now recorded as deferred; every other queue error stays a loss.
+
+- **A refused compile of a day that is compiled now no longer keeps health red.** Since 2026-08-25 the doctor reported one refused attempt "whose work never happened": a DLP refusal had staged receipts for eight snapshots of one day, snapshots that no longer exist and whose receipts can never be written. A refused attempt that meant to create only compile receipts is now history when every day its staged receipts name has a committed receipt for every part of its current bytes. Anything unreadable or unexpected keeps the finding. On the live vault the transaction check reads `ok` with this rule.
+
+- **A claim that is already quarantined is not written again.** The nightly compile of 2026-09-11 failed with `FileExistsError`: a pending quarantined daily was planned again, the model proposed the same claim over the same evidence, and the candidate create met the file written on 2026-09-07. A candidate file that embeds the same claim id, fingerprint and evidence now counts as present; a retry of the same attempt returns its commit, and a new attempt reports "batch still quarantined" instead of failing the run. A foreign file at the path still refuses the write.
+
+- The scale stand's exact cell no longer grades itself: it reports no recall, with the reason, instead of 1.0 by construction (audit M11).
+- A queue heartbeat thread that does not stop within twice its heartbeat is refused by name (`heartbeat_stop_timeout`) instead of joined forever (audit OPS-18).
+- Impact analysis no longer names the symbol after a grown line as changed: a hunk is matched against the generation's occurrences by its old byte range, the coordinate system the generation indexed (audit M13).
+- **Git warnings are not diff records.** `impact_analysis` read Git's
+  stderr together with the `-z` record stream, so on a checkout with
+  `core.autocrlf=true` the advisory line about line endings made every
+  impact answer empty and partial (`malformed zero-delimited Git diff
+  record`, PR30 runs 34535006773–34550352312 on Windows). Stderr is kept
+  apart and quoted only on failure. Research:
+  `docs/research/2026-09-11-git-warnings-are-not-diff-records.md`.
+- **`claim_operation` is a pipeline under CCN 5** (the gate refused
+  `mutate` at 13 in a file the OPS-21 fix touched).
+- **One answer to "is this process alive".** `scripts/process_liveness.py`
+  holds the three-state probe (`alive`, `dead`, `unknown`) lifted from the
+  doctor; `memory_state`, `markdown_transaction` and the doctor delegate to
+  it, and a legacy lock treats doubt as alive — a process owned by another
+  user is no longer read as dead and stolen (audit OPS-08). Research:
+  `docs/research/2026-09-11-one-answer-to-is-this-process-alive.md`.
+- **The compile-lock owner token travels in return values.** `maybe_compile`
+  no longer keeps the claimant's token in a module global; the claim returns
+  it and the release takes it (audit OPS-22).
+- **`compile_memory` imports its lock module once.** Two per-call
+  `sys.path.insert` grew the import path on every compile-lock check
+  (audit M10).
+- **A skipped night and a failed adoption say why.** The doctor's stale
+  nightly message names the last pass's skip reason when the skip is newer
+  than the last run; `install.sh` keeps the V3 adoption's stderr in
+  `logs/install-adoption.err.log` and quotes its tail on failure instead of
+  telling the user to rerun the command blind (audit OPS-23, OPS-20).
+  Research: `docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md`.
+- **Nine small findings closed at once.** A bad `MEMORY_LLM_TIMEOUT_S` is
+  refused by name; the compile budget is written once; the session record
+  renders its transcript once; the self-alias of `GenerationSealChanged` is
+  gone; a generation's descriptors close with `OSError` handling and one
+  named error; the flush docstring says "bounded"; `--status` opens the
+  legacy index read-only; the optional-stage worker and the detached
+  provider no longer swallow interrupts; `merge_claude_settings` is under
+  the complexity gate (audit L5–L12). Research:
+  `docs/research/2026-09-11-nine-small-findings-closed-at-once.md`.
+- **A dropped best-effort write is counted, and one bound is declared once.**
+  Six best-effort writes (capture-operation state, feedback capture, the
+  three MCP telemetry emitters) now count their failure in the
+  capture-failure trail instead of `pass`; the nightly hands the repository
+  refresh its own budget (`--budget-seconds`) and waits a margin longer, so
+  the child's graceful deferral runs before the parent's kill (audit OPS-21,
+  OPS-10). Research:
+  `docs/research/2026-09-10-a-dropped-best-effort-write-is-counted-and-one-bound-is-declared-once.md`.
+- **A silent fallback names its cause.** An encode that raised, a corrupt
+  `vectors.npy` or catalog, an unusable graph all looked like "no vectors
+  yet"; the eight sites now record `Class: redacted message` by kind
+  (`search_memory.degradation_reasons()`), say it once on stderr, and the
+  health resource carries `retrieval_degradations` (audit M5, M6). Research:
+  `docs/research/2026-09-10-a-silent-fallback-names-its-cause.md`.
+- **A page that cannot be flushed is named.** `access_tracking.py` was the
+  one module under `scripts/` the complexity gate refused (four functions
+  up to CCN 15, six bare excepts); a page whose frontmatter export failed
+  was skipped in silence while the cursor moved on. The module is a pipeline
+  of small steps with the same behaviour, and a failed page is reported with
+  its reason (`last_flush_failures()`, stderr, `--flush` output) while the
+  bounded scan still advances (audit H2). Research:
+  `docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md`.
+- **A failing in-process step says why, not only its class.** The nightly's
+  health report, three doctor repair paths and the self-update reported a
+  failure as `RuntimeError` alone; they now report
+  `Class: redacted message` through one helper, and the tests assert the
+  message (audit OPS-09, the rest of OPS-17). Research:
+  `docs/research/2026-09-10-a-failing-step-says-why-not-only-its-class.md`.
+- **A stale lock is moved aside and checked before it is removed.** The
+  three legacy lock stealers (`run/compile.pid`, `run/state.json.lock`, the
+  legacy `run/maintenance.lock`) decided "stale" from one read and then
+  unlinked whatever was at the path, so two stealers could remove each
+  other's fresh lock and both proceed. One helper now renames the lock aside
+  (one winner), deletes it only while it still holds the judged bytes, and
+  puts a fresh owner's lock back; the legacy marker is judged by its process,
+  not by age (audit OPS-07). Research:
+  `docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md`.
+- **A maintenance step that times out takes its children with it.** The
+  nightly and weekly runner killed only the direct child at the bound; a
+  step's own workers (queue processors, repository refresh, model download)
+  kept writing while the pass moved on. Steps now run through the tree
+  runner the sync already used, and the log says whether the tree ended
+  (audit OPS-06). Research:
+  `docs/research/2026-09-10-a-step-that-times-out-takes-its-children-with-it.md`.
+- **A failed MCP warm-up is in the health answer.** The retrieval warm-up
+  swallowed every failure, including `KeyboardInterrupt` and `MemoryError`,
+  and the first answers of a session silently fell back to the lexical leg.
+  It now records its state (`not_started`, `running`, `warm` with seconds,
+  `failed` with stage and error class), prints one line to the server log,
+  and `llm-wiki://health` carries it with a warning (audit OPS-13). Research:
+  `docs/research/2026-09-10-a-failed-warm-up-is-in-the-health-answer.md`.
+- **Docstrings and docs say what the code does.** The nightly's header
+  names its scheduler and its steps, `maybe_compile` and its tests describe
+  the lock they have, the search module quotes measured costs instead of
+  "<10 ms", and the last LanceDB and `SETUP-COGNEE.md` mentions are gone
+  (audit OPS-16, L1, L2, L3).
+- **The status names what the search reads.** `search_memory.py --status`
+  reports the active generation (id, extractor, vector state, model) before
+  the legacy index, `--rebuild` says it rebuilds the legacy index only, and
+  the user guide documents the on-by-default vectors with `--no-semantic`
+  and points an empty search at `doctor.py` (audit M2, M3). Research:
+  `docs/research/2026-09-10-the-status-names-what-the-search-reads.md`.
+- **One page ceiling for every reader of `knowledge/`.** The guardrails
+  snapshot, the compile after-image, the index rebuild and access telemetry
+  refused a page at 4 MiB, backlink repair at 512 KiB, while the journal,
+  claim tree, corpus and search accepted 8 MiB — the family of the journal
+  incident (audit M4). `bounded_io.MAX_KNOWLEDGE_PAGE_BYTES` is now the one
+  declaration and eleven readers alias it; a test holds them equal. Research:
+  `docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md`.
+- **The Windows installer says "owned" only after the transaction committed.**
+  A failed install-ownership transaction no longer prints
+  `Claude settings owned by the install transaction` or lists Claude Code as
+  active automatic (audit OPS-05). Research:
+  `docs/research/2026-09-10-the-installer-says-owned-only-after-the-transaction-committed.md`.
+- **A lost session record is written down.** `write_session_evidence`
+  still never raises, and a refused write now lands in the capture-failure
+  trail and counters with its reason and session (audit H5). Research:
+  `docs/research/2026-09-10-a-lost-session-record-is-written-down.md`.
+- **Every hang bound in the tests comes from one place.** 330 literal
+  bounds on `join`, `result`, `get` and `wait` in 26 files under `tests/` now
+  name `SHORT_TIMEOUT` or `LONG_TIMEOUT` from `tests/slow_machine.py`; a
+  bound the test expects to elapse, or a pause whose result the test
+  discards, stays literal by design, and
+  `test_no_test_carries_a_literal_hang_bound` keeps the count at zero
+  (audit OPS-04). Research:
+  `docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.
+- **A compile lock lives as long as its process, not thirty minutes.** The
+  legacy lock declared a live compile stale after 30 minutes, so the nightly
+  ran lint, backlink repair and the index rebuild on top of it and the next
+  trigger reported a race that never happened (audit OPS-01, OPS-11, H4).
+  One predicate now answers absent, stale or live for every reader; a lost
+  claim names the lock that won; `maybe_compile` decides its exit code from
+  the outcome and not from the reason text; `compile_memory` refuses to run
+  when the lock cannot be taken or read and says why. Research:
+  `docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md`.
+- **Warm structural answers on every supported Python, and the tests that
+  prove them pass on every runner.** PR30 run 34500804888 was red in 13 of 50
+  jobs. The reader cache demanded a serialized sqlite3 build (`threadsafety
+  == 3`), which Python 3.10 never reports, so on 3.10 every answer reopened
+  its generation and the MCP answer lost its `freshness` block; a lease
+  already hands the reader to one thread at a time, which is all SQLite's
+  multi-thread mode asks, so only a single-thread build is refused now.
+  Three Windows-only test defects were fixed at the class: the idle-reader
+  test drives the cache's clock instead of trusting a 15.6 ms monotonic step,
+  a test removes a Git checkout through `tests/filesystem.py::remove_tree`
+  (read-only objects), and the timeout-scale test no longer starts a child
+  Python without `SYSTEMROOT`. Research:
+  `docs/research/2026-09-10-a-cached-reader-needs-one-thread-at-a-time-not-a-serialized-build.md`.
+- **The compile commits again; a project journal is no longer a claim page.**
+  No compile had committed since 2026-09-07: the claim index read
+  `knowledge/projects/*/journal.md` and refused the 4.2 MB `no-hands`
+  journal at a 4 MiB cap the journal itself did not have, so every draft
+  was recorded as a validation error. The claim tree, the claim index and
+  lint now share one file set, `context.md` and `state.md`: the journal is
+  the event log the state is projected from, carries no claim ledger, and
+  is not scanned. Every reader that can still meet a project page accepts
+  the journal's own 8 MiB ceiling, and one test holds the bounds together.
+- **Tests wait as long as the slowest supported machine needs.** Two
+  Windows jobs went red on waits sized for a fast disk. Every wait in the
+  tests now comes from `tests/slow_machine.py` as CPython's
+  `SHORT_TIMEOUT`/`LONG_TIMEOUT`, scaled by `LLM_WIKI_TEST_TIMEOUT_SCALE`,
+  and a generation build reports the seconds each phase cost in its
+  outcome, built or deferred, which the nightly log prints.
+- **A generation built by an older extractor is served, not refused.** The
+  FTS content check re-derived every chunk with the current chunker and
+  compared; after the 2026-09-08 chunker change every generation built
+  before it was "semantically invalid", retrieval fell to the legacy BM25
+  index (`generation_unavailable`, lexical-only, empty for Russian) and the
+  six failing validations cost 40 s on every search of every process. The
+  content check now applies only to generations this extractor built; an
+  older one is validated structurally and served until the nightly rebuilds
+  it, and a refusal is remembered under the same hashed identity as a success.
+
 ### Removed
 
+- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
+- The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
+- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
+  had no caller; 40 functions reachable only from it (legacy triple RRF, its
+  own reranker call, its own generation search) and the tests that existed
+  only for them are gone — 897 lines. The live path is unchanged:
+  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
+  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
 - **The repository ships no memory.** The 89 published pages under
   `knowledge/notes/` (the owner's architecture decisions and the
   demonstration pages), the two synthetic daily logs and the vault's log

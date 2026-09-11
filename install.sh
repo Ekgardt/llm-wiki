@@ -599,6 +599,17 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
+# ─── 8a. Pinned model weights ──────────────────────────────────────
+# The read path loads weights local-only. With the semantic extra installed,
+# fetch the two pinned models now, verified; without it, nothing is expected.
+MODELS_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+case "$MODELS_EXIT" in
+  0) ok "Pinned model weights present" ;;
+  2) info "Semantic search not installed; model weights are fetched once it is" ;;
+  *) warn "Model weights incomplete; run: uv run python scripts/install_models.py" ;;
+esac
+
 # ─── 8b. Reliability V3 adoption ───────────────────────────────────
 # Session capture writes through the V3 queue, and a vault that has not
 # adopted V3 refuses every capture with `legacy_protocol_unquiesced` (issue
@@ -606,22 +617,36 @@ esac
 # is adopted here; any other state is named with the command to run.
 
 info "Checking Reliability V3 adoption..."
-ADOPTION_STATE="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>/dev/null || echo unknown)"
+# Whatever the check or the adoption says on stderr lands in one log and its
+# tail is quoted on failure, so the user never has to rerun a command blind
+# (audit OPS-20, docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md).
+ADOPTION_ERR="$STATE_ROOT/logs/install-adoption.err.log"
+mkdir -p "$STATE_ROOT/logs"
+: > "$ADOPTION_ERR"
+ADOPTION_STATE="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown)"
+adoption_tail() {
+  if [ -s "$ADOPTION_ERR" ]; then
+    warn "  last lines of $ADOPTION_ERR:"
+    tail -n 5 "$ADOPTION_ERR" | sed 's/^/    /' >&2
+  fi
+}
 case "$ADOPTION_STATE" in
   adopted) ok "Reliability V3 adopted" ;;
   fresh|upgrade-required)
-    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >/dev/null 2>&1; then
+    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >/dev/null 2>>"$ADOPTION_ERR"; then
       ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
     else
       SYNC_WARNING=1
       warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
       warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+      adoption_tail
     fi
     ;;
   *)
     SYNC_WARNING=1
     warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
     warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    adoption_tail
     ;;
 esac
 

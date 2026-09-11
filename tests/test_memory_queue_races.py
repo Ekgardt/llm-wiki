@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -38,7 +40,7 @@ class _SeventhBeatWait:
     def __call__(self, stop: threading.Event, interval: float) -> bool:
         self.waits.append(interval)
         if len(self.waits) > 7:
-            return stop.wait(60)
+            return stop.wait(LONG_TIMEOUT)
         self.clock.advance(40)
         if len(self.waits) == 7:
             self.completed.set()
@@ -89,7 +91,7 @@ def _join_all(threads: list[threading.Thread]) -> None:
     # Windows runner on 2026-09-07; a ten-second join per thread called that a
     # hang. The bound is for a real deadlock, so it is generous.
     for thread in threads:
-        thread.join(timeout=120)
+        thread.join(timeout=LONG_TIMEOUT)
         assert not thread.is_alive()
 
 
@@ -308,7 +310,7 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
         # The handler waits for the heartbeat thread to reach its seventh beat.
         # Two seconds was not enough on a loaded runner, and the task then
         # failed on the fixture rather than on the behaviour under test.
-        lambda task: completed.wait(60),
+        lambda task: completed.wait(LONG_TIMEOUT),
         max_tasks=1,
     )
     assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
@@ -355,7 +357,7 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
     monkeypatch.setattr(memory_queue, "_queue", lambda: primary)
 
     counts = memory_queue.drain_with(
-        lambda task: fence_lost.wait(2),
+        lambda task: fence_lost.wait(SHORT_TIMEOUT),
         max_tasks=1,
     )
     assert counts == {"ok": 0, "failed": 1, "dead": 0, "skipped": 0}

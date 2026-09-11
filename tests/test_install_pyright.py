@@ -39,6 +39,7 @@ from tests.code_kernel_helpers import (
     create_pyright_install_artifact,
     use_pyright_install_artifact_identity,
 )
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
 def _artifact(
@@ -594,7 +595,7 @@ def test_download_real_http_response_drip_feed_honors_absolute_deadline(
         stop.set()
         client.close()
         server.close()
-        worker.join(timeout=0.2)
+        worker.join(timeout=SHORT_TIMEOUT)
         elapsed = time.monotonic() - started
         destination.cleanup()
         parent.close()
@@ -2208,7 +2209,7 @@ def test_concurrent_installers_converge_on_one_valid_publication(
         # Convergence is the claim, not speed: the loser waits for the winner's
         # publication, and both together took longer than ten seconds on a
         # loaded runner.
-        results = [future.result(timeout=120) for future in futures]
+        results = [future.result(timeout=LONG_TIMEOUT) for future in futures]
 
     assert results[0] == results[1]
     assert results[0].root == _root(state_root)

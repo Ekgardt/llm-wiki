@@ -290,6 +290,33 @@ def test_a_writer_race_is_deferred_not_lost(diagnostics):
     assert [json.loads(line)["outcome"] for line in lines] == ["deferred", "lost"]
 
 
+def test_a_lost_intent_fence_is_deferred_not_lost(diagnostics):
+    """2026-09-11: every "lost" worker row carried intent_fence_lost, and every
+    intent those rows named had a succeeded task — authority moved, data did not."""
+    module, state = diagnostics
+
+    from memory_queue import QueueOperationError
+
+    module.record_capture_failure(
+        "adapter_capture_worker",
+        "QueueOperationError: intent_fence_lost",
+        error=QueueOperationError("intent_fence_lost"),
+    )
+    module.record_capture_failure(
+        "adapter_capture_worker",
+        "QueueOperationError: capture_link_insert_failed",
+        error=QueueOperationError("capture_link_insert_failed"),
+    )
+    module.record_capture_failure(
+        "adapter_capture_worker",
+        "RuntimeError: intent_fence_lost",
+        error=RuntimeError("intent_fence_lost"),
+    )
+
+    assert module.capture_deferred_totals(state) == {"adapter_capture_worker": 1}
+    assert module.capture_failure_totals(state) == {"adapter_capture_worker": 2}
+
+
 def test_only_deferred_writes_keep_the_session_quiet(diagnostics):
     module, state = diagnostics
 

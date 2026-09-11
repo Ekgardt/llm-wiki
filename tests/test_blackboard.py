@@ -12,6 +12,7 @@ import blackboard
 import markdown_transaction
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_reliability_v3_adoption import (
     _vault,
     build_adopted_reliability_v3,
@@ -271,7 +272,7 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
             )
             for worker in range(writers)
         ]
-        assert [future.result(timeout=300) for future in writes] == [
+        assert [future.result(timeout=LONG_TIMEOUT) for future in writes] == [
             tasks_per_writer
         ] * writers
         assert all(future.result(timeout=300) >= 0 for future in readers)
@@ -298,7 +299,7 @@ def test_multiprocess_same_resource_claim_has_one_fenced_winner(
             )
             for agent in ("opencode", "codex")
         ]
-        results = [future.result(timeout=300) for future in futures]
+        results = [future.result(timeout=LONG_TIMEOUT) for future in futures]
 
     assert sorted(status for status, _identity in results) == ["claimed", "conflict"]
     with sqlite3.connect(

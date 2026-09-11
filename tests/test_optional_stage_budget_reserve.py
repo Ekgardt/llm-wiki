@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import retrieval  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 @pytest.fixture(autouse=True)
 def _forget_observed_costs():
@@ -70,7 +72,7 @@ def test_a_stage_with_no_time_left_is_still_started_but_not_waited_for():
             cancelled=None,
             kind="dense",
         )
-    assert started.wait(5.0)
+    assert started.wait(SHORT_TIMEOUT)
 
 
 def test_a_generous_caller_keeps_a_window_far_wider_than_the_reserve():
@@ -123,7 +125,7 @@ def test_a_kind_observed_to_be_slower_than_the_window_is_not_waited_for():
         )
     # The worker still ran: skipping the wait must not skip warming the cache,
     # which is what makes the next call cheap.
-    assert started.wait(5.0)
+    assert started.wait(SHORT_TIMEOUT)
 
 
 def test_a_kind_observed_to_fit_is_waited_for():
@@ -149,7 +151,7 @@ def test_an_unknown_kind_is_not_waited_for_on_an_operation_sized_budget():
             cancelled=None,
             kind="dense",
         )
-    assert started.wait(5.0)
+    assert started.wait(SHORT_TIMEOUT)
 
 
 def test_an_unknown_kind_is_waited_for_when_the_caller_granted_the_ceiling():

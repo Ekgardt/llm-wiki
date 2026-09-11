@@ -33,8 +33,26 @@ def test_an_overflowing_node_count_is_marked_inexact() -> None:
     }
 
 
-def test_a_missing_manifest_is_not_invented(tmp_path: Path) -> None:
-    assert path_coverage._source_manifest(tmp_path, "generation-x") is None
+def test_a_stored_source_and_its_parse_are_answered_from_the_generation() -> None:
+    """Issue #24, B1: no manifest lookup — the source row is the answer."""
+
+    class _Graph:
+        generation_id = "generation-x"
+
+        def source_by_path(self, relative, *, deadline=None):
+            return {"sha256": "0" * 64, "size": 5, "language": "python", "content": b"x = 1"}
+
+        def source_observations(self, relative, *, deadline=None):
+            return {}
+
+        def find_nodes(self, **_kwargs):
+            return [{}]
+
+    answer = path_coverage._coverage_answer(_Graph(), Path("/nonexistent"), "a.py", 0.0)
+    expected = {"indexed": True, "freshness": "missing_on_disk", "nodes": 1}
+    assert {key: answer[key] for key in expected} == expected
+    assert answer["parse"]["status"] == "ok"
+    assert not hasattr(path_coverage, "_source_manifest")
 
 
 def test_the_note_admits_the_limit() -> None:

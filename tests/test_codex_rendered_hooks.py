@@ -39,12 +39,30 @@ def _template_command(root: Path) -> str:
     return doctor._expected_codex_runtime_hooks(_template(root))[0]["command"]
 
 
+def _runtime_command(wanted: dict, command: str) -> str:
+    """`command` stands in for the lifecycle hooks; the graph hooks keep their own (#24, C2)."""
+    if "codex_memory.py" in wanted["command"]:
+        return command
+    return wanted["command"]
+
+
 def _verdict(root: Path, command: str, trust: str = "trusted"):
     destination = _template(root)
     hooks = [dict(wanted, eventName=wanted["eventName"][0].lower() + wanted["eventName"][1:],
-                  command=command, enabled=True, trustStatus=trust)
+                  command=_runtime_command(wanted, command), enabled=True, trustStatus=trust)
              for wanted in doctor._expected_codex_runtime_hooks(destination)]
     return doctor._codex_hooks_verdict(root, hooks)
+
+
+@posix_rendering
+def test_rendered_graph_hooks_are_ours_and_accepted(tmp_path):
+    destination = _template(tmp_path)
+    expected = doctor._expected_codex_runtime_hooks(destination)
+    rendered = [dict(wanted, command=doctor._rendered_codex_hook_command(tmp_path, wanted["command"]),
+                     enabled=True, trustStatus="trusted") for wanted in expected]
+    owned = doctor._codex_owned_hooks(rendered)
+    assert (len(owned), doctor._codex_hooks_verdict(tmp_path, owned)) == (
+        len(expected), (True, "runtime_hooks_active"))
 
 
 @pytest.mark.parametrize("trust,expected", [

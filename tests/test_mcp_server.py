@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 from lsp_profiles import PYRIGHT_PROFILE
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
@@ -1960,8 +1962,8 @@ class TestHandleToolCall:
                 return loop_progressed, await task
             finally:
                 release.set()
-                assert finished.wait(1.0)
-                assert drained.wait(1.0)
+                assert finished.wait(SHORT_TIMEOUT)
+                assert drained.wait(SHORT_TIMEOUT)
                 with mcp_server._MCP_WORKERS_LOCK:
                     assert not workers
 
@@ -2227,7 +2229,7 @@ class TestHandleToolCall:
             try:
                 yield connection
                 commit_reached.set()
-                assert release_commit.wait(60.0)
+                assert release_commit.wait(LONG_TIMEOUT)
                 if before_commit is not None:
                     before_commit()
                 connection.commit()
@@ -2284,7 +2286,7 @@ class TestHandleToolCall:
             try:
                 yield connection
                 commit_reached.set()
-                assert release_commit.wait(60.0)
+                assert release_commit.wait(LONG_TIMEOUT)
                 if before_commit is not None:
                     before_commit()
                 connection.commit()
@@ -2350,7 +2352,7 @@ class TestHandleToolCall:
                     fail_late, deadline=time.monotonic() + 0.1
                 )
             )
-        assert finished.wait(2.0)
+        assert finished.wait(SHORT_TIMEOUT)
         deadline = time.monotonic() + 1.0
         while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -3437,8 +3439,8 @@ class TestResources:
                 return loop_progressed, await task
             finally:
                 release.set()
-                assert finished.wait(1.0)
-                assert drained.wait(1.0)
+                assert finished.wait(SHORT_TIMEOUT)
+                assert drained.wait(SHORT_TIMEOUT)
                 with mcp_server._MCP_WORKERS_LOCK:
                     assert not workers
 
@@ -4728,7 +4730,7 @@ def test_timed_out_worker_cannot_recreate_manager_after_final_close(
         del deadline
         if not entered.is_set():
             entered.set()
-            assert release.wait(2)
+            assert release.wait(SHORT_TIMEOUT)
         return tmp_path, None
 
     def request():
@@ -4786,7 +4788,7 @@ def test_timed_out_worker_cannot_recreate_manager_after_final_close(
         mcp_server._close_navigation_session_manager(time.monotonic() + 5)
         assert mcp_server._NAVIGATION_MANAGER_EPOCH == 102
         release.set()
-        assert completed.wait(2)
+        assert completed.wait(SHORT_TIMEOUT)
         _assert_stale_worker_was_abandoned(mcp_server, stale_results, constructed)
 
         fresh = mcp_server._get_precise_architecture(
@@ -6041,3 +6043,52 @@ def test_precise_components_report_provider_and_graph_without_private_state() ->
         "provider": {"generation": "1.1.411", "freshness": "fresh"},
         "graph": {"generation": "generation-17", "freshness": "fresh"},
     }
+
+
+class TestWarmupIsInTheHealthAnswer:
+    """Audit OPS-13: a failed warm-up is recorded and shown, never swallowed."""
+
+    def test_a_failed_stage_is_named_in_the_health_resource(self, monkeypatch, capsys):
+        import mcp_server
+
+        def broken_reranker():
+            raise RuntimeError("no torch")
+
+        monkeypatch.setattr(mcp_server, "_warm_reranker", broken_reranker)
+        mcp_server.warmup_retrieval_path()
+
+        state = mcp_server.warmup_state()
+        assert (state["status"], state["stage"], state["error"]) == (
+            "failed",
+            "reranker",
+            "RuntimeError",
+        )
+        assert "retrieval warm-up failed at reranker: RuntimeError: no torch" in capsys.readouterr().err
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_vault_status",
+            lambda **_k: {
+                "last_compile": "2026-09-10T03:00:00",
+                "last_compile_status": "ok",
+                "compile_backlog": 0,
+                "warmup": state,
+            },
+        )
+        envelope = json.loads(mcp_server._handle_resource_read("llm-wiki://health"))
+
+        assert envelope["partial"] is True
+        assert any("warm-up failed at reranker" in w for w in envelope["warnings"])
+        assert envelope["data"]["warmup"]["status"] == "failed"
+
+    def test_a_completed_warm_up_records_its_seconds(self, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_warm_reranker", lambda: None)
+        monkeypatch.setattr(mcp_server, "_warmup_pass", lambda _seconds: None)
+
+        mcp_server.warmup_retrieval_path()
+
+        state = mcp_server.warmup_state()
+        assert state["status"] == "warm"
+        assert isinstance(state["seconds"], float)

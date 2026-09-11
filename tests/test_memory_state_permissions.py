@@ -169,3 +169,36 @@ def test_save_state_routes_through_atomic_write(tmp_path, monkeypatch):
     memory_state.save_state({"value": 1})
 
     assert calls == [(state_file, '{\n  "value": 1\n}', "utf-8")]
+
+
+def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
+    """Audit OPS-07: a fresh owner's lock moved aside by mistake is put back."""
+    import memory_state
+
+    lock = tmp_path / "state.json.lock"
+    lock.write_bytes(b"4242")
+
+    assert memory_state.retire_stale_lock(lock, b"4242") is True
+    assert not lock.exists()
+    assert list(tmp_path.iterdir()) == []
+
+    lock.write_bytes(b"9999")
+    assert memory_state.retire_stale_lock(lock, b"4242") is False
+    assert lock.read_bytes() == b"9999"
+    assert [path.name for path in tmp_path.iterdir()] == ["state.json.lock"]
+
+    assert memory_state.retire_stale_lock(tmp_path / "absent.lock", b"1") is False
+
+
+def test_a_dead_state_lock_is_retired_and_a_live_one_waited_out(tmp_path, monkeypatch):
+    import memory_state
+
+    lock = tmp_path / "state.json.lock"
+    monkeypatch.setattr(memory_state, "LOCK_FILE", lock)
+    monkeypatch.setattr(memory_state, "_lock_age", lambda: memory_state._STALE_LOCK_SECONDS + 1)
+    lock.write_bytes(b"777")
+    monkeypatch.setattr(memory_state, "_is_pid_alive", lambda pid: False)
+
+    memory_state._await_lock_turn(deadline=time.time() + 5, poll=0.01)
+
+    assert not lock.exists()

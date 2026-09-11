@@ -167,12 +167,7 @@ def main() -> int:
         _reports(args.baseline), _reports(args.candidate), metric=args.metric
     )
     print(render(rows))
-    thin = under_run_arms(rows)
-    if thin:
-        print(
-            f"\nweak: {', '.join(thin)} ran fewer than {MINIMUM_RUNS} times; "
-            "every verdict above is a first look, not a measurement"
-        )
+    _warn_thin_arms(under_run_arms(rows))
     losses = _blocking_losses(rows)
     if losses:
         print(f"\nblocked: {', '.join(losses)} lost by more than the baseline's spread")
@@ -181,6 +176,14 @@ def main() -> int:
             json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8"
         )
     return 1 if losses else 0
+
+
+def _warn_thin_arms(thin: list[str]) -> None:
+    if thin:
+        print(
+            f"\nweak: {', '.join(thin)} ran fewer than {MINIMUM_RUNS} times; "
+            "every verdict above is a first look, not a measurement"
+        )
 
 
 if __name__ == "__main__":

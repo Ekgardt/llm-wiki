@@ -493,7 +493,7 @@ def test_retrieval_trace_schema_accepts_contract_payload() -> None:
             reranker_model_revision=None,
             reranker_depth=None,
             reranker_duration_ms=None,
-            reranker_fallback_reason="conditions_unmet",
+            reranker_fallback_reason="reranker_unavailable",
         )
     )
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")

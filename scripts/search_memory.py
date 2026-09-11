@@ -5,10 +5,11 @@ Optionally uses sentence-transformers for semantic (vector) search
 when the library is installed. Results are fused via Reciprocal
 Rank Fusion (RRF) for hybrid ranking.
 
-For solo-developer vaults (<500 pages):
-- BM25 only: <10ms, zero deps, good for keyword-precise queries
-- BM25 + Vector: <50ms, needs `pip install sentence-transformers`,
-  finds semantically related pages ("database performance" → "N+1 query fix")
+Costs measured on this vault (2026-09-10, `docs/ISSUES-2026-09-10.md`):
+- lexical only: tens of milliseconds, zero optional dependencies
+- with vectors: the dense leg costs seconds on a cold process and about a
+  second warm (`sentence-transformers`), and finds semantically related pages
+  ("database performance" → "N+1 query fix")
 
 Usage:
     uv run python scripts/search_memory.py "auth decision"
@@ -40,7 +41,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
     MAX_CORPUS_FILES,
@@ -76,8 +77,7 @@ MAX_SEARCH_ENTRIES = 20_000
 MAX_SEARCH_DIRECTORIES = 2_000
 MAX_SEARCH_DEPTH = 32
 MAX_SEARCH_LIMIT = 1_000
-MAX_PAGE_BYTES = 8 * 1024 * 1024
-MAX_PATH_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
 )
@@ -149,8 +149,8 @@ SUMMARY_RE = re.compile(
 )
 
 # The model, its revision and its prefixes live in one module, because the
-# LanceDB store and its rebuild encode with the same model and a drifting copy
-# would embed questions and pages with different ones.
+# generation builder encodes with the same model and a drifting copy would
+# embed questions and pages with different ones.
 from embedding_model import (  # noqa: E402
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
@@ -189,6 +189,29 @@ def _embedder_failure_kind(exc: BaseException) -> str:
     if isinstance(exc, OSError) or "NotFound" in type(exc).__name__:
         return "model_unavailable"
     return "load_failed"
+
+
+# One reason per kind of degraded retrieval stage, said once on stderr and
+# readable by the health resource; the model-load reason above was the first
+# of these. Research: docs/research/2026-09-10-a-silent-fallback-names-its-cause.md
+_DEGRADATIONS: dict[str, str] = {}
+_degradations_announced: set[str] = set()
+
+
+def note_degradation(kind: str, error: BaseException) -> None:
+    """Record why a retrieval stage fell back, as `Class: redacted message`."""
+    from secret_redact import describe_error
+
+    reason = describe_error(error)[:EMBEDDER_REASON_MAX_CHARS]
+    _DEGRADATIONS[kind] = reason
+    if kind in _degradations_announced:
+        return
+    _degradations_announced.add(kind)
+    print(f"search_memory: {kind} degraded — {reason}", file=sys.stderr)
+
+
+def degradation_reasons() -> dict[str, str]:
+    return dict(_DEGRADATIONS)
 
 
 def _note_embedder_unavailable(kind: str, detail: str) -> None:
@@ -1273,7 +1296,8 @@ def _embed_texts(
         return vectors.tolist()
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_encode", exc)
         return None
 
 
@@ -2014,116 +2038,6 @@ def _valid_as_of(path: str, as_of: str) -> bool:
     if vt in ("null", "none", "~", ""):
         return True
     return vt[:10] >= as_of[:10]
-
-
-def _deduplicate_by_slug(results: list[dict]) -> list[dict]:
-    """Remove results with duplicate filename stems, keeping the first (highest-ranked).
-
-    Some pages exist both flat (knowledge/notes/X.md) and under subdirectories
-    (knowledge/notes/qa/X.md). This deduplication keeps only the first
-    occurrence, preventing the same content from appearing twice.
-    """
-    seen_stems: set[str] = set()
-    deduped: list[dict] = []
-    for r in results:
-        # Use slug as identifier; fall back to filename stem from path.
-        stem = r.get("slug") or Path(r.get("path", "")).stem
-        if stem in seen_stems:
-            continue
-        seen_stems.add(stem)
-        deduped.append(r)
-    return deduped
-
-
-def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
-    """Apply cross-encoder reranker if available, else return results as-is."""
-    if not results or len(results) <= 1:
-        return results[:limit]
-    return _deduplicate_by_slug(_reranked(query, results, limit))[:limit]
-
-
-def _reranked(query: str, results: list[dict], limit: int) -> list[dict]:
-    """The reranker is optional; any failure leaves the order untouched."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from reranker import rerank, should_rerank
-
-        apply, _reason = should_rerank(
-            profile=str(results[0].get("requested_mode") or "HYBRID"),
-            candidates=results,
-            analysis_intents=(),
-            rerank_enabled=True,
-        )
-        if not apply:
-            return results
-        return rerank(query, results, limit=max(limit, len(results)))
-    except Exception:
-        return results
-
-
-def _stamp_retrieval_mode(results: list[dict], mode: str) -> None:
-    for result in results:
-        result.setdefault("generation", "legacy")
-        result["requested_mode"] = mode
-        result["effective_mode"] = mode
-        result.setdefault("fallback_reason", None)
-
-
-def _impression_events(
-    query: str, results: list[dict], mode: str, source_tool: str, make_event
-) -> list:
-    events = []
-    for rank, result in enumerate(results, start=1):
-        event = make_event(
-            event_kind="impression",
-            query=query,
-            retrieval_mode=mode,
-            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
-            rank=rank,
-            generation=str(result.get("generation") or "legacy"),
-            source_tool=source_tool,
-        )
-        if event is not None:
-            events.append(event)
-    return events
-
-
-def _best_effort_record_impressions(
-    query: str, results: list[dict], mode: str, source_tool: str
-) -> None:
-    """Telemetry never changes what a search returns, so it swallows failures."""
-    try:
-        from retrieval_telemetry import (
-            best_effort_make_event,
-            best_effort_record_events,
-        )
-
-        events = _impression_events(
-            query, results, mode, source_tool, best_effort_make_event
-        )
-        if events:
-            best_effort_record_events(events)
-    except Exception:
-        pass
-
-
-def _finalize_results(
-    query: str,
-    results: list[dict],
-    limit: int,
-    *,
-    retrieval_mode: str,
-    source_tool: str,
-    emit_telemetry: bool,
-) -> list[dict]:
-    """Finalize one returned list and best-effort record its impressions once."""
-    final = _deduplicate_by_slug(results)[:limit]
-    mode = str(retrieval_mode or "bm25").lower()
-    _stamp_retrieval_mode(final, mode)
-    if not final or not emit_telemetry:
-        return final
-    _best_effort_record_impressions(query, final, mode, source_tool)
-    return final
 
 
 def _active_generation_catalog() -> GenerationCatalog | None:
@@ -2947,6 +2861,13 @@ def _generation_authoritative_sources(
     return sources
 
 
+def _reproducible_by_this_extractor(manifest: Mapping[str, object]) -> bool:
+    """Only this extractor's own chunks can be re-derived and compared."""
+    import corpus_snapshot
+
+    return manifest.get("extractor_version") == corpus_snapshot.EXTRACTOR_VERSION
+
+
 def validate_generation_fts_artifact(
     generation_path: Path,
     manifest: dict[str, object],
@@ -2955,17 +2876,29 @@ def validate_generation_fts_artifact(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
-    """Fail closed unless a generation-local FTS artifact is semantically valid."""
+    """Fail closed unless a generation-local FTS artifact is semantically valid.
+
+    The content check re-derives every chunk from the stored sources and
+    compares; it can only be asked of a generation this extractor built.
+    An older extractor's rows are not reproducible here — the 2026-09-07
+    generation checked by the v3 chunker failed at row 9,272 and the vault
+    answered lexical-only for two days — so for those the artifact is
+    validated structurally and served, and the nightly rebuilds it on the
+    version mismatch. See
+    `docs/research/2026-09-10-a-generation-outlives-its-extractor.md`.
+    """
     _check_generation_stop(deadline, cancelled)
     generation_path = Path(generation_path)
     state_root = Path(state_root)
-    authoritative_sources = _generation_authoritative_sources(
-        generation_path,
-        manifest,
-        state_root=state_root,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
+    authoritative_sources = None
+    if _reproducible_by_this_extractor(manifest):
+        authoritative_sources = _generation_authoritative_sources(
+            generation_path,
+            manifest,
+            state_root=state_root,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     artifact = Path(generation_path) / GENERATION_FTS_ARTIFACT
     validate_runtime_file(artifact, state_root, max_bytes=16 * 1024 * 1024 * 1024)
     uri = f"{artifact.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
@@ -4127,107 +4060,6 @@ def _generation_vectors_search(
         return None
 
 
-def _page_diverse_order(
-    ordered: list[str], metadata: Mapping[str, Mapping[str, object]]
-) -> list[str]:
-    """One chunk per page first, then the rest in the order they already had.
-
-    Retrieved chunks cluster: several passages of one page are one answer
-    repeated, not several answers, and they crowd every other page out of the
-    result. Nothing is dropped here — the extra chunks follow the first pass —
-    so a caller that wanted them still receives them.
-    """
-    first_by_page: list[str] = []
-    extras: list[str] = []
-    seen: set[str] = set()
-    for chunk_id in ordered:
-        page = str(metadata[chunk_id].get("path") or "")
-        if page in seen:
-            extras.append(chunk_id)
-            continue
-        seen.add(page)
-        first_by_page.append(chunk_id)
-    return first_by_page + extras
-
-
-def _fuse_generation_results(
-    lexical: list[dict[str, object]], vectors: list[dict[str, object]], limit: int
-) -> list[dict[str, object]]:
-    scores: dict[str, float] = {}
-    metadata: dict[str, dict[str, object]] = {}
-    for rank, result in enumerate(lexical, 1):
-        chunk_id = str(result["chunk_id"])
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + 2.0 / (60 + rank)
-        metadata[chunk_id] = result
-    for rank, result in enumerate(vectors, 1):
-        chunk_id = str(result["chunk_id"])
-        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
-        metadata.setdefault(chunk_id, result)
-    ordered = _page_diverse_order(
-        sorted(scores, key=lambda key: (-scores[key], key)), metadata
-    )
-    results = []
-    for chunk_id in ordered[:limit]:
-        result = dict(metadata[chunk_id])
-        result["score"] = round(scores[chunk_id], 4)
-        result["requested_mode"] = "hybrid"
-        result["effective_mode"] = "hybrid"
-        result["fallback_reason"] = None
-        results.append(result)
-    return results
-
-
-def _finalize_generation_results(
-    results: list[dict[str, object]],
-    *,
-    query: str,
-    source_tool: str,
-    emit_telemetry: bool,
-) -> list[dict[str, object]]:
-    if not results or not emit_telemetry:
-        return results
-    _best_effort_record_generation_impressions(results, query, source_tool)
-    return results
-
-
-def _generation_impression_events(
-    results: list[dict[str, object]], query: str, source_tool: str, make_event
-) -> list:
-    events = []
-    for rank, result in enumerate(results, 1):
-        event = make_event(
-            event_kind="impression",
-            query=query,
-            retrieval_mode=str(result["effective_mode"]),
-            candidate_id=str(result["chunk_id"]),
-            rank=rank,
-            generation=str(result["generation"]),
-            source_tool=source_tool,
-        )
-        if event is not None:
-            events.append(event)
-    return events
-
-
-def _best_effort_record_generation_impressions(
-    results: list[dict[str, object]], query: str, source_tool: str
-) -> None:
-    """Telemetry never changes what a search returns, so it swallows failures."""
-    try:
-        from retrieval_telemetry import (
-            best_effort_make_event,
-            best_effort_record_events,
-        )
-
-        events = _generation_impression_events(
-            results, query, source_tool, best_effort_make_event
-        )
-        if events:
-            best_effort_record_events(events)
-    except Exception:
-        pass
-
-
 def search(
     query: str,
     scope: str = "all",
@@ -4938,7 +4770,15 @@ def _legacy_dense_hits(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
-    """Independent dense backend used by retrieve() — returns None if unavailable."""
+    """Independent dense backend used by retrieve() — returns None if unavailable.
+
+    With an explicit `deadline` the leg is deferred before the model is
+    probed: it encodes on the caller's thread with no admission record. The
+    product path never passes one here — `retrieve_via_search_memory` runs
+    every optional stage without a deadline and bounds it in `_call_dense`
+    instead — so this guard reaches only direct callers
+    (docs/research/2026-09-10-a-deferred-dense-leg-says-deferred.md).
+    """
     _check_legacy_stop(deadline, cancelled)
     if deadline is not None or not _dense_backend_ready(query):
         return None
@@ -4954,356 +4794,6 @@ def _legacy_dense_hits(
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
-    )
-
-
-def _vectors_wanted(
-    manifest: Mapping[str, object],
-    semantic: bool,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-) -> bool:
-    if not semantic or embedder is None:
-        return False
-    if model_id is None or model_revision is None:
-        return False
-    return manifest.get("vector_state") == "complete"
-
-
-def _generation_artifact_names(
-    manifest: Mapping[str, object],
-    *,
-    semantic: bool,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-) -> tuple[str, ...]:
-    """Vectors join the sealed set only when they are complete and wanted."""
-    if _vectors_wanted(manifest, semantic, embedder, model_id, model_revision):
-        return (GENERATION_FTS_ARTIFACT, *GENERATION_VECTOR_ARTIFACTS)
-    return (GENERATION_FTS_ARTIFACT,)
-
-
-def _active_manifest(
-    catalog: GenerationCatalog, stop_options: Mapping[str, object]
-) -> dict | None:
-    try:
-        manifest = catalog.get_active(**stop_options)
-    except TimeoutError:
-        raise
-    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
-        return None
-    return manifest if isinstance(manifest, dict) else None
-
-
-def _generation_vector_hits(
-    query: str,
-    catalog: GenerationCatalog,
-    manifest: Mapping[str, object],
-    connection: sqlite3.Connection,
-    *,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-    scope: str,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    stop_options: Mapping[str, object],
-) -> list[dict] | None:
-    if embedder is None or model_id is None or model_revision is None:
-        return None
-    return _generation_vectors_search(
-        query,
-        catalog,
-        manifest,
-        connection,
-        embedder=embedder,
-        model_id=model_id,
-        model_revision=model_revision,
-        scope=scope,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        **stop_options,
-    )
-
-
-def _mark_vectors_unavailable(
-    lexical: list[dict], deadline: float | None, cancelled: Callable[[], bool] | None
-) -> None:
-    for result in lexical:
-        _check_generation_stop(deadline, cancelled)
-        result["requested_mode"] = "hybrid"
-        result["fallback_reason"] = "generation_vectors_unavailable"
-
-
-def _generation_search_results(
-    query: str,
-    catalog: GenerationCatalog,
-    manifest: Mapping[str, object],
-    connection: sqlite3.Connection,
-    *,
-    artifact_names: tuple[str, ...],
-    consumption_seal: object,
-    scope: str,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    semantic: bool,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-    source_tool: str,
-    emit_telemetry: bool,
-    stop_options: Mapping[str, object],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict] | None:
-    """Results from the sealed generation, or None when the seal no longer holds."""
-    lexical = _generation_fts_search(
-        query,
-        manifest,
-        connection,
-        scope=scope,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        **stop_options,
-    )
-
-    def sealed() -> bool:
-        return bool(
-            _generation_consumption_unchanged(
-                catalog, manifest, artifact_names, consumption_seal, **stop_options
-            )
-        )
-
-    if semantic:
-        vectors = _generation_vector_hits(
-            query,
-            catalog,
-            manifest,
-            connection,
-            embedder=embedder,
-            model_id=model_id,
-            model_revision=model_revision,
-            scope=scope,
-            limit=limit,
-            project=project,
-            since=since,
-            as_of=as_of,
-            stop_options=stop_options,
-        )
-        if vectors is not None and sealed():
-            return _finalize_generation_results(
-                _fuse_generation_results(lexical, vectors, limit),
-                query=query,
-                source_tool=source_tool,
-                emit_telemetry=emit_telemetry,
-            )
-        _mark_vectors_unavailable(lexical, deadline, cancelled)
-    if not sealed():
-        return None
-    return _finalize_generation_results(
-        lexical, query=query, source_tool=source_tool, emit_telemetry=emit_telemetry
-    )
-
-
-def _generation_attempt_inputs(
-    catalog: GenerationCatalog,
-    stop_options: Mapping[str, object],
-    *,
-    semantic: bool,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-) -> tuple | None:
-    """The manifest, its sealed artifact set, the seal, and an open artifact."""
-    manifest = _active_manifest(catalog, stop_options)
-    if manifest is None:
-        return None
-    artifact_names = _generation_artifact_names(
-        manifest,
-        semantic=semantic,
-        embedder=embedder,
-        model_id=model_id,
-        model_revision=model_revision,
-    )
-    return _sealed_generation_inputs(
-        catalog, manifest, artifact_names, stop_options
-    )
-
-
-def _sealed_generation_inputs(
-    catalog: GenerationCatalog,
-    manifest: dict[str, object],
-    artifact_names: object,
-    stop_options: Mapping[str, object],
-) -> tuple | None:
-    """The seal and the open artifact, or None when either is unusable."""
-    seal = _generation_consumption_seal(
-        catalog, manifest, artifact_names, **stop_options
-    )
-    if seal is None:
-        return None
-    # Opened last: an unusable seal must not leave a connection behind.
-    connection = _generation_connection(catalog, manifest, **stop_options)
-    if connection is None:
-        return None
-    return (manifest, artifact_names, seal, connection)
-
-
-def _try_generation_search(
-    query: str,
-    catalog: GenerationCatalog,
-    *,
-    scope: str,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    semantic: bool,
-    embedder: object | None,
-    model_id: str | None,
-    model_revision: str | None,
-    source_tool: str,
-    emit_telemetry: bool,
-    stop_options: Mapping[str, object],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict] | None:
-    """One attempt through the active generation; None means fall back."""
-    inputs = _generation_attempt_inputs(
-        catalog,
-        stop_options,
-        semantic=semantic,
-        embedder=embedder,
-        model_id=model_id,
-        model_revision=model_revision,
-    )
-    if inputs is None:
-        return None
-    manifest, artifact_names, consumption_seal, connection = inputs
-    try:
-        return _generation_search_results(
-            query,
-            catalog,
-            manifest,
-            connection,
-            artifact_names=artifact_names,
-            consumption_seal=consumption_seal,
-            scope=scope,
-            limit=limit,
-            project=project,
-            since=since,
-            as_of=as_of,
-            semantic=semantic,
-            embedder=embedder,
-            model_id=model_id,
-            model_revision=model_revision,
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-            stop_options=stop_options,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    except TimeoutError:
-        raise
-    except (
-        OSError,
-        PermissionError,
-        sqlite3.Error,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-    ):
-        return None
-    finally:
-        connection.close()
-
-
-def _generation_search_allowed(
-    catalog: object, force_rebuild: bool, page_paths: list[Path] | None
-) -> bool:
-    return catalog is not None and not force_rebuild and page_paths is None
-
-
-def _search_backends(
-    query: str,
-    scope: str = "all",
-    limit: int = 10,
-    force_rebuild: bool = False,
-    project: str | None = None,
-    since: str | None = None,
-    as_of: str | None = None,
-    semantic: bool = True,
-    page_paths: list[Path] | None = None,
-    graph: bool = True,
-    rerank: bool = True,
-    source_tool: str = "search_memory",
-    emit_telemetry: bool = True,
-    *,
-    catalog: GenerationCatalog | None = None,
-    generation_embedder: object | None = None,
-    generation_model_id: str | None = None,
-    generation_model_revision: str | None = None,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> list[dict]:
-    """Prefer a validated generation and otherwise preserve legacy search behavior."""
-    limit = _validate_search_limit(limit)
-    if _blank_query(query):
-        return []
-    selected_catalog = catalog if catalog is not None else _active_generation_catalog()
-    generation_embedder, generation_model_id, generation_model_revision = (
-        _resolved_generation_embedder(
-            semantic, generation_embedder, generation_model_id, generation_model_revision
-        )
-    )
-    stop_options = _stop_options(deadline, cancelled)
-    _check_generation_stop(deadline, cancelled)
-    if _generation_search_allowed(selected_catalog, force_rebuild, page_paths):
-        results = _try_generation_search(
-            query,
-            selected_catalog,
-            scope=scope,
-            limit=limit,
-            project=project,
-            since=since,
-            as_of=as_of,
-            semantic=semantic,
-            embedder=generation_embedder,
-            model_id=generation_model_id,
-            model_revision=generation_model_revision,
-            source_tool=source_tool,
-            emit_telemetry=emit_telemetry,
-            stop_options=stop_options,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if results is not None:
-            return results
-    _check_generation_stop(deadline, cancelled)
-    return _legacy_search(
-        query,
-        scope,
-        limit,
-        force_rebuild,
-        project,
-        since,
-        as_of,
-        semantic,
-        page_paths,
-        graph,
-        rerank,
-        source_tool,
-        emit_telemetry,
     )
 
 
@@ -5346,345 +4836,9 @@ def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: st
     return _newer_than_as_of(timestamp, as_of) or not _valid_as_of(path, as_of)
 
 
-def _legacy_scored_rows(
-    rows: list[tuple[object, ...]],
-    *,
-    query_lower: str,
-    query_words: set[str],
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-) -> list[dict]:
-    scored = [
-        _legacy_scored_row(
-            row,
-            query_lower=query_lower,
-            query_words=query_words,
-            project=project,
-        )
-        for row in rows
-        if not _legacy_row_excluded(str(row[0]), str(row[4] or ""), since, as_of)
-    ]
-    # FTS5 returns bm25() order; the boosts above change it.
-    scored.sort(key=lambda row: row["score"], reverse=True)
-    return scored
-
-
-def _legacy_scored_row(
-    row: tuple[object, ...],
-    *,
-    query_lower: str,
-    query_words: set[str],
-    project: str | None,
-) -> dict:
-    path, title, summary, proj, timestamp, rank = row
-    score = _boosted_lexical_score(
-        rank,
-        path=path,
-        title=title,
-        row_project=proj or "",
-        query_lower=query_lower,
-        query_words=query_words,
-        project=project,
-    )
-    return {
-        "path": path,
-        "title": title,
-        "summary": summary[:120] if summary else "",
-        "score": round(score, 2),
-        "project": proj or "",
-        "timestamp": timestamp or "",
-    }
-
-
 def _notes_first(row: dict) -> int:
     """Duplicates prefer the canonical notes tree."""
     return 0 if "knowledge/notes/" in row["path"] else 1
-
-
-def _stem_matches(rows: list[dict], normalized: str) -> list[dict]:
-    return [row for row in rows if Path(row["path"]).stem.lower() == normalized]
-
-
-def _exact_filename_answer(rows: list[dict], query: str, limit: int) -> list[dict] | None:
-    """A page whose filename is the query wins outright, before any fusion.
-
-    Otherwise a graph neighbour can promote a linked-but-wrong page above it.
-    Duplicates prefer the canonical notes tree.
-    """
-    normalized = query.lower().strip().replace(" ", "-")
-    matches = _stem_matches(rows[:10], normalized)
-    if not matches:
-        return None
-    matches.sort(key=lambda row: (_notes_first(row), -row["score"]))
-    best = matches[0]
-    rest = [row for row in rows if row["path"] != best["path"]][: limit - 1]
-    return [best, *rest]
-
-
-def _legacy_vector_results(
-    query: str,
-    pages: list[Path],
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-) -> list[dict] | None:
-    """Brute-force NumPy over the legacy vectors, None on failure.
-
-    LanceDB stood in front of this until 2026-09-07. It was reachable only
-    from this deadline-less legacy path, its table had never been built on
-    the installed vault, and its index was keyed to a different embedder than
-    the product's. See `docs/research/2026-09-07-lancedb-was-never-reached.md`.
-    """
-    try:
-        return _vector_search(query, pages, limit * 3, project, since, as_of)
-    except Exception as error:  # noqa: BLE001 - a failed optional signal is reported
-        print(f"  (vector search failed: {error})", file=sys.stderr)
-        return None
-
-
-def _legacy_graph_boosts(
-    graph: bool, bm25_results: list[dict], vector_results: list[dict] | None
-) -> list[dict] | None:
-    if not graph:
-        return None
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from graph_neighbors import boost_graph_neighbors
-
-        return boost_graph_neighbors(bm25_results, vector_results)
-    except Exception:  # noqa: BLE001 - optional signal
-        return None
-
-
-def _project_boosted_fusion(fused: list[dict], project: str | None) -> list[dict]:
-    if not project:
-        return fused
-    for row in fused:
-        if row.get("project", "").lower() == project.lower():
-            row["fused_score"] = round(row["fused_score"] * 1.5, 4)
-    fused.sort(key=lambda row: row.get("fused_score", 0), reverse=True)
-    return fused
-
-
-def _legacy_search(
-    query: str,
-    scope: str = "all",
-    limit: int = 10,
-    force_rebuild: bool = False,
-    project: str | None = None,
-    since: str | None = None,
-    as_of: str | None = None,
-    semantic: bool = True,
-    page_paths: list[Path] | None = None,
-    graph: bool = True,
-    rerank: bool = True,
-    source_tool: str = "search_memory",
-    emit_telemetry: bool = True,
-) -> list[dict]:
-    """Run a hybrid BM25 + optional vector search over the legacy index.
-
-    `project` boosts pages tagged with that slug, `since` and `as_of` filter by
-    time, and `semantic` adds vector search fused with BM25 through RRF so
-    related pages surface when the keywords do not match.
-    """
-    if _blank_query(query):
-        return []
-    pages = page_paths if page_paths is not None else _collect_pages(scope)
-    if not pages:
-        return []
-    ranked, retrieval_mode = _legacy_ranked(
-        query,
-        pages,
-        limit,
-        force_rebuild=force_rebuild,
-        project=project,
-        since=since,
-        as_of=as_of,
-        semantic=semantic,
-        graph=graph,
-        rerank=rerank,
-    )
-    return _finalize_results(
-        query,
-        ranked,
-        limit,
-        retrieval_mode=retrieval_mode,
-        source_tool=source_tool,
-        emit_telemetry=emit_telemetry,
-    )
-
-
-def _legacy_ranked(
-    query: str,
-    pages: list[Path],
-    limit: int,
-    *,
-    force_rebuild: bool,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    semantic: bool,
-    graph: bool,
-    rerank: bool,
-) -> tuple[list[dict], str]:
-    """Order the legacy index and report which path produced that order."""
-    bm25_results = _legacy_bm25_results(
-        query,
-        pages,
-        limit,
-        force_rebuild=force_rebuild,
-        project=project,
-        since=since,
-        as_of=as_of,
-    )
-    exact = _exact_filename_answer(bm25_results, query, limit)
-    if exact is not None:
-        return exact, "exact"
-
-    vector_results = _optional_vector_results(
-        query, pages, limit, project, since, as_of, semantic=semantic
-    )
-    graph_boosts = _legacy_graph_boosts(graph, bm25_results, vector_results)
-    if not vector_results and not graph_boosts:
-        return _reranked_or_capped(query, bm25_results, limit, rerank), "bm25"
-
-    fused = _project_boosted_fusion(
-        _rrf_fuse_triple(bm25_results, vector_results, graph_boosts), project
-    )
-    return _reranked_or_capped(query, fused, limit, rerank), "hybrid"
-
-
-def _legacy_bm25_results(
-    query: str,
-    pages: list[Path],
-    limit: int,
-    *,
-    force_rebuild: bool,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-) -> list[dict]:
-    if force_rebuild or _needs_rebuild(pages):
-        _build_index(pages)
-    conn = sqlite3.connect(str(INDEX_FILE))
-    try:
-        raw_rows = _legacy_bm25_rows(conn, query, limit)
-    finally:
-        conn.close()
-    query_lower = query.lower().strip()
-    return _legacy_scored_rows(
-        raw_rows,
-        query_lower=query_lower,
-        query_words=set(query_lower.split()),
-        project=project,
-        since=since,
-        as_of=as_of,
-    )
-
-
-def _optional_vector_results(
-    query: str,
-    pages: list[Path],
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    *,
-    semantic: bool,
-) -> list[dict] | None:
-    """Vectors are opt-in and need the optional dependency to be installed."""
-    if not semantic or not _have_sentence_transformers():
-        return None
-    return _legacy_vector_results(query, pages, limit, project, since, as_of)
-
-
-def _reranked_or_capped(
-    query: str, results: list[dict], limit: int, rerank: bool
-) -> list[dict]:
-    if not rerank:
-        return results[:limit]
-    return _maybe_rerank(query, results, limit)
-
-
-def _fold_ranked(
-    scores: dict[str, float],
-    metadata: dict[str, dict],
-    ranked: list[dict],
-    *,
-    weight: float,
-    k: int,
-) -> None:
-    """Add one ranked list to the fused scores, keeping the first metadata seen."""
-    for rank, result in enumerate(ranked):
-        path = result["path"]
-        scores[path] = scores.get(path, 0) + weight / (k + rank + 1)
-        metadata.setdefault(path, result)
-
-
-def _graph_only_metadata(path: str) -> dict:
-    """A neighbour reached only through links has no row of its own."""
-    return {
-        "path": path,
-        "title": path.split("/")[-1].replace(".md", ""),
-        "summary": "",
-        "score": 0,
-        "project": "",
-        "timestamp": "",
-    }
-
-
-def _fold_graph_boosts(
-    scores: dict[str, float],
-    metadata: dict[str, dict],
-    boosts: list[dict],
-    *,
-    k: int,
-) -> None:
-    for rank, result in enumerate(boosts):
-        path = result["path"]
-        contribution = 0.5 * result.get("graph_boost", 0) / (k * 2 + rank + 1)
-        scores[path] = scores.get(path, 0) + contribution
-        metadata.setdefault(path, _graph_only_metadata(path))
-
-
-def _fused_in_score_order(
-    scores: dict[str, float], metadata: dict[str, dict]
-) -> list[dict]:
-    results = []
-    for path, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
-        result = metadata[path].copy()
-        result["fused_score"] = round(score, 4)
-        results.append(result)
-    return results
-
-
-def _rrf_fuse_triple(
-    bm25_results: list[dict],
-    vector_results: list[dict] | None,
-    graph_boosts: list[dict] | None,
-    k: int = 60,
-) -> list[dict]:
-    """Triple-fusion RRF: BM25 + Vector + Graph-neighbor.
-
-    Weighted RRF: BM25 gets weight 2 (most reliable for known-item
-    retrieval), Vector gets weight 1 (helps with semantic queries),
-    Graph gets weight 0.5 (soft boost through links).
-
-    Standard unweighted RRF can HURT when BM25 is already correct:
-    if BM25 has page at rank 1 but Vector has a different page at
-    rank 1, the fusion pushes the correct page down. Weighting BM25
-    higher prevents this regression.
-    """
-    scores: dict[str, float] = {}
-    metadata: dict[str, dict] = {}
-    _fold_ranked(scores, metadata, bm25_results, weight=2.0, k=k)
-    if vector_results:
-        _fold_ranked(scores, metadata, vector_results, weight=1.0, k=k)
-    if graph_boosts:
-        _fold_graph_boosts(scores, metadata, graph_boosts, k=k)
-    return _fused_in_score_order(scores, metadata)
 
 
 _PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
@@ -5922,7 +5076,8 @@ def _cached_vectors(
         return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_cache", exc)
         return None
 
 
@@ -6043,7 +5198,8 @@ def _encoded_page_vectors(
         _check_legacy_stop(deadline, cancelled)
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_encode", exc)
         return None
     if not _usable_vector_block(vectors, len(texts)):
         return None
@@ -6083,7 +5239,8 @@ def _persisted_vector_metadata(vectors, live: dict) -> dict | None:
         )
     except TimeoutError:
         raise
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        note_degradation("vector_persist", exc)
         return None
     return metadata
 
@@ -6167,14 +5324,32 @@ def _print_cli_usage() -> int:
     return 1
 
 
+def _active_generation_line() -> str:
+    """What the search reads first: the active generation, or the legacy fallback."""
+    catalog = _active_generation_catalog()
+    manifest = None if catalog is None else catalog.get_active()
+    if not isinstance(manifest, dict):
+        return "Active generation: none (search falls back to the legacy index)"
+    return (
+        f"Active generation: {manifest.get('generation_id')} "
+        f"({manifest.get('extractor_version')}, vectors {manifest.get('vector_state')}, "
+        f"model {manifest.get('embedding_model_id')})"
+    )
+
+
 def _print_index_status() -> int:
+    # The generation is what an answer reads first; the legacy index is the
+    # fallback. Research: docs/research/2026-09-10-the-status-names-what-the-search-reads.md
+    print(_active_generation_line())
     pages = _collect_pages("all")
     if not INDEX_FILE.exists():
         print(f"Index: not built ({len(pages)} pages would be indexed)")
         return 0
-    conn = sqlite3.connect(str(INDEX_FILE))
-    count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-    conn.close()
+    conn = sqlite3.connect(f"{INDEX_FILE.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    finally:
+        conn.close()
     print(f"Index: {INDEX_FILE}")
     print(f"  Pages indexed: {count}")
     print(f"  Pages on disk: {len(pages)}")
@@ -6185,6 +5360,7 @@ def _print_index_status() -> int:
 
 def _rebuild_index_cli(scope: str) -> int:
     pages = _collect_pages(scope)
+    print("Rebuilding the legacy index only; the generation is built by doctor.py --repair")
     print(f"Rebuilding index with {len(pages)} pages...")
     t0 = time.time()
     _build_index(pages)
