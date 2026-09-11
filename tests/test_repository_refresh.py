@@ -209,7 +209,8 @@ def test_the_nightly_pass_refreshes_repositories_before_it_prunes():
     labels = [step.label for step in scheduled_nightly._post_compile_steps()]
     step = next(step for step in scheduled_nightly._post_compile_steps() if step.label == "repositories")
 
-    assert (labels.index("repositories") < labels.index("prune_generations"), step.command[-1]) == (
+    subcommand = step.command[step.command.index("refresh-all")]
+    assert (labels.index("repositories") < labels.index("prune_generations"), subcommand) == (
         True,
         "refresh-all",
     )

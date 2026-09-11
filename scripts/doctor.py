@@ -5350,18 +5350,29 @@ def _nightly_freshness_result(
 
 def _stale_nightly_message(state: dict) -> str:
     """A pass that ran and skipped says so, with its reason (audit OPS-23)."""
-    skip = state.get("last_nightly_skip")
-    if not isinstance(skip, dict) or not _skip_is_newer_than_run(state, skip):
+    skip = _fresh_skip(state)
+    if skip is None:
         return "Nightly maintenance is stale."
     reason = skip.get("reason") or "unknown"
-    when = str(skip.get("skipped_at") or skip.get("date") or "")[:10]
+    when = _skip_moment(skip)[:10]
     return f"Nightly maintenance is stale; the last pass skipped: {reason} ({when})."
 
 
+def _fresh_skip(state: dict) -> dict | None:
+    """The recorded skip when it is newer than the last recorded run."""
+    skip = state.get("last_nightly_skip")
+    if not isinstance(skip, dict):
+        return None
+    return skip if _skip_is_newer_than_run(state, skip) else None
+
+
+def _skip_moment(skip: dict) -> str:
+    return str(skip.get("skipped_at") or skip.get("date") or "")
+
+
 def _skip_is_newer_than_run(state: dict, skip: dict) -> bool:
-    skipped_at = str(skip.get("skipped_at") or skip.get("date") or "")
     ran_at = str(state.get("last_nightly_at") or state.get("last_nightly_date") or "")
-    return skipped_at >= ran_at
+    return _skip_moment(skip) >= ran_at
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
