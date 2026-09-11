@@ -277,6 +277,11 @@ def _link_finding(
     resolved = _resolve_link(target, search_roots)
     if resolved is None:
         return f"{_rel(md)} -> [[{target}]]"
+    return _tracked_link_finding(md, target, resolved, tracked)
+
+
+def _tracked_link_finding(md: Path, target: str, resolved: Path, tracked: set[str] | None) -> str | None:
+    """With a tracked-file set, a resolved link must also point at a tracked page."""
     if tracked is None:
         return None
     return _tracked_target_finding(md, target, resolved, tracked)
@@ -578,7 +583,11 @@ def _invalid_type_value(md: Path) -> str | None:
     frontmatter = _frontmatter_of(md)
     if frontmatter is None:
         return None
-    declared = _declared_type(frontmatter)
+    return _unknown_type(_declared_type(frontmatter))
+
+
+def _unknown_type(declared: str | None) -> str | None:
+    """The canonical form of a declared type that is not a valid one; None otherwise."""
     if not declared:
         return None
     canonical = TYPE_ALIASES.get(declared, declared)
@@ -609,6 +618,13 @@ def _candidate_record(page: Path, text: str) -> dict:
     candidate_root = (ROOT / "knowledge" / "inbox" / "claims").resolve(strict=False)
     if candidate_root not in Path(page).resolve(strict=True).parents:
         raise ValueError("claim-candidate is allowed only under knowledge/inbox/claims")
+    candidate = _embedded_canonical_record(text)
+    validate_schema(candidate, CANDIDATE_SCHEMA)
+    validate_claim_record(candidate["claim"])
+    return candidate["claim"]
+
+
+def _embedded_canonical_record(text: str) -> dict:
     matches = CANDIDATE_JSON_RE.findall(text)
     if len(matches) != 1:
         raise ValueError("claim-candidate must embed exactly one JSON record")
@@ -616,9 +632,7 @@ def _candidate_record(page: Path, text: str) -> dict:
     candidate = json.loads(encoded)
     if canonical_json_bytes(candidate) != encoded:
         raise ValueError("claim-candidate record is not restricted canonical JSON")
-    validate_schema(candidate, CANDIDATE_SCHEMA)
-    validate_claim_record(candidate["claim"])
-    return candidate["claim"]
+    return candidate
 
 
 def _ledger_records(raw: bytes) -> list[dict]:
@@ -762,7 +776,10 @@ def _expiry_date(frontmatter: str) -> str | None:
     match = VALID_TO_RE.search(frontmatter)
     if match is None:
         return None
-    value = match.group(1).strip().strip('"\'')
+    return _dated_expiry(match.group(1).strip().strip('"\''))
+
+
+def _dated_expiry(value: str) -> str | None:
     if value.lower() in _OPEN_ENDED_VALID_TO:
         return None
     date = value[:10]
@@ -785,6 +802,10 @@ def _expired_active_finding(md: Path, today: str) -> str | None:
     expiry = _expiry_date(frontmatter)
     if expiry is None or expiry >= today:
         return None
+    return _still_active_finding(md, frontmatter, expiry, today)
+
+
+def _still_active_finding(md: Path, frontmatter: str, expiry: str, today: str) -> str | None:
     status = _declared_status(frontmatter)
     if status not in ("", "active"):
         return None
@@ -900,9 +921,7 @@ def _bulleted_findings(answer: str) -> list[str]:
 
 
 def _contradiction_findings(answer: str | None) -> list[str]:
-    if not answer:
-        return []
-    if "NO_CONTRADICTIONS" in answer.upper():
+    if not answer or "NO_CONTRADICTIONS" in answer.upper():
         return []
     if answer.startswith("("):
         # llm_client returns parenthesized error strings on failure.
