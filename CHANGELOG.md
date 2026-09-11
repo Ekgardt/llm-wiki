@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A replay over a committed transaction is a duplicate, not a quarantine.**
+  A project checkpoint row and its transaction do not change in the same
+  instant, so a second caller could find the row still `reserved` while the
+  transaction another caller ran was already `committed`; it then asked to
+  refresh the lease precondition of a transaction that was no longer
+  `prepared`, was told `precondition_failed`, and quarantined an attempt
+  whose work was durably in the journal. `precondition_failed` is now graded
+  against the transaction: committed means the caller gets the ordinary
+  duplicate receipt, anything else keeps the old fence error. Found by the
+  Windows job of CI run 34655557302, which is where the window is widest.
+
 ### Added
 
 - **Argument bindings, the HTTP boundary and routes across repositories
