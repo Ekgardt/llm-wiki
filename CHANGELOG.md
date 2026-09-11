@@ -54,6 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
 - `lsp_security` obeys the complexity gate: the no-follow walk, the provider URI check and the path redaction scanners are pipelines of named steps; every containment message and refusal order is unchanged (audit OPS-15).
 - `sync_memory`, `install_smoke` and `lsp_positions` obey the complexity gate: the sync run is a table of actions over one `_SyncRun`, the three `uv` steps are one step record, the file-URI parser is a pipeline of named checks; behaviour and messages unchanged (audit OPS-15).
 - Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
