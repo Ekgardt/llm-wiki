@@ -482,6 +482,15 @@ def validate_report(value: object) -> None:
     _validate_schema(value, REPORT_SCHEMA, "report")
 
 
+def _prf_from_counts(true_positive: int, false_positive: int, false_negative: int) -> tuple[float, float, float]:
+    actual_count = true_positive + false_positive
+    expected_count = true_positive + false_negative
+    precision = true_positive / actual_count if actual_count else 1.0
+    recall = true_positive / expected_count if expected_count else 1.0
+    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
+
+
 def precision_recall_f1(
     expected: Iterable[object],
     actual: Iterable[object],
@@ -492,11 +501,7 @@ def precision_recall_f1(
     true_positive = len(expected_set & actual_set)
     false_positive = len(actual_set - expected_set)
     false_negative = len(expected_set - actual_set)
-    precision = (
-        true_positive / len(actual_set) if actual_set else (1.0 if not expected_set else 1.0)
-    )
-    recall = true_positive / len(expected_set) if expected_set else 1.0
-    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    precision, recall, f1 = _prf_from_counts(true_positive, false_positive, false_negative)
     return {
         "true_positive": true_positive,
         "false_positive": false_positive,
@@ -577,27 +582,18 @@ def _measure_warm_performance_pair(
     next_deadline: Callable[[], float],
     perf_counter: Callable[[], float] = time.perf_counter,
 ) -> tuple[tuple[object, ...], tuple[object, ...], float, float]:
-    direct_results: list[object] = []
-    facade_results: list[object] = []
-    direct_times: list[float] = []
-    facade_times: list[float] = []
-    for direct_first in (True, False):
-        operations = ("direct", "facade") if direct_first else ("facade", "direct")
-        for operation in operations:
-            started = perf_counter()
-            if operation == "direct":
-                result = runtime.direct_query(request, deadline=next_deadline())
-                direct_results.append(result)
-                direct_times.append((perf_counter() - started) * 1000.0)
-            else:
-                result = runtime.query(request, deadline=next_deadline())
-                facade_results.append(result)
-                facade_times.append((perf_counter() - started) * 1000.0)
+    queries = {"direct": runtime.direct_query, "facade": runtime.query}
+    results: dict[str, list[object]] = {"direct": [], "facade": []}
+    times: dict[str, list[float]] = {"direct": [], "facade": []}
+    for operation in ("direct", "facade", "facade", "direct"):
+        started = perf_counter()
+        results[operation].append(queries[operation](request, deadline=next_deadline()))
+        times[operation].append((perf_counter() - started) * 1000.0)
     return (
-        tuple(direct_results),
-        tuple(facade_results),
-        sum(direct_times) / len(direct_times),
-        sum(facade_times) / len(facade_times),
+        tuple(results["direct"]),
+        tuple(results["facade"]),
+        sum(times["direct"]) / len(times["direct"]),
+        sum(times["facade"]) / len(times["facade"]),
     )
 
 
@@ -2281,6 +2277,455 @@ def _close_runtime_with_retry(
     return None
 
 
+def _result_successful(result: object) -> bool:
+    return result is not None and result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}
+
+
+def _actual_keys(result: object, successful: bool) -> set[tuple[object, ...]]:
+    if not successful:
+        return set()
+    return {_actual_key(location) for location in result.locations}
+
+
+def _citation_flags(repository_root: Path, query: GoldQuery, result: NavigationResult) -> list[bool]:
+    expected_hashes = _expected_hashes(query)
+    return [
+        _current_citation(repository_root, location, expected_sha256=expected_hashes.get(_actual_key(location), ""))
+        for location in result.locations
+    ]
+
+
+def _recovered_correctly(recovered: object, repository_root: Path, crash_query: GoldQuery) -> bool:
+    if not isinstance(recovered, NavigationResult):
+        return False
+    locations = {_actual_key(location) for location in recovered.locations}
+    citations = _citations_current(repository_root, recovered.locations, _expected_hashes(crash_query))
+    expected = {_expected_key(location) for location in crash_query.expected_locations}
+    return _navigation_assertion_succeeds(recovered, expected=expected, actual=locations, citations_current=citations)
+
+
+def _unavailable_ownership() -> dict[str, dict[str, int | bool | None]]:
+    return {scenario: {"available": False, "orphan_count": None} for scenario in _OWNERSHIP_SCENARIOS}
+
+
+def _normal_shutdown_measured(normal_shutdown: object) -> bool:
+    if not isinstance(normal_shutdown, dict) or normal_shutdown.get("available") is not True:
+        return False
+    orphan = normal_shutdown.get("orphan_count")
+    return isinstance(orphan, int) and not isinstance(orphan, bool) and orphan in {0, 1}
+
+
+def _record_final_incident(ownership: dict, final_incident: int | None) -> None:
+    normal_shutdown = ownership.get("normal_shutdown")
+    if final_incident is None:
+        ownership["normal_shutdown"] = {"available": False, "orphan_count": None}
+        return
+    if _normal_shutdown_measured(normal_shutdown):
+        normal_shutdown["orphan_count"] = max(normal_shutdown["orphan_count"], final_incident)
+
+
+def _orphan_process_count(orphan_values: list[object]) -> int | None:
+    if len(orphan_values) != len(_OWNERSHIP_SCENARIOS):
+        return None
+    return sum(int(value) for value in orphan_values if isinstance(value, int))
+
+
+def _ownership_summary(ownership: dict) -> tuple[int, int | None]:
+    """(scenarios measured, orphan process count over all scenarios or None)."""
+    measured = [value for value in ownership.values() if isinstance(value, dict) and value.get("available") is True]
+    return len(measured), _orphan_process_count([value.get("orphan_count") for value in measured])
+
+
+def _rate(numerator: float, denominator: float) -> float:
+    if denominator:
+        return numerator / denominator
+    return 0.0
+
+
+def _orphan_rate(orphan_process_count: int | None) -> float | None:
+    if orphan_process_count is None:
+        return None
+    return orphan_process_count / len(_OWNERSHIP_SCENARIOS)
+
+
+_NO_PERFORMANCE = {
+    "available": False,
+    "cold_readiness_seconds": None,
+    "warm_facade_p50_ms": None,
+    "warm_facade_p95_ms": None,
+    "direct_pyright_p95_ms": None,
+    "warm_overhead_p95_ms": None,
+    "sample_count": 0,
+}
+
+
+class _FixtureRun:
+    """One measured fixture run: its phases append to one error list in a fixed order."""
+
+    def __init__(self, repository, scope, runtime, mode, run_deadline, monotonic) -> None:
+        self.repository = repository
+        self.scope = scope
+        self.runtime = runtime
+        self.mode = mode
+        self.run_deadline = run_deadline
+        self.monotonic = monotonic
+        self.definition_attempted = 0
+        self.definition_exact = 0
+        self.reference_expected: set[tuple[object, ...]] = set()
+        self.reference_actual: set[tuple[object, ...]] = set()
+        self.call_expected: set[tuple[object, ...]] = set()
+        self.call_actual: set[tuple[object, ...]] = set()
+        self.query_attempts = 0
+        self.tasks_solved = 0
+        self.citation_total = 0
+        self.citation_correct = 0
+        self.token_tasks: list[dict[str, object]] = []
+        self.default_items = 0
+        self.default_tokens = 0
+        self.errors: list[dict[str, str]] = []
+        self.first_request: NavigationRequest | None = None
+        self.cold_readiness_seconds: float | None = None
+        self.ownership = _unavailable_ownership()
+        self.warm_facade: list[float] = []
+        self.direct_pyright: list[float] = []
+        self.overhead: list[float] = []
+        self.stale = 0
+        self.mutation_cycles = 0
+        self.freshness_checks_measured = 0
+        self.freshness_latencies: list[float] = []
+        self.crash_attempts = 0
+        self.crash_recoveries = 0
+
+    def check(self) -> None:
+        _check_run_deadline(self.run_deadline, monotonic=self.monotonic)
+
+    def operation_deadline(self) -> float:
+        return _operation_deadline(self.run_deadline, monotonic=self.monotonic)
+
+    # --- gold queries ------------------------------------------------------------
+
+    def _query_result(self, request: NavigationRequest) -> NavigationResult | None:
+        try:
+            return self.runtime.query(request, deadline=self.operation_deadline())
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "gold_query", "code": type(exc).__name__})
+            return None
+
+    def _pair_sets(self, capability: str) -> tuple[set, set]:
+        if capability == "references":
+            return self.reference_expected, self.reference_actual
+        return self.call_expected, self.call_actual
+
+    def _tally_correctness(self, query: GoldQuery, expected: set, actual: set) -> None:
+        if query.capability == "definition":
+            self.definition_attempted += 1
+            if actual == expected:
+                self.definition_exact += 1
+            return
+        target_expected, target_actual = self._pair_sets(query.capability)
+        target_expected.update((query.query_id, *item) for item in expected)
+        target_actual.update((query.query_id, *item) for item in actual)
+
+    def _record_rendered(self, index: int, query, request, result, solved: bool, elapsed: float) -> None:
+        if index == 0 and self.mode == "qualification" and solved:
+            self.cold_readiness_seconds = elapsed
+        rendered = render_navigation(result, offset=0, limit=DEFAULT_LIMIT)
+        self.default_items = max(self.default_items, _rendered_item_count(rendered))
+        self.default_tokens = max(self.default_tokens, estimate_tokens(_canonical_json(rendered)))
+        if solved:
+            self.tasks_solved += 1
+            self.token_tasks.append(_token_record(query, request, result, rendered))
+
+    def _gold_query(self, index: int, query: GoldQuery) -> None:
+        request = _navigation_request(query, self.scope)
+        if self.first_request is None:
+            self.first_request = request
+        started = time.perf_counter()
+        self.query_attempts += 1
+        result = self._query_result(request)
+        self.check()
+        elapsed = time.perf_counter() - started
+        expected = {_expected_key(location) for location in query.expected_locations}
+        successful = _result_successful(result)
+        actual = _actual_keys(result, successful)
+        self._tally_correctness(query, expected, actual)
+        if result is None:
+            return
+        citations = _citation_flags(self.repository.root, query, result)
+        self.citation_total += len(citations)
+        self.citation_correct += sum(citations)
+        solved = successful and _navigation_assertion_succeeds(
+            result, expected=expected, actual=actual, citations_current=all(citations)
+        )
+        self._record_rendered(index, query, request, result, solved, elapsed)
+        self.check()
+
+    def gold_phase(self) -> None:
+        for index, query in enumerate(self.repository.gold_queries):
+            self._gold_query(index, query)
+
+    # --- performance sample ------------------------------------------------------
+
+    def _measure_pair(self, request: NavigationRequest):
+        try:
+            measured = _measure_warm_performance_pair(self.runtime, request, next_deadline=self.operation_deadline)
+            self.check()
+            return measured
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "performance_sample", "code": type(exc).__name__})
+            self.check()
+            return None
+
+    def _facade_valid(self, query: GoldQuery, facade_results) -> bool:
+        expected = {_expected_key(location) for location in query.expected_locations}
+        hashes = _expected_hashes(query)
+        for facade_result in facade_results:
+            actual = {_actual_key(location) for location in facade_result.locations}
+            citations = _citations_current(self.repository.root, facade_result.locations, hashes)
+            if not _navigation_assertion_succeeds(facade_result, expected=expected, actual=actual, citations_current=citations):
+                return False
+        return True
+
+    def _performance_query(self, query: GoldQuery) -> None:
+        measured = self._measure_pair(_navigation_request(query, self.scope))
+        if measured is None:
+            return
+        direct_results, facade_results, direct_ms, facade_ms = measured
+        if not _direct_results_are_exact(
+            self.runtime, self.repository, self.scope, query, direct_results, deadline=self.operation_deadline()
+        ):
+            self.errors.append({"phase": "performance_direct", "code": "UnsuccessfulDirectResult"})
+            return
+        if not self._facade_valid(query, facade_results):
+            self.errors.append({"phase": "performance_facade", "code": "UnsuccessfulNavigationResult"})
+            return
+        self.direct_pyright.append(direct_ms)
+        self.warm_facade.append(facade_ms)
+        self.overhead.append(facade_ms - direct_ms)
+
+    def performance_phase(self) -> None:
+        if self.mode != "qualification":
+            return
+        for query in _performance_queries(self.repository.gold_queries):
+            self._performance_query(query)
+
+    # --- mutations, crashes, ownership ------------------------------------------
+
+    def mutation_phase(self) -> None:
+        (
+            self.stale,
+            self.mutation_cycles,
+            self.freshness_checks_measured,
+            self.freshness_latencies,
+        ) = _mutate_and_measure(
+            self.runtime, self.repository, self.scope, self.errors, run_deadline=self.run_deadline, monotonic=self.monotonic
+        )
+
+    def _crash_cycle(self, crash_request: NavigationRequest, crash_query: GoldQuery) -> bool:
+        """One kill-and-recover cycle; False when cleanup became terminal."""
+        self.crash_attempts += 1
+        try:
+            recovered = self.runtime.crash_and_recover(crash_request, deadline=self.operation_deadline())
+            if _recovered_correctly(recovered, self.repository.root, crash_query):
+                self.crash_recoveries += 1
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "crash_recovery", "code": type(exc).__name__})
+        self.check()
+        if getattr(self.runtime, "cleanup_failed", False):
+            self.errors.append({"phase": "cleanup", "code": "CleanupTerminal"})
+            return False
+        return True
+
+    def crash_phase(self) -> None:
+        if self.first_request is None:
+            return
+        crash_query = self.repository.gold_queries[-1]
+        crash_request = _navigation_request(crash_query, self.scope)
+        for _index in range(CRASH_CYCLES):
+            if not self._crash_cycle(crash_request, crash_query):
+                break
+
+    def ownership_phase(self) -> None:
+        if getattr(self.runtime, "cleanup_failed", False):
+            return
+        try:
+            self.ownership = self.runtime.ownership_checks(deadline=self.operation_deadline())
+            self.check()
+            if getattr(self.runtime, "cleanup_failed", False):
+                self.errors.append({"phase": "ownership", "code": "CleanupTerminal"})
+        except BenchmarkTimeoutError:
+            raise
+        except Exception as exc:
+            self.errors.append({"phase": "ownership", "code": type(exc).__name__})
+            self.ownership = _unavailable_ownership()
+            self.check()
+
+    def finish(self) -> None:
+        final_incident = _close_runtime_with_retry(self.runtime, self.errors, monotonic=self.monotonic)
+        _record_final_incident(self.ownership, final_incident)
+
+    # --- report ------------------------------------------------------------------
+
+    def performance(self) -> dict[str, object]:
+        if self.mode != "qualification":
+            return dict(_NO_PERFORMANCE)
+        percentiles = (
+            nearest_rank_percentile(self.warm_facade, 0.5),
+            nearest_rank_percentile(self.warm_facade, 0.95),
+            nearest_rank_percentile(self.direct_pyright, 0.95),
+            nearest_rank_percentile(self.overhead, 0.95),
+        )
+        complete = all(value is not None for value in (self.cold_readiness_seconds, *percentiles))
+        return {
+            "available": len(self.warm_facade) == PERFORMANCE_SAMPLES and complete,
+            "cold_readiness_seconds": self.cold_readiness_seconds,
+            "warm_facade_p50_ms": percentiles[0],
+            "warm_facade_p95_ms": percentiles[1],
+            "direct_pyright_p95_ms": percentiles[2],
+            "warm_overhead_p95_ms": percentiles[3],
+            "sample_count": len(self.warm_facade),
+        }
+
+    def report(self, commit: str, identity: object, operator_metrics, resources: dict) -> dict[str, object]:
+        ownership_checks, orphan_process_count = _ownership_summary(self.ownership)
+        freshness_checks_attempted = MUTATION_CYCLES * FRESHNESS_CHECKS_PER_CYCLE
+        return {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "mode": self.mode,
+            "identity": {
+                "source_manifest_sha256": self.repository.source_manifest_sha256,
+                "gold_sha256": self.repository.gold_sha256,
+                "git_commit": commit,
+                "python_version": platform.python_version(),
+                "pyright_version": getattr(identity, "version"),
+                "pyright_package_sha256": getattr(identity, "package_sha256"),
+                "node_version": getattr(identity, "node_version"),
+                "node_major": getattr(identity, "node_major"),
+            },
+            "environment": _environment(),
+            "workload": {
+                "fixture_seed": FIXTURE_SEED,
+                "fixture_lines": FIXTURE_LINES,
+                "definition_queries": DEFINITION_QUERIES,
+                "reference_queries": REFERENCE_QUERIES,
+                "call_queries": CALL_QUERIES,
+                "edit_rename_delete_cycles": MUTATION_CYCLES,
+                "crash_cycles": CRASH_CYCLES,
+                "default_limit": DEFAULT_LIMIT,
+                "max_estimated_tokens": MAX_ESTIMATED_TOKENS,
+                "freshness_checks": freshness_checks_attempted,
+                "ownership_checks": len(_OWNERSHIP_SCENARIOS),
+                "ownership_scenarios": list(_OWNERSHIP_SCENARIOS),
+            },
+            "evidence": {
+                "measured": True,
+                "runner": RUNNER_EVIDENCE_VERSION,
+                "source_hash_verified": True,
+                "gold_hash_verified": True,
+                "git_commit_verified": self.scope.git_commit == commit,
+                "identity_verified": True,
+                "query_attempts": self.query_attempts,
+                "mutation_cycles": self.mutation_cycles,
+                "crash_attempts": self.crash_attempts,
+                "ownership_checks": ownership_checks,
+            },
+            "correctness": {
+                "definitions": {
+                    "attempted": self.definition_attempted,
+                    "exact": self.definition_exact,
+                    "accuracy": _rate(self.definition_exact, self.definition_attempted),
+                },
+                "references": {"attempted": REFERENCE_QUERIES, **precision_recall_f1(self.reference_expected, self.reference_actual)},
+                "calls": {"attempted": CALL_QUERIES, **precision_recall_f1(self.call_expected, self.call_actual)},
+                "task_success_rate": self.tasks_solved / len(self.repository.gold_queries),
+                "citation_locations_attempted": self.citation_total,
+                "citation_locations_correct": self.citation_correct,
+                "citation_correctness_rate": _rate(self.citation_correct, self.citation_total),
+            },
+            "tokens": {
+                "cache_read_label": "not_applicable_no_result_cache",
+                "tasks": self.token_tasks,
+                "default_items": self.default_items,
+                "max_default_estimated_tokens": self.default_tokens,
+            },
+            "reliability": {
+                "stale_answer_count": self.stale,
+                "freshness_checks_attempted": freshness_checks_attempted,
+                "freshness_checks_measured": self.freshness_checks_measured,
+                "stale_result_rate": self.stale / freshness_checks_attempted,
+                "mutation_cycles_measured": self.mutation_cycles,
+                "edit_to_fresh_p50_ms": nearest_rank_percentile(self.freshness_latencies, 0.5),
+                "edit_to_fresh_p95_ms": nearest_rank_percentile(self.freshness_latencies, 0.95),
+                "crash_recoveries": self.crash_recoveries,
+                "crash_attempts": self.crash_attempts,
+                "recovery_rate": _rate(self.crash_recoveries, self.crash_attempts),
+                "orphan_process_count": orphan_process_count,
+                "orphan_checks_attempted": len(_OWNERSHIP_SCENARIOS),
+                "orphan_checks_measured": ownership_checks,
+                "orphan_process_rate": _orphan_rate(orphan_process_count),
+                "ownership": self.ownership,
+            },
+            "performance": self.performance(),
+            "resources": resources,
+            "operator_corpus": operator_metrics,
+            "errors": self.errors,
+            "market_superiority_claimed": False,
+        }
+
+
+def _prepare_fixture(work_root: Path, state_root: Path, manifest, dependencies, run_deadline: float) -> tuple:
+    """(manifest, repository, commit, scope, identity, runtime) of one generated fixture."""
+    monotonic = dependencies.monotonic
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    manifest_value = dict(load_manifest() if manifest is None else manifest)
+    validate_manifest(manifest_value)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    work_root = Path(work_root)
+    work_root.mkdir(parents=True, exist_ok=False)
+    state_root = Path(state_root).resolve()
+    state_root.mkdir(parents=True, exist_ok=True)
+    repository = generate_qualification_repository(work_root / "qualification")
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    verify_repository_identity(repository, manifest_value)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    commit = initialize_deterministic_git(repository.root, deadline=run_deadline, monotonic=monotonic)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    scope = resolve_repository_scope(repository.root)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    if scope.git_commit != commit:
+        raise FixtureIdentityError("resolved Git commit does not match generated commit")
+    identity = dependencies.discover_identity(scope, state_root, _operation_deadline(run_deadline, monotonic=monotonic))
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    _require_qualified_identity(identity, manifest_value)
+    runtime = dependencies.runtime_factory(repository, scope, identity, state_root)
+    _check_run_deadline(run_deadline, monotonic=monotonic)
+    return manifest_value, repository, commit, scope, identity, runtime
+
+
+def _operator_corpus_metrics(operator_corpus: Path | None, dependencies, state_root: Path, run: _FixtureRun):
+    if operator_corpus is None:
+        return None
+    probe = dependencies.operator_probe or _probe_operator_corpus
+    metrics = _operator_metrics(probe(operator_corpus, Path(state_root).resolve(), run.operation_deadline()))
+    run.check()
+    return metrics
+
+
+def _resources(mode: str, run: _FixtureRun) -> dict[str, object]:
+    if mode != "qualification":
+        return {"available": False, "client_peak_rss_mib": None, "method": "not_measured_in_correctness_only"}
+    run.check()
+    peak_rss, rss_method = _peak_rss()
+    run.check()
+    return {"available": peak_rss is not None, "client_peak_rss_mib": peak_rss, "method": rss_method}
+
+
 def run_fixture_benchmark(
     work_root: Path,
     *,
@@ -2294,508 +2739,26 @@ def run_fixture_benchmark(
     if mode not in {"correctness-only", "qualification"}:
         raise ValueError("mode must be correctness-only or qualification")
     dependencies = dependencies or _default_dependencies()
-    monotonic = dependencies.monotonic
-    run_deadline = monotonic() + RUN_TIMEOUT_SECONDS
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    manifest_value = dict(load_manifest() if manifest is None else manifest)
-    validate_manifest(manifest_value)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    work_root = Path(work_root)
-    work_root.mkdir(parents=True, exist_ok=False)
-    state_root = Path(state_root).resolve()
-    state_root.mkdir(parents=True, exist_ok=True)
-    repository = generate_qualification_repository(work_root / "qualification")
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    verify_repository_identity(repository, manifest_value)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    commit = initialize_deterministic_git(
-        repository.root,
-        deadline=run_deadline,
-        monotonic=monotonic,
+    run_deadline = dependencies.monotonic() + RUN_TIMEOUT_SECONDS
+    _manifest, repository, commit, scope, identity, runtime = _prepare_fixture(
+        work_root, state_root, manifest, dependencies, run_deadline
     )
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    scope = resolve_repository_scope(repository.root)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    if scope.git_commit != commit:
-        raise FixtureIdentityError("resolved Git commit does not match generated commit")
-    identity = dependencies.discover_identity(
-        scope,
-        state_root,
-        _operation_deadline(run_deadline, monotonic=monotonic),
-    )
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    _require_qualified_identity(identity, manifest_value)
-    runtime = dependencies.runtime_factory(repository, scope, identity, state_root)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-
-    definition_attempted = 0
-    definition_exact = 0
-    reference_expected: set[tuple[object, ...]] = set()
-    reference_actual: set[tuple[object, ...]] = set()
-    call_expected: set[tuple[object, ...]] = set()
-    call_actual: set[tuple[object, ...]] = set()
-    query_attempts = 0
-    tasks_solved = 0
-    citation_total = 0
-    citation_correct = 0
-    token_tasks: list[dict[str, object]] = []
-    default_items = 0
-    default_tokens = 0
-    errors: list[dict[str, str]] = []
-    first_request: NavigationRequest | None = None
-    cold_readiness_seconds: float | None = None
-    ownership: dict[str, dict[str, int | bool | None]] = {
-        scenario: {"available": False, "orphan_count": None} for scenario in _OWNERSHIP_SCENARIOS
-    }
-
+    run = _FixtureRun(repository, scope, runtime, mode, run_deadline, dependencies.monotonic)
     try:
-        for index, query in enumerate(repository.gold_queries):
-            request = _navigation_request(query, scope)
-            if first_request is None:
-                first_request = request
-            started = time.perf_counter()
-            operation_deadline = _operation_deadline(
-                run_deadline,
-                monotonic=monotonic,
-            )
-            query_attempts += 1
-            try:
-                result = runtime.query(
-                    request,
-                    deadline=operation_deadline,
-                )
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:
-                errors.append({"phase": "gold_query", "code": type(exc).__name__})
-                result = None
-            _check_run_deadline(run_deadline, monotonic=monotonic)
-            elapsed = time.perf_counter() - started
-            expected = {_expected_key(location) for location in query.expected_locations}
-            expected_hashes = {
-                _expected_key(location): location.source_sha256
-                for location in query.expected_locations
-            }
-            result_successful = result is not None and result.status in {
-                NavigationStatus.OK,
-                NavigationStatus.PARTIAL,
-            }
-            actual = (
-                {_actual_key(location) for location in result.locations}
-                if result_successful
-                else set()
-            )
-            if query.capability == "definition":
-                definition_attempted += 1
-                if actual == expected:
-                    definition_exact += 1
-            elif query.capability == "references":
-                reference_expected.update((query.query_id, *item) for item in expected)
-                reference_actual.update((query.query_id, *item) for item in actual)
-            else:
-                call_expected.update((query.query_id, *item) for item in expected)
-                call_actual.update((query.query_id, *item) for item in actual)
-            if result is None:
-                continue
-            citations = [
-                _current_citation(
-                    repository.root,
-                    location,
-                    expected_sha256=expected_hashes.get(_actual_key(location), ""),
-                )
-                for location in result.locations
-            ]
-            citation_total += len(citations)
-            citation_correct += sum(citations)
-            solved = result_successful and _navigation_assertion_succeeds(
-                result,
-                expected=expected,
-                actual=actual,
-                citations_current=all(citations),
-            )
-            if index == 0 and mode == "qualification" and solved:
-                cold_readiness_seconds = elapsed
-            rendered = render_navigation(
-                result,
-                offset=0,
-                limit=DEFAULT_LIMIT,
-            )
-            rendered_tokens = estimate_tokens(_canonical_json(rendered))
-            default_items = max(default_items, _rendered_item_count(rendered))
-            default_tokens = max(default_tokens, rendered_tokens)
-            if solved:
-                tasks_solved += 1
-                token_tasks.append(_token_record(query, request, result, rendered))
-            _check_run_deadline(run_deadline, monotonic=monotonic)
-
-        warm_facade: list[float] = []
-        direct_pyright: list[float] = []
-        overhead: list[float] = []
-        if mode == "qualification":
-            for query in _performance_queries(repository.gold_queries):
-                request = _navigation_request(query, scope)
-                try:
-                    direct_results, facade_results, direct_ms, facade_ms = (
-                        _measure_warm_performance_pair(
-                            runtime,
-                            request,
-                            next_deadline=lambda: _operation_deadline(
-                                run_deadline,
-                                monotonic=monotonic,
-                            ),
-                        )
-                    )
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                except BenchmarkTimeoutError:
-                    raise
-                except Exception as exc:
-                    errors.append(
-                        {
-                            "phase": "performance_sample",
-                            "code": type(exc).__name__,
-                        }
-                    )
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                    continue
-                if not _direct_results_are_exact(
-                    runtime,
-                    repository,
-                    scope,
-                    query,
-                    direct_results,
-                    deadline=_operation_deadline(
-                        run_deadline,
-                        monotonic=monotonic,
-                    ),
-                ):
-                    errors.append(
-                        {
-                            "phase": "performance_direct",
-                            "code": "UnsuccessfulDirectResult",
-                        }
-                    )
-                    continue
-                expected = {_expected_key(location) for location in query.expected_locations}
-                expected_hashes = {
-                    _expected_key(location): location.source_sha256
-                    for location in query.expected_locations
-                }
-                facade_valid = True
-                for facade_result in facade_results:
-                    actual = {_actual_key(location) for location in facade_result.locations}
-                    citations = all(
-                        _current_citation(
-                            repository.root,
-                            location,
-                            expected_sha256=expected_hashes.get(
-                                _actual_key(location),
-                                "",
-                            ),
-                        )
-                        for location in facade_result.locations
-                    )
-                    if not _navigation_assertion_succeeds(
-                        facade_result,
-                        expected=expected,
-                        actual=actual,
-                        citations_current=citations,
-                    ):
-                        facade_valid = False
-                        break
-                if not facade_valid:
-                    errors.append(
-                        {
-                            "phase": "performance_facade",
-                            "code": "UnsuccessfulNavigationResult",
-                        }
-                    )
-                    continue
-                direct_pyright.append(direct_ms)
-                warm_facade.append(facade_ms)
-                overhead.append(facade_ms - direct_ms)
-
-        (
-            stale,
-            mutation_cycles,
-            freshness_checks_measured,
-            freshness_latencies,
-        ) = _mutate_and_measure(
-            runtime,
-            repository,
-            scope,
-            errors,
-            run_deadline=run_deadline,
-            monotonic=monotonic,
-        )
-
-        crash_attempts = 0
-        crash_recoveries = 0
-        crash_query = repository.gold_queries[-1]
-        crash_request = _navigation_request(crash_query, scope)
-        crash_expected = {_expected_key(location) for location in crash_query.expected_locations}
-        crash_hashes = {
-            _expected_key(location): location.source_sha256
-            for location in crash_query.expected_locations
-        }
-        if first_request is not None:
-            for _index in range(CRASH_CYCLES):
-                crash_deadline = _operation_deadline(
-                    run_deadline,
-                    monotonic=monotonic,
-                )
-                crash_attempts += 1
-                try:
-                    recovered = runtime.crash_and_recover(
-                        crash_request,
-                        deadline=crash_deadline,
-                    )
-                    recovered_locations = (
-                        set()
-                        if not isinstance(recovered, NavigationResult)
-                        else {_actual_key(location) for location in recovered.locations}
-                    )
-                    recovered_citations = isinstance(recovered, NavigationResult) and all(
-                        _current_citation(
-                            repository.root,
-                            location,
-                            expected_sha256=crash_hashes.get(
-                                _actual_key(location),
-                                "",
-                            ),
-                        )
-                        for location in recovered.locations
-                    )
-                    if isinstance(recovered, NavigationResult) and _navigation_assertion_succeeds(
-                        recovered,
-                        expected=crash_expected,
-                        actual=recovered_locations,
-                        citations_current=recovered_citations,
-                    ):
-                        crash_recoveries += 1
-                except BenchmarkTimeoutError:
-                    raise
-                except Exception as exc:
-                    errors.append({"phase": "crash_recovery", "code": type(exc).__name__})
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-                if getattr(runtime, "cleanup_failed", False):
-                    errors.append({"phase": "cleanup", "code": "CleanupTerminal"})
-                    break
-
-        if not getattr(runtime, "cleanup_failed", False):
-            try:
-                ownership = runtime.ownership_checks(
-                    deadline=_operation_deadline(
-                        run_deadline,
-                        monotonic=monotonic,
-                    )
-                )
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-                if getattr(runtime, "cleanup_failed", False):
-                    errors.append({"phase": "ownership", "code": "CleanupTerminal"})
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:
-                errors.append({"phase": "ownership", "code": type(exc).__name__})
-                ownership = {
-                    scenario: {"available": False, "orphan_count": None}
-                    for scenario in _OWNERSHIP_SCENARIOS
-                }
-                _check_run_deadline(run_deadline, monotonic=monotonic)
+        run.gold_phase()
+        run.performance_phase()
+        run.mutation_phase()
+        run.crash_phase()
+        run.ownership_phase()
     finally:
-        final_incident = _close_runtime_with_retry(
-            runtime,
-            errors,
-            monotonic=monotonic,
-        )
-        normal_shutdown = ownership.get("normal_shutdown")
-        if final_incident is None:
-            ownership["normal_shutdown"] = {
-                "available": False,
-                "orphan_count": None,
-            }
-        elif (
-            isinstance(normal_shutdown, dict)
-            and normal_shutdown.get("available") is True
-            and isinstance(normal_shutdown.get("orphan_count"), int)
-            and not isinstance(normal_shutdown.get("orphan_count"), bool)
-            and normal_shutdown.get("orphan_count") in {0, 1}
-        ):
-            normal_shutdown["orphan_count"] = max(
-                normal_shutdown["orphan_count"],
-                final_incident,
-            )
-
-    ownership_checks = sum(
-        isinstance(value, dict) and value.get("available") is True for value in ownership.values()
-    )
-    orphan_values = [
-        value.get("orphan_count")
-        for value in ownership.values()
-        if isinstance(value, dict) and value.get("available") is True
-    ]
-    orphan_process_count = (
-        sum(int(value) for value in orphan_values if isinstance(value, int))
-        if len(orphan_values) == len(_OWNERSHIP_SCENARIOS)
-        else None
-    )
-    freshness_checks_attempted = MUTATION_CYCLES * FRESHNESS_CHECKS_PER_CYCLE
-    stale_result_rate = stale / freshness_checks_attempted
-    orphan_process_rate = (
-        orphan_process_count / len(_OWNERSHIP_SCENARIOS)
-        if orphan_process_count is not None
-        else None
-    )
-
-    references = precision_recall_f1(reference_expected, reference_actual)
-    calls = precision_recall_f1(call_expected, call_actual)
-    if mode == "qualification":
-        performance = {
-            "available": len(warm_facade) == PERFORMANCE_SAMPLES
-            and all(
-                value is not None
-                for value in (
-                    cold_readiness_seconds,
-                    nearest_rank_percentile(warm_facade, 0.5),
-                    nearest_rank_percentile(warm_facade, 0.95),
-                    nearest_rank_percentile(direct_pyright, 0.95),
-                    nearest_rank_percentile(overhead, 0.95),
-                )
-            ),
-            "cold_readiness_seconds": cold_readiness_seconds,
-            "warm_facade_p50_ms": nearest_rank_percentile(warm_facade, 0.5),
-            "warm_facade_p95_ms": nearest_rank_percentile(warm_facade, 0.95),
-            "direct_pyright_p95_ms": nearest_rank_percentile(direct_pyright, 0.95),
-            "warm_overhead_p95_ms": nearest_rank_percentile(overhead, 0.95),
-            "sample_count": len(warm_facade),
-        }
-    else:
-        performance = {
-            "available": False,
-            "cold_readiness_seconds": None,
-            "warm_facade_p50_ms": None,
-            "warm_facade_p95_ms": None,
-            "direct_pyright_p95_ms": None,
-            "warm_overhead_p95_ms": None,
-            "sample_count": 0,
-        }
-        resources = {
-            "available": False,
-            "client_peak_rss_mib": None,
-            "method": "not_measured_in_correctness_only",
-        }
-
-    operator_metrics: dict[str, object] | None = None
-    if operator_corpus is not None:
-        probe = dependencies.operator_probe or _probe_operator_corpus
-        operator_metrics = _operator_metrics(
-            probe(
-                operator_corpus,
-                state_root,
-                _operation_deadline(run_deadline, monotonic=monotonic),
-            )
-        )
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-
-    if mode == "qualification":
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-        peak_rss, rss_method = _peak_rss()
-        _check_run_deadline(run_deadline, monotonic=monotonic)
-        resources = {
-            "available": peak_rss is not None,
-            "client_peak_rss_mib": peak_rss,
-            "method": rss_method,
-        }
-
-    _check_run_deadline(run_deadline, monotonic=monotonic)
-    report: dict[str, object] = {
-        "schema_version": REPORT_SCHEMA_VERSION,
-        "mode": mode,
-        "identity": {
-            "source_manifest_sha256": repository.source_manifest_sha256,
-            "gold_sha256": repository.gold_sha256,
-            "git_commit": commit,
-            "python_version": platform.python_version(),
-            "pyright_version": getattr(identity, "version"),
-            "pyright_package_sha256": getattr(identity, "package_sha256"),
-            "node_version": getattr(identity, "node_version"),
-            "node_major": getattr(identity, "node_major"),
-        },
-        "environment": _environment(),
-        "workload": {
-            "fixture_seed": FIXTURE_SEED,
-            "fixture_lines": FIXTURE_LINES,
-            "definition_queries": DEFINITION_QUERIES,
-            "reference_queries": REFERENCE_QUERIES,
-            "call_queries": CALL_QUERIES,
-            "edit_rename_delete_cycles": MUTATION_CYCLES,
-            "crash_cycles": CRASH_CYCLES,
-            "default_limit": DEFAULT_LIMIT,
-            "max_estimated_tokens": MAX_ESTIMATED_TOKENS,
-            "freshness_checks": freshness_checks_attempted,
-            "ownership_checks": len(_OWNERSHIP_SCENARIOS),
-            "ownership_scenarios": list(_OWNERSHIP_SCENARIOS),
-        },
-        "evidence": {
-            "measured": True,
-            "runner": RUNNER_EVIDENCE_VERSION,
-            "source_hash_verified": True,
-            "gold_hash_verified": True,
-            "git_commit_verified": scope.git_commit == commit,
-            "identity_verified": True,
-            "query_attempts": query_attempts,
-            "mutation_cycles": mutation_cycles,
-            "crash_attempts": crash_attempts,
-            "ownership_checks": ownership_checks,
-        },
-        "correctness": {
-            "definitions": {
-                "attempted": definition_attempted,
-                "exact": definition_exact,
-                "accuracy": (
-                    definition_exact / definition_attempted if definition_attempted else 0.0
-                ),
-            },
-            "references": {"attempted": REFERENCE_QUERIES, **references},
-            "calls": {"attempted": CALL_QUERIES, **calls},
-            "task_success_rate": tasks_solved / len(repository.gold_queries),
-            "citation_locations_attempted": citation_total,
-            "citation_locations_correct": citation_correct,
-            "citation_correctness_rate": (
-                citation_correct / citation_total if citation_total else 0.0
-            ),
-        },
-        "tokens": {
-            "cache_read_label": "not_applicable_no_result_cache",
-            "tasks": token_tasks,
-            "default_items": default_items,
-            "max_default_estimated_tokens": default_tokens,
-        },
-        "reliability": {
-            "stale_answer_count": stale,
-            "freshness_checks_attempted": freshness_checks_attempted,
-            "freshness_checks_measured": freshness_checks_measured,
-            "stale_result_rate": stale_result_rate,
-            "mutation_cycles_measured": mutation_cycles,
-            "edit_to_fresh_p50_ms": nearest_rank_percentile(freshness_latencies, 0.5),
-            "edit_to_fresh_p95_ms": nearest_rank_percentile(freshness_latencies, 0.95),
-            "crash_recoveries": crash_recoveries,
-            "crash_attempts": crash_attempts,
-            "recovery_rate": (crash_recoveries / crash_attempts if crash_attempts else 0.0),
-            "orphan_process_count": orphan_process_count,
-            "orphan_checks_attempted": len(_OWNERSHIP_SCENARIOS),
-            "orphan_checks_measured": ownership_checks,
-            "orphan_process_rate": orphan_process_rate,
-            "ownership": ownership,
-        },
-        "performance": performance,
-        "resources": resources,
-        "operator_corpus": operator_metrics,
-        "errors": errors,
-        "market_superiority_claimed": False,
-    }
-    _check_run_deadline(run_deadline, monotonic=monotonic)
+        run.finish()
+    operator_metrics = _operator_corpus_metrics(operator_corpus, dependencies, state_root, run)
+    resources = _resources(mode, run)
+    run.check()
+    report = run.report(commit, identity, operator_metrics, resources)
+    run.check()
     validate_report(report)
-    _check_run_deadline(run_deadline, monotonic=monotonic)
+    run.check()
     return report
 
 
@@ -2821,158 +2784,220 @@ def _finite_number(value: object) -> bool:
 
 
 def _set_metric_consistent(metric: Mapping[str, object]) -> bool:
-    true_positive = metric["true_positive"]
-    false_positive = metric["false_positive"]
-    false_negative = metric["false_negative"]
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in (true_positive, false_positive, false_negative)
-    ):
+    counts = (metric["true_positive"], metric["false_positive"], metric["false_negative"])
+    if any(not _is_count(value) for value in counts):
         return False
-    actual_count = true_positive + false_positive
-    expected_count = true_positive + false_negative
-    precision = true_positive / actual_count if actual_count else 1.0
-    recall = true_positive / expected_count if expected_count else 1.0
-    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
+    precision, recall, f1 = _prf_from_counts(*counts)
+    return _ratio_equal(metric["precision"], precision) and _ratio_equal(metric["recall"], recall) and _ratio_equal(metric["f1"], f1)
+
+
+def _identity_complete(report: Mapping[str, object], manifest: Mapping[str, object]) -> bool:
+    identity = report["identity"]
     return (
-        _ratio_equal(metric["precision"], precision)
-        and _ratio_equal(metric["recall"], recall)
-        and _ratio_equal(metric["f1"], f1)
+        identity["source_manifest_sha256"] == manifest["expected_source_manifest_sha256"]
+        and identity["gold_sha256"] == manifest["expected_gold_sha256"]
+    )
+
+
+def _evidence_section_complete(evidence: Mapping[str, object]) -> bool:
+    flags = all(
+        evidence[key] is True
+        for key in ("measured", "source_hash_verified", "gold_hash_verified", "git_commit_verified", "identity_verified")
+    )
+    counts = (evidence["query_attempts"], evidence["mutation_cycles"], evidence["crash_attempts"], evidence["ownership_checks"])
+    return flags and counts == (400, 50, 20, 4)
+
+
+def _definitions_complete(definitions: Mapping[str, object]) -> bool:
+    return (
+        definitions["attempted"] == 200
+        and definitions["exact"] <= definitions["attempted"]
+        and _ratio_equal(definitions["accuracy"], definitions["exact"] / definitions["attempted"])
+    )
+
+
+def _reference_metrics_complete(references: Mapping[str, object]) -> bool:
+    return (
+        references["attempted"] == 100
+        and _set_metric_consistent(references)
+        and references["true_positive"] + references["false_negative"] == 500
+    )
+
+
+def _call_metrics_complete(calls: Mapping[str, object]) -> bool:
+    return calls["attempted"] == 100 and _set_metric_consistent(calls) and calls["true_positive"] + calls["false_negative"] == 100
+
+
+def _query_metrics_complete(correctness: Mapping[str, object]) -> bool:
+    return (
+        _definitions_complete(correctness["definitions"])
+        and _reference_metrics_complete(correctness["references"])
+        and _call_metrics_complete(correctness["calls"])
+    )
+
+
+def _required_citation_locations(token_query_ids: list[str]) -> int:
+    return sum(5 if query_id.startswith("references-") else 1 for query_id in token_query_ids)
+
+
+def _citations_complete(correctness: Mapping[str, object], required: int) -> bool:
+    attempted = correctness["citation_locations_attempted"]
+    correct = correctness["citation_locations_correct"]
+    if attempted <= 0 or correct > attempted:
+        return False
+    if attempted < required or correct < required:
+        return False
+    return _ratio_equal(correctness["citation_correctness_rate"], correct / attempted)
+
+
+def _correctness_complete(report: Mapping[str, object]) -> bool:
+    correctness = report["correctness"]
+    token_tasks = report["tokens"]["tasks"]
+    ids = [task["query_id"] for task in token_tasks]
+    return (
+        _query_metrics_complete(correctness)
+        and _ratio_equal(correctness["task_success_rate"], len(token_tasks) / 400)
+        and _citations_complete(correctness, _required_citation_locations(ids))
+    )
+
+
+def _valid_query_ids() -> set[str]:
+    return {
+        *(f"definition-{index:03d}" for index in range(DEFINITION_QUERIES)),
+        *(f"references-{index:03d}" for index in range(REFERENCE_QUERIES)),
+        *(f"calls-{index:03d}" for index in range(CALL_QUERIES)),
+    }
+
+
+def _ids_valid(ids: list[str]) -> bool:
+    return len(ids) == len(set(ids)) and set(ids) <= _valid_query_ids()
+
+
+def _tokens_complete(report: Mapping[str, object]) -> bool:
+    tokens = report["tokens"]
+    ids = [task["query_id"] for task in tokens["tasks"]]
+    return (
+        _ids_valid(ids)
+        and tokens["cache_read_label"] == "not_applicable_no_result_cache"
+        and all(task["cache_read_tokens"] == 0 for task in tokens["tasks"])
+    )
+
+
+def _freshness_complete(reliability: Mapping[str, object]) -> bool:
+    return (
+        reliability["freshness_checks_attempted"] == 250
+        and reliability["freshness_checks_measured"] == 250
+        and reliability["stale_answer_count"] <= 250
+        and _ratio_equal(reliability["stale_result_rate"], reliability["stale_answer_count"] / 250)
+        and reliability["mutation_cycles_measured"] == 50
+    )
+
+
+def _latency_complete(reliability: Mapping[str, object]) -> bool:
+    p50 = reliability["edit_to_fresh_p50_ms"]
+    p95 = reliability["edit_to_fresh_p95_ms"]
+    return _finite_number(p50) and p50 >= 0 and _finite_number(p95) and p95 >= 0 and p50 <= p95
+
+
+def _crash_complete(reliability: Mapping[str, object]) -> bool:
+    return (
+        reliability["crash_attempts"] == 20
+        and reliability["crash_recoveries"] <= reliability["crash_attempts"]
+        and _ratio_equal(reliability["recovery_rate"], reliability["crash_recoveries"] / reliability["crash_attempts"])
+    )
+
+
+def _ownership_measured(ownership: Mapping[str, Mapping[str, object]]) -> bool:
+    return all(
+        ownership[scenario]["available"] is True and ownership[scenario]["orphan_count"] is not None
+        for scenario in _OWNERSHIP_SCENARIOS
+    )
+
+
+def _orphan_totals_consistent(reliability: Mapping[str, object], total: int) -> bool:
+    return reliability["orphan_process_count"] == total and _ratio_equal(reliability["orphan_process_rate"], total / 4)
+
+
+def _ownership_complete(reliability: Mapping[str, object]) -> bool:
+    ownership = reliability["ownership"]
+    total = sum(ownership[scenario]["orphan_count"] for scenario in _OWNERSHIP_SCENARIOS)
+    return (
+        reliability["orphan_checks_attempted"] == 4
+        and reliability["orphan_checks_measured"] == 4
+        and _ownership_measured(ownership)
+        and _orphan_totals_consistent(reliability, total)
+    )
+
+
+def _reliability_complete(report: Mapping[str, object]) -> bool:
+    reliability = report["reliability"]
+    return (
+        _freshness_complete(reliability)
+        and _latency_complete(reliability)
+        and _crash_complete(reliability)
+        and _ownership_complete(reliability)
+    )
+
+
+def _operator_corpus_complete(report: Mapping[str, object]) -> bool:
+    operator_corpus = report["operator_corpus"]
+    if operator_corpus is None:
+        return True
+    return operator_corpus["available"] is True and operator_corpus["errors"] == 0
+
+
+_PERFORMANCE_FIELDS = (
+    "cold_readiness_seconds",
+    "warm_facade_p50_ms",
+    "warm_facade_p95_ms",
+    "direct_pyright_p95_ms",
+    "warm_overhead_p95_ms",
+)
+
+
+def _performance_complete(performance: Mapping[str, object]) -> bool:
+    return (
+        performance["available"] is True
+        and performance["sample_count"] == PERFORMANCE_SAMPLES
+        and all(_finite_number(performance[field]) for field in _PERFORMANCE_FIELDS)
+        and performance["warm_facade_p50_ms"] <= performance["warm_facade_p95_ms"]
+    )
+
+
+def _resources_complete(resources: Mapping[str, object]) -> bool:
+    return resources["available"] is True and _finite_number(resources["client_peak_rss_mib"]) and resources["method"] != "unavailable"
+
+
+def _python_310(identity: Mapping[str, object]) -> bool:
+    version = identity["python_version"]
+    return isinstance(version, str) and _PYTHON_310_VERSION.fullmatch(version) is not None
+
+
+def _qualification_complete(report: Mapping[str, object]) -> bool:
+    if report["mode"] != "qualification":
+        return True
+    return (
+        report["environment"]["os"] == "Linux"
+        and _python_310(report["identity"])
+        and _performance_complete(report["performance"])
+        and _resources_complete(report["resources"])
     )
 
 
 def _evidence_complete(report: Mapping[str, object]) -> bool:
     try:
-        identity = report["identity"]
-        environment = report["environment"]
-        evidence = report["evidence"]
-        correctness = report["correctness"]
-        reliability = report["reliability"]
-        tokens = report["tokens"]
-        ownership = reliability["ownership"]
         manifest = load_manifest()
-        definitions = correctness["definitions"]
-        references = correctness["references"]
-        calls = correctness["calls"]
-        token_tasks = tokens["tasks"]
-        token_query_ids = [task["query_id"] for task in token_tasks]
-        required_citation_locations = sum(
-            5 if query_id.startswith("references-") else 1 for query_id in token_query_ids
+        checks = (
+            _identity_complete(report, manifest),
+            _evidence_section_complete(report["evidence"]),
+            _correctness_complete(report),
+            _tokens_complete(report),
+            _reliability_complete(report),
+            report["errors"] == [],
+            _operator_corpus_complete(report),
+            _qualification_complete(report),
         )
-        valid_query_ids = {
-            *(f"definition-{index:03d}" for index in range(DEFINITION_QUERIES)),
-            *(f"references-{index:03d}" for index in range(REFERENCE_QUERIES)),
-            *(f"calls-{index:03d}" for index in range(CALL_QUERIES)),
-        }
-        ownership_total = sum(
-            ownership[scenario]["orphan_count"] for scenario in _OWNERSHIP_SCENARIOS
-        )
-        complete = (
-            identity["source_manifest_sha256"] == manifest["expected_source_manifest_sha256"]
-            and identity["gold_sha256"] == manifest["expected_gold_sha256"]
-            and evidence["measured"] is True
-            and evidence["source_hash_verified"] is True
-            and evidence["gold_hash_verified"] is True
-            and evidence["git_commit_verified"] is True
-            and evidence["identity_verified"] is True
-            and evidence["query_attempts"] == 400
-            and evidence["mutation_cycles"] == 50
-            and evidence["crash_attempts"] == 20
-            and evidence["ownership_checks"] == 4
-            and correctness["definitions"]["attempted"] == 200
-            and references["attempted"] == 100
-            and calls["attempted"] == 100
-            and definitions["exact"] <= definitions["attempted"]
-            and _ratio_equal(
-                definitions["accuracy"],
-                definitions["exact"] / definitions["attempted"],
-            )
-            and _set_metric_consistent(references)
-            and references["true_positive"] + references["false_negative"] == 500
-            and _set_metric_consistent(calls)
-            and calls["true_positive"] + calls["false_negative"] == 100
-            and _ratio_equal(
-                correctness["task_success_rate"],
-                len(token_tasks) / 400,
-            )
-            and correctness["citation_locations_attempted"] > 0
-            and correctness["citation_locations_correct"]
-            <= correctness["citation_locations_attempted"]
-            and correctness["citation_locations_attempted"] >= required_citation_locations
-            and correctness["citation_locations_correct"] >= required_citation_locations
-            and _ratio_equal(
-                correctness["citation_correctness_rate"],
-                correctness["citation_locations_correct"]
-                / correctness["citation_locations_attempted"],
-            )
-            and len(token_query_ids) == len(set(token_query_ids))
-            and set(token_query_ids) <= valid_query_ids
-            and reliability["freshness_checks_attempted"] == 250
-            and reliability["freshness_checks_measured"] == 250
-            and reliability["stale_answer_count"] <= 250
-            and _ratio_equal(
-                reliability["stale_result_rate"],
-                reliability["stale_answer_count"] / 250,
-            )
-            and reliability["mutation_cycles_measured"] == 50
-            and _finite_number(reliability["edit_to_fresh_p50_ms"])
-            and reliability["edit_to_fresh_p50_ms"] >= 0
-            and _finite_number(reliability["edit_to_fresh_p95_ms"])
-            and reliability["edit_to_fresh_p95_ms"] >= 0
-            and reliability["edit_to_fresh_p50_ms"] <= reliability["edit_to_fresh_p95_ms"]
-            and reliability["crash_attempts"] == 20
-            and reliability["crash_recoveries"] <= reliability["crash_attempts"]
-            and _ratio_equal(
-                reliability["recovery_rate"],
-                reliability["crash_recoveries"] / reliability["crash_attempts"],
-            )
-            and reliability["orphan_checks_attempted"] == 4
-            and reliability["orphan_checks_measured"] == 4
-            and all(
-                ownership[scenario]["available"] is True
-                and ownership[scenario]["orphan_count"] is not None
-                for scenario in _OWNERSHIP_SCENARIOS
-            )
-            and reliability["orphan_process_count"] == ownership_total
-            and _ratio_equal(
-                reliability["orphan_process_rate"],
-                ownership_total / 4,
-            )
-            and tokens["cache_read_label"] == "not_applicable_no_result_cache"
-            and all(task["cache_read_tokens"] == 0 for task in token_tasks)
-            and report["errors"] == []
-        )
-        operator_corpus = report["operator_corpus"]
-        if operator_corpus is not None:
-            complete = (
-                complete and operator_corpus["available"] is True and operator_corpus["errors"] == 0
-            )
-        if report["mode"] == "qualification":
-            performance = report["performance"]
-            resources = report["resources"]
-            complete = (
-                complete
-                and environment["os"] == "Linux"
-                and isinstance(identity["python_version"], str)
-                and _PYTHON_310_VERSION.fullmatch(identity["python_version"]) is not None
-                and performance["available"] is True
-                and performance["sample_count"] == PERFORMANCE_SAMPLES
-                and all(
-                    _finite_number(performance[field])
-                    for field in (
-                        "cold_readiness_seconds",
-                        "warm_facade_p50_ms",
-                        "warm_facade_p95_ms",
-                        "direct_pyright_p95_ms",
-                        "warm_overhead_p95_ms",
-                    )
-                )
-                and performance["warm_facade_p50_ms"] <= performance["warm_facade_p95_ms"]
-                and resources["available"] is True
-                and _finite_number(resources["client_peak_rss_mib"])
-                and resources["method"] != "unavailable"
-            )
-        return bool(complete)
+        return all(checks)
     except (ArithmeticError, KeyError, TypeError, ValueError):
         return False
 
@@ -2999,51 +3024,63 @@ def _gate_values(report: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+_MINIMUM_GATES = frozenset({"definition_accuracy", "reference_f1", "recovery_rate"})
+
+
+def _invalid_evaluation() -> dict[str, object]:
+    return {"passed": False, "schema_valid": False, "evidence_complete": False, "scope": "invalid", "gates": {}}
+
+
+def _gate_value_measured(value: object, measured: bool) -> bool:
+    if not measured or isinstance(value, bool):
+        return False
+    return isinstance(value, (int, float))
+
+
+def _gate_passed(field: str, value: object, threshold: object, measured: bool) -> bool:
+    if not _gate_value_measured(value, measured):
+        return False
+    if field in _MINIMUM_GATES:
+        return float(value) >= float(threshold)
+    if field == "client_rss_mib":
+        return float(value) < float(threshold)
+    return float(value) <= float(threshold)
+
+
+def _gate_entry(field: str, value: object, complete: bool) -> dict[str, object]:
+    threshold = GATE_THRESHOLDS[field]
+    measured = complete and value is not None
+    return {
+        "measured": measured,
+        "value": value,
+        "threshold": threshold,
+        "passed": _gate_passed(field, value, threshold, measured),
+    }
+
+
+def _evaluation(complete: bool, gates: dict, qualification: bool) -> dict[str, object]:
+    return {
+        "passed": complete and all(item["passed"] for item in gates.values()),
+        "schema_valid": True,
+        "evidence_complete": complete,
+        "scope": "qualification" if qualification else "correctness_reliability",
+        "gates": gates,
+    }
+
+
 def evaluate_gates(report: object) -> dict[str, object]:
     """Fail closed unless a schema-valid measured report has complete evidence."""
     try:
         validate_report(report)
     except (TypeError, ValueError):
-        return {
-            "passed": False,
-            "schema_valid": False,
-            "evidence_complete": False,
-            "scope": "invalid",
-            "gates": {},
-        }
+        return _invalid_evaluation()
     assert isinstance(report, Mapping)
     complete = _evidence_complete(report)
-    mode = report["mode"]
-    scope = "qualification" if mode == "qualification" else "correctness_reliability"
-    fields = _QUALIFICATION_GATES if mode == "qualification" else _CORRECTNESS_GATES
+    qualification = report["mode"] == "qualification"
+    fields = _QUALIFICATION_GATES if qualification else _CORRECTNESS_GATES
     values = _gate_values(report)
-    minimums = {"definition_accuracy", "reference_f1", "recovery_rate"}
-    gates: dict[str, dict[str, object]] = {}
-    for field in fields:
-        value = values[field]
-        threshold = GATE_THRESHOLDS[field]
-        measured = complete and value is not None
-        if not measured or isinstance(value, bool) or not isinstance(value, (int, float)):
-            passed = False
-        elif field in minimums:
-            passed = float(value) >= float(threshold)
-        elif field == "client_rss_mib":
-            passed = float(value) < float(threshold)
-        else:
-            passed = float(value) <= float(threshold)
-        gates[field] = {
-            "measured": measured,
-            "value": value,
-            "threshold": threshold,
-            "passed": passed,
-        }
-    return {
-        "passed": complete and all(item["passed"] for item in gates.values()),
-        "schema_valid": True,
-        "evidence_complete": complete,
-        "scope": scope,
-        "gates": gates,
-    }
+    gates = {field: _gate_entry(field, values[field], complete) for field in fields}
+    return _evaluation(complete, gates, qualification)
 
 
 def resolve_state_root(
@@ -3062,6 +3099,20 @@ def resolve_state_root(
     return value.expanduser().resolve()
 
 
+def _validated_operator_corpus(parser: argparse.ArgumentParser, argument: Path) -> Path:
+    operator_corpus = argument.expanduser()
+    if not operator_corpus.is_absolute():
+        parser.error("--operator-corpus must be absolute")
+    operator_corpus = Path(os.path.abspath(os.fspath(operator_corpus)))
+    try:
+        metadata = operator_corpus.stat(follow_symlinks=False)
+    except OSError:
+        parser.error("--operator-corpus must exist")
+    if _operator_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        parser.error("--operator-corpus must be a directory")
+    return operator_corpus
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run measured Python navigation qualification")
     parser.add_argument("--fixture", action="store_true", help="Use the pinned public fixture")
@@ -3075,20 +3126,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not args.fixture:
         parser.error("--fixture is required")
     if args.operator_corpus is not None:
-        operator_corpus = args.operator_corpus.expanduser()
-        if not operator_corpus.is_absolute():
-            parser.error("--operator-corpus must be absolute")
-        operator_corpus = Path(os.path.abspath(os.fspath(operator_corpus)))
-        try:
-            metadata = operator_corpus.stat(follow_symlinks=False)
-        except OSError:
-            parser.error("--operator-corpus must exist")
-        if _operator_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-            parser.error("--operator-corpus must be a directory")
-        args.operator_corpus = operator_corpus
+        args.operator_corpus = _validated_operator_corpus(parser, args.operator_corpus)
     if args.state_root is not None and not args.state_root.is_absolute():
         parser.error("--state-root must be absolute")
     return args
+
+
+def _error_exit(code_name: str, exit_code: int) -> int:
+    print(
+        _canonical_json({"status": "error", "code": code_name, "market_superiority_claimed": False}),
+        file=sys.stderr,
+    )
+    return exit_code
+
+
+def _run_and_evaluate(args: argparse.Namespace, mode: str, state_root: Path) -> int:
+    with tempfile.TemporaryDirectory(prefix="code-navigation-fixture-") as temporary:
+        report = run_fixture_benchmark(
+            Path(temporary) / "run",
+            state_root=state_root,
+            mode=mode,
+            operator_corpus=args.operator_corpus,
+        )
+    evaluation = evaluate_gates(report)
+    print(_canonical_json(report))
+    if args.require_gates and not evaluation["passed"]:
+        print(_canonical_json(evaluation), file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3096,55 +3161,13 @@ def main(argv: list[str] | None = None) -> int:
     mode = "qualification" if args.qualification else "correctness-only"
     state_root = resolve_state_root(args.state_root)
     try:
-        with tempfile.TemporaryDirectory(prefix="code-navigation-fixture-") as temporary:
-            report = run_fixture_benchmark(
-                Path(temporary) / "run",
-                state_root=state_root,
-                mode=mode,
-                operator_corpus=args.operator_corpus,
-            )
-        evaluation = evaluate_gates(report)
-        print(_canonical_json(report))
-        if args.require_gates and not evaluation["passed"]:
-            print(_canonical_json(evaluation), file=sys.stderr)
-            return 1
-        return 0
+        return _run_and_evaluate(args, mode, state_root)
     except BenchmarkTimeoutError:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": "BenchmarkTimeout",
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 4
+        return _error_exit("BenchmarkTimeout", 4)
     except (FixtureIdentityError, QualifiedIdentityError) as exc:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": type(exc).__name__,
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 2
+        return _error_exit(type(exc).__name__, 2)
     except Exception as exc:
-        print(
-            _canonical_json(
-                {
-                    "status": "error",
-                    "code": type(exc).__name__,
-                    "market_superiority_claimed": False,
-                }
-            ),
-            file=sys.stderr,
-        )
-        return 3
+        return _error_exit(type(exc).__name__, 3)
 
 
 if __name__ == "__main__":
