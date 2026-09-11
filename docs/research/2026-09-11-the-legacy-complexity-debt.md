@@ -81,3 +81,17 @@ they go with it: `TestDailyLockExclusivity` in
 `tests/test_capture_hooks.py`, and the `_daily_lock` marker in
 `tests/test_quality_guards.py`, whose remaining markers (`append_daily`,
 `locked_append`) are the two writers every daily-log script uses.
+
+## A module that never ran is deleted
+
+`scripts/session_feedback.py` (the "self-correcting flywheel": record which
+decisions were injected, look for corrections in the next days, raise a
+staleness score) arrived in e20b204 together with contextual retrieval and
+was never wired: `record_injection` has no caller in any script, hook,
+integration or scheduler, so its injection list is always empty,
+`run_feedback_check` always returns zeros and `should_inject` is consulted
+by nothing. It also carried a lost update — `run_feedback_check` saved the
+feedback it loaded before the per-decision updates, erasing them — which
+only never mattered because nothing ran it. It goes with
+`tests/test_session_feedback.py` and its `tests/shard_weights.json` entry,
+as the dead LLM branches of contextual retrieval went earlier today.

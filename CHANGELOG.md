@@ -303,6 +303,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
 - The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
 - **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
   had no caller; 40 functions reachable only from it (legacy triple RRF, its

@@ -65,6 +65,10 @@ SUMMARY_RE = re.compile(
 )
 
 
+_RULE_TYPES = ("pattern", "decision", "qa", "debugging")
+_RULE_WORDS = re.compile(r"\b(do not|don'?t|always|never|must|should)\b", re.IGNORECASE)
+
+
 def _collect_corrections(
     project: str | None = None,
     *,
@@ -79,68 +83,109 @@ def _collect_corrections(
     """
     if source_contents is None:
         _, source_contents = snapshot_guardrail_sources_with_content(ROOT)
-    corrections = []
+    notes = _entries(_selected(source_contents, "knowledge/notes/", ".md"), _knowledge_correction, project)
+    feedback = _entries(_selected(source_contents, "knowledge/feedback/", ".json"), _feedback_correction, project)
+    return notes + feedback
 
-    # Source 1: knowledge pages with correction-like types
-    for relative, source_bytes in source_contents.items():
-        if relative.startswith("knowledge/notes/") and relative.endswith(".md"):
-            md = ROOT / relative
-            content = source_bytes.decode("utf-8", errors="ignore")
-            fm = FRONTMATTER_RE.match(content)
-            if not fm:
-                continue
-            fm_text = fm.group(1)
-            status = _extract(fm_text, STATUS_RE)
-            if status and status.strip() in ("archived", "superseded"):
-                continue
-            page_type = _extract(fm_text, TYPE_RE)
-            if page_type not in ("pattern", "decision", "qa", "debugging"):
-                continue
-            summary = _extract(content, SUMMARY_RE) or ""
-            if not re.search(r"\b(do not|don'?t|always|never|must|should)\b", summary, re.IGNORECASE):
-                continue
 
-            # Filter by project
-            proj = _extract(fm_text, PROJECT_RE)
-            if project and proj and proj.lower() != project.lower():
-                continue
+def _selected(source_contents: Mapping[str, bytes], prefix: str, suffix: str) -> list[tuple[str, bytes]]:
+    return [
+        (relative, source_bytes)
+        for relative, source_bytes in source_contents.items()
+        if relative.startswith(prefix) and relative.endswith(suffix)
+    ]
 
-            title_m = H1_RE.search(content)
-            summary_m = SUMMARY_RE.search(content)
-            corrections.append({
-                "type": page_type,
-                "title": title_m.group(1).strip() if title_m else md.stem,
-                "summary": (summary_m.group(1).strip()[:150] if summary_m else ""),
-                "source": "knowledge",
-                "path": md.relative_to(ROOT).as_posix(),
-            })
 
-    # Source 2: promoted feedback candidates
-    for relative, source_bytes in source_contents.items():
-        if relative.startswith("knowledge/feedback/") and relative.endswith(".json"):
-            try:
-                candidate = json.loads(source_bytes)
-            except json.JSONDecodeError:
-                continue
-            if candidate.get("status") != "promoted":
-                continue
-            proj = candidate.get("project", "")
-            if project and proj.lower() != project.lower():
-                continue
-            corrections.append({
-                "type": candidate.get("type", "feedback"),
-                "title": candidate.get("text", "")[:80],
-                "summary": candidate.get("text", "")[:150],
-                "source": "feedback",
-                "path": candidate.get("promoted_to", ""),
-            })
+def _entries(selected: list[tuple[str, bytes]], reader, project: str | None) -> list[dict]:
+    entries = (reader(relative, source_bytes, project) for relative, source_bytes in selected)
+    return [entry for entry in entries if entry is not None]
 
-    return corrections
+
+def _knowledge_correction(relative: str, source_bytes: bytes, project: str | None) -> dict | None:
+    """Source 1: an active knowledge page of a rule-like type whose summary states a rule."""
+    content = source_bytes.decode("utf-8", errors="ignore")
+    fm = FRONTMATTER_RE.match(content)
+    if not fm:
+        return None
+    page_type = _rule_page_type(fm.group(1), content, project)
+    if page_type is None:
+        return None
+    return _knowledge_rule(relative, content, page_type)
+
+
+def _rule_page_type(fm_text: str, content: str, project: str | None) -> str | None:
+    page_type = _extract(fm_text, TYPE_RE)
+    if _retired(fm_text) or page_type not in _RULE_TYPES:
+        return None
+    if not _states_a_rule(content) or not _in_scope(_extract(fm_text, PROJECT_RE), project):
+        return None
+    return page_type
+
+
+def _retired(fm_text: str) -> bool:
+    status = _extract(fm_text, STATUS_RE)
+    return bool(status) and status.strip() in ("archived", "superseded")
+
+
+def _states_a_rule(content: str) -> bool:
+    summary = _extract(content, SUMMARY_RE) or ""
+    return _RULE_WORDS.search(summary) is not None
+
+
+def _in_scope(page_project: str | None, project: str | None) -> bool:
+    if not project or not page_project:
+        return True
+    return page_project.lower() == project.lower()
+
+
+def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
+    md = ROOT / relative
+    title_m = H1_RE.search(content)
+    summary_m = SUMMARY_RE.search(content)
+    return {
+        "type": page_type,
+        "title": title_m.group(1).strip() if title_m else md.stem,
+        "summary": (summary_m.group(1).strip()[:150] if summary_m else ""),
+        "source": "knowledge",
+        "path": md.relative_to(ROOT).as_posix(),
+    }
+
+
+def _feedback_correction(relative: str, source_bytes: bytes, project: str | None) -> dict | None:
+    """Source 2: a promoted feedback candidate of this project (or of any, when unscoped)."""
+    try:
+        candidate = json.loads(source_bytes)
+    except json.JSONDecodeError:
+        return None
+    if candidate.get("status") != "promoted" or not _feedback_in_scope(candidate, project):
+        return None
+    return {
+        "type": candidate.get("type", "feedback"),
+        "title": candidate.get("text", "")[:80],
+        "summary": candidate.get("text", "")[:150],
+        "source": "feedback",
+        "path": candidate.get("promoted_to", ""),
+    }
+
+
+def _feedback_in_scope(candidate: dict, project: str | None) -> bool:
+    if not project:
+        return True
+    return candidate.get("project", "").lower() == project.lower()
 
 
 def _extract(text: str, pattern: re.Pattern) -> str | None:
     m = pattern.search(text)
     return m.group(1).strip() if m else None
+
+
+_RULE_LABELS = {
+    "correction": "CORRECTION",
+    "preference": "PREFERENCE",
+    "requirement": "REQUIREMENT",
+    "instruction": "INSTRUCTION",
+    "pattern_rule": "RULE",
+}
 
 
 def build_guardrails(
@@ -155,11 +200,19 @@ def build_guardrails(
     because they were learned from past corrections.
     """
     corrections = _collect_corrections(project, source_contents=source_contents)
-
     if not corrections:
         return ""
+    lines = ["## Guard rails (learned rules — do NOT repeat these mistakes)\n"]
+    by_type: dict[str, list[dict]] = {}
+    for c in _deduplicated(corrections)[:max_rules]:
+        by_type.setdefault(c["type"], []).append(c)
+    for rtype in sorted(by_type.keys()):
+        lines.extend(_type_block(rtype, by_type[rtype]))
+    return "\n".join(lines).strip()
 
-    # Deduplicate by summary similarity (simple)
+
+def _deduplicated(corrections: list[dict]) -> list[dict]:
+    """Deduplicate by summary similarity (simple): the first 60 lower-cased characters."""
     seen: set[str] = set()
     unique = []
     for c in corrections:
@@ -167,31 +220,12 @@ def build_guardrails(
         if key not in seen:
             seen.add(key)
             unique.append(c)
+    return unique
 
-    unique = unique[:max_rules]
 
-    lines = ["## Guard rails (learned rules — do NOT repeat these mistakes)\n"]
-
-    by_type: dict[str, list[dict]] = {}
-    for c in unique:
-        by_type.setdefault(c["type"], []).append(c)
-
-    for rtype in sorted(by_type.keys()):
-        rules = by_type[rtype]
-        label = {
-            "correction": "CORRECTION",
-            "preference": "PREFERENCE",
-            "requirement": "REQUIREMENT",
-            "instruction": "INSTRUCTION",
-            "pattern_rule": "RULE",
-        }.get(rtype, rtype.upper())
-
-        lines.append(f"**{label}** ({len(rules)}):")
-        for r in rules[:5]:
-            lines.append(f"- {r['summary']}")
-        lines.append("")
-
-    return "\n".join(lines).strip()
+def _type_block(rtype: str, rules: list[dict]) -> list[str]:
+    label = _RULE_LABELS.get(rtype, rtype.upper())
+    return [f"**{label}** ({len(rules)}):", *(f"- {r['summary']}" for r in rules[:5]), ""]
 
 
 def main() -> int:

@@ -122,7 +122,6 @@
   "test_search_ranking.py": 3.07,
   "test_security_invariants.py": 30.2,
   "test_session_end_skip.py": 0.5,
-  "test_session_feedback.py": 0.5,
   "test_slug.py": 0.5,
   "test_slugify.py": 0.5,
   "test_structure.py": 0.5,

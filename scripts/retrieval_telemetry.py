@@ -64,6 +64,10 @@ def _require_encodable(name: str, value: str) -> None:
 def _bounded_text(name: str, value: object, *, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
+    return _checked_text(name, value)
+
+
+def _checked_text(name: str, value: object) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a string")
     if _is_unsafe_text(name, value):
@@ -84,6 +88,10 @@ def _parsed_timestamp_text(value: str) -> datetime:
 def _parsed_timestamp(value: datetime | str | None) -> datetime:
     if value is None:
         return datetime.now(timezone.utc)
+    return _given_timestamp(value)
+
+
+def _given_timestamp(value: object) -> datetime:
     if isinstance(value, datetime):
         return value
     if isinstance(value, str):
@@ -169,17 +177,17 @@ class RetrievalEvent:
             raise ValueError("timestamp must be canonical UTC")
 
 
+def _positive_sequence(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 @dataclass(frozen=True)
 class SequencedRetrievalEvent:
     sequence: int
     event: RetrievalEvent
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.sequence, int)
-            or isinstance(self.sequence, bool)
-            or self.sequence <= 0
-        ):
+        if not _positive_sequence(self.sequence):
             raise ValueError("sequence must be a positive integer")
         if not isinstance(self.event, RetrievalEvent):
             raise TypeError("event must be a RetrievalEvent")
@@ -345,6 +353,10 @@ def _require_batch_shape(events: object, max_rows: int) -> None:
         raise TypeError("events must be a list or tuple")
     if len(events) > MAX_READ_EVENTS:
         raise ValueError("event batch exceeds limit")
+    _require_within_max_rows(events, max_rows)
+
+
+def _require_within_max_rows(events: list | tuple, max_rows: int) -> None:
     _validate_limit("max_rows", max_rows, DEFAULT_MAX_ROWS)
     if len(events) > max_rows:
         raise ValueError("event batch exceeds max_rows")

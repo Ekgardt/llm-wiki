@@ -50,12 +50,13 @@ def count_wiki_pages() -> int:
     if not WIKI.exists():
         return 0
     skip_parents = editorial_parents_to_skip(WIKI)
-    return sum(
-        1 for p in WIKI.rglob("*.md")
-        if p.is_file()
-        and p.name not in EDITORIAL_NAMES
-        and not any(sp in p.parents for sp in skip_parents)
-    )
+    return sum(1 for p in WIKI.rglob("*.md") if _curated_page(p, skip_parents))
+
+
+def _curated_page(p: Path, skip_parents: object) -> bool:
+    if not p.is_file() or p.name in EDITORIAL_NAMES:
+        return False
+    return not any(sp in p.parents for sp in skip_parents)
 
 
 def tier_for(count: int) -> str:
@@ -67,30 +68,39 @@ def tier_for(count: int) -> str:
 
 def index_status() -> dict:
     """Inspect the local SQLite FTS5 index without opening it."""
+    for candidate in _index_candidates():
+        info = _index_info(candidate)
+        if info is not None:
+            return info
+    return {"available": False}
+
+
+def _index_candidates() -> list[Path]:
     import os
 
-    info: dict = {"available": False}
     state_root_env = os.environ.get("LLM_WIKI_STATE_ROOT")
     candidates: list[Path] = []
     if state_root_env:
         candidates.append(Path(state_root_env) / "cache" / "index.sqlite")
     candidates.append(ROOT / "cache" / "index.sqlite")
-    for c in candidates:
-        try:
-            if c and c.exists() and c.is_file():
-                mtime = datetime.fromtimestamp(c.stat().st_mtime, tz=timezone.utc)
-                age_h = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
-                info.update({
-                    "available": True,
-                    "index_path": str(c),
-                    "index_size_mb": round(c.stat().st_size / (1024 * 1024), 2),
-                    "index_age_hours": round(age_h, 1),
-                    "index_stale": age_h > 24,
-                })
-                break
-        except OSError:
-            continue
-    return info
+    return candidates
+
+
+def _index_info(candidate: Path) -> dict | None:
+    try:
+        if not (candidate.exists() and candidate.is_file()):
+            return None
+        mtime = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+        return {
+            "available": True,
+            "index_path": str(candidate),
+            "index_size_mb": round(candidate.stat().st_size / (1024 * 1024), 2),
+            "index_age_hours": round(age_h, 1),
+            "index_stale": age_h > 24,
+        }
+    except OSError:
+        return None
 
 
 def main() -> int:
@@ -112,21 +122,28 @@ def main() -> int:
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0
+    _print_summary(count, tier, index)
+    return 0
 
+
+def _print_summary(count: int, tier: str, index: dict) -> None:
     print(f"Wiki pages (curated, excl. editorial): {count}")
     print(f"Recommended tier: {tier}")
     print("Thresholds: DIRECT < 50  |  BASE 50–300  |  HYBRID > 300")
-    if index.get("available"):
-        print(f"FTS5 index: {index.get('index_path')} ({index.get('index_size_mb')} MB)")
-        age_h = index.get("index_age_hours")
-        if age_h is not None:
-            stale = " [STALE >24h]" if index.get("index_stale") else ""
-            print(f"FTS5 index age: {age_h} hours{stale}")
-        if index.get("index_stale") and tier != "DIRECT":
-            print("Tip: run `search_memory.py --rebuild` before querying.")
-    else:
+    if not index.get("available"):
         print("FTS5 index not found; search_memory.py will build it on demand.")
-    return 0
+        return
+    _print_index(index, tier)
+
+
+def _print_index(index: dict, tier: str) -> None:
+    print(f"FTS5 index: {index.get('index_path')} ({index.get('index_size_mb')} MB)")
+    age_h = index.get("index_age_hours")
+    if age_h is not None:
+        stale = " [STALE >24h]" if index.get("index_stale") else ""
+        print(f"FTS5 index age: {age_h} hours{stale}")
+    if index.get("index_stale") and tier != "DIRECT":
+        print("Tip: run `search_memory.py --rebuild` before querying.")
 
 
 if __name__ == "__main__":
