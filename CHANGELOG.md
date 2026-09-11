@@ -54,6 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `sync_memory`, `install_smoke` and `lsp_positions` obey the complexity gate: the sync run is a table of actions over one `_SyncRun`, the three `uv` steps are one step record, the file-URI parser is a pipeline of named checks; behaviour and messages unchanged (audit OPS-15).
 - Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
 - The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
 - The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).

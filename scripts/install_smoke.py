@@ -47,6 +47,12 @@ def _production_imports() -> dict[str, bool]:
     return result
 
 
+def _has_required_shape(value: dict, required: dict[str, type]) -> bool:
+    return all(
+        key in value and isinstance(value[key], expected) for key, expected in required.items()
+    )
+
+
 def _validate_doctor_report(value: object) -> dict[str, object]:
     required = {
         "schema_version": str,
@@ -57,10 +63,7 @@ def _validate_doctor_report(value: object) -> dict[str, object]:
         "counts": dict,
         "run_deletion": dict,
     }
-    if not isinstance(value, dict) or any(
-        key not in value or not isinstance(value[key], expected)
-        for key, expected in required.items()
-    ):
+    if not isinstance(value, dict) or not _has_required_shape(value, required):
         raise RuntimeError("Doctor report does not satisfy the install smoke schema")
     status = value["overall_status"]
     if status not in {"ok", "degraded", "error"}:
@@ -86,19 +89,22 @@ def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, ob
     )
     if completed.returncode not in {0, 1}:
         raise RuntimeError("Doctor failed during install smoke")
-    encoded = completed.stdout.encode("utf-8", errors="replace")
-    if len(encoded) > MAX_CHILD_BYTES:
-        raise RuntimeError("Doctor output exceeded the install smoke bound")
-    try:
-        parsed = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Doctor did not return valid JSON") from exc
-    report = _validate_doctor_report(parsed)
+    report = _validate_doctor_report(_parsed_doctor_output(completed.stdout))
     status = report["overall_status"]
     expected_returncode = {"ok": 0, "degraded": 1, "error": 2}[status]
     if status == "error" or completed.returncode != expected_returncode:
         raise RuntimeError("Doctor failed during install smoke")
     return report
+
+
+def _parsed_doctor_output(stdout: str) -> object:
+    encoded = stdout.encode("utf-8", errors="replace")
+    if len(encoded) > MAX_CHILD_BYTES:
+        raise RuntimeError("Doctor output exceeded the install smoke bound")
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Doctor did not return valid JSON") from exc
 
 
 async def _mcp_tools(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:
@@ -136,6 +142,35 @@ def validate_tool_contract(tools: tuple[str, ...]) -> None:
         raise RuntimeError("MCP smoke returned an unexpected tool contract")
 
 
+def _require_deadline(deadline_seconds: object) -> float:
+    if isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, (int, float)):
+        raise ValueError("deadline_seconds must be a positive finite number")
+    if not math.isfinite(deadline_seconds) or deadline_seconds <= 0:
+        raise ValueError("deadline_seconds must be a positive finite number")
+    return float(deadline_seconds)
+
+
+def _resolved_roots(root: Path, state_root: Path) -> tuple[Path, Path]:
+    root = Path(root).resolve(strict=True)
+    state_root = Path(state_root).resolve(strict=True)
+    if not root.is_dir() or not state_root.is_dir():
+        raise ValueError("install smoke roots must be directories")
+    return root, state_root
+
+
+def _remaining_before(deadline: float, stage: str) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"install smoke deadline expired before {stage}")
+    return remaining
+
+
+def _smoke_status(doctor: dict[str, object]) -> str:
+    if doctor["overall_status"] == "degraded":
+        return "degraded"
+    return "ok"
+
+
 def run_smoke(
     root: Path,
     state_root: Path,
@@ -143,31 +178,16 @@ def run_smoke(
     deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
 ) -> dict[str, object]:
     """Run imports, Doctor, and MCP under one absolute deadline."""
-    if (
-        isinstance(deadline_seconds, bool)
-        or not isinstance(deadline_seconds, (int, float))
-        or not math.isfinite(deadline_seconds)
-        or deadline_seconds <= 0
-    ):
-        raise ValueError("deadline_seconds must be a positive finite number")
-    root = Path(root).resolve(strict=True)
-    state_root = Path(state_root).resolve(strict=True)
-    if not root.is_dir() or not state_root.is_dir():
-        raise ValueError("install smoke roots must be directories")
-    deadline = time.monotonic() + float(deadline_seconds)
+    seconds = _require_deadline(deadline_seconds)
+    root, state_root = _resolved_roots(root, state_root)
+    deadline = time.monotonic() + seconds
 
     imports = _production_imports()
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("install smoke deadline expired before Doctor")
-    doctor = _doctor_report(root, state_root, remaining)
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("install smoke deadline expired before MCP")
-    names = _mcp_tool_names(root, state_root, remaining)
+    doctor = _doctor_report(root, state_root, _remaining_before(deadline, "Doctor"))
+    names = _mcp_tool_names(root, state_root, _remaining_before(deadline, "MCP"))
     validate_tool_contract(names)
     return {
-        "status": "degraded" if doctor["overall_status"] == "degraded" else "ok",
+        "status": _smoke_status(doctor),
         "imports": imports,
         "doctor": doctor,
         "tool_count": len(names),
