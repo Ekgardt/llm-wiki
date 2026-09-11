@@ -340,7 +340,7 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-15 — Rule 5 is not met by 110 functions in scope
 
-- Status: in progress. Closed 2026-09-10/11: `maybe_compile.py`, `capture_operation.py`, `sync_memory.py`, `lsp_positions.py`, `install_smoke.py` (lizard reports no function over 5). Open: `lsp_security.py`, `lsp_protocol.py`, `pyright_profile.py` — 92 functions measured 2026-09-11 (`docs/research/2026-09-11-a-sync-run-is-a-table-of-actions.md`, `docs/research/2026-09-11-the-uri-parser-is-a-pipeline-of-named-checks.md`).
+- Status: in progress. Closed 2026-09-10/11: `maybe_compile.py`, `capture_operation.py`, `sync_memory.py`, `lsp_positions.py`, `install_smoke.py` (lizard reports no function over 5). `lsp_security.py` closed 2026-09-11 in three stages (`docs/research/2026-09-11-a-no-follow-walk-is-a-sequence-of-named-steps.md`). Open: `lsp_protocol.py`, `pyright_profile.py` — 52 functions measured 2026-09-11 (`docs/research/2026-09-11-a-sync-run-is-a-table-of-actions.md`, `docs/research/2026-09-11-the-uri-parser-is-a-pipeline-of-named-checks.md`).
 
 - Rule: L5.
 - Evidence: measured with lizard `-C 5` and `ccn_gate.py` on 2026-09-10:

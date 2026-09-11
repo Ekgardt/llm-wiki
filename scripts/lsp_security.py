@@ -339,13 +339,14 @@ class _PosixWalk:
 
     def walk(self, parts: tuple[str, ...]) -> None:
         for index, component in enumerate(parts):
-            if index == len(parts) - 1:
-                if not self._open_final(component):
-                    self.missing = parts[index:]
-                return
-            if not self._open_parent(component):
+            if not self._open_component(component, final=index == len(parts) - 1):
                 self.missing = parts[index:]
                 return
+
+    def _open_component(self, component: str, *, final: bool) -> bool:
+        if final:
+            return self._open_final(component)
+        return self._open_parent(component)
 
     def _require_absence_allowed(self, message: str) -> None:
         if self.must_exist:
@@ -2165,6 +2166,52 @@ def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
     return "".join(pieces)
 
 
+def _posix_text_within_ceiling(raw: str, encoded: bytes) -> bool:
+    return len(raw) <= _MAX_REDACTION_PATH_TOKEN and len(encoded) <= _MAX_REDACTION_PATH_TOKEN
+
+
+def _posix_text_is_rooted(raw: str, encoded: bytes) -> bool:
+    if not raw.startswith("/") or raw.startswith("//"):
+        return False
+    if not _posix_text_within_ceiling(raw, encoded):
+        return False
+    return not any(_is_control(character) for character in raw)
+
+
+def _posix_component_within_ceiling(component: str, component_bytes: bytes) -> bool:
+    if len(component) > _MAX_COMPONENT_CHARACTERS:
+        return False
+    return len(component_bytes) <= _MAX_COMPONENT_BYTES
+
+
+def _posix_component_is_valid(component: str) -> bool:
+    try:
+        component_bytes = component.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    if not _posix_component_within_ceiling(component, component_bytes):
+        return False
+    return not any(_is_control(character) or character == "/" for character in component)
+
+
+def _all_posix_components_valid(components: tuple[str, ...]) -> bool:
+    return all(_posix_component_is_valid(component) for component in components)
+
+
+def _split_posix_components(normalized: str) -> tuple[str, ...]:
+    return tuple(component for component in normalized.split("/") if component)
+
+
+def _normalized_posix_root(raw: str) -> tuple[str, tuple[str, ...]] | None:
+    normalized = posixpath.normpath(raw)
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return None
+    components = _split_posix_components(normalized)
+    if len(components) > _MAX_COMPONENTS:
+        return None
+    return normalized, components
+
+
 def _posix_root_components(
     path: Path,
 ) -> tuple[str, tuple[str, ...]] | None:
@@ -2173,32 +2220,12 @@ def _posix_root_components(
         encoded = raw.encode("utf-8", errors="strict")
     except (AttributeError, UnicodeError):
         return None
-    if (
-        not raw.startswith("/")
-        or raw.startswith("//")
-        or len(raw) > _MAX_REDACTION_PATH_TOKEN
-        or len(encoded) > _MAX_REDACTION_PATH_TOKEN
-        or any(_is_control(character) for character in raw)
-    ):
+    if not _posix_text_is_rooted(raw, encoded):
         return None
-    normalized = posixpath.normpath(raw)
-    if not normalized.startswith("/") or normalized.startswith("//"):
+    root = _normalized_posix_root(raw)
+    if root is None or not _all_posix_components_valid(root[1]):
         return None
-    components = tuple(component for component in normalized.split("/") if component)
-    if len(components) > _MAX_COMPONENTS:
-        return None
-    for component in components:
-        try:
-            component_bytes = component.encode("utf-8", errors="strict")
-        except UnicodeEncodeError:
-            return None
-        if (
-            len(component) > _MAX_COMPONENT_CHARACTERS
-            or len(component_bytes) > _MAX_COMPONENT_BYTES
-            or any(_is_control(character) or character == "/" for character in component)
-        ):
-            return None
-    return normalized, components
+    return root
 
 
 def _posix_candidate_inspection_characters(
@@ -2217,6 +2244,44 @@ def _posix_candidate_starts_at(value: str, start: int) -> bool:
     ] == "/"
 
 
+def _boundary_character_at(value: str, index: int, file_uri: bool) -> tuple[str, bool] | None:
+    """(character, encoded) at `index`; None when a file URI escape there is malformed."""
+    if not file_uri:
+        return value[index], False
+    decoded = _uri_character(value, index, min(len(value), index + 12))
+    if decoded is None:
+        return None
+    return decoded[0], decoded[2]
+
+
+def _posix_hard_boundary(character: str, quoted: bool) -> bool:
+    if character in ':?#<>"' or character.isspace() or _is_control(character):
+        return True
+    return quoted and character == '"'
+
+
+def _posix_punctuation_boundary(value: str, index: int) -> bool:
+    character = value[index]
+    if character not in _WINDOWS_LOG_TRAILING_PUNCTUATION:
+        return False
+    punctuation_end = _trailing_punctuation_end(value, index)
+    if _after_punctuation_is_boundary(value, punctuation_end):
+        return True
+    return character in {",", ";"} and _posix_candidate_starts_at(value, punctuation_end)
+
+
+def _decoded_posix_boundary(
+    character: str, encoded: bool, quoted: bool, value: str, index: int
+) -> bool:
+    if character == "/":
+        return True
+    if encoded:
+        return False
+    if _posix_hard_boundary(character, quoted):
+        return True
+    return _posix_punctuation_boundary(value, index)
+
+
 def _posix_root_boundary(
     value: str,
     index: int,
@@ -2226,42 +2291,10 @@ def _posix_root_boundary(
 ) -> bool:
     if index >= len(value):
         return True
-    if file_uri:
-        decoded = _uri_character(value, index, min(len(value), index + 12))
-        if decoded is None:
-            return False
-        character, _source_end, encoded = decoded
-    else:
-        character = value[index]
-        encoded = False
-    if character == "/":
-        return True
-    if encoded:
+    decoded = _boundary_character_at(value, index, file_uri)
+    if decoded is None:
         return False
-    if (
-        character in ":?#<>\""
-        or character.isspace()
-        or _is_control(character)
-        or (quoted and character == '"')
-    ):
-        return True
-    if character not in _WINDOWS_LOG_TRAILING_PUNCTUATION:
-        return False
-
-    punctuation_end = index
-    while (
-        punctuation_end < len(value)
-        and value[punctuation_end] in _WINDOWS_LOG_TRAILING_PUNCTUATION
-    ):
-        punctuation_end += 1
-    if punctuation_end >= len(value):
-        return True
-    following = value[punctuation_end]
-    if following.isspace() or _is_control(following) or following == '"':
-        return True
-    return character in {",", ";"} and _posix_candidate_starts_at(
-        value, punctuation_end
-    )
+    return _decoded_posix_boundary(decoded[0], decoded[1], quoted, value, index)
 
 
 def _posix_native_root_match_end(
@@ -2362,13 +2395,7 @@ def _double_slash_start(value: str, start: int, limit: int) -> tuple[int, bool]:
     return second[1], True
 
 
-def _uri_posix_prefix(value: str, start: int, limit: int) -> int | None:
-    first = _uri_character(value, start + 5, limit)
-    if first is None or first[0] != "/":
-        return None
-    index, doubled = _double_slash_start(value, start, limit)
-    if not doubled:
-        return index
+def _uri_posix_after_double_slash(value: str, index: int, limit: int) -> int | None:
     rooted = _rooted_uri_prefix(value, index, limit)
     if rooted is not _NOT_ROOTED:
         return rooted
@@ -2376,6 +2403,16 @@ def _uri_posix_prefix(value: str, start: int, limit: int) -> int | None:
     if authority_end is None:
         return None
     return _skip_posix_separators(value, authority_end, limit)
+
+
+def _uri_posix_prefix(value: str, start: int, limit: int) -> int | None:
+    first = _uri_character(value, start + 5, limit)
+    if first is None or first[0] != "/":
+        return None
+    index, doubled = _double_slash_start(value, start, limit)
+    if not doubled:
+        return index
+    return _uri_posix_after_double_slash(value, index, limit)
 
 
 def _posix_semantic_prefix(
@@ -2423,21 +2460,13 @@ def _posix_add_semantic_component(
     components: list[str],
     root: tuple[str, tuple[str, ...]],
 ) -> tuple[bool, bool]:
-    if raw_component in {"", "."}:
-        return True, _posix_components_reach_root(components, root)
     if raw_component == "..":
         if components:
             components.pop()
         return True, _posix_components_reach_root(components, root)
-    try:
-        component_bytes = raw_component.encode("utf-8", errors="strict")
-    except UnicodeEncodeError:
-        return False, False
-    if (
-        len(raw_component) > _MAX_COMPONENT_CHARACTERS
-        or len(component_bytes) > _MAX_COMPONENT_BYTES
-        or any(_is_control(character) or character == "/" for character in raw_component)
-    ):
+    if raw_component in {"", "."}:
+        return True, _posix_components_reach_root(components, root)
+    if not _posix_component_is_valid(raw_component):
         return False, False
     components.append(raw_component)
     return True, _posix_components_reach_root(components, root)
@@ -2454,18 +2483,29 @@ def _posix_component_accepts_log_character(
     return root[1][len(components)].startswith("".join(component) + character)
 
 
+def _ends_posix_component(character: str) -> bool:
+    return _is_control(character) or character in '<>"'
+
+
+def _posix_component_separator(value: str, index: int, limit: int) -> int | None:
+    """The index of the `/` that ends the component at `index`, or None."""
+    separator = index
+    while separator < limit and value[separator] != "/":
+        if _ends_posix_component(value[separator]):
+            return None
+        separator += 1
+    if separator >= limit:
+        return None
+    return separator
+
+
 def _posix_native_component_is_canceled(
     value: str,
     index: int,
     limit: int,
 ) -> bool:
-    separator = index
-    while separator < limit and value[separator] != "/":
-        character = value[separator]
-        if _is_control(character) or character in '<>"':
-            return False
-        separator += 1
-    if separator >= limit:
+    separator = _posix_component_separator(value, index, limit)
+    if separator is None:
         return False
     while separator < limit and value[separator] == "/":
         separator += 1
@@ -2547,6 +2587,9 @@ class _PosixRootScanner:
         self.component_source_end = index
         if not self.root[1]:
             return index, index
+        return self._scan()
+
+    def _scan(self) -> tuple[int | None, int]:
         while self.index < self.limit:
             outcome = self._step()
             if outcome is not None:
@@ -2566,6 +2609,9 @@ class _PosixRootScanner:
             self.component, self.components, self.root, character
         ):
             return True
+        return self._component_is_disposable()
+
+    def _component_is_disposable(self) -> bool:
         if self.disposable_component is None:
             self.disposable_component = _posix_native_component_is_canceled(
                 self.value, self.index, self.limit
@@ -2598,14 +2644,10 @@ class _PosixRootScanner:
         self.component_source_end = source_end
         return None
 
-    def _step(self) -> tuple | None:
-        decoded = self._decode()
-        if decoded is None:
-            return None, max(self.start + 1, self.index + 1)
-        character, source_end, encoded = decoded
+    def _terminator_for(self, character: str, encoded: bool) -> bool:
         unquoted_boundary = _posix_unquoted_boundary(character, encoded, self.quoted)
         boundary_allowed = self._boundary_allowed(character, unquoted_boundary)
-        terminator = _posix_terminator(
+        return _posix_terminator(
             character,
             encoded=encoded,
             quoted=self.quoted,
@@ -2613,6 +2655,13 @@ class _PosixRootScanner:
             unquoted_boundary=unquoted_boundary,
             boundary_allowed=boundary_allowed,
         )
+
+    def _step(self) -> tuple | None:
+        decoded = self._decode()
+        if decoded is None:
+            return None, max(self.start + 1, self.index + 1)
+        character, source_end, encoded = decoded
+        terminator = self._terminator_for(character, encoded)
         if character == "/" or terminator:
             return self._close_component(source_end, terminator)
         self.component.append(character)
@@ -2644,6 +2693,36 @@ def _posix_semantic_root_match_end(
     ).run()
 
 
+def _posix_end_always(character: str, file_uri: bool) -> bool:
+    if _is_control(character) or character in '<>"':
+        return True
+    return file_uri and character in "?#\\"
+
+
+def _posix_end_in_context(character: str, quoted: bool) -> bool:
+    if quoted:
+        return character == '"'
+    return character.isspace() or character in ":,;)]}"
+
+
+def _posix_end_character(character: str, *, file_uri: bool, quoted: bool) -> bool:
+    if _posix_end_always(character, file_uri):
+        return True
+    return _posix_end_in_context(character, quoted)
+
+
+def _posix_next_index(
+    value: str, index: int, limit: int, *, file_uri: bool, quoted: bool
+) -> int | None:
+    """Where the token continues after `index`; None where it ends."""
+    character = value[index]
+    if _posix_end_character(character, file_uri=file_uri, quoted=quoted):
+        return None
+    if file_uri and character == "%":
+        return _percent_escape_end(value, index, limit)
+    return index + 1
+
+
 def _posix_redaction_end(
     value: str,
     start: int,
@@ -2655,30 +2734,63 @@ def _posix_redaction_end(
     limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
     index = root_end
     while index < limit:
-        character = value[index]
-        if (
-            _is_control(character)
-            or (file_uri and character in "?#")
-            or (quoted and character == '"')
-            or (
-                not quoted
-                and (character.isspace() or character in ":,;)]}")
-            )
-            or character in '<>"'
-            or (file_uri and character == "\\")
-        ):
-            break
-        if file_uri and character == "%":
-            if (
-                index + 3 > limit
-                or re.fullmatch(r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3])
-                is None
-            ):
-                break
-            index += 3
-            continue
-        index += 1
+        next_index = _posix_next_index(value, index, limit, file_uri=file_uri, quoted=quoted)
+        if next_index is None:
+            return index
+        index = next_index
     return index
+
+
+def _posix_token_bounded(value: str, start: int) -> bool:
+    """A token starts only where the previous character could not continue one."""
+    previous = value[start - 1 : start]
+    if previous and (previous.isalnum() or previous in "_/%"):
+        return False
+    return not (previous == ":" and value[start + 1 : start + 2] == "/")
+
+
+def _posix_token_at(value: str, start: int) -> tuple[bool, bool] | None:
+    """(file_uri, native) of a candidate at `start`; None when none starts here."""
+    bounded = _posix_token_bounded(value, start)
+    file_uri = bounded and value[start : start + 5].casefold() == "file:"
+    native = bounded and value[start : start + 1] == "/"
+    if not file_uri and not native:
+        return None
+    return file_uri, native
+
+
+def _posix_root_end(
+    value: str,
+    start: int,
+    root: tuple[str, tuple[str, ...]],
+    *,
+    file_uri: bool,
+    native: bool,
+    quoted: bool,
+) -> tuple[int | None, int]:
+    """(root end, where to resume when there is none)."""
+    if native:
+        root_end = _posix_native_root_match_end(value, start, root, quoted=quoted)
+        if root_end is not None:
+            return root_end, start + 1
+    return _posix_semantic_root_match_end(value, start, root, file_uri=file_uri, quoted=quoted)
+
+
+def _posix_match_at(
+    value: str, start: int, root: tuple[str, tuple[str, ...]]
+) -> tuple[int | None, int]:
+    """(match end, resume index): the span to redact at `start`, or where to look next."""
+    token = _posix_token_at(value, start)
+    if token is None:
+        return None, start + 1
+    file_uri, native = token
+    quoted = value[start - 1 : start] == '"'
+    root_end, resume = _posix_root_end(
+        value, start, root, file_uri=file_uri, native=native, quoted=quoted
+    )
+    if root_end is None:
+        return None, resume
+    return _posix_redaction_end(value, start, root_end, file_uri=file_uri, quoted=quoted), resume
 
 
 def _redact_posix_path_tokens(value: str, path: Path, marker: str) -> str:
@@ -2690,49 +2802,14 @@ def _redact_posix_path_tokens(value: str, path: Path, marker: str) -> str:
     index = 0
     while index < len(value):
         start = index
-        previous = value[start - 1 : start]
-        bounded = not (
-            previous and (previous.isalnum() or previous in "_/%")
-        ) and not (
-            previous == ":" and value[start + 1 : start + 2] == "/"
-        )
-        file_uri = bounded and value[start : start + 5].casefold() == "file:"
-        native = bounded and value[start : start + 1] == "/"
-        if not (file_uri or native):
-            index += 1
+        match_end, resume = _posix_match_at(value, start, root)
+        if match_end is None:
+            index = max(start + 1, resume)
             continue
-
-        quoted = previous == '"'
-        root_end = (
-            _posix_native_root_match_end(
-                value, start, root, quoted=quoted
-            )
-            if native
-            else None
-        )
-        resume = start + 1
-        if root_end is None:
-            root_end, resume = _posix_semantic_root_match_end(
-                value,
-                start,
-                root,
-                file_uri=file_uri,
-                quoted=quoted,
-            )
-        if root_end is not None:
-            match_end = _posix_redaction_end(
-                value,
-                start,
-                root_end,
-                file_uri=file_uri,
-                quoted=quoted,
-            )
-            pieces.append(value[cursor:start])
-            pieces.append(marker)
-            cursor = match_end
-            index = max(start + 1, match_end)
-            continue
-        index = max(start + 1, resume)
+        pieces.append(value[cursor:start])
+        pieces.append(marker)
+        cursor = match_end
+        index = max(start + 1, match_end)
     pieces.append(value[cursor:])
     return "".join(pieces)
 
@@ -2794,10 +2871,13 @@ class _LogScanner:
         self._emit(character)
         self.index += 1
 
+    def _escape_terminator_follows(self, character: str) -> bool:
+        return character == "\x1b" and self.value[self.index + 1 : self.index + 2] == "\\"
+
     def _string_terminator_length(self, character: str) -> int:
         if character == "\x9c":
             return 1
-        if character == "\x1b" and self.value[self.index + 1 : self.index + 2] == "\\":
+        if self._escape_terminator_follows(character):
             return 2
         if self.osc and character == "\x07":
             return 1
@@ -2908,45 +2988,55 @@ def _normalize_log_text(value: str) -> str:
     return _LogScanner(value).run()
 
 
+def _require_redaction_input(value: object, repository: RepositoryScope | None):
+    if not isinstance(value, str):
+        raise TypeError("value must be a string")
+    if repository is None:
+        return None
+    return _require_repository(repository)
+
+
+def _oversized_for_redaction(value: str) -> bool:
+    if len(value) > _MAX_REDACTION_RAW_BYTES:
+        return True
+    return not _fits_utf8_redaction_ceiling(value)
+
+
+def _home_paths() -> list[Path]:
+    """The home directory as given and, when it differs, as resolved."""
+    home = Path.home().absolute()
+    home_paths = [home]
+    try:
+        resolved_home = home.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return home_paths
+    if resolved_home not in home_paths:
+        home_paths.append(resolved_home)
+    return home_paths
+
+
+def _redact_home(redacted: str) -> str:
+    try:
+        for home_path in _home_paths():
+            redacted = _redact_path(redacted, home_path, "<home>")
+    except (OSError, RuntimeError):
+        pass
+    return redacted
+
+
 def redact_lsp_text(
     value: str,
     *,
     repository: RepositoryScope | None = None,
 ) -> str:
     """Remove credentials, local roots, and log injection from bounded raw text."""
-    if not isinstance(value, str):
-        raise TypeError("value must be a string")
-    if repository is not None:
-        repository = _require_repository(repository)
-    if len(value) > _MAX_REDACTION_RAW_BYTES:
+    repository = _require_redaction_input(value, repository)
+    if _oversized_for_redaction(value):
         return _OVERSIZED_REDACTION_MARKER
-    if not _fits_utf8_redaction_ceiling(value):
-        return _OVERSIZED_REDACTION_MARKER
-
-    redacted = _normalize_log_text(value)
-    redacted = _redact_assignments(redacted)
-    redacted = _redact_url_userinfo(redacted)
+    redacted = _redact_url_userinfo(_redact_assignments(_normalize_log_text(value)))
     if repository is not None:
-        redacted = _redact_path(
-            redacted,
-            Path(repository.checkout_root),
-            "<repository>",
-        )
-    try:
-        home = Path.home().absolute()
-        home_paths = [home]
-        try:
-            resolved_home = home.resolve(strict=False)
-        except (OSError, RuntimeError):
-            pass
-        else:
-            if resolved_home not in home_paths:
-                home_paths.append(resolved_home)
-        for home_path in home_paths:
-            redacted = _redact_path(redacted, home_path, "<home>")
-    except (OSError, RuntimeError):
-        pass
-    return _normalize_log_text(redacted)[:1024]
+        redacted = _redact_path(redacted, Path(repository.checkout_root), "<repository>")
+    return _normalize_log_text(_redact_home(redacted))[:1024]
 
 
 __all__ = [
