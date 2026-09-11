@@ -8,6 +8,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Argument bindings, the HTTP boundary and routes across repositories
+  (#24, B3/D2).** `get_architecture mode=data_flow` answers, hop by hop,
+  which caller-visible name binds which parameter of the callee, and says in
+  its own answer that this is argument binding and not data-flow analysis.
+  `mode=cross_service` follows calls plus literal-path HTTP client calls:
+  a call reaches the `route` node of the same method and path and the walk
+  turns around into the handler that exposes it; a route this repository
+  does not serve is matched against the exported routes of every other
+  indexed checkout and named with the repository it lives in, without
+  opening a second generation. The extractor (`code-extractor/v12`) records
+  one `BINDS_ARGUMENTS` literal assertion per resolved call (at most 8
+  `argument->parameter` pairs, 256 bytes) and one `HTTP_CALLS` assertion per
+  literal-path client call; the callee of a binding is named by the `CALLS`
+  assertion of the same call span, because the graph contract allows an
+  assertion to carry a target node or a literal, never both. Hint files gain
+  a `route` table (`code-hints/v2`) and new readers
+  `EvidenceGraph.argument_bindings` and `unresolved_edges` answer both
+  modes. Measured on this repository: 30 617 bindings, 24.0 s to index.
+  Derived generations rebuild themselves on the next nightly pass; until
+  then both modes answer nothing.
+- **The parity set asks the new questions (#24, E).**
+  `benchmark/code-parity-v2.json` carries the thirteen v1 tasks unchanged and
+  adds two argument-binding tasks and one "which tests exercise this
+  function" task, with gold read by hand from the working tree on
+  2026-09-11; the stand now defaults to it.
+  `benchmark/code-parity-cross-service-v1.json` asks the cross-service
+  questions against the two-repository fixture
+  `benchmark/build_cross_service_fixture.py` builds, because this repository
+  serves no HTTP route. No run is included: runs need the owner's word.
 - **The graph meets the agent where it searches (#24, C).** A Claude Code
   `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
   indexed repository gets a hint of at most three definitions (qualified name,
@@ -59,8 +88,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   hops, beside the unchanged `affected` groups. No new tool, no generation
   format change. Measured warm on a 1 020-file fixture: search ~99 ms,
   snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
-  `data_flow`/`cross_service` tracing is not feasible on the current graph
-  (no `DATA_FLOWS` or route-call edges) and is named as such. New modules
+  New modules
   `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
   `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
 - **The weights arrive with the install.** `scripts/install_models.py`

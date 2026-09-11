@@ -50,7 +50,14 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TASKS_PATH = Path(__file__).resolve().parent / "code-parity-v1.json"
+# v2 carries the thirteen v1 tasks unchanged and adds the data-flow and
+# which-tests questions issue #24, section E asks for. The cross-service
+# questions need two repositories and live in
+# `code-parity-cross-service-v1.json` (see `build_cross_service_fixture.py`).
+TASKS_PATH = Path(__file__).resolve().parent / "code-parity-v2.json"
+CROSS_SERVICE_TASKS_PATH = (
+    Path(__file__).resolve().parent / "code-parity-cross-service-v1.json"
+)
 CBM_BINARY = Path.home() / ".local" / "bin" / "codebase-memory-mcp"
 CBM_PROJECT = "home-user-llm-wiki"
 CALL_BUDGET_SECONDS = 60.0

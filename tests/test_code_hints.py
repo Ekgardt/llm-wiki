@@ -81,8 +81,10 @@ def test_a_foreign_or_stale_table_answers_nothing(tmp_path):
 
 
 def _meta(checkout_id: str) -> dict[str, str]:
+    import code_hints
+
     return {
-        "schema_version": "code-hints/v1",
+        "schema_version": code_hints.SCHEMA_VERSION,
         "generation_id": "generation-x",
         "repository_id": "repository:" + "0" * 64,
         "checkout_id": checkout_id,

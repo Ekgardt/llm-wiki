@@ -3412,6 +3412,34 @@ def _edges_filter(
     return clause, parameters
 
 
+_ARGUMENT_BINDING_SQL = (
+    "SELECT calls.source_node_id AS source_node_id, "
+    "calls.target_node_id AS target_node_id, "
+    "binds.literal_json AS literal, calls.assertion_id AS assertion_id "
+    "FROM assertion AS calls "
+    "JOIN evidence AS call_span ON call_span.assertion_id = calls.assertion_id "
+    "JOIN evidence AS bind_span ON bind_span.source_id = call_span.source_id "
+    "AND bind_span.byte_start = call_span.byte_start "
+    "AND bind_span.byte_end = call_span.byte_end "
+    "JOIN assertion AS binds ON binds.assertion_id = bind_span.assertion_id "
+    "WHERE calls.edge_type = 'CALLS' AND calls.resolution = 'resolved' "
+    "AND calls.target_node_id IS NOT NULL "
+    "AND binds.edge_type = 'BINDS_ARGUMENTS' AND binds.literal_json IS NOT NULL"
+)
+_ARGUMENT_BINDING_ORDER = (
+    " ORDER BY calls.source_node_id, calls.target_node_id, calls.assertion_id LIMIT ?"
+)
+
+
+def _argument_binding_row(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "source_node_id": row["source_node_id"],
+        "target_node_id": row["target_node_id"],
+        "literal": _stored_json(row["literal"], "literal"),
+        "assertion_id": row["assertion_id"],
+    }
+
+
 def _validated_prefix_values(prefixes: object) -> tuple[str, ...]:
     if isinstance(prefixes, (str, bytes)) or not isinstance(prefixes, Sequence):
         raise ValueError("exclude_name_prefixes must be a bounded sequence")
@@ -3957,6 +3985,34 @@ class EvidenceGraph:
             deadline=deadline,
         )
         return [dict(row) for row in rows]
+
+    def argument_bindings(
+        self,
+        *,
+        source_node_ids: Sequence[str] | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Resolved calls out of these nodes, each carrying its argument bindings.
+
+        An assertion carries either a target node or a literal, never both, so
+        the callee is named by the `CALLS` assertion and the bindings by the
+        `BINDS_ARGUMENTS` assertion of the same call site. The two are joined
+        by the byte span both record as evidence — see
+        `docs/research/2026-09-11-argument-bindings-and-route-calls.md`.
+        """
+        sources = _node_id_values(source_node_ids, "source_node_ids")
+        if _selects_nothing(sources):
+            return []
+        parameters: list[object] = []
+        filter_sql = _in_clause("calls.source_node_id", sources, parameters)
+        rows = self._execute(
+            _ARGUMENT_BINDING_SQL + filter_sql + _ARGUMENT_BINDING_ORDER,
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [_argument_binding_row(row) for row in rows]
 
     def nodes_without_edges(
         self,
@@ -4564,6 +4620,35 @@ ORDER BY depth, assertion_ids LIMIT ?
             deadline=deadline,
         )
         return {str(row["reason"]): int(row["total"]) for row in rows}
+
+    def unresolved_edges(
+        self,
+        *,
+        edge_types: Sequence[str],
+        source_node_ids: Sequence[str] | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Observations of these edge types: what a source names but reaches nowhere.
+
+        A client call whose route is in another repository is exactly this: the
+        call is proven, the target is not in this generation (issue #24, D2).
+        """
+        sources = _node_id_values(source_node_ids, "source_node_ids")
+        if _selects_nothing(sources):
+            return []
+        parameters: list[object] = []
+        filter_sql = _in_clause("edge_type", _edge_type_values(edge_types), parameters)
+        filter_sql += _in_clause("source_node_id", sources, parameters)
+        rows = self._execute(
+            "SELECT observation_id, source_node_id, edge_type, target_text, reason "
+            f"FROM observation WHERE source_node_id IS NOT NULL{filter_sql} "
+            "ORDER BY source_node_id, target_text, observation_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [dict(row) for row in rows]
 
     def search_nodes(
         self,

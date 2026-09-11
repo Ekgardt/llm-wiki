@@ -1,0 +1,114 @@
+{
+ "version": "code-parity-cross-service-v1",
+ "date": "2026-09-11",
+ "repository": "the client repository of benchmark/build_cross_service_fixture.py",
+ "notes": [
+  "Two tiny repositories, one client and one service, built by",
+  "`benchmark/build_cross_service_fixture.py`. Index both with the tool",
+  "under test, then run this file with --directory pointing at the",
+  "client repository. Gold is the fixture source itself, which is in",
+  "this repository and therefore checkable rather than trusted.",
+  "A cross-service answer is graded on three facts: the route the client",
+  "call reaches, the handler that serves it, and the repository the",
+  "handler lives in. A tool that only echoes the URL grades wrong.",
+  "X02 asks what happens inside the service. llm-wiki is expected to stop at the boundary: a cross-repository hop names the handler, the file and the repository it lives in, and does not open the other generation (docs/research/2026-09-11-argument-bindings-and-route-calls.md). The task is kept so that the gap is measured rather than assumed away."
+ ],
+ "tasks": [
+  {
+   "id": "X01",
+   "kind": "cross-service",
+   "question": "Which service function handles the request shop.checkout.submit sends?",
+   "gold": {
+    "citations": [
+     "client: shop/checkout.py — `requests.post(\"https://orders.internal/orders\", json=basket)`",
+     "service: orders/api.py — `@router.post(\"/orders\")` on `def create_order(payload)`"
+    ],
+    "must": [
+     "create_order",
+     [
+      "POST /orders",
+      "/orders"
+     ]
+    ],
+    "must_not": [
+     "list_orders"
+    ]
+   },
+   "llm_wiki": [
+    {
+     "tool": "get_architecture",
+     "arguments": {
+      "mode": "cross_service",
+      "symbol": "submit",
+      "depth": 2
+     }
+    }
+   ],
+   "llm_wiki_best": [
+    {
+     "tool": "get_architecture",
+     "arguments": {
+      "mode": "cross_service",
+      "symbol": "submit",
+      "depth": 2
+     }
+    }
+   ],
+   "cbm": [
+    {
+     "tool": "trace_path",
+     "arguments": {
+      "function_name": "submit",
+      "mode": "cross_service",
+      "depth": 2
+     }
+    }
+   ]
+  },
+  {
+   "id": "X02",
+   "kind": "cross-service",
+   "question": "Following the request shop.checkout.submit sends, which function stores the order?",
+   "gold": {
+    "citations": [
+     "service: orders/api.py — `create_order` calls `place_order(payload, 1)`",
+     "service: orders/store.py — `def place_order(record, attempt)`, so payload->record"
+    ],
+    "must": [
+     "place_order"
+    ],
+    "must_not": []
+   },
+   "llm_wiki": [
+    {
+     "tool": "get_architecture",
+     "arguments": {
+      "mode": "cross_service",
+      "symbol": "submit",
+      "depth": 3
+     }
+    }
+   ],
+   "llm_wiki_best": [
+    {
+     "tool": "get_architecture",
+     "arguments": {
+      "mode": "cross_service",
+      "symbol": "submit",
+      "depth": 3
+     }
+    }
+   ],
+   "cbm": [
+    {
+     "tool": "trace_path",
+     "arguments": {
+      "function_name": "submit",
+      "mode": "cross_service",
+      "depth": 3
+     }
+    }
+   ]
+  }
+ ]
+}

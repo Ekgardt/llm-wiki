@@ -146,10 +146,28 @@ reindex. Research:
   the one-hop answer (no `depth`, or `depth=1`) is unchanged and locates the
   call site. The report carries `symbol_resolved`, `depth_applied` and
   `depth_frontier_open` exactly as `dependencies` does, and `callers` keeps
-  `unresolved_callers`. `data_flow` and `cross_service` walks are **not
-  feasible** on this graph: there are no `DATA_FLOWS` edges and no edge from
-  a call site to a `route` node; both need an extractor change and a new
-  generation format.
+  `unresolved_callers`.
+- **`mode=data_flow` with `depth`** (1–8) — argument bindings, hop by hop,
+  never data-flow analysis. Each row names the callee and the
+  `argument->parameter` pairs the call passes (`bindings`), bounded at 8
+  pairs and 256 bytes per call. The callee is named by the `CALLS` edge and
+  the pairs by the `BINDS_ARGUMENTS` literal assertion of the same call
+  span, because one assertion may carry a target node or a literal, never
+  both. The `note` says in the answer itself what it is.
+- **`mode=cross_service` with `depth`** (1–8) — calls plus the HTTP
+  boundary. A client call with a literal path reaches the `route` node of
+  the same method and path (`HTTP_CALLS`), and the walk turns around there
+  into the handler that declares it (`EXPOSES`), so a request is followed
+  into the service that answers it. Rows carry `relation` (`calls`,
+  `http_calls`, `handled_by`, `handled_by_repository`) and the report carries
+  `routes_crossed` and `repositories_crossed`. A route this repository does
+  not serve is matched against the routes every other indexed checkout
+  exported into its hint file (`cache/code-hints/<checkout>.sqlite3`,
+  `code-hints/v2`); such a hop names the handler, its file and the
+  repository it lives in, and stops there — the other generation is never
+  opened, so nothing is claimed about what happens inside it.
+  Both modes need `code-extractor/v12` or newer, so they answer nothing on
+  a generation built before 2026-09-11.
 - **`mode=impact`** additionally answers `affected_symbols`: the functions,
   methods and classes that call, import or inherit a changed symbol within
   eight hops (`{qualified_name, kind, path, line, depth}`, at most 200,

@@ -27,7 +27,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-SCHEMA_VERSION = "code-hints/v1"
+SCHEMA_VERSION = "code-hints/v2"
 HINT_KINDS = ("class", "function", "method")
 # A 1 026-file repository holds 20 385 functions (#24); ten times that is far
 # above any repository one operator indexes and still a few megabytes.
@@ -39,12 +39,21 @@ MAX_FIELD_CHARS = 160
 _CHECKOUT_ID = re.compile(r"checkout:([0-9a-f]{64})")
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
 
+# A route exported here is how a client call in one checkout finds the service
+# that answers it in another (#24, D2): the generations never meet, but the
+# projection of each is one small file the other can read.
+MAX_HINT_ROUTES = 5_000
+MAX_ROUTE_MATCHES = 5
+
 _SCHEMA = (
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
     "CREATE TABLE symbol (name TEXT NOT NULL, qualified_name TEXT NOT NULL, "
     "kind TEXT NOT NULL, path TEXT, line INTEGER, in_degree INTEGER NOT NULL, "
     "out_degree INTEGER NOT NULL);"
     "CREATE INDEX symbol_name ON symbol(name);"
+    "CREATE TABLE route (method TEXT NOT NULL, path TEXT NOT NULL, "
+    "handler TEXT NOT NULL, file TEXT, line INTEGER);"
+    "CREATE INDEX route_key ON route(method, path);"
 )
 
 
@@ -110,21 +119,71 @@ def _meta(scope, generation_id: str, symbols: int) -> dict[str, str]:
     }
 
 
-def _fill_table(temporary: Path, meta: dict[str, str], rows: list[tuple]) -> None:
+def _handler_names(graph, routes: list[dict], deadline: float) -> dict[str, dict]:
+    """The function that declares each route, by route node id."""
+    if not routes:
+        return {}
+    edges = graph.edges(
+        edge_types=("EXPOSES",),
+        target_node_ids=[str(route["node_id"]) for route in routes],
+        max_rows=MAX_HINT_ROUTES,
+        deadline=deadline,
+    )
+    return {str(edge["target_node_id"]): edge for edge in edges}
+
+
+def _handler_location(graph, node: dict) -> tuple[str, int | None]:
+    occurrences = graph.occurrences(str(node["node_id"]), max_rows=1)
+    if not occurrences:
+        return (str(node["metadata"].get("path", "")), None)
+    return (str(occurrences[0]["relative_path"]), int(occurrences[0]["line_start"]))
+
+
+def _route_row(graph, route: dict, edge: dict | None) -> tuple | None:
+    from symbol_search import _qualified_name
+
+    handler = None if edge is None else graph.node(str(edge["source_node_id"]))
+    if handler is None:
+        return None
+    metadata = route["metadata"]
+    file_path, line = _handler_location(graph, handler)
+    return (
+        str(metadata.get("method", "")),
+        str(metadata.get("path", "")),
+        _qualified_name(handler),
+        file_path,
+        line,
+    )
+
+
+def _route_rows(graph, deadline: float) -> list[tuple]:
+    """Every route of the generation with the handler that exposes it (#24, D2)."""
+    routes = graph.find_nodes(kinds=("route",), max_rows=MAX_HINT_ROUTES, deadline=deadline)
+    handlers = _handler_names(graph, routes, deadline)
+    rows = [_route_row(graph, route, handlers.get(str(route["node_id"]))) for route in routes]
+    return [row for row in rows if row is not None]
+
+
+def _fill_table(
+    temporary: Path, meta: dict[str, str], rows: list[tuple], routes: list[tuple] = ()
+) -> None:
     with closing(sqlite3.connect(temporary)) as database:
         database.executescript(_SCHEMA)
         database.executemany("INSERT INTO meta(key, value) VALUES (?, ?)", meta.items())
         database.executemany("INSERT INTO symbol VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        database.executemany("INSERT INTO route VALUES (?, ?, ?, ?, ?)", routes)
         database.commit()
 
 
-def write_hints(state_root: Path, meta: dict[str, str], rows: list[tuple]) -> Path:
+def write_hints(
+    state_root: Path, meta: dict[str, str], rows: list[tuple], routes: list[tuple] = ()
+) -> Path:
     """Publish the table whole: a reader sees the old file or the new one."""
     path = hints_path(state_root, meta["checkout_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.stem}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     try:
-        _fill_table(temporary, meta, rows)
+        _fill_table(temporary, meta, rows, routes)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -141,11 +200,18 @@ def export_hints(catalog, scope, state_root: Path, *, deadline: float | None = N
         return {"status": "skipped", "reason": "no_generation"}
     try:
         rows = _collected_rows(graph, bound)
+        routes = _route_rows(graph, bound)
         meta = _meta(scope, str(graph.generation_id), len(rows))
     finally:
         graph.close()
-    path = write_hints(state_root, meta, rows)
-    return {"status": "written", "symbols": len(rows), "generation_id": meta["generation_id"], "path": str(path)}
+    path = write_hints(state_root, meta, rows, routes)
+    return {
+        "status": "written",
+        "symbols": len(rows),
+        "routes": len(routes),
+        "generation_id": meta["generation_id"],
+        "path": str(path),
+    }
 
 
 def export_hints_quietly(catalog, scope, state_root: Path, *, deadline: float | None = None) -> dict:
@@ -264,6 +330,66 @@ def hint_text(answer: dict, checkout_commit: str | None) -> str | None:
     )
     tail = f"Callers, callees, snippet: {TOOL_NAME} mode=callers|callees|snippet symbol={symbol}"
     return "\n".join([head, *(_row_line(row) for row in answer["rows"]), tail])
+
+
+# --------------------------------------------------------------------------
+# cross-repository routes (#24, D2): one checkout reads another's projection
+# --------------------------------------------------------------------------
+
+
+def _file_routes(path: Path, method: str, route_path: str) -> list[dict]:
+    """Routes of one hint file matching method and path, or nothing at all."""
+    meta = read_meta(path)
+    if meta is None:
+        return []
+    with closing(_open_read_only(path)) as database:
+        rows = database.execute(
+            "SELECT handler, file, line FROM route WHERE method = ? AND path = ? "
+            "ORDER BY handler LIMIT ?",
+            (method, route_path, MAX_ROUTE_MATCHES),
+        ).fetchall()
+    return [_foreign_route(meta, row) for row in rows]
+
+
+def _foreign_route(meta: dict[str, str], row: tuple) -> dict:
+    handler, file_path, line = row
+    return {
+        "handler": _clean(handler),
+        "file": _clean(file_path),
+        "line": line,
+        "repository_id": meta.get("repository_id", ""),
+        "checkout_root": _clean(meta.get("checkout_root", "")),
+        "generation_id": meta.get("generation_id", ""),
+    }
+
+
+def _hint_files(state_root: Path, exclude_checkout_id: str) -> list[Path]:
+    excluded = {identity for identity in (exclude_checkout_id,) if identity}
+    return sorted(
+        hints_path(state_root, identity)
+        for identity in hinted_checkout_ids(state_root) - excluded
+    )
+
+
+def find_routes(
+    state_root: Path, method: str, route_path: str, *, exclude_checkout_id: str = ""
+) -> list[dict]:
+    """Which other indexed checkout serves `METHOD path`, if any (#24, D2).
+
+    A damaged or foreign file answers nothing rather than raising: the tables
+    are disposable projections, and a cross-service hint is a convenience.
+    """
+    found: list[dict] = []
+    for path in _hint_files(state_root, exclude_checkout_id):
+        found.extend(_quiet_file_routes(path, str(method), str(route_path)))
+    return found[:MAX_ROUTE_MATCHES]
+
+
+def _quiet_file_routes(path: Path, method: str, route_path: str) -> list[dict]:
+    try:
+        return _file_routes(path, method, route_path)
+    except (OSError, ValueError, sqlite3.Error):
+        return []
 
 
 REMINDER_MODES = ("search", "symbol", "callers", "callees", "snippet", "coverage", "impact")
