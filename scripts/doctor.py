@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import errno
 import hashlib
 import importlib.util
 import json
@@ -27,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
@@ -6162,107 +6162,15 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
             repaired.append({"action": "create_runtime_directory", "directory": relative})
 
 
-def _windows_process_state(pid: int) -> str:
-    """Ask the kernel directly; a missing process is dead, anything else unknown."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        open_process.restype = wintypes.HANDLE
-        get_exit_code = kernel32.GetExitCodeProcess
-        get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-        get_exit_code.restype = wintypes.BOOL
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = [wintypes.HANDLE]
-        close_handle.restype = wintypes.BOOL
-        handle = open_process(0x1000, False, pid)
-        if not handle:
-            return _windows_open_failure_state(ctypes.get_last_error())
-        try:
-            return _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle)
-        finally:
-            close_handle(handle)
-    except (AttributeError, OSError, OverflowError, ValueError):
-        return "unknown"
-
-
-def _windows_open_failure_state(last_error: int) -> str:
-    if last_error in {87, 1168}:
-        return "dead"
-    return "unknown"
-
-
-def _windows_exit_code_state(ctypes, wintypes, get_exit_code, handle) -> str:
-    exit_code = wintypes.DWORD()
-    if not get_exit_code(handle, ctypes.byref(exit_code)):
-        return "unknown"
-    if exit_code.value == 259:
-        return "alive"
-    return "dead"
-
-
-def _os_error_process_state(exc: OSError) -> str:
-    if exc.errno == errno.ESRCH:
-        return "dead"
-    return "unknown"
-
-
-def _posix_process_state(pid: int) -> str:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        return "unknown"
-    except OSError as exc:
-        return _os_error_process_state(exc)
-    except (OverflowError, ValueError):
-        return "unknown"
-    return "alive"
-
-
 def _lsp_pid_state(pid: int) -> str:
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
-        return "unknown"
-    if sys.platform == "win32":
-        return _windows_process_state(pid)
-    return _posix_process_state(pid)
-
-
-def _windows_exit_code_is_active(ctypes, handle) -> bool:
-    still_active = 259
-    exit_code = ctypes.c_ulong()
-    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-        return False
-    return exit_code.value == still_active
-
-
-def _windows_pid_alive(pid: int) -> bool:
-    import ctypes
-
-    process_query = 0x1000
-    handle = ctypes.windll.kernel32.OpenProcess(process_query, False, pid)
-    if not handle:
-        return False
-    try:
-        return _windows_exit_code_is_active(ctypes, handle)
-    finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+    return process_liveness.process_state(pid)
 
 
 def _pid_alive(pid: int) -> bool:
+    """The legacy boolean: only a provably dead process is dead (`process_liveness`)."""
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        return _windows_pid_alive(pid)
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, OverflowError, ValueError):
-        return False
+    return process_liveness.pid_alive(pid)
 
 
 def _lock_metadata(pid: int, token: str, now: datetime) -> bytes:

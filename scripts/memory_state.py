@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import process_liveness
 from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
 
 
@@ -90,44 +91,16 @@ LOCK_FILE = STATE_DIR / "state.json.lock"
 _STALE_LOCK_SECONDS = 30.0
 
 
-def _windows_pid_alive(pid: int) -> bool:
-    import ctypes
-
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    STILL_ACTIVE = 259
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return False
-    try:
-        exit_code = ctypes.c_ulong()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return False
-        return exit_code.value == STILL_ACTIVE
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _posix_pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError, OverflowError, ValueError):
-        return False
-
-
 def _is_pid_alive(pid: int) -> bool:
-    """Cross-platform 'is this PID still running?' check.
+    """Cross-platform 'is this PID still running?' — one probe, doubt is alive.
 
-    Same pattern as maybe_compile.py — used to decide whether a stale
-    lock file belongs to a process that is genuinely dead (steal it)
-    or merely slow (wait longer).
+    Used to decide whether a stale lock file belongs to a process that is
+    genuinely dead (retire it) or merely slow or foreign (wait longer). A PID
+    that is not a positive integer is never alive.
     """
-    if pid <= 0:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
-    if sys.platform == "win32":
-        return _windows_pid_alive(pid)
-    return _posix_pid_alive(pid)
+    return process_liveness.pid_alive(pid)
 
 
 def load_state() -> dict[str, Any]:

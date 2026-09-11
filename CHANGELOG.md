@@ -99,6 +99,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **One answer to "is this process alive".** `scripts/process_liveness.py`
+  holds the three-state probe (`alive`, `dead`, `unknown`) lifted from the
+  doctor; `memory_state`, `markdown_transaction` and the doctor delegate to
+  it, and a legacy lock treats doubt as alive — a process owned by another
+  user is no longer read as dead and stolen (audit OPS-08). Research:
+  `docs/research/2026-09-11-one-answer-to-is-this-process-alive.md`.
 - **The compile-lock owner token travels in return values.** `maybe_compile`
   no longer keeps the claimant's token in a module global; the claim returns
   it and the release takes it (audit OPS-22).

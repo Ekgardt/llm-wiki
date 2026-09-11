@@ -211,6 +211,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-08 — PID liveness is implemented five times with three different failure policies
 
+- Status: fixed 2026-09-11 for the three legacy copies (`docs/research/2026-09-11-one-answer-to-is-this-process-alive.md`); `lsp_process_tree` probes its own children and `memory_queue` already treated doubt as alive.
+
 - Rule: L4 (maintainability, one truth); C (doubt refuses).
 - Evidence: `scripts/memory_state.py:93-130` (`OSError` → dead);
   `scripts/doctor.py:6228-6237` (`OSError` → dead) beside `:6185-6204`

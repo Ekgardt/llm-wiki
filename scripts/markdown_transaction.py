@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
+import process_liveness
 from bounded_io import read_stable_bytes
 from claim_tree_manifest import (
     snapshot_claim_tree,
@@ -4402,34 +4403,10 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 def _pid_alive(pid: int) -> bool:
+    """One probe for every legacy lock (`process_liveness`); doubt is alive."""
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        return _windows_pid_alive(pid)
-    try:
-        os.kill(pid, 0)
-    except (OSError, OverflowError, ValueError):
-        return False
-    return True
-
-
-def _windows_pid_alive(pid: int) -> bool:
-    process_query_limited_information = 0x1000
-    still_active = 259
-    handle = ctypes.windll.kernel32.OpenProcess(
-        process_query_limited_information, False, pid
-    )
-    if not handle:
-        return False
-    try:
-        exit_code = ctypes.c_ulong()
-        if not ctypes.windll.kernel32.GetExitCodeProcess(
-            handle, ctypes.byref(exit_code)
-        ):
-            return False
-        return exit_code.value == still_active
-    finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+    return process_liveness.pid_alive(pid)
 
 
 def _traversable_target(current: Path, value: str) -> bool:
