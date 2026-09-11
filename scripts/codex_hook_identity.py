@@ -4,13 +4,19 @@ The installer's ownership merge (`codex_memory`) and the doctor's runtime
 verification (`doctor`) ask the same question of a Codex hook command; two
 answers would let the installer write a hook the doctor then calls foreign.
 A command is ours when it names one of our scripts and ends with that
-script's argument tail: the lifecycle hook, and the graph hint and reminder.
+script's argument tail: the lifecycle hook, the graph hint and reminder, and
+the prompt and edit capture (docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md).
 """
 
 from __future__ import annotations
 
-OUR_CODEX_COMMANDS = (("codex_memory.py", " hook"), ("graph_hint.py", " --source codex"))
-OUR_CODEX_SCRIPTS = tuple(script for script, _ending in OUR_CODEX_COMMANDS)
+OUR_CODEX_COMMANDS = (
+    ("codex_memory.py", " hook"),
+    ("graph_hint.py", " --source codex"),
+    ("integration_adapter.py", " --source codex --event user_prompt"),
+    ("integration_adapter.py", " --source codex --event post_tool_use"),
+)
+OUR_CODEX_SCRIPTS = tuple(dict.fromkeys(script for script, _ending in OUR_CODEX_COMMANDS))
 
 
 def is_our_codex_command(command: object) -> bool:

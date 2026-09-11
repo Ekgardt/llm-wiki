@@ -5915,25 +5915,24 @@ def _probe_codex_hooks_list(
     return _codex_hooks_result(raw) if raw is not None else None
 
 
-def _single_template_group(groups: object) -> dict:
-    if not isinstance(groups, list) or len(groups) != 1:
+def _template_dicts(values: object) -> list[dict]:
+    """A non-empty list of objects, or a template error."""
+    if not isinstance(values, list) or not values:
         raise ValueError("invalid Codex hook template")
-    group = groups[0]
-    if not isinstance(group, dict):
+    if any(not isinstance(value, dict) for value in values):
         raise ValueError("invalid Codex hook template")
-    return group
+    return values
 
 
-def _single_template_handler(groups: object) -> tuple[dict, dict]:
-    """The one group and its one handler, or a template error."""
-    group = _single_template_group(groups)
-    handlers = group.get("hooks")
-    if not isinstance(handlers, list) or len(handlers) != 1:
-        raise ValueError("invalid Codex hook template")
-    handler = handlers[0]
-    if not isinstance(handler, dict):
-        raise ValueError("invalid Codex hook template")
-    return group, handler
+def _template_handlers(groups: object) -> list[tuple[dict, dict]]:
+    """Every (group, handler) of one event: an event may hold several groups,
+    as `PostToolUse` holds the graph hint on `Bash` and the edit capture
+    (docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md)."""
+    return [
+        (group, handler)
+        for group in _template_dicts(groups)
+        for handler in _template_dicts(group.get("hooks"))
+    ]
 
 
 def _template_hook_command(handler: dict) -> str:
@@ -5963,13 +5962,13 @@ def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
     for event_name, groups in _template_hooks_table(template_path).items():
         if not isinstance(event_name, str):
             raise ValueError("invalid Codex hook template")
-        group, handler = _single_template_handler(groups)
-        expected.append(
+        expected.extend(
             {
                 "eventName": event_name,
                 "matcher": group.get("matcher"),
                 "command": _template_hook_command(handler),
             }
+            for group, handler in _template_handlers(groups)
         )
     return expected
 
@@ -6078,7 +6077,8 @@ def _codex_hook_commands(root: Path, command: str) -> set[str]:
 def _canonical_codex_event(event: object) -> object:
     return {"sessionStart": "SessionStart", "preCompact": "PreCompact",
             "postCompact": "PostCompact", "stop": "Stop",
-            "postToolUse": "PostToolUse", "subagentStart": "SubagentStart"}.get(str(event), event)
+            "postToolUse": "PostToolUse", "subagentStart": "SubagentStart",
+            "userPromptSubmit": "UserPromptSubmit"}.get(str(event), event)
 
 
 def _codex_hook_matches(wanted: dict, hook: dict, root: Path) -> bool:

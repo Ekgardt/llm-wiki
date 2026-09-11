@@ -31,7 +31,7 @@ Claude Code is visible to OpenCode in its next session.
 | Feature | Every supported agent (Claude Code / OpenCode / Codex) |
 |---|---|
 | **Reads/actions** | 12 task-shaped MCP tools |
-| **Auto-capture** | Thin hooks/plugins forward lifecycle events |
+| **Auto-capture** | Thin hooks/plugins forward lifecycle events; prompts and edits leave a breadcrumb in the daily log (Claude `UserPromptSubmit`/`PostToolUse`, Codex `UserPromptSubmit`/`PostToolUse` on `apply_patch`\|`Bash`, OpenCode `tool.execute.after`) |
 | **Session classification** | FLUSH MAJOR/MINOR/OK at idle |
 | **Nightly compile** | Native scheduler (Task Scheduler, LaunchAgent, or user systemd); cron is explicit fallback |
 | **Context injection** | SessionStart hook injects bounded context |
