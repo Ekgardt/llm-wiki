@@ -105,6 +105,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Git warnings are not diff records.** `impact_analysis` read Git's
+  stderr together with the `-z` record stream, so on a checkout with
+  `core.autocrlf=true` the advisory line about line endings made every
+  impact answer empty and partial (`malformed zero-delimited Git diff
+  record`, PR30 runs 34535006773–34550352312 on Windows). Stderr is kept
+  apart and quoted only on failure. Research:
+  `docs/research/2026-09-11-git-warnings-are-not-diff-records.md`.
+- **`claim_operation` is a pipeline under CCN 5** (the gate refused
+  `mutate` at 13 in a file the OPS-21 fix touched).
 - **One answer to "is this process alive".** `scripts/process_liveness.py`
   holds the three-state probe (`alive`, `dead`, `unknown`) lifted from the
   doctor; `memory_state`, `markdown_transaction` and the doctor delegate to

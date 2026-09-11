@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -104,52 +105,76 @@ def _check_impact_stop(
         raise TimeoutError("impact analysis deadline reached")
 
 
-def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -> bytes:
-    """Run Git without a shell and stop reading at the declared ceiling."""
-    process = subprocess.Popen(
-        [
-            "git",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "diff.external=false",
-            *arguments,
-        ],
+def _start_git(root: Path, arguments: list[str], stderr) -> subprocess.Popen:
+    return subprocess.Popen(
+        ["git", "-c", "core.fsmonitor=false", "-c", "diff.external=false", *arguments],
         cwd=root,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=stderr,
         env=sanitized_git_environment(),
         shell=False,
     )
-    timed_out = threading.Event()
 
-    def stop_at_deadline() -> None:
-        timed_out.set()
+
+def _read_to_ceiling(process: subprocess.Popen, max_bytes: int) -> bytes:
+    assert process.stdout is not None
+    stdout = process.stdout.read(max_bytes + 1)
+    if len(stdout) > max_bytes:
         process.kill()
+    process.wait()
+    return stdout
 
-    timer = threading.Timer(_remaining(deadline), stop_at_deadline)
-    timer.daemon = True
-    timer.start()
-    try:
-        assert process.stdout is not None
-        stdout = process.stdout.read(max_bytes + 1)
-        if len(stdout) > max_bytes:
+
+def _stderr_head(stderr, limit: int = 1024) -> str:
+    stderr.seek(0)
+    return stderr.read(limit).decode("utf-8", errors="replace").strip()
+
+
+def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -> bytes:
+    """Run Git without a shell and stop reading at the declared ceiling.
+
+    Stderr is kept apart from the `-z` record stream: on a checkout with
+    `core.autocrlf=true` Git prints an advisory line about line endings and
+    still exits 0, and that line is not a diff record (research
+    2026-09-11-git-warnings-are-not-diff-records.md).
+    """
+    with tempfile.TemporaryFile() as stderr:
+        process = _start_git(root, arguments, stderr)
+        timed_out = threading.Event()
+
+        def stop_at_deadline() -> None:
+            timed_out.set()
             process.kill()
+
+        timer = threading.Timer(_remaining(deadline), stop_at_deadline)
+        timer.daemon = True
+        timer.start()
+        try:
+            stdout = _read_to_ceiling(process, max_bytes)
+        finally:
+            timer.cancel()
+            _ensure_finished(process)
+        _require_git_success(process, stdout, timed_out, max_bytes, _stderr_head(stderr))
+    return stdout
+
+
+def _ensure_finished(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.kill()
         process.wait()
-    finally:
-        timer.cancel()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
+
+
+def _require_git_success(
+    process: subprocess.Popen, stdout: bytes, timed_out: threading.Event, max_bytes: int, stderr: str
+) -> None:
     if timed_out.is_set():
         raise TimeoutError("Git impact command deadline reached")
     if len(stdout) > max_bytes:
         raise ValueError("Git impact output exceeds the read ceiling")
     if process.returncode != 0:
-        detail = stdout[:1024].decode("utf-8", errors="replace").strip()
+        detail = stderr or stdout[:1024].decode("utf-8", errors="replace").strip()
         raise ValueError(f"Git impact command failed: {detail or process.returncode}")
-    return stdout
 
 
 def _validate_revision(value: str | None, label: str) -> str:

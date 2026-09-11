@@ -19,7 +19,7 @@ def test_our_own_process_is_alive() -> None:
     assert process_liveness.pid_alive(os.getpid()) is True
 
 
-@pytest.mark.parametrize("pid", [0, -1, True, "12", None, 2**40])
+@pytest.mark.parametrize("pid", [0, -1, True, "12", None])
 def test_a_pid_that_is_not_a_positive_integer_is_unknown_and_never_dead(pid) -> None:
     assert process_liveness.process_state(pid) == "unknown"
     assert process_liveness.pid_alive(pid) is True
@@ -54,3 +54,11 @@ def test_the_three_legacy_locks_ask_the_same_probe(monkeypatch) -> None:
     assert markdown_transaction._pid_alive(4242) is True
     assert doctor._pid_alive(4242) is True
     assert doctor._lsp_pid_state(4242) == "unknown"
+
+
+def test_a_pid_beyond_the_platform_range_is_never_alive_by_guess() -> None:
+    """Windows answers `dead` (error 87) for 2**40; POSIX raises OverflowError → unknown.
+    Either way the one boolean the locks read is the honest one."""
+    state = process_liveness.process_state(2**40)
+    assert state in {"dead", "unknown"}
+    assert process_liveness.pid_alive(2**40) is (state != "dead")
