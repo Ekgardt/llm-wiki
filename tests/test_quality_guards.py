@@ -700,7 +700,7 @@ def test_unix_installer_is_executable_in_git():
 _DAILY_WRITE_PATTERN = re.compile(
     r"daily[\w.]*\.open\s*\(|DAILY_DIR.*\.write|append_daily\s*\("
 )
-_DAILY_LOCK_MARKERS = ("_daily_lock", "append_daily", "locked_append")
+_DAILY_LOCK_MARKERS = ("append_daily", "locked_append")
 _DAILY_INFRASTRUCTURE = ("daily_log_append.py", "memory_state.py")
 
 
@@ -713,7 +713,7 @@ def _uses_daily_lock(source: str) -> bool:
 
 
 def test_all_daily_writers_use_lock():
-    """Scripts that write to daily logs must use _daily_lock or append_daily."""
+    """Scripts that write to daily logs must go through append_daily or locked_append."""
     for py in sorted((ROOT / "scripts").glob("*.py")):
         if py.name in _DAILY_INFRASTRUCTURE:
             continue  # These define the lock/append infrastructure.
@@ -721,8 +721,8 @@ def test_all_daily_writers_use_lock():
         if not _writes_daily_log(source):
             continue
         assert _uses_daily_lock(source), (
-            f"{py.name}: writes to daily log without using _daily_lock() "
-            f"or append_daily(). All daily-log writes must be lock-protected."
+            f"{py.name}: writes to daily log without append_daily() or "
+            f"locked_append(). All daily-log writes must go through the transaction."
         )
 
 

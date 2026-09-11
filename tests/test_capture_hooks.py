@@ -33,13 +33,11 @@ import pytest
 
 @pytest.fixture
 def isolated_capture_state(tmp_path, monkeypatch):
-    """Keep hook transaction and lock state out of the suite runtime."""
-    import daily_log_append
+    """Keep hook transaction state out of the suite runtime."""
     import user_prompt_capture
 
     state_root = tmp_path / "state"
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
-    monkeypatch.setattr(daily_log_append, "STATE_ROOT", state_root)
     monkeypatch.setattr(user_prompt_capture, "STATE_ROOT", state_root)
     return state_root
 
@@ -847,7 +845,6 @@ def test_tool_capture_retries_after_failed_append(monkeypatch, tmp_path):
 def test_tool_capture_replay_after_commit_appends_one_marked_record(
     monkeypatch, tmp_path, isolated_capture_state
 ):
-    import daily_log_append
     import post_tool_capture
 
     fake_root = tmp_path / "vault"
@@ -861,7 +858,6 @@ def test_tool_capture_replay_after_commit_appends_one_marked_record(
         return state
 
     monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
-    monkeypatch.setattr(daily_log_append, "STATE_ROOT", isolated_capture_state)
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "update_state", update)
     monkeypatch.setattr(
@@ -1127,7 +1123,6 @@ def test_capture_replays_after_crash_between_append_and_completion(
     completion_name,
     needle,
 ):
-    import daily_log_append
 
     module = __import__(module_name)
     fake_root = tmp_path / "vault"
@@ -1141,7 +1136,6 @@ def test_capture_replays_after_crash_between_append_and_completion(
         return state
 
     monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
-    monkeypatch.setattr(daily_log_append, "STATE_ROOT", isolated_capture_state)
     monkeypatch.setattr(module, "ROOT", fake_root)
     monkeypatch.setattr(module, "update_state", update)
     monkeypatch.setattr(module, "_compute_slug_from_cwd", lambda _cwd: "test-slug")

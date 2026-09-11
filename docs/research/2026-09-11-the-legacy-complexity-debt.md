@@ -63,3 +63,21 @@ touch: `scripts/compile_cache.py`, `scripts/build_tiers.py`,
 2. M. Fowler, *Refactoring: Improving the Design of Existing Code*, 2nd ed.
    (2018) — the refactoring catalogue named above.
 3. radon documentation, "Cyclomatic Complexity" — which constructs add one.
+
+## A dead lock is deleted, not refactored
+
+`daily_log_append._daily_lock` (CCN 16, nesting 4) has had no production
+caller since 9375f3d moved every daily-log write onto the transaction's
+`append_knowledge`: no script, hook or integration names it (a repository
+grep finds only its own definition, the CHANGELOG and four tests). The
+serialization it once gave is proven where it now lives: cross-process
+same-file appends converge without loss or interleaving in
+`test_concurrent_identical_append_converges_once_during_distinct_event_churn`
+(18 processes) and `test_concurrent_appends_lose_no_bytes`. The tests that
+exercised the dead lock itself give assurance about code nothing runs, so
+they go with it: `TestDailyLockExclusivity` in
+`tests/test_security_invariants.py`, the `nullcontext` stand-in in
+`tests/test_memory_queue.py`, the `STATE_ROOT` isolation of the lock in
+`tests/test_capture_hooks.py`, and the `_daily_lock` marker in
+`tests/test_quality_guards.py`, whose remaining markers (`append_daily`,
+`locked_append`) are the two writers every daily-log script uses.
