@@ -66,11 +66,6 @@ LOG_ERR = STATE_ROOT / "logs" / "maybe-compile-last.err.log"
 # docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
 _PID0_TTL_SECONDS = 10.0
 
-# Owner token for the lock we most recently claimed/spawned. Used by
-# `_clear_lock()` to refuse deleting a live lock owned by another caller.
-_current_owner: str | None = None
-
-
 def _is_pid_alive(pid: int) -> bool:
     """Cross-platform 'is this PID still running?' check; PID 0 is the placeholder."""
     if pid == 0:
@@ -169,29 +164,33 @@ def _lock_state() -> tuple[str, str]:
     return _owner_state(lock)
 
 
-def _lock_is_ours() -> bool:
+def lock_owner_token() -> str | None:
+    """The owner token the lock carries now; the claimant keeps it (audit OPS-22)."""
     lock = _read_lock()
-    owner = None if lock is None else lock.get("owner")
-    return bool(_current_owner) and owner == _current_owner
+    return None if lock is None else lock.get("owner")
 
 
-def _clear_lock() -> bool:
+def _clear_lock(owner: str | None = None) -> bool:
     """Remove the lock unless a live process we do not own holds it.
 
-    Returns True when the lock is gone (cleared or absent), False when a
-    live lock belongs to another caller. The removal retires exactly the
+    `owner` is the token the caller received when it claimed the lock; a
+    live lock with another token belongs to someone else. Returns True when
+    the lock is gone (cleared or absent). The removal retires exactly the
     bytes that were judged: a lock replaced meanwhile by a fresh owner is
     left alone (audit OPS-07).
     """
-    global _current_owner
     judged = _lock_bytes()
     if judged is None:
         return not LOCK_FILE.exists()
-    if _judged_state(judged) == "live" and not _lock_is_ours():
+    if _judged_state(judged) == "live" and not _held_with(judged, owner):
         return False
     removed = retire_stale_lock(LOCK_FILE, judged)
-    _current_owner = None
     return removed or not LOCK_FILE.exists()
+
+
+def _held_with(judged: bytes, owner: str | None) -> bool:
+    lock = _parse_lock(judged.decode("utf-8", errors="replace").strip().splitlines())
+    return bool(owner) and lock is not None and lock.get("owner") == owner
 
 
 def _judged_state(judged: bytes) -> str:
@@ -275,27 +274,19 @@ def _claim_lock() -> bool:
     return _try_claim_lock()
 
 
-def _remember_owner() -> None:
-    global _current_owner
-    lock = _read_lock()
-    if lock:
-        _current_owner = lock.get("owner")
-
-
 def _spawn_claimed() -> tuple[bool, bool, str]:
-    # Remember the placeholder owner so we can clear it if the spawn fails.
-    _remember_owner()
+    # The placeholder's token is ours to clear if the spawn fails.
+    placeholder = lock_owner_token()
     pid = spawn_detached(
         [sys.executable, str(COMPILE_SCRIPT), "--trigger", "auto"],
         stdout_path=LOG_OUT,
         stderr_path=LOG_ERR,
     )
     if pid is None:
-        _clear_lock()
+        _clear_lock(placeholder)
         return (False, False, "spawn failed")
-    # Replace the placeholder PID (0) with the real one and keep its token.
+    # Replace the placeholder PID (0) with the real one; the child owns it now.
     _write_lock(pid)
-    _remember_owner()
     return (True, False, f"spawned compile pid={pid}")
 
 

@@ -99,6 +99,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The compile-lock owner token travels in return values.** `maybe_compile`
+  no longer keeps the claimant's token in a module global; the claim returns
+  it and the release takes it (audit OPS-22).
 - **`compile_memory` imports its lock module once.** Two per-call
   `sys.path.insert` grew the import path on every compile-lock check
   (audit M10).

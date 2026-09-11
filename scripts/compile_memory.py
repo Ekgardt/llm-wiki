@@ -4008,11 +4008,12 @@ def _lock_lines(lock_file: Path) -> list[str] | None:
 
 
 def _lock_is_ours(lines: list[str]) -> bool:
+    """Unreadable, our own PID, or a dead owner; a placeholder is a spawner's."""
     pid = _lock_pid(lines)
     if pid is None or pid == os.getpid():
         return True
     if pid == 0:
-        return _own_placeholder(_lock_owner(lines))
+        return False
     return not _is_pid_alive(pid)
 
 
@@ -4022,17 +4023,6 @@ def _lock_pid(lines: list[str]) -> int | None:
         return int(lines[0].strip())
     except (IndexError, ValueError):
         return None
-
-
-def _lock_owner(lines: list[str]) -> str:
-    if len(lines) < 3:
-        return ""
-    return lines[2].strip()
-
-
-def _own_placeholder(owner: str) -> bool:
-    """Only a matching owner token proves we wrote the PID-0 placeholder."""
-    return bool(owner) and owner == maybe_compile._current_owner
 
 
 def _unlink_quietly(path: Path) -> None:
@@ -4059,8 +4049,8 @@ def main() -> int:
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
     _mark_started(args.trigger)
-    lock_acquired, refusal = _acquire_compile_lock()
-    if lock_acquired is None:
+    lock_token, refusal = _acquire_compile_lock()
+    if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
         _mark_finished(args.trigger, "error", refusal)
         return 1
@@ -4071,35 +4061,37 @@ def main() -> int:
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise
     finally:
-        _release_compile_lock(lock_acquired)
+        _release_compile_lock(lock_token)
 
 
-def _acquire_compile_lock() -> tuple[bool | None, str]:
-    """Claim the compile lock for a direct run: (outcome, reason).
+SPAWNED_LOCK = "spawned"
 
-    True when this run owns the lock, False when the spawner wrote it for us
-    and keeps its lifecycle, None when the run is refused — another compile
-    holds the lock, or the lock could not be taken or read. Doubt refuses:
-    two compiles writing one daily log is worse than one late compile.
+
+def _acquire_compile_lock() -> tuple[str | None, str]:
+    """Claim the compile lock for a direct run: (lock handle, reason).
+
+    The handle is the owner token when this run claimed the lock,
+    `SPAWNED_LOCK` when the spawner wrote it for us and keeps its lifecycle,
+    None when the run is refused — another compile holds the lock, or the
+    lock could not be taken or read. Doubt refuses: two compiles writing one
+    daily log is worse than one late compile. The token travels in the
+    return value, not in a module global (audit OPS-22).
     Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
         if maybe_compile._try_claim_lock():
-            return (_claim_direct_lock(maybe_compile), "claimed")
+            return (_claim_direct_lock(), "claimed")
         if _spawned_lock_is_ours(maybe_compile):
-            return (False, "spawned")
+            return (SPAWNED_LOCK, "spawned")
         return (None, f"lock held by another compile ({maybe_compile._lock_state()[1]})")
     except Exception as exc:  # noqa: BLE001 - any lock failure refuses the run
         return (None, f"compile lock unavailable ({type(exc).__name__}: {exc})")
 
 
-def _claim_direct_lock(maybe_compile: object) -> bool:
-    """Replace the PID-0 placeholder with our PID and keep the owner token."""
+def _claim_direct_lock() -> str:
+    """Replace the PID-0 placeholder with our PID; the new token is the handle."""
     maybe_compile._write_lock(os.getpid())
-    lock = maybe_compile._read_lock()
-    if lock:
-        maybe_compile._current_owner = lock.get("owner")
-    return True
+    return maybe_compile.lock_owner_token() or ""
 
 
 def _spawned_lock_is_ours(maybe_compile: object) -> bool:
@@ -4107,12 +4099,12 @@ def _spawned_lock_is_ours(maybe_compile: object) -> bool:
     return bool(lock) and lock.get("pid") == os.getpid()
 
 
-def _release_compile_lock(lock_acquired: bool) -> None:
+def _release_compile_lock(lock_token: str | None) -> None:
     """maybe_compile owns the lifecycle of a lock it wrote for a spawned run."""
-    if not lock_acquired:
+    if not lock_token or lock_token == SPAWNED_LOCK:
         return
     try:
-        maybe_compile._clear_lock()
+        maybe_compile._clear_lock(lock_token)
     except Exception as exc:  # noqa: BLE001 - reported, never hidden
         print(f"compile_memory: compile lock not released ({exc})", file=sys.stderr)
 

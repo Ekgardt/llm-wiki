@@ -443,6 +443,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-22 — Hidden module globals
 
+- Status: the compile owner token moved into return values 2026-09-11; the guarded MCP globals stay.
+
 - Rule: L4.
 - Evidence: `scripts/maybe_compile.py:66, 140, 261` (`_current_owner`),
   `scripts/mcp_server.py:1990-2026` (`_NAVIGATION_MANAGER`, `_CLOSING`,
