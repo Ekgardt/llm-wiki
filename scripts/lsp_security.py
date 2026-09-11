@@ -1416,35 +1416,48 @@ def _windows_extended_local_start(value: str, start: int) -> int | None:
     return drive_start
 
 
-def _windows_root_boundary(value: str, index: int, *, quoted: bool) -> bool:
-    if index >= len(value):
+def _windows_hard_boundary(character: str) -> bool:
+    if character in {"/", "\\", ":"} or character.isspace():
         return True
-    character = value[index]
-    if (
-        character in {"/", "\\", ":"}
-        or character.isspace()
-        or _is_control(character)
-        or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
-        or (quoted and character == '"')
-    ):
-        return True
-    if character not in _WINDOWS_LOG_TRAILING_PUNCTUATION:
-        return False
+    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
 
-    punctuation_end = index
-    while (
-        punctuation_end < len(value)
-        and value[punctuation_end] in _WINDOWS_LOG_TRAILING_PUNCTUATION
-    ):
-        punctuation_end += 1
+
+def _windows_boundary_character(character: str, quoted: bool) -> bool:
+    if _windows_hard_boundary(character):
+        return True
+    return quoted and character == '"'
+
+
+def _trailing_punctuation_end(value: str, index: int) -> int:
+    while index < len(value) and value[index] in _WINDOWS_LOG_TRAILING_PUNCTUATION:
+        index += 1
+    return index
+
+
+def _after_punctuation_is_boundary(value: str, punctuation_end: int) -> bool:
     if punctuation_end >= len(value):
         return True
     following = value[punctuation_end]
-    if following.isspace() or _is_control(following) or following == '"':
+    return following.isspace() or _is_control(following) or following == '"'
+
+
+def _punctuation_boundary(value: str, index: int) -> bool:
+    """Log punctuation after the root ends it only when a boundary or a new token follows."""
+    character = value[index]
+    if character not in _WINDOWS_LOG_TRAILING_PUNCTUATION:
+        return False
+    punctuation_end = _trailing_punctuation_end(value, index)
+    if _after_punctuation_is_boundary(value, punctuation_end):
         return True
-    return character in {",", ";"} and _windows_candidate_starts_at(
-        value, punctuation_end
-    )
+    return character in {",", ";"} and _windows_candidate_starts_at(value, punctuation_end)
+
+
+def _windows_root_boundary(value: str, index: int, *, quoted: bool) -> bool:
+    if index >= len(value):
+        return True
+    if _windows_boundary_character(value[index], quoted):
+        return True
+    return _punctuation_boundary(value, index)
 
 
 def _windows_casefolded_prefix_end(
@@ -1462,6 +1475,83 @@ def _windows_casefolded_prefix_end(
     return index if folded == folded_alias else None
 
 
+def _skip_native_separators(value: str, index: int) -> int:
+    while value[index : index + 1] in {"/", "\\"}:
+        index += 1
+    return index
+
+
+def _longest_alias_end(value: str, index: int, aliases: frozenset[str]) -> int | None:
+    for alias in sorted(aliases, key=len, reverse=True):
+        alias_end = _windows_casefolded_prefix_end(value, index, alias)
+        if alias_end is not None:
+            return alias_end
+    return None
+
+
+def _absorb_trailing_dots_and_spaces(value: str, component_end: int) -> int:
+    """Trailing dots and spaces before a separator belong to the component."""
+    trailing_end = component_end
+    while value[trailing_end : trailing_end + 1] in {".", " "}:
+        trailing_end += 1
+    if trailing_end > component_end and value[trailing_end : trailing_end + 1] in {"/", "\\"}:
+        return trailing_end
+    return component_end
+
+
+def _dots_may_end_here(following: str) -> bool:
+    if not following or following in {"/", "\\", '"'}:
+        return True
+    return following.isspace() or _is_control(following)
+
+
+def _absorb_final_dots(value: str, component_end: int) -> int:
+    dots_end = component_end
+    while value[dots_end : dots_end + 1] == ".":
+        dots_end += 1
+    if dots_end == component_end:
+        return component_end
+    if _dots_may_end_here(value[dots_end : dots_end + 1]):
+        return dots_end
+    return component_end
+
+
+def _native_component_end(value: str, index: int, aliases: frozenset[str]) -> int | None:
+    component_end = _longest_alias_end(value, index, aliases)
+    if component_end is None:
+        return None
+    return _absorb_trailing_dots_and_spaces(value, component_end)
+
+
+def _next_native_component_start(value: str, component_end: int) -> int | None:
+    if value[component_end : component_end + 1] not in {"/", "\\"}:
+        return None
+    return _skip_native_separators(value, component_end)
+
+
+def _native_final_end(value: str, component_end: int, quoted: bool) -> int | None:
+    component_end = _absorb_final_dots(value, component_end)
+    if _windows_root_boundary(value, component_end, quoted=quoted):
+        return component_end
+    return None
+
+
+def _match_native_components(
+    value: str, index: int, root_component_aliases: tuple[frozenset[str], ...], quoted: bool
+) -> int | None:
+    last = len(root_component_aliases) - 1
+    for component_index, aliases in enumerate(root_component_aliases):
+        component_end = _native_component_end(value, index, aliases)
+        if component_end is None:
+            return None
+        if component_index == last:
+            return _native_final_end(value, component_end, quoted)
+        index = _next_native_component_start(value, component_end)
+        if index is None:
+            return None
+    return None
+
+
 def _windows_native_root_match_end(
     value: str,
     start: int,
@@ -1475,54 +1565,10 @@ def _windows_native_root_match_end(
     index = start + 2
     if value[index : index + 1] not in {"/", "\\"}:
         return None
-    while value[index : index + 1] in {"/", "\\"}:
-        index += 1
+    index = _skip_native_separators(value, index)
     if not root_component_aliases:
         return index
-
-    for component_index, aliases in enumerate(root_component_aliases):
-        component_end = None
-        for alias in sorted(aliases, key=len, reverse=True):
-            alias_end = _windows_casefolded_prefix_end(value, index, alias)
-            if alias_end is not None:
-                component_end = alias_end
-                break
-        if component_end is None:
-            return None
-
-        trailing_end = component_end
-        while value[trailing_end : trailing_end + 1] in {".", " "}:
-            trailing_end += 1
-        if (
-            trailing_end > component_end
-            and value[trailing_end : trailing_end + 1] in {"/", "\\"}
-        ):
-            component_end = trailing_end
-
-        if component_index + 1 < len(root_component_aliases):
-            if value[component_end : component_end + 1] not in {"/", "\\"}:
-                return None
-            index = component_end
-            while value[index : index + 1] in {"/", "\\"}:
-                index += 1
-            continue
-
-        dots_end = component_end
-        while value[dots_end : dots_end + 1] == ".":
-            dots_end += 1
-        if dots_end > component_end:
-            following = value[dots_end : dots_end + 1]
-            if (
-                not following
-                or following in {"/", "\\", '"'}
-                or following.isspace()
-                or _is_control(following)
-            ):
-                component_end = dots_end
-        if _windows_root_boundary(value, component_end, quoted=quoted):
-            return component_end
-        return None
-    return None
+    return _match_native_components(value, index, root_component_aliases, quoted)
 
 
 def _percent_byte(value: str, index: int, limit: int) -> int | None:
@@ -1632,21 +1678,32 @@ def _names_windows_drive(pair: tuple | None) -> bool:
     return second[0] == ":"
 
 
-def _uri_authority_end(value: str, index: int, limit: int) -> int | None:
-    """The index after a `localhost` authority, or None when it is anything else."""
+def _authority_character_is_invalid(character: str) -> bool:
+    return _is_control(character) or character.isspace()
+
+
+def _read_authority(value: str, index: int, limit: int) -> tuple[list[str], int] | None:
+    """(authority characters, index after them) up to the first separator."""
     authority: list[str] = []
     while index < limit:
         decoded = _uri_character(value, index, limit)
         if decoded is None:
             return None
-        character, source_end, _encoded = decoded
+        character, index, _encoded = decoded
         if character in {"/", "\\"}:
-            index = source_end
-            break
-        if _is_control(character) or character.isspace():
+            return authority, index
+        if _authority_character_is_invalid(character):
             return None
         authority.append(character)
-        index = source_end
+    return authority, index
+
+
+def _uri_authority_end(value: str, index: int, limit: int) -> int | None:
+    """The index after a `localhost` authority, or None when it is anything else."""
+    read = _read_authority(value, index, limit)
+    if read is None:
+        return None
+    authority, index = read
     if "".join(authority).casefold() != "localhost":
         return None
     return index
@@ -1700,31 +1757,33 @@ def _windows_semantic_prefix(
     return (first[0] + ":").casefold(), index
 
 
+def _windows_semantic_component_text(raw_component: str) -> str | None:
+    """The component to add: "" when nothing is added, None when it is refused."""
+    if raw_component == ".":
+        return ""
+    component = raw_component.rstrip(" .")
+    if not component:
+        return ""
+    if not _windows_component_is_valid(component):
+        return None
+    return component
+
+
 def _windows_add_semantic_component(
     raw_component: str,
     components: list[str],
     root: tuple[str, tuple[frozenset[str], ...]],
     drive: str,
 ) -> tuple[bool, bool]:
-    if raw_component == ".":
-        return True, _windows_components_reach_root(drive, components, root)
     if raw_component == "..":
         if components:
             components.pop()
         return True, _windows_components_reach_root(drive, components, root)
-
-    component = raw_component.rstrip(" .")
-    if not component:
-        return True, _windows_components_reach_root(drive, components, root)
-    if (
-        len(component) > _MAX_COMPONENT_CHARACTERS
-        or any(
-            character in '<>:"|?*' or _is_control(character)
-            for character in component
-        )
-    ):
+    component = _windows_semantic_component_text(raw_component)
+    if component is None:
         return False, False
-    components.append(component.casefold())
+    if component:
+        components.append(component.casefold())
     return True, _windows_components_reach_root(drive, components, root)
 
 
@@ -1740,18 +1799,29 @@ def _windows_component_accepts_space(
     return any(alias.startswith(candidate) for alias in aliases[len(components)])
 
 
+def _ends_native_component(character: str) -> bool:
+    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+
+
+def _native_component_separator(value: str, index: int, limit: int) -> int | None:
+    """The index of the separator that ends the component at `index`, or None."""
+    separator = index
+    while separator < limit and value[separator] not in {"/", "\\"}:
+        if _ends_native_component(value[separator]):
+            return None
+        separator += 1
+    if separator >= limit:
+        return None
+    return separator
+
+
 def _windows_native_component_is_canceled(
     value: str,
     index: int,
     limit: int,
 ) -> bool:
-    separator = index
-    while separator < limit and value[separator] not in {"/", "\\"}:
-        character = value[separator]
-        if _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS:
-            return False
-        separator += 1
-    if separator >= limit:
+    separator = _native_component_separator(value, index, limit)
+    if separator is None:
         return False
     while separator < limit and value[separator] in {"/", "\\"}:
         separator += 1
@@ -1785,13 +1855,17 @@ def _windows_terminator(
     unquoted_space: bool,
     space_allowed: bool,
 ) -> bool:
-    if _is_control(character) or character in '<>:"|?*':
+    if _windows_structural_terminator(character):
         return True
     if _windows_uri_terminator(character, encoded, file_uri):
         return True
     if _windows_quote_terminator(character, encoded, quoted):
         return True
     return unquoted_space and not space_allowed
+
+
+def _windows_structural_terminator(character: str) -> bool:
+    return _is_control(character) or character in '<>:"|?*'
 
 
 class _WindowsRootScanner:
@@ -1822,17 +1896,26 @@ class _WindowsRootScanner:
         self.disposable_component: bool | None = None
 
     def run(self) -> int | None:
+        if not self._enter_prefix():
+            return None
+        if not self.root[1]:
+            return self.index
+        return self._scan()
+
+    def _enter_prefix(self) -> bool:
+        """Consume the drive prefix; False when it is not the root's drive."""
         prefix = _windows_semantic_prefix(
             self.value, self.start, self.limit, file_uri=self.file_uri
         )
         if prefix is None:
-            return None
+            return False
         self.drive, self.index = prefix
         if self.drive != self.root[0]:
-            return None
+            return False
         self.component_source_end = self.index
-        if not self.root[1]:
-            return self.index
+        return True
+
+    def _scan(self) -> int | None:
         while self.index < self.limit:
             outcome = self._step()
             if outcome is not _KEEP_SCANNING:
@@ -1852,6 +1935,9 @@ class _WindowsRootScanner:
             self.component, self.components, self.root
         ):
             return True
+        return self._component_is_disposable()
+
+    def _component_is_disposable(self) -> bool:
         if self.disposable_component is None:
             self.disposable_component = _windows_native_component_is_canceled(
                 self.value, self.index, self.limit
@@ -1874,14 +1960,10 @@ class _WindowsRootScanner:
         self.component_source_end = source_end
         return _KEEP_SCANNING
 
-    def _step(self) -> object:
-        decoded = self._decode()
-        if decoded is None:
-            return None
-        character, source_end, encoded = decoded
+    def _terminator_for(self, character: str, encoded: bool) -> bool:
         unquoted_space = not self.quoted and not encoded and character.isspace()
         space_allowed = self._space_allowed(character, unquoted_space)
-        terminator = _windows_terminator(
+        return _windows_terminator(
             character,
             encoded=encoded,
             quoted=self.quoted,
@@ -1889,6 +1971,13 @@ class _WindowsRootScanner:
             unquoted_space=unquoted_space,
             space_allowed=space_allowed,
         )
+
+    def _step(self) -> object:
+        decoded = self._decode()
+        if decoded is None:
+            return None
+        character, source_end, encoded = decoded
+        terminator = self._terminator_for(character, encoded)
         if character in {"/", "\\"} or terminator:
             return self._close_component(source_end, terminator)
         self.component.append(character)
@@ -1918,6 +2007,70 @@ def _windows_semantic_root_match_end(
     ).run()
 
 
+def _windows_end_always(character: str) -> bool:
+    return _is_control(character) or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+
+
+def _windows_end_in_context(character: str, *, file_uri: bool, quoted: bool) -> bool:
+    if file_uri and character == "#":
+        return True
+    if quoted:
+        return character == '"'
+    return character.isspace() or character in ":,;)]}"
+
+
+def _windows_end_character(character: str, *, file_uri: bool, quoted: bool) -> bool:
+    if _windows_end_always(character):
+        return True
+    return _windows_end_in_context(character, file_uri=file_uri, quoted=quoted)
+
+
+def _percent_escape_end(value: str, index: int, limit: int) -> int | None:
+    if index + 3 > limit:
+        return None
+    if re.fullmatch(r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3]) is None:
+        return None
+    return index + 3
+
+
+def _windows_next_index(
+    value: str, index: int, limit: int, *, file_uri: bool, quoted: bool
+) -> int | None:
+    """Where the token continues after `index`; None where it ends."""
+    character = value[index]
+    if _windows_end_character(character, file_uri=file_uri, quoted=quoted):
+        return None
+    if file_uri and character == "%":
+        return _percent_escape_end(value, index, limit)
+    return index + 1
+
+
+def _windows_token_scan_end(
+    value: str, root_end: int, limit: int, *, file_uri: bool, quoted: bool
+) -> int:
+    index = root_end
+    while index < limit:
+        next_index = _windows_next_index(value, index, limit, file_uri=file_uri, quoted=quoted)
+        if next_index is None:
+            return index
+        index = next_index
+    return index
+
+
+def _strip_log_punctuation(value: str, root_end: int, match_end: int) -> int:
+    """Trailing log punctuation is not path unless it directly follows a separator."""
+    punctuation_start = match_end
+    while punctuation_start > root_end and (
+        value[punctuation_start - 1] in _WINDOWS_LOG_TRAILING_PUNCTUATION
+    ):
+        punctuation_start -= 1
+    if punctuation_start == root_end:
+        return punctuation_start
+    if value[punctuation_start - 1 : punctuation_start] not in {"/", "\\"}:
+        return punctuation_start
+    return match_end
+
+
 def _windows_redaction_end(
     value: str,
     start: int,
@@ -1927,46 +2080,68 @@ def _windows_redaction_end(
     quoted: bool,
 ) -> int:
     limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
-    index = root_end
-    while index < limit:
-        character = value[index]
-        if (
-            _is_control(character)
-            or (file_uri and character == "#")
-            or (quoted and character == '"')
-            or (
-                not quoted
-                and (
-                    character.isspace()
-                    or character in ":,;)]}"
-                )
-            )
-            or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
-        ):
-            break
-        if file_uri and character == "%":
-            if (
-                index + 3 > limit
-                or re.fullmatch(r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3])
-                is None
-            ):
-                break
-            index += 3
-            continue
-        index += 1
+    match_end = _windows_token_scan_end(value, root_end, limit, file_uri=file_uri, quoted=quoted)
+    return _strip_log_punctuation(value, root_end, match_end)
 
-    match_end = index
-    punctuation_start = match_end
-    while punctuation_start > root_end and (
-        value[punctuation_start - 1] in _WINDOWS_LOG_TRAILING_PUNCTUATION
-    ):
-        punctuation_start -= 1
-    if (
-        punctuation_start == root_end
-        or value[punctuation_start - 1 : punctuation_start] not in {"/", "\\"}
-    ):
-        match_end = punctuation_start
-    return match_end
+
+def _token_bounded(previous: str) -> bool:
+    """A token starts only where the previous character could not continue one."""
+    if not previous:
+        return True
+    return not (previous.isalnum() or previous in "_\\/%")
+
+
+def _windows_native_start(value: str, start: int, bounded: bool) -> int | None:
+    if not bounded:
+        return None
+    if _drive_spec_at(value, start):
+        return start
+    return _windows_extended_local_start(value, start)
+
+
+def _windows_token_at(value: str, start: int) -> tuple[bool, int | None] | None:
+    """(file_uri, native start) of a candidate at `start`; None when none starts here."""
+    bounded = _token_bounded(value[start - 1 : start])
+    file_uri = bounded and value[start : start + 5].casefold() == "file:"
+    native_start = _windows_native_start(value, start, bounded)
+    if not file_uri and native_start is None:
+        return None
+    return file_uri, native_start
+
+
+def _windows_root_end(
+    value: str,
+    start: int,
+    root: tuple[str, tuple[frozenset[str], ...]],
+    *,
+    file_uri: bool,
+    native_start: int | None,
+    quoted: bool,
+) -> int | None:
+    if native_start is not None:
+        root_end = _windows_native_root_match_end(value, native_start, root, quoted=quoted)
+        if root_end is not None:
+            return root_end
+    scan_start = start if native_start is None else native_start
+    return _windows_semantic_root_match_end(
+        value, scan_start, root, file_uri=file_uri, quoted=quoted
+    )
+
+
+def _windows_match_end_at(
+    value: str, start: int, root: tuple[str, tuple[frozenset[str], ...]]
+) -> int | None:
+    token = _windows_token_at(value, start)
+    if token is None:
+        return None
+    file_uri, native_start = token
+    quoted = value[start - 1 : start] == '"'
+    root_end = _windows_root_end(
+        value, start, root, file_uri=file_uri, native_start=native_start, quoted=quoted
+    )
+    if root_end is None:
+        return None
+    return _windows_redaction_end(value, start, root_end, file_uri=file_uri, quoted=quoted)
 
 
 def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
@@ -1978,58 +2153,14 @@ def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
     index = 0
     while index < len(value):
         start = index
-        previous = value[start - 1 : start]
-        bounded = not (
-            previous and (previous.isalnum() or previous in "_\\/%")
-        )
-        file_uri = bounded and value[start : start + 5].casefold() == "file:"
-        native_start = (
-            start
-            if (
-                bounded
-                and value[start : start + 1].isascii()
-                and value[start : start + 1].isalpha()
-                and value[start + 1 : start + 2] == ":"
-                and value[start + 2 : start + 3] in {"/", "\\"}
-            )
-            else (_windows_extended_local_start(value, start) if bounded else None)
-        )
-        native = native_start is not None
-        if not (file_uri or native):
-            index += 1
+        match_end = _windows_match_end_at(value, start, root)
+        if match_end is None:
+            index = start + 1
             continue
-
-        quoted = previous == '"'
-        root_end = (
-            _windows_native_root_match_end(
-                value, native_start, root, quoted=quoted
-            )
-            if native_start is not None
-            else None
-        )
-        if root_end is None:
-            root_end = _windows_semantic_root_match_end(
-                value,
-                native_start if native_start is not None else start,
-                root,
-                file_uri=file_uri,
-                quoted=quoted,
-            )
-
-        if root_end is not None:
-            match_end = _windows_redaction_end(
-                value,
-                start,
-                root_end,
-                file_uri=file_uri,
-                quoted=quoted,
-            )
-            pieces.append(value[cursor:start])
-            pieces.append(marker)
-            cursor = match_end
-            index = max(start + 1, match_end)
-            continue
-        index = start + 1
+        pieces.append(value[cursor:start])
+        pieces.append(marker)
+        cursor = match_end
+        index = max(start + 1, match_end)
     pieces.append(value[cursor:])
     return "".join(pieces)
 
