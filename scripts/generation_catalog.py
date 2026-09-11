@@ -157,6 +157,10 @@ if os.name == "nt":
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ARTIFACTS = 1024
+# Absurdity ceilings for the sizes a manifest declares, not read bounds: a
+# reader reads an artifact to the size the sealed manifest names, which
+# `_validate_generation` verified by hashing. These refuse a manifest whose
+# numbers could not be true (audit M8).
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024 * 1024
 MAX_GENERATION_BYTES = 64 * 1024 * 1024 * 1024
 MAX_GENERATION_CHILDREN = 4096

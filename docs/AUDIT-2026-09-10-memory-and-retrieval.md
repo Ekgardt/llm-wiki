@@ -253,6 +253,11 @@ disposable, fail-closed, bounded reads, no silent fallback).
 - Verified: read.
 - Fix direction: derive per-artifact bounds from the sealed manifest sizes
   and delete the GiB constants, or name them "absurdity ceiling" in code.
+- Status: closed 2026-09-11 by naming. The per-artifact read bound is already
+  the sealed manifest size (`_declared_manifest_bytes`) and the per-source
+  bound is the corpus snapshot's one-page ceiling; the four constants are
+  declared as absurdity ceilings that say what they guard and where the read
+  bound lives (`docs/research/2026-09-11-a-ceiling-says-which-kind-of-ceiling-it-is.md`).
 
 ### M9 — Tests that assert on the clock [defect]
 - Status: open — the two `claims` cases observe a worker blocked inside the product's lock and have no event to wait on without a product hook; recorded as the negative-wait class in `docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.

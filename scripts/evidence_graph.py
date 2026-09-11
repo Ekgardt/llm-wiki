@@ -27,6 +27,12 @@ GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 class GraphSchema(str, Enum):
     V2 = "evidence-graph/v2"
     V3 = "evidence-graph/v3"
+# Absurdity ceilings, not read bounds (audit M8, docs/research/2026-09-11-a-ceiling-says-which-kind-of-ceiling-it-is.md).
+# A source reaches this module already read, and the reader that bounded it
+# is the corpus snapshot (`corpus_snapshot.MAX_CORPUS_FILE_BYTES`, one page);
+# an artifact is read to the size its sealed manifest declares. These two
+# only refuse a mis-typed size, a field outside any sane range, or a build
+# that has run away, so a caller never has to reason about 16 GiB.
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
@@ -1286,7 +1292,7 @@ def _normalized_source(
     assert source_id is not None
     content = source_bytes[source_id]
     if not isinstance(content, bytes) or len(content) > MAX_SOURCE_BYTES:
-        raise TypeError("captured source content must be bounded bytes")
+        raise TypeError("captured source content must be bytes under the absurdity ceiling")
     size = _integer(record["size"], "source size")
     digest = _digest(record["sha256"], "source hash")
     if _source_bytes_mismatch(size, digest, content, deadline, cancelled, monotonic):
@@ -1929,7 +1935,7 @@ def _validated_stored_source(
     assert source_id is not None
     content = row["content"]
     if not isinstance(content, bytes) or len(content) > MAX_SOURCE_BYTES:
-        raise ValueError("captured source content must be bounded bytes")
+        raise ValueError("captured source content must be bytes under the absurdity ceiling")
     size = _integer(row["size"], "source size")
     digest = _digest(row["sha256"], "source hash")
     if _source_bytes_mismatch(size, digest, content, deadline, cancelled, monotonic):
