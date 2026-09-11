@@ -154,3 +154,18 @@ scenarios (every one equal, with statuses from `ok` to `stale`), and kept as
 `tests/test_code_navigation_fault_paths.py`: 40 cases that pass on the
 code before the change and after it, so they pin existing behaviour rather
 than the new code's.
+
+## Analysis contracts are fuzzed, not sampled
+
+`scripts/code_intelligence.py` (32 findings) holds the immutable records a
+code analysis must satisfy before the graph accepts it. Its checks become
+named requirements, and long runs of independent checks become one ordered
+table (`_require_all`: the first check that does not hold raises its own
+error), so the first error a broken record reports is unchanged. The suite
+never reaches about 25 of its refusals, so old and new were compared under
+30,000 random mutations of a valid native and a valid precise analysis
+(one to three fields replaced by wrong types, other enum members, empty or
+oversized text, reordered, duplicated or truncated collections). Each case
+compares construction, native verification, closed-world answers for every
+capability and thirteen batch mints: no case differs, across 405 distinct
+outcomes.
