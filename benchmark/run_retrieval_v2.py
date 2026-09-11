@@ -4303,84 +4303,78 @@ def _candidate_key(candidate: dict) -> str:
     return json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def _variant_matches(variant: dict, target: dict) -> bool:
+    return variant["variant_id"] == target["variant_id"] and variant["dimensions"] == target["dimensions"]
+
+
+def _candidate_matches(item: dict, target: dict) -> bool:
+    if item["id"] != target["id"] or item["revision"] != target["revision"]:
+        return False
+    return any(_variant_matches(variant, target) for variant in item["variants"])
+
+
+def _matching_candidate(items: Sequence[dict], target: dict) -> dict | None:
+    return next((item for item in items if _candidate_matches(item, target)), None)
+
+
+def _selected_reranker_policy(matrix: dict, reranker_target: dict | None) -> dict | None:
+    if reranker_target is None:
+        return None
+    reranker = _matching_candidate(matrix["rerankers"], reranker_target)
+    if reranker is None:
+        raise ValueError("raw report selects an unknown reranker target")
+    return reranker
+
+
 def _candidate_policy(matrix: dict, spec: dict) -> tuple[dict, dict | None]:
-    embedding_target = spec["embedding"]
-    embedding = next(
-        (
-            item
-            for item in matrix["embeddings"]
-            if item["id"] == embedding_target["id"]
-            and item["revision"] == embedding_target["revision"]
-            and any(
-                variant["variant_id"] == embedding_target["variant_id"]
-                and variant["dimensions"] == embedding_target["dimensions"]
-                for variant in item["variants"]
-            )
-        ),
-        None,
-    )
+    embedding = _matching_candidate(matrix["embeddings"], spec["embedding"])
     if embedding is None:
         raise ValueError("raw report selects an unknown embedding target")
-    reranker_target = spec["reranker"]
-    reranker = None
-    if reranker_target is not None:
-        reranker = next(
-            (
-                item
-                for item in matrix["rerankers"]
-                if item["id"] == reranker_target["id"]
-                and item["revision"] == reranker_target["revision"]
-                and any(
-                    variant["variant_id"] == reranker_target["variant_id"]
-                    and variant["dimensions"] == reranker_target["dimensions"]
-                    for variant in item["variants"]
-                )
-            ),
-            None,
-        )
-        if reranker is None:
-            raise ValueError("raw report selects an unknown reranker target")
-    return embedding, reranker
+    return embedding, _selected_reranker_policy(matrix, spec["reranker"])
 
 
-def _metrics_match(claimed: object, recomputed: object, path: str) -> None:
-    if isinstance(recomputed, dict):
-        if not isinstance(claimed, dict) or set(claimed) != set(recomputed):
-            raise ValueError(f"candidate metric object mismatch at {path}")
-        for key, value in recomputed.items():
-            _metrics_match(claimed[key], value, f"{path}.{key}")
-        return
-    if isinstance(recomputed, list):
-        if not isinstance(claimed, list) or len(claimed) != len(recomputed):
-            raise ValueError(f"candidate metric list mismatch at {path}")
-        for index, value in enumerate(recomputed):
-            _metrics_match(claimed[index], value, f"{path}[{index}]")
-        return
-    if recomputed is None or isinstance(recomputed, int):
-        if claimed != recomputed or type(claimed) is not type(recomputed):
-            raise ValueError(f"candidate metric mismatch at {path}")
-        return
+def _dict_metrics_match(claimed: object, recomputed: dict, path: str) -> None:
+    if not isinstance(claimed, dict) or set(claimed) != set(recomputed):
+        raise ValueError(f"candidate metric object mismatch at {path}")
+    for key, value in recomputed.items():
+        _metrics_match(claimed[key], value, f"{path}.{key}")
+
+
+def _list_metrics_match(claimed: object, recomputed: list, path: str) -> None:
+    if not isinstance(claimed, list) or len(claimed) != len(recomputed):
+        raise ValueError(f"candidate metric list mismatch at {path}")
+    for index, value in enumerate(recomputed):
+        _metrics_match(claimed[index], value, f"{path}[{index}]")
+
+
+def _exact_metric_match(claimed: object, recomputed: object, path: str) -> None:
+    if claimed != recomputed or type(claimed) is not type(recomputed):
+        raise ValueError(f"candidate metric mismatch at {path}")
+
+
+def _float_metric_match(claimed: object, recomputed: object, path: str) -> None:
     if not isinstance(claimed, (int, float)) or not math.isclose(
         float(claimed), float(recomputed), rel_tol=0.0, abs_tol=1e-12
     ):
         raise ValueError(f"candidate metric mismatch at {path}")
 
 
-def _recompute_report_metrics(
-    corpus: dict,
-    report: dict,
-    *,
-    require_complete_rankings: bool = True,
-    require_normalized_confidence: bool = True,
-) -> tuple[dict, dict]:
-    queries = {query["query_id"]: query for query in corpus["queries"]}
-    traces = report["traces"]
-    if not isinstance(traces, list) or len(traces) != len(queries):
-        raise ValueError("candidate traces must contain every frozen query exactly once")
-    trace_ids = [trace.get("query_id") for trace in traces if isinstance(trace, dict)]
-    if len(trace_ids) != len(traces) or set(trace_ids) != set(queries):
-        raise ValueError("candidate traces contain missing, extra, or duplicate query IDs")
-    gold_fields = {
+def _metric_matcher(recomputed: object):
+    if isinstance(recomputed, dict):
+        return _dict_metrics_match
+    if isinstance(recomputed, list):
+        return _list_metrics_match
+    if recomputed is None or isinstance(recomputed, int):
+        return _exact_metric_match
+    return _float_metric_match
+
+
+def _metrics_match(claimed: object, recomputed: object, path: str) -> None:
+    _metric_matcher(recomputed)(claimed, recomputed, path)
+
+
+_GOLD_FIELDS = frozenset(
+    {
         "answerability",
         "allowed_abstention_reason",
         "cross_language",
@@ -4392,85 +4386,160 @@ def _recompute_report_metrics(
         "required_evidence_spans",
         "temporal_scope",
     }
+)
+_APPROVED_RERANKER_SOURCES = frozenset(
+    {
+        None,
+        "sigmoid_probability_from_sequence_classification_logit",
+        "softmax_probability_of_yes_over_no",
+    }
+)
+_RANKED_ITEM_KEYS = frozenset({"evidence_id", "score"})
 
-    def contains_gold(value: object) -> bool:
-        if isinstance(value, dict):
-            return bool(gold_fields & set(value)) or any(contains_gold(item) for item in value.values())
-        if isinstance(value, list):
-            return any(contains_gold(item) for item in value)
-        return False
 
-    if contains_gold(report):
-        raise ValueError("candidate report contains forbidden gold fields")
+def _dict_contains_gold(value: dict) -> bool:
+    if _GOLD_FIELDS & set(value):
+        return True
+    return any(_contains_gold(item) for item in value.values())
+
+
+def _contains_gold(value: object) -> bool:
+    if isinstance(value, dict):
+        return _dict_contains_gold(value)
+    if isinstance(value, list):
+        return any(_contains_gold(item) for item in value)
+    return False
+
+
+def _require_trace_count(traces: object, queries: dict) -> None:
+    if not isinstance(traces, list) or len(traces) != len(queries):
+        raise ValueError("candidate traces must contain every frozen query exactly once")
+
+
+def _require_trace_ids(traces: list, queries: dict) -> None:
+    trace_ids = [trace.get("query_id") for trace in traces if isinstance(trace, dict)]
+    if len(trace_ids) != len(traces) or set(trace_ids) != set(queries):
+        raise ValueError("candidate traces contain missing, extra, or duplicate query IDs")
+
+
+def _require_approved_confidence(report: dict) -> None:
     confidence = report["methodology"].get("confidence")
     if not isinstance(confidence, dict) or confidence.get("fusion") != (
         "RRF divided by its theoretical maximum; bounded to [0,1]"
     ) or confidence.get("qa_threshold") != 0.54:
         raise ValueError("candidate report confidence source or calibration is not approved")
-    approved_reranker_sources = {
-        None,
-        "sigmoid_probability_from_sequence_classification_logit",
-        "softmax_probability_of_yes_over_no",
-    }
-    if confidence.get("reranker") not in approved_reranker_sources:
+    if confidence.get("reranker") not in _APPROVED_RERANKER_SOURCES:
         raise ValueError("candidate report reranker confidence source is not approved")
 
-    candidates = build_candidates(corpus)
-    by_id = {candidate.evidence_id: candidate for candidate in candidates}
-    rows = []
-    for trace in traces:
-        query = queries[trace["query_id"]]
-        ranked_evidence = trace.get("ranked_evidence")
-        if not isinstance(ranked_evidence, list) or any(
-            not isinstance(item, dict) or set(item) != {"evidence_id", "score"}
-            for item in ranked_evidence
-        ):
-            raise ValueError("candidate trace ranked evidence is malformed")
+
+def _malformed_ranked_item(item: object) -> bool:
+    return not isinstance(item, dict) or set(item) != _RANKED_ITEM_KEYS
+
+
+def _well_formed_ranked_evidence(trace: dict) -> list:
+    ranked_evidence = trace.get("ranked_evidence")
+    if not isinstance(ranked_evidence, list) or any(_malformed_ranked_item(item) for item in ranked_evidence):
+        raise ValueError("candidate trace ranked evidence is malformed")
+    return ranked_evidence
+
+
+def _ids_match_eligible(ranked_ids: list[str], eligible: set[str], require_complete: bool) -> bool:
+    if require_complete:
+        return set(ranked_ids) == eligible
+    return set(ranked_ids) <= eligible
+
+
+def _require_exact_eligible_ids(ranked_ids: list[str], eligible: set[str], require_complete: bool) -> None:
+    if len(ranked_ids) != len(set(ranked_ids)) or not _ids_match_eligible(ranked_ids, eligible, require_complete):
+        raise ValueError("candidate trace does not contain exact eligible candidate IDs")
+
+
+def _normalized_score(score: object) -> bool:
+    return isinstance(score, (int, float)) and math.isfinite(float(score)) and 0 <= float(score) <= 1
+
+
+def _require_normalized_scores(ranked_evidence: list) -> None:
+    if any(not _normalized_score(item["score"]) for item in ranked_evidence):
+        raise ValueError("candidate trace scores must be finite normalized confidence")
+
+
+def _trace_answer(trace: dict) -> dict:
+    answer = {"abstained": trace.get("abstained"), "reason": trace.get("abstention_reason")}
+    if type(answer["abstained"]) is not bool:
+        raise ValueError("candidate trace abstention is invalid")
+    return answer
+
+
+def _calibrated_reason(expected_abstained: bool) -> str | None:
+    if expected_abstained:
+        return "not-in-corpus"
+    return None
+
+
+def _require_calibrated_abstention(answer: dict, ranked_evidence: list) -> None:
+    expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
+    if answer["abstained"] is not expected_abstained:
+        raise ValueError("candidate trace abstention differs from normalized confidence")
+    if answer["reason"] != _calibrated_reason(expected_abstained):
+        raise ValueError("candidate trace abstention reason differs from calibration")
+
+
+class _TraceRecompute:
+    """Recomputes one report's evaluation rows from its traces and the frozen corpus."""
+
+    def __init__(self, corpus: dict, *, require_complete_rankings: bool, require_normalized_confidence: bool) -> None:
+        self.candidates = build_candidates(corpus)
+        self.by_id = {candidate.evidence_id: candidate for candidate in self.candidates}
+        self.require_complete_rankings = require_complete_rankings
+        self.require_normalized_confidence = require_normalized_confidence
+
+    def _eligible_ids(self, query: dict) -> set[str]:
+        return {item.evidence_id for item in filter_candidates(self.candidates, _query_scope(query))}
+
+    def _checked_ranking(self, trace: dict, query: dict) -> tuple[list, list[ScoredCandidate]]:
+        ranked_evidence = _well_formed_ranked_evidence(trace)
         ranked_ids = [item["evidence_id"] for item in ranked_evidence]
-        eligible = {
-            item.evidence_id
-            for item in filter_candidates(candidates, _query_scope(query))
-        }
-        if len(ranked_ids) != len(set(ranked_ids)) or (
-            set(ranked_ids) != eligible
-            if require_complete_rankings
-            else not set(ranked_ids) <= eligible
-        ):
-            raise ValueError("candidate trace does not contain exact eligible candidate IDs")
-        if require_normalized_confidence and any(
-            not isinstance(item["score"], (int, float))
-            or not math.isfinite(float(item["score"]))
-            or not 0 <= float(item["score"]) <= 1
-            for item in ranked_evidence
-        ):
-            raise ValueError("candidate trace scores must be finite normalized confidence")
-        ranked = [ScoredCandidate(by_id[evidence_id], 0.0) for evidence_id in ranked_ids]
-        expected_parents = _expand_parents(ranked)
-        if trace.get("ranked_parents") != expected_parents:
+        _require_exact_eligible_ids(ranked_ids, self._eligible_ids(query), self.require_complete_rankings)
+        if self.require_normalized_confidence:
+            _require_normalized_scores(ranked_evidence)
+        ranked = [ScoredCandidate(self.by_id[evidence_id], 0.0) for evidence_id in ranked_ids]
+        if trace.get("ranked_parents") != _expand_parents(ranked):
             raise ValueError("candidate trace parent expansion mismatch")
-        answer = {
-            "abstained": trace.get("abstained"),
-            "reason": trace.get("abstention_reason"),
-        }
-        if type(answer["abstained"]) is not bool:
-            raise ValueError("candidate trace abstention is invalid")
-        if require_normalized_confidence:
-            expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
-            if answer["abstained"] is not expected_abstained:
-                raise ValueError("candidate trace abstention differs from normalized confidence")
-            expected_reason = "not-in-corpus" if expected_abstained else None
-            if answer["reason"] != expected_reason:
-                raise ValueError("candidate trace abstention reason differs from calibration")
+        return ranked_evidence, ranked
+
+    def row(self, trace: dict, query: dict) -> dict:
+        ranked_evidence, ranked = self._checked_ranking(trace, query)
+        answer = _trace_answer(trace)
+        if self.require_normalized_confidence:
+            _require_calibrated_abstention(answer, ranked_evidence)
         row = _evaluation_row(query, ranked, answer)
         if trace.get("abstention_contract_valid") is not row["abstention_contract_valid"]:
             raise ValueError("candidate trace abstention contract mismatch")
-        rows.append(row)
+        return row
+
+
+def _recompute_report_metrics(
+    corpus: dict,
+    report: dict,
+    *,
+    require_complete_rankings: bool = True,
+    require_normalized_confidence: bool = True,
+) -> tuple[dict, dict]:
+    queries = {query["query_id"]: query for query in corpus["queries"]}
+    traces = report["traces"]
+    _require_trace_count(traces, queries)
+    _require_trace_ids(traces, queries)
+    if _contains_gold(report):
+        raise ValueError("candidate report contains forbidden gold fields")
+    _require_approved_confidence(report)
+    recompute = _TraceRecompute(
+        corpus,
+        require_complete_rankings=require_complete_rankings,
+        require_normalized_confidence=require_normalized_confidence,
+    )
+    rows = [recompute.row(trace, queries[trace["query_id"]]) for trace in traces]
     overall = _aggregate(rows)
-    slices = {
-        language: _aggregate([row for row in rows if row["language"] == language])
-        for language in ("EN", "RU", "ZH")
-    }
-    slices["cross-language"] = _aggregate([row for row in rows if row["cross_language"]])
+    slices = _language_slices(rows)
     _metrics_match(report["overall"], overall, "overall")
     _metrics_match(report["slices"], slices, "slices")
     macro = {metric: macro_average(slices, metric) for metric in EFFECTIVENESS_FIELDS}
@@ -4504,6 +4573,63 @@ def _baseline_policy_sha256(report: dict) -> str:
     )
 
 
+_BASELINE_ENVIRONMENT_KEYS = frozenset({"packages", "runner_sha256", "uv_lock_sha256", "verified_lock"})
+_VERIFIED_LOCK_KEYS = frozenset({"packages", "package_map_sha256", "uv_lock_sha256"})
+_BASELINE_REQUIRED_PACKAGES = frozenset({"jieba", "numpy", "sentence-transformers", "torch", "transformers"})
+_ENVIRONMENT_PACKAGE_NAMES = ("numpy", "sentence-transformers", "torch", "transformers")
+
+
+def _dict_or_none(value: object, key: str) -> object:
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
+
+
+def _keys_are(value: object, keys: frozenset) -> bool:
+    return isinstance(value, dict) and set(value) == keys
+
+
+def _expected_environment_packages(frozen_packages: object) -> dict:
+    packages = {name: _dict_or_none(frozen_packages, name) for name in _ENVIRONMENT_PACKAGE_NAMES}
+    packages["usearch"] = None
+    return packages
+
+
+def _environment_shape_valid(environment: object, verified: object, frozen_packages: object) -> bool:
+    return (
+        _keys_are(environment, _BASELINE_ENVIRONMENT_KEYS)
+        and _keys_are(verified, _VERIFIED_LOCK_KEYS)
+        and _keys_are(frozen_packages, _BASELINE_REQUIRED_PACKAGES)
+    )
+
+
+def _frozen_versions_locked(frozen_packages: dict, locked: dict[str, set[str]]) -> bool:
+    return not any(
+        not isinstance(version, str) or version not in locked.get(name, set())
+        for name, version in frozen_packages.items()
+    )
+
+
+def _environment_bindings_valid(report: dict, environment: dict, verified: dict, frozen_packages: dict) -> bool:
+    if environment["packages"] != _expected_environment_packages(frozen_packages):
+        return False
+    if environment["runner_sha256"] != report.get("benchmark_runner_sha256"):
+        return False
+    if not _is_recorded_digest(environment["uv_lock_sha256"]):
+        return False
+    if verified["uv_lock_sha256"] != environment["uv_lock_sha256"]:
+        return False
+    return verified["package_map_sha256"] == _sha256_json(frozen_packages)
+
+
+def _baseline_environment_valid(report: dict, environment, verified, frozen_packages, locked) -> bool:
+    if not _environment_shape_valid(environment, verified, frozen_packages):
+        return False
+    if not _frozen_versions_locked(frozen_packages, locked):
+        return False
+    return _environment_bindings_valid(report, environment, verified, frozen_packages)
+
+
 def _verify_baseline_package_contract(report: dict) -> dict:
     """Check the baseline was measured in the environment it claims.
 
@@ -4521,227 +4647,240 @@ def _verify_baseline_package_contract(report: dict) -> dict:
     `knowledge/notes/baseline-environment-binding-decision.md`.
     """
     environment = report.get("methodology", {}).get("environment_provenance")
-    verified = environment.get("verified_lock") if isinstance(environment, dict) else None
+    verified = _dict_or_none(environment, "verified_lock")
     locked = _locked_package_version_sets(ROOT / "uv.lock")
-    required = {"jieba", "numpy", "sentence-transformers", "torch", "transformers"}
-    frozen_packages = verified.get("packages") if isinstance(verified, dict) else None
-    expected_environment_packages = {
-        name: frozen_packages.get(name) if isinstance(frozen_packages, dict) else None
-        for name in ("numpy", "sentence-transformers", "torch", "transformers")
-    }
-    expected_environment_packages["usearch"] = None
-    if (
-        not isinstance(environment, dict)
-        or set(environment) != {
-            "packages",
-            "runner_sha256",
-            "uv_lock_sha256",
-            "verified_lock",
-        }
-        or not isinstance(verified, dict)
-        or set(verified) != {"packages", "package_map_sha256", "uv_lock_sha256"}
-        or not isinstance(frozen_packages, dict)
-        or set(frozen_packages) != required
-        or any(
-            not isinstance(version, str) or version not in locked.get(name, set())
-            for name, version in frozen_packages.items()
-        )
-        or environment["packages"] != expected_environment_packages
-        or environment["runner_sha256"] != report.get("benchmark_runner_sha256")
-        or not _is_recorded_digest(environment["uv_lock_sha256"])
-        or verified["uv_lock_sha256"] != environment["uv_lock_sha256"]
-        or verified["package_map_sha256"] != _sha256_json(frozen_packages)
-    ):
+    frozen_packages = _dict_or_none(verified, "packages")
+    if not _baseline_environment_valid(report, environment, verified, frozen_packages, locked):
         raise ValueError("bound baseline frozen package contract mismatch")
     lexical_config = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
-    return _observed_runtime_environment(
-        report.get("vector_backend"), lexical_config=lexical_config
-    )
+    return _observed_runtime_environment(report.get("vector_backend"), lexical_config=lexical_config)
 
 
-def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
-    baseline_target = {
-        "embedding": {
-            "dimensions": 384,
-            "id": "BAAI/bge-small-en-v1.5",
-            "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
-            "variant_id": "float32-384d",
-        },
-        "reranker": None,
-    }
-    if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(
-        report
-    ):
-        raise ValueError("bound baseline policy fingerprint mismatch")
-    _verify_baseline_package_contract(report)
-    if (
-        set(report) != REPORT_FIELDS
-        or report.get("schema_version") != "retrieval-report/v2"
-        or report.get("corpus_id") not in FROZEN_CORPUS_IDS
-        or report.get("adapter_kind") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("quality_claim") is not True
-        or report.get("requested_mode") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("candidate") != baseline_target
-        or report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND
-        or report.get("fallback_reason") is not None
-        or report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]
-        or report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"])
-        or report.get("acquisition_mode") != "offline-local-files-only"
-        or report.get("vector_backend") != "numpy-exact"
-        or report.get("release_evidence") is not False
-        or report.get("thresholds") != THRESHOLDS
-        or report.get("methodology", {}).get("lexical_configuration")
-        != LEXICAL_CONFIGURATIONS["L4"]
-    ):
-        raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
-    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
-    overall, slices = _recompute_report_metrics(corpus, report)
-    quality = round(
-        sum(
-            float(overall[name])
-            for name in (
-                "parent_recall_at_10",
-                "all_required_evidence_recall_at_20",
-                "ndcg_at_10",
-                "mrr_at_10",
-            )
-        )
-        / 4
-        * 10_000
-    )
+_BASELINE_TARGET = {
+    "embedding": {
+        "dimensions": 384,
+        "id": "BAAI/bge-small-en-v1.5",
+        "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "variant_id": "float32-384d",
+    },
+    "reranker": None,
+}
+_BASELINE_EQUALITIES = (
+    ("schema_version", "retrieval-report/v2"),
+    ("adapter_kind", MODEL_MATRIX_ADAPTER_KIND),
+    ("requested_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("candidate", _BASELINE_TARGET),
+    ("effective_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("acquisition_mode", "offline-local-files-only"),
+    ("vector_backend", "numpy-exact"),
+    ("thresholds", THRESHOLDS),
+)
+_BASELINE_IDENTITIES = (("quality_claim", True), ("fallback_reason", None), ("release_evidence", False))
+
+
+def _baseline_values_match(report: dict) -> bool:
+    equal = all(report.get(field) == expected for field, expected in _BASELINE_EQUALITIES)
+    return equal and all(report.get(field) is expected for field, expected in _BASELINE_IDENTITIES)
+
+
+def _baseline_bound_to_matrix(matrix: dict, report: dict) -> bool:
+    if report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]:
+        return False
+    if report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"]):
+        return False
+    return report.get("methodology", {}).get("lexical_configuration") == LEXICAL_CONFIGURATIONS["L4"]
+
+
+def _baseline_report_comparable(matrix: dict, report: dict) -> bool:
+    if set(report) != REPORT_FIELDS or report.get("corpus_id") not in FROZEN_CORPUS_IDS:
+        return False
+    if not _baseline_values_match(report):
+        return False
+    return _baseline_bound_to_matrix(matrix, report)
+
+
+def _quality_basis_points(overall: dict) -> int:
+    return round(sum(float(overall[name]) for name in _RETRIEVAL_GATE_METRICS) / 4 * 10_000)
+
+
+def _require_baseline_matches(matrix: dict, overall: dict) -> None:
+    quality = _quality_basis_points(overall)
     baseline = matrix["selection"]["baseline"]
     if baseline["overall_basis_points"] != quality or baseline[
         "parent_recall_at_10_basis_points"
     ] != round(float(overall["parent_recall_at_10"]) * 10_000):
         raise ValueError("selection baseline metrics do not match bound raw evidence")
+
+
+def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
+    if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(report):
+        raise ValueError("bound baseline policy fingerprint mismatch")
+    _verify_baseline_package_contract(report)
+    if not _baseline_report_comparable(matrix, report):
+        raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
+    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
+    overall, slices = _recompute_report_metrics(corpus, report)
+    _require_baseline_matches(matrix, overall)
     return overall, slices
+
+
+_LEXICAL_COMPARABLE_FIELDS = (
+    "schema_version",
+    "corpus_sha256",
+    "benchmark_contract_sha256",
+    "benchmark_runner_sha256",
+    "adapter_kind",
+    "effective_mode",
+)
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _finite_nonnegative(value: object) -> bool:
+    return _is_finite_number(value) and value >= 0
+
+
+def _lexical_configuration_id(report: dict, configurations: dict, seen: dict) -> str:
+    configuration = report.get("methodology", {}).get("lexical_configuration")
+    lexical = _dict_or_none(configuration, "id")
+    if lexical not in configurations or lexical in seen:
+        raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
+    if configuration != configurations[lexical]:
+        raise ValueError("lexical evidence configuration differs from the frozen matrix")
+    return lexical
+
+
+def _lexical_evidence_values(report: dict) -> tuple[list, object]:
+    overall = report.get("overall", {})
+    values = [overall.get(name) for name in _RETRIEVAL_GATE_METRICS]
+    latency = report.get("measurements", {}).get("warm_latency_p95_ms")
+    if not all(_is_finite_number(value) for value in values) or not _finite_nonnegative(latency):
+        raise ValueError("lexical ablation evidence is incomplete or nonfinite")
+    return values, latency
+
+
+class _LexicalTally:
+    """The L0-L4 ablation reports, checked for comparability as they are added."""
+
+    def __init__(self, configurations: dict) -> None:
+        self.configurations = configurations
+        self.by_id: dict[str, dict] = {}
+        self.provenance: tuple | None = None
+
+    def _require_comparable(self, report: dict) -> None:
+        comparable = tuple(report.get(field) for field in _LEXICAL_COMPARABLE_FIELDS)
+        if self.provenance is None:
+            self.provenance = comparable
+            return
+        if comparable != self.provenance:
+            raise ValueError("lexical ablation evidence is not comparable")
+
+    def add(self, report: dict) -> None:
+        lexical = _lexical_configuration_id(report, self.configurations, self.by_id)
+        self._require_comparable(report)
+        values, latency = _lexical_evidence_values(report)
+        self.by_id[lexical] = {
+            "id": lexical,
+            "quality": sum(float(value) for value in values) / len(values),
+            "warm_latency_p95_ms": float(latency),
+        }
 
 
 def _select_lexical_winner(
     reports: Sequence[dict], *, configurations: dict | None = None
 ) -> dict:
     configurations = LEXICAL_CONFIGURATIONS if configurations is None else configurations
-    by_id = {}
-    provenance = None
+    tally = _LexicalTally(configurations)
     for report in reports:
-        configuration = report.get("methodology", {}).get("lexical_configuration")
-        lexical = configuration.get("id") if isinstance(configuration, dict) else None
-        if lexical not in configurations or lexical in by_id:
-            raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
-        if configuration != configurations[lexical]:
-            raise ValueError("lexical evidence configuration differs from the frozen matrix")
-        comparable = tuple(
-            report.get(field)
-            for field in (
-                "schema_version",
-                "corpus_sha256",
-                "benchmark_contract_sha256",
-                "benchmark_runner_sha256",
-                "adapter_kind",
-                "effective_mode",
-            )
-        )
-        if provenance is None:
-            provenance = comparable
-        elif comparable != provenance:
-            raise ValueError("lexical ablation evidence is not comparable")
-        overall = report.get("overall", {})
-        values = [
-            overall.get(name)
-            for name in (
-                "parent_recall_at_10",
-                "all_required_evidence_recall_at_20",
-                "ndcg_at_10",
-                "mrr_at_10",
-            )
-        ]
-        latency = report.get("measurements", {}).get("warm_latency_p95_ms")
-        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values) or not (
-            isinstance(latency, (int, float)) and math.isfinite(latency) and latency >= 0
-        ):
-            raise ValueError("lexical ablation evidence is incomplete or nonfinite")
-        by_id[lexical] = {
-            "id": lexical,
-            "quality": sum(float(value) for value in values) / len(values),
-            "warm_latency_p95_ms": float(latency),
-        }
-    if set(by_id) != set(configurations):
+        tally.add(report)
+    if set(tally.by_id) != set(configurations):
         raise ValueError("lexical evidence requires the complete L0 through L4 ablation set")
     return min(
-        by_id.values(),
+        tally.by_id.values(),
         key=lambda item: (-item["quality"], item["warm_latency_p95_ms"], item["id"]),
     )
+
+
+def _depth_evidence(trace: dict, depth_key: str) -> dict:
+    depth_evidence = trace.get("reranker", {}).get("depths", {}).get(depth_key)
+    if not isinstance(depth_evidence, dict) or not isinstance(depth_evidence.get("ranked_evidence"), list):
+        raise ValueError("reranker trace lacks complete depth rankings")
+    return depth_evidence
+
+
+def _depth_timings(depth_evidence: dict) -> tuple[float, float]:
+    duration = depth_evidence.get("duration_ms")
+    query_latency = depth_evidence.get("query_latency_ms")
+    if not all(_finite_nonnegative(value) for value in (duration, query_latency)):
+        raise ValueError("reranker depth trace lacks finite timing")
+    return float(duration), float(query_latency)
+
+
+def _depth_trace(trace: dict, depth_evidence: dict, corpus: dict, candidates: dict) -> dict:
+    copied = dict(trace)
+    copied["ranked_evidence"] = depth_evidence["ranked_evidence"]
+    copied["abstained"] = depth_evidence.get("abstained")
+    copied["abstention_reason"] = depth_evidence.get("abstention_reason")
+    query = next(item for item in corpus["queries"] if item["query_id"] == copied["query_id"])
+    copied["abstention_contract_valid"] = _abstention_contract_valid(
+        query, {"abstained": copied["abstained"], "reason": copied["abstention_reason"]}
+    )
+    ranked = [
+        ScoredCandidate(candidates[item["evidence_id"]], 0.0)
+        for item in copied["ranked_evidence"]
+        if item["evidence_id"] in candidates
+    ]
+    copied["ranked_parents"] = _expand_parents(ranked)
+    return copied
+
+
+def _require_depth_timing(claimed: dict, inference_latencies: list[float], query_latencies: list[float]) -> None:
+    warm_p95 = _resource_measurements(
+        query_latencies,
+        build_time_ms=0,
+        chunk_count=0,
+        index_size_bytes=0,
+        peak_rss_bytes=None,
+        peak_rss_status="shared-run-level",
+    )["warm_latency_p95_ms"]
+    _metrics_match(claimed["inference_latencies_ms"], inference_latencies, "reranker timing")
+    _metrics_match(claimed["duration_ms"], sum(inference_latencies), "reranker duration")
+    _metrics_match(claimed["warm_latency_p95_ms"], warm_p95, "reranker warm p95")
+
+
+def _recomputed_depth(corpus: dict, report: dict, depth: int, candidates: dict) -> tuple[dict, dict]:
+    depth_key = str(depth)
+    depth_traces = []
+    inference_latencies = []
+    query_latencies = []
+    for trace in report["traces"]:
+        depth_evidence = _depth_evidence(trace, depth_key)
+        duration, query_latency = _depth_timings(depth_evidence)
+        inference_latencies.append(duration)
+        query_latencies.append(query_latency)
+        depth_traces.append(_depth_trace(trace, depth_evidence, corpus, candidates))
+    claimed = report["reranker"]["depth_metrics"][depth_key]
+    _require_depth_timing(claimed, inference_latencies, query_latencies)
+    synthetic = dict(
+        report,
+        traces=depth_traces,
+        overall=claimed["overall"],
+        slices=claimed["slices"],
+        macro_average={metric: macro_average(claimed["slices"], metric) for metric in EFFECTIVENESS_FIELDS},
+    )
+    return _recompute_report_metrics(corpus, synthetic)
 
 
 def _recompute_reranker_depth_metrics(corpus: dict, report: dict) -> dict[str, tuple[dict, dict]]:
     if report["reranker"] is None:
         return {}
-    recomputed = {}
     candidates = {item.evidence_id: item for item in build_candidates(corpus)}
-    for depth in report["reranker"]["depths"]:
-        depth_key = str(depth)
-        depth_traces = []
-        inference_latencies = []
-        query_latencies = []
-        for trace in report["traces"]:
-            depth_evidence = trace.get("reranker", {}).get("depths", {}).get(depth_key)
-            if not isinstance(depth_evidence, dict) or not isinstance(
-                depth_evidence.get("ranked_evidence"), list
-            ):
-                raise ValueError("reranker trace lacks complete depth rankings")
-            duration = depth_evidence.get("duration_ms")
-            query_latency = depth_evidence.get("query_latency_ms")
-            if not all(
-                isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
-                for value in (duration, query_latency)
-            ):
-                raise ValueError("reranker depth trace lacks finite timing")
-            inference_latencies.append(float(duration))
-            query_latencies.append(float(query_latency))
-            copied = dict(trace)
-            copied["ranked_evidence"] = depth_evidence["ranked_evidence"]
-            copied["abstained"] = depth_evidence.get("abstained")
-            copied["abstention_reason"] = depth_evidence.get("abstention_reason")
-            query = next(
-                item for item in corpus["queries"] if item["query_id"] == copied["query_id"]
-            )
-            copied["abstention_contract_valid"] = (
-                not copied["abstained"]
-                if query["answerability"] == "answerable"
-                else copied["abstained"]
-                and copied["abstention_reason"] == query["allowed_abstention_reason"]
-            )
-            ranked = [
-                ScoredCandidate(candidates[item["evidence_id"]], 0.0)
-                for item in copied["ranked_evidence"]
-                if item["evidence_id"] in candidates
-            ]
-            copied["ranked_parents"] = _expand_parents(ranked)
-            depth_traces.append(copied)
-        claimed = report["reranker"]["depth_metrics"][depth_key]
-        warm_p95 = _resource_measurements(
-            query_latencies,
-            build_time_ms=0,
-            chunk_count=0,
-            index_size_bytes=0,
-            peak_rss_bytes=None,
-            peak_rss_status="shared-run-level",
-        )["warm_latency_p95_ms"]
-        _metrics_match(claimed["inference_latencies_ms"], inference_latencies, "reranker timing")
-        _metrics_match(claimed["duration_ms"], sum(inference_latencies), "reranker duration")
-        _metrics_match(claimed["warm_latency_p95_ms"], warm_p95, "reranker warm p95")
-        synthetic = dict(
-            report,
-            traces=depth_traces,
-            overall=claimed["overall"],
-            slices=claimed["slices"],
-            macro_average={
-                metric: macro_average(claimed["slices"], metric)
-                for metric in EFFECTIVENESS_FIELDS
-            },
-        )
-        recomputed[depth_key] = _recompute_report_metrics(corpus, synthetic)
-    return recomputed
+    return {
+        str(depth): _recomputed_depth(corpus, report, depth, candidates)
+        for depth in report["reranker"]["depths"]
+    }
 
 
 def _selection_report_gates(matrix: dict, report: dict, embedding: dict, reranker: dict | None):
