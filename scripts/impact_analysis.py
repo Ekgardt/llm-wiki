@@ -735,14 +735,22 @@ def _require_symbol_ceiling(symbols: dict, bounds: ImpactLimits) -> None:
         raise ValueError("changed symbol ceiling exceeded")
 
 
+def _range_sides(changes: list[dict]) -> list[tuple[dict, dict, str]]:
+    """Every (change, hunk, side) the mapping visits, in diff order."""
+    return [
+        (change, changed_range, side)
+        for change in changes
+        for changed_range in change["ranges"]
+        for side in ("old", "new")
+    ]
+
+
 def _map_symbols(graph, changes: list[dict], bounds: ImpactLimits, deadline: float) -> list[dict]:
     symbols: dict[str, dict] = {}
-    for change in changes:
-        for changed_range in change["ranges"]:
-            for side in ("old", "new"):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("impact analysis deadline reached")
-                _map_side(graph, symbols, change, changed_range, side, bounds, deadline)
+    for change, changed_range, side in _range_sides(changes):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("impact analysis deadline reached")
+        _map_side(graph, symbols, change, changed_range, side, bounds, deadline)
     return sorted(symbols.values(), key=lambda item: (item["path"], item["name"], item["node_id"]))
 
 
