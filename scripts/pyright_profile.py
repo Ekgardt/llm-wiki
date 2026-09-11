@@ -63,6 +63,10 @@ def thaw_pyright_profile_value(value: object) -> object:
     """Return a mutable JSON-domain copy of an immutable profile value."""
     if isinstance(value, Mapping):
         return _thaw_mapping(value)
+    return _thaw_non_mapping(value)
+
+
+def _thaw_non_mapping(value: object) -> object:
     if isinstance(value, tuple):
         return _thaw_tuple(value)
     if value is None or isinstance(value, (bool, int, str)):
@@ -362,6 +366,9 @@ class _CommentStripper:
         if self.escaped:
             self.escaped = False
             return
+        self._unescaped_string_character(character)
+
+    def _unescaped_string_character(self, character: str) -> None:
         if character == "\\":
             self.escaped = True
             return
@@ -374,6 +381,9 @@ class _CommentStripper:
             self._advance_string_state(character)
             self._keep(character)
             return
+        self._step_outside_string(character)
+
+    def _step_outside_string(self, character: str) -> None:
         if character == '"':
             self.in_string = True
             self._keep(character)
@@ -434,6 +444,9 @@ class _TrailingCommaPass:
         if self.escaped:
             self.escaped = False
             return
+        self._unescaped_string_character(character)
+
+    def _unescaped_string_character(self, character: str) -> None:
         if character == "\\":
             self.escaped = True
             return
@@ -463,6 +476,9 @@ class _TrailingCommaPass:
             self.previous = character
             self.in_string = True
             return
+        self._step_outside_string(index, character)
+
+    def _step_outside_string(self, index: int, character: str) -> None:
         if character == ",":
             self._comma(index)
             return
@@ -526,6 +542,10 @@ def _domain_children(item: object, prefix: str) -> tuple | None:
     """The children of a container; None for a scalar; a refusal for anything else."""
     if item is None or isinstance(item, (bool, int, str)):
         return None
+    return _container_children(item, prefix)
+
+
+def _container_children(item: object, prefix: str) -> tuple:
     if isinstance(item, dict):
         return _object_children(item, prefix)
     if isinstance(item, list):
@@ -738,16 +758,20 @@ def _record_configuration(
     )
 
 
+def _require_extends(chain: _ConfigChain, extends: object) -> None:
+    if not isinstance(extends, str):
+        raise _MetadataError("pyright_repository_config_extends_invalid")
+    if len(chain.configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
+        raise _MetadataError("pyright_repository_config_extends_too_deep")
+
+
 def _next_extends(
     chain: _ConfigChain, configuration: dict, current: Path, repository_root: Path
 ) -> Path | None:
     extends = configuration.get("extends")
     if extends is None:
         return None
-    if not isinstance(extends, str):
-        raise _MetadataError("pyright_repository_config_extends_invalid")
-    if len(chain.configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
-        raise _MetadataError("pyright_repository_config_extends_too_deep")
+    _require_extends(chain, extends)
     return _contained_repository_config_path(
         extends, current=current, repository_root=repository_root
     )
@@ -853,7 +877,10 @@ def _lockfile_entries(value: dict, lockfile_version: int) -> tuple[object, str] 
 def _pyright_lockfile_entry(entries: object, key: str) -> dict | str:
     if not isinstance(entries, dict):
         return "pyright_lockfile_malformed"
-    entry = entries.get(key)
+    return _lockfile_entry_or_code(entries.get(key))
+
+
+def _lockfile_entry_or_code(entry: object) -> dict | str:
     if not isinstance(entry, dict):
         return "pyright_lockfile_entry_missing"
     if "link" in entry:
@@ -1167,12 +1194,17 @@ def _located_node(deadline: float | None) -> tuple[dict[str, str] | None, Path |
     return environment, node, code
 
 
+def _probe_deadline(now: float, deadline: float | None) -> float:
+    probe_deadline = now + NODE_PROBE_TIMEOUT_SECONDS
+    if deadline is not None:
+        return min(probe_deadline, deadline)
+    return probe_deadline
+
+
 def _probe_window(deadline: float | None) -> tuple[float, float] | None:
     """(probe deadline, hard cleanup deadline), or None when no time is left."""
     now = time.monotonic()
-    probe_deadline = now + NODE_PROBE_TIMEOUT_SECONDS
-    if deadline is not None:
-        probe_deadline = min(probe_deadline, deadline)
+    probe_deadline = _probe_deadline(now, deadline)
     if probe_deadline - now <= 0:
         return None
     hard_cleanup_deadline = probe_deadline + NODE_PROBE_CLEANUP_SECONDS
@@ -1367,6 +1399,12 @@ def _probe_node(
     window = _probe_window(deadline)
     if window is None:
         return node, None, None, {"pyright_node_probe_timeout"}
+    return _probe_in_window(node, environment, window)
+
+
+def _probe_in_window(
+    node: Path | None, environment: dict, window: tuple[float, float]
+) -> tuple[Path | None, str | None, int | None, set[str]]:
     owner = _reserve_node_probe_owner()
     if owner is None:
         return node, None, None, {"pyright_node_probe_failed"}
@@ -1448,12 +1486,18 @@ def _candidate_is_present(
     exists, code = _candidate_exists(server, deadline)
     if exists:
         return True, code
+    return _expected_evidence_present(source, server, repository, state_root, deadline), None
+
+
+def _expected_evidence_present(
+    source: str, server: Path, repository: RepositoryScope, state_root: Path, deadline: float | None
+) -> bool:
     expected = _expected_source_server(source, repository, state_root)
     if expected is None or server != expected:
-        return False, None
+        return False
     if source == "project-local":
-        return _project_local_evidence_present(server, repository, deadline), None
-    return _managed_evidence_present(server, deadline), None
+        return _project_local_evidence_present(server, repository, deadline)
+    return _managed_evidence_present(server, deadline)
 
 
 def _is_path_tuple(values: object) -> bool:
@@ -1575,10 +1619,14 @@ def _target_matches(target: Path | None, expected: Path) -> bool:
     return target == expected
 
 
-def _symlink_result(candidate: Path, deadline: float | None) -> tuple[Path | None, set[str], bool]:
+def _pyright_symlink_expected(candidate: Path) -> Path | None:
     if not _symlink_is_pyright(candidate):
-        return None, _mismatch(), False
-    expected = _symlink_expected_server(candidate)
+        return None
+    return _symlink_expected_server(candidate)
+
+
+def _symlink_result(candidate: Path, deadline: float | None) -> tuple[Path | None, set[str], bool]:
+    expected = _pyright_symlink_expected(candidate)
     if expected is None:
         return None, _mismatch(), False
     target = _resolved_symlink_target(candidate, deadline)
@@ -1595,6 +1643,10 @@ def _system_candidate_server(
         return None, _mismatch(), True
     if _is_node_modules_server(candidate):
         return candidate, set(), False
+    return _named_system_server(candidate, deadline)
+
+
+def _named_system_server(candidate: Path, deadline: float | None) -> tuple[Path | None, set[str], bool]:
     if candidate.name.casefold() == "pyright-langserver.cmd":
         return _cmd_shim_result(candidate)
     if candidate.name != "pyright-langserver":
@@ -1630,6 +1682,12 @@ def _normalize_candidate(
 ) -> tuple[Path | None, set[str], bool]:
     if source == "system":
         return _system_candidate(candidate, repository, state_root, deadline)
+    return _fixed_source_candidate(source, candidate, repository, state_root)
+
+
+def _fixed_source_candidate(
+    source: str, candidate: Path, repository: RepositoryScope, state_root: Path
+) -> tuple[Path | None, set[str], bool]:
     expected = _expected_source_server(source, repository, state_root)
     if expected is None:
         raise AssertionError(f"unsupported Pyright source: {source}")
@@ -1671,6 +1729,17 @@ def _normalized_candidate_is_present(
         return True, None
     if server is None:
         return _candidate_exists(candidate, deadline)
+    return _server_is_present(source, candidate, server, repository, state_root, deadline)
+
+
+def _server_is_present(
+    source: str,
+    candidate: Path,
+    server: Path,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[bool, str | None]:
     if source != "system":
         return _candidate_is_present(source, server, repository, state_root, deadline)
     return _system_candidate_present(candidate, server, repository, deadline)
@@ -1835,6 +1904,13 @@ def _first_present_candidate(
     return None
 
 
+def _require_discovery_arguments(repository: object, state_root: object) -> None:
+    if not isinstance(repository, RepositoryScope):
+        raise TypeError("repository must be a RepositoryScope")
+    if not isinstance(state_root, Path):
+        raise TypeError("state_root must be a Path")
+
+
 def discover_pyright(
     repository: RepositoryScope,
     *,
@@ -1843,10 +1919,7 @@ def discover_pyright(
     deadline: float | None = None,
 ) -> PyrightIdentity:
     """Discover one candidate by fixed precedence without mutation or installation."""
-    if not isinstance(repository, RepositoryScope):
-        raise TypeError("repository must be a RepositoryScope")
-    if not isinstance(state_root, Path):
-        raise TypeError("state_root must be a Path")
+    _require_discovery_arguments(repository, state_root)
     deadline = _validated_deadline(deadline)
     _check_deadline(deadline)
     configuration_sha256, profile_codes = _repository_configuration_identity(
