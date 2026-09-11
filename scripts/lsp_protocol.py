@@ -338,6 +338,10 @@ def _scalar_is_done(walk: _JsonWalk, current: object) -> bool:
         walk.count_string(current)
         return True
     _require_finite_number(current)
+    return _non_string_scalar(current)
+
+
+def _non_string_scalar(current: object) -> bool:
     if current is None or isinstance(current, (bool, int, float)):
         return True
     if not isinstance(current, (dict, list)):
@@ -384,6 +388,10 @@ def _validate_error(value: object) -> None:
         raise ProtocolViolation("response error must be an object")
     if not _error_shape_is_valid(value):
         raise ProtocolViolation("response error has invalid shape")
+    _validate_error_fields(value)
+
+
+def _validate_error_fields(value: dict) -> None:
     if not _valid_error_code(value["code"]):
         raise ProtocolViolation("response error code is invalid")
     if not isinstance(value["message"], str):
@@ -427,6 +435,10 @@ def _validate_message(value: object) -> dict[str, Any]:
         raise ProtocolViolation("JSON-RPC batches and scalar messages are not supported")
     if value.get("jsonrpc") != "2.0":
         raise ProtocolViolation("JSON-RPC version must be 2.0")
+    return _validate_by_role(value)
+
+
+def _validate_by_role(value: dict[str, Any]) -> dict[str, Any]:
     if "method" in value:
         return _validate_request(value)
     return _validate_response(value)
@@ -502,12 +514,16 @@ def _content_length_text_is_valid(length_text: str | None) -> bool:
     return length_text.isascii() and length_text.isdecimal()
 
 
-def _content_length(headers: dict[str, str]) -> int:
-    length_text = headers.get("content-length")
+def _require_length_text(length_text: str | None) -> None:
     if not _content_length_text_is_valid(length_text):
         raise ProtocolViolation("Content-Length is missing or invalid")
     if len(length_text) > len(str(MAX_FRAME_BYTES)):
         raise ProtocolViolation("Content-Length exceeds the frame limit")
+
+
+def _content_length(headers: dict[str, str]) -> int:
+    length_text = headers.get("content-length")
+    _require_length_text(length_text)
     length = int(length_text)
     if length > MAX_FRAME_BYTES:
         raise ProtocolViolation("LSP frame exceeds 8 MiB")
@@ -523,7 +539,10 @@ def _require_content_type(headers: dict[str, str]) -> None:
     content_type = headers.get("content-type")
     if content_type is None:
         return
-    media_type, parameters = _content_type_parts(content_type)
+    _require_media_type(*_content_type_parts(content_type))
+
+
+def _require_media_type(media_type: str, parameters: list[str]) -> None:
     if media_type != "application/vscode-jsonrpc":
         raise ProtocolViolation("unsupported LSP content type")
     if parameters not in ([], ["charset=utf-8"], ["charset=utf8"]):
@@ -641,9 +660,28 @@ def _scrubbed_secondary(secondary: BaseException | None, interruption) -> BaseEx
     return secondary
 
 
-def _detach_self_links(interruption: BaseException) -> None:
+def _drop_self_cause(interruption: BaseException) -> None:
     if _exception_reaches(interruption.__cause__, interruption):
         interruption.__cause__ = None
+
+
+def _response_value(pending: PendingRequest) -> object:
+    if pending.error is not None:
+        raise JsonRpcResponseError(pending.error)
+    return pending.result
+
+
+def _require_not_cancelled_or_late(
+    method: str, deadline: float, cancelled_at: float | None, now: float
+) -> None:
+    if cancelled_at is not None and cancelled_at <= deadline:
+        raise RequestCancelled(f"LSP request cancelled: {method}")
+    if now >= deadline:
+        raise TimeoutError(f"LSP request timed out: {method}")
+
+
+def _detach_self_links(interruption: BaseException) -> None:
+    _drop_self_cause(interruption)
     if _exception_reaches(interruption.__context__, interruption):
         interruption.__context__ = None
     if interruption.__cause__ is not None:
@@ -1082,12 +1120,7 @@ class LspProtocol:
     def _require_request_admissible_locked(
         self, method: str, deadline: float, cancellation: CancellationToken | None
     ) -> None:
-        cancelled_at = _cancelled_at(cancellation)
-        now = time.monotonic()
-        if cancelled_at is not None and cancelled_at <= deadline:
-            raise RequestCancelled(f"LSP request cancelled: {method}")
-        if now >= deadline:
-            raise TimeoutError(f"LSP request timed out: {method}")
+        _require_not_cancelled_or_late(method, deadline, _cancelled_at(cancellation), time.monotonic())
         if len(self._pending) >= MAX_PENDING_REQUESTS:
             raise PendingRequestLimitExceeded("at most 32 LSP requests may be active")
 
@@ -1147,9 +1180,7 @@ class LspProtocol:
         if outcome == "timed_out":
             self._raise_timed_out(pending, method)
         _raise_terminal_outcome(pending, outcome)
-        if pending.error is not None:
-            raise JsonRpcResponseError(pending.error)
-        return pending.result
+        return _response_value(pending)
 
     def request(
         self,
@@ -1402,12 +1433,22 @@ class LspProtocol:
     def _process_write_task(self, task: _WriteTask) -> bool:
         """Write one dequeued task; False when the writer loop must end."""
         stopped, skip_request, request_method = self._take_task_locked(task)
+        dequeued = self._dequeued_outcome(task, stopped, skip_request)
+        if dequeued is not None:
+            return dequeued
+        return self._write_live_task(task, request_method)
+
+    def _dequeued_outcome(self, task: _WriteTask, stopped: bool, skip_request: bool) -> bool | None:
+        """The loop's answer for a task that must not be written, or None to write it."""
         if stopped:
             self._complete_write(task, ProtocolViolation("LSP protocol stopped"))
             return False
         if skip_request:
             self._complete_write(task, None)
             return True
+        return None
+
+    def _write_live_task(self, task: _WriteTask, request_method: str | None) -> bool:
         outcome = self._write_deadline_outcome(
             task, time.monotonic() >= task.deadline, "LSP write deadline expired"
         )
@@ -1476,13 +1517,18 @@ class LspProtocol:
         with self._state_lock:
             if key in self._responded_keys:
                 return ProtocolViolation("duplicate active response ID")
-            pending = self._pending.get(key)
-            if pending is None:
-                return None
-            violation = self._store_response_locked(pending, message)
-            if violation is None:
-                self._settle_response_locked(key, pending)
-            return violation
+            return self._accept_pending_locked(key, message)
+
+    def _accept_pending_locked(
+        self, key: tuple[str, int], message: dict[str, Any]
+    ) -> ProtocolViolation | None:
+        pending = self._pending.get(key)
+        if pending is None:
+            return None
+        violation = self._store_response_locked(pending, message)
+        if violation is None:
+            self._settle_response_locked(key, pending)
+        return violation
 
     def _handle_response(self, message: dict[str, Any], generation_nonce: str) -> None:
         response_id = message["id"]
@@ -1562,7 +1608,9 @@ class LspProtocol:
         if method not in SERVER_NOTIFICATIONS:
             self._warn_unknown_notification()
             return
-        params = message.get("params")
+        self._dispatch_known_notification(method, message.get("params"))
+
+    def _dispatch_known_notification(self, method: str, params: object) -> None:
         if method == "textDocument/publishDiagnostics" and not self._diagnostics_are_bounded(params):
             return
         handler = self._server_notification_handlers.get(method)
@@ -1579,6 +1627,11 @@ class LspProtocol:
     ) -> None:
         if pending.terminal is not None:
             return
+        self._commit_expired_locked(key, pending, now, source)
+
+    def _commit_expired_locked(
+        self, key: tuple[str, int], pending: PendingRequest, now: float, source: str
+    ) -> None:
         cancelled_at = _effective_cancellation(pending, now)
         if cancelled_at is not None:
             self._commit_local_locked(key, pending, "cancelled", cancelled_at, source)
@@ -1707,6 +1760,12 @@ class LspProtocol:
         if task.error is not None:
             self._raise_write_failure(task.error)
 
+    def _write_task(self, message: object, deadline: float) -> _WriteTask:
+        frame = encode_frame(message)
+        if time.monotonic() >= deadline:
+            self._raise_write_timeout("LSP write deadline expired")
+        return _WriteTask(frame, deadline, threading.Event())
+
     def _write_message(
         self,
         message: object,
@@ -1716,10 +1775,7 @@ class LspProtocol:
     ) -> None:
         if deadline is None:
             deadline = time.monotonic() + _INTERNAL_WRITE_SECONDS
-        frame = encode_frame(message)
-        if time.monotonic() >= deadline:
-            self._raise_write_timeout("LSP write deadline expired")
-        task = _WriteTask(frame, deadline, threading.Event())
+        task = self._write_task(message, deadline)
         self._enqueue_or_fail(task)
         if wait:
             self._await_write(task, deadline)
@@ -1862,6 +1918,9 @@ class LspProtocol:
         if _owner_never_started(owner):
             self._release_and_raise(name)
             return
+        self._join_started_owner(owner, name, deadline)
+
+    def _join_started_owner(self, owner: threading.Thread, name: str, deadline: float) -> None:
         remaining = deadline - time.monotonic()
         if remaining > 0:
             owner.join(remaining)
