@@ -96,6 +96,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`compile_memory` imports its lock module once.** Two per-call
+  `sys.path.insert` grew the import path on every compile-lock check
+  (audit M10).
 - **A skipped night and a failed adoption say why.** The doctor's stale
   nightly message names the last pass's skip reason when the skip is newer
   than the last run; `install.sh` keeps the V3 adoption's stderr in

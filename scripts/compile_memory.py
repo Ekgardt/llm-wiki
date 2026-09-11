@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import maybe_compile  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
@@ -4031,9 +4032,6 @@ def _lock_owner(lines: list[str]) -> str:
 
 def _own_placeholder(owner: str) -> bool:
     """Only a matching owner token proves we wrote the PID-0 placeholder."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import maybe_compile
-
     return bool(owner) and owner == maybe_compile._current_owner
 
 
@@ -4086,9 +4084,6 @@ def _acquire_compile_lock() -> tuple[bool | None, str]:
     Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import maybe_compile
-
         if maybe_compile._try_claim_lock():
             return (_claim_direct_lock(maybe_compile), "claimed")
         if _spawned_lock_is_ours(maybe_compile):
@@ -4117,8 +4112,6 @@ def _release_compile_lock(lock_acquired: bool) -> None:
     if not lock_acquired:
         return
     try:
-        import maybe_compile
-
         maybe_compile._clear_lock()
     except Exception as exc:  # noqa: BLE001 - reported, never hidden
         print(f"compile_memory: compile lock not released ({exc})", file=sys.stderr)

@@ -254,6 +254,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   and delete the GiB constants, or name them "absurdity ceiling" in code.
 
 ### M9 — Tests that assert on the clock [defect]
+- Status: open — the two `claims` cases observe a worker blocked inside the product's lock and have no event to wait on without a product hook; recorded as the negative-wait class in `docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.
 - Rule: R4 (test reliability).
 - Evidence: `tests/test_search_ranking.py:624-625` (`time.sleep(0.1);
   assert not freshness.done()`), `tests/test_claims.py:393-394, 435-436`
@@ -269,6 +270,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   claims tests already do for the first half.
 
 ### M10 — `sys.path.insert(0, …)` inside functions, on every call [defect]
+- Status: fixed 2026-09-11 — `compile_memory` imports `maybe_compile` once at module top; the two `search_memory` sites went with H1.
 - Rule: R4 (hidden global state).
 - Evidence: `scripts/compile_memory.py:4023, 4079`;
   `scripts/search_memory.py:2048, 5472` (the last two are inside the dead
