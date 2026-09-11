@@ -908,23 +908,36 @@ class TestFormatForAdvisory:
         assert "7 more" in result
 
 
-def test_a_git_warning_on_stderr_is_not_a_diff_record(tmp_path, monkeypatch):
-    """A Windows checkout with core.autocrlf=true warns on stderr and exits 0;
-    the `-z` record stream must still parse (PR30 runs of 2026-09-10/11)."""
+def _autocrlf_checkout(root: Path) -> Path:
+    """A real repository whose committed file was rewritten with LF endings
+    under core.autocrlf=true, so every diff warns on stderr and exits 0."""
+    def git(*arguments: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *arguments],
+            cwd=root, capture_output=True, check=True,
+        )
+
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "core.py").write_bytes(b"a\n")
+    git("init", "-q")
+    git("config", "core.autocrlf", "true")
+    git("add", ".")
+    git("commit", "-q", "-m", "init")
+    (root / "pkg" / "core.py").write_bytes(b"a\nb\n")
+    return root
+
+
+def test_a_git_warning_on_stderr_is_not_a_diff_record(tmp_path):
+    """A checkout with core.autocrlf=true warns on stderr and exits 0; the
+    `-z` record stream must still parse (PR30 runs of 2026-09-10/11). Real Git
+    in a real repository, so the split is exercised on every platform."""
     import impact_analysis
 
-    fake_git = tmp_path / "git"
-    fake_git.write_text(
-        "#!/bin/sh\n"
-        "echo 'warning: in the working copy of pkg/core.py, LF will be replaced by CRLF' >&2\n"
-        "printf ':100644 100644 %s %s M\\0pkg/core.py\\0' "
-        "0000000000000000000000000000000000000001 0000000000000000000000000000000000000002\n",
-        encoding="utf-8",
-    )
-    fake_git.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    root = _autocrlf_checkout(tmp_path / "repository")
+    warning = subprocess.run(["git", "diff", "--raw", "-z"], cwd=root, capture_output=True, check=True)
 
-    raw = impact_analysis._git(tmp_path, ["diff", "--raw", "-z"], deadline=time.monotonic() + 30, max_bytes=1 << 20)
+    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + 30, max_bytes=1 << 20)
     records = impact_analysis._parse_raw_records(raw, "dirty")
 
+    assert b"LF will be replaced by CRLF" in warning.stderr
     assert [(r["status"], r["new_path"]) for r in records] == [("M", "pkg/core.py")]
