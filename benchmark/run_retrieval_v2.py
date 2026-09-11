@@ -1437,6 +1437,54 @@ def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
     }
 
 
+
+_OWNED_INDEX_FLAGS = (
+    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+)
+_INJECTED_SEGMENTER_RUNTIME = {
+    "provenance": "injected-test",
+    "quality_evidence": False,
+    "version": None,
+    "dictionary_sha256": None,
+}
+_SEGMENTATION_END = object()
+
+
+def _require_lexical_arguments(lexical_config: str, deadline_seconds: float) -> None:
+    if lexical_config not in LEXICAL_CONFIGURATIONS:
+        raise ValueError(f"unknown lexical configuration: {lexical_config}")
+    if deadline_seconds <= 0:
+        raise ValueError("lexical deadline must be positive")
+
+
+def _candidate_maps(candidates: Sequence[Candidate]) -> tuple[dict[str, Candidate], dict[str, Candidate]]:
+    normalized_ids = [_normalized_id(candidate.evidence_id) for candidate in candidates]
+    if len(normalized_ids) != len(set(normalized_ids)):
+        raise ValueError("duplicate normalized candidate id")
+    by_id = {candidate.evidence_id: candidate for candidate in candidates}
+    universe = {_normalized_id(candidate.evidence_id): candidate for candidate in candidates}
+    return by_id, universe
+
+
+def _prepared_lexical_root(requested_root: Path) -> Path:
+    if requested_root.exists() and _is_reparse_point(requested_root):
+        raise ValueError("lexical cache root must not be a symlink or reparse point")
+    requested_root.mkdir(parents=True, exist_ok=True)
+    if _is_reparse_point(requested_root):
+        raise ValueError("lexical cache root must not be a symlink or reparse point")
+    return _validate_cache_root(requested_root).resolve(strict=True)
+
+
+def _next_segment(iterator) -> object:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _SEGMENTATION_END
+    except Exception as exc:
+        raise ValueError(f"segmentation failed: {exc}") from exc
+
+
+
 class SQLiteLexicalAdapter:
     kind = "sqlite-fts5-bm25"
 
@@ -1450,65 +1498,41 @@ class SQLiteLexicalAdapter:
         deadline_seconds: float = DEFAULT_LEXICAL_DEADLINE_SECONDS,
         deadline: float | None = None,
     ) -> None:
-        if lexical_config not in LEXICAL_CONFIGURATIONS:
-            raise ValueError(f"unknown lexical configuration: {lexical_config}")
-        if deadline_seconds <= 0:
-            raise ValueError("lexical deadline must be positive")
+        _require_lexical_arguments(lexical_config, deadline_seconds)
         self.configuration = LEXICAL_CONFIGURATIONS[lexical_config]
-        normalized_ids = [_normalized_id(candidate.evidence_id) for candidate in candidates]
-        if len(normalized_ids) != len(set(normalized_ids)):
-            raise ValueError("duplicate normalized candidate id")
-        self._candidates = {candidate.evidence_id: candidate for candidate in candidates}
-        self._candidate_universe = {
-            _normalized_id(candidate.evidence_id): candidate for candidate in candidates
-        }
-        requested_root = Path(cache_root)
-        if requested_root.exists() and _is_reparse_point(requested_root):
-            raise ValueError("lexical cache root must not be a symlink or reparse point")
-        requested_root.mkdir(parents=True, exist_ok=True)
-        if _is_reparse_point(requested_root):
-            raise ValueError("lexical cache root must not be a symlink or reparse point")
-        self._root = _validate_cache_root(requested_root).resolve(strict=True)
+        self._candidates, self._candidate_universe = _candidate_maps(candidates)
+        self._root = _prepared_lexical_root(Path(cache_root))
         self._root_identity = self._root.stat(follow_symlinks=False)
         self.path = self._root / f"lexical-{lexical_config}.sqlite3"
         self._deadline = deadline or time.perf_counter() + deadline_seconds
-        self._jieba = None
-        self.segmentation_runtime = None
-        if self.configuration["segmentation"] is not None:
-            if test_segmenter is not None:
-                if not callable(getattr(test_segmenter, "cut", None)):
-                    raise ValueError("test segmenter has no callable cut function")
-                self._jieba = test_segmenter
-                self.segmentation_runtime = {
-                    "provenance": "injected-test",
-                    "quality_evidence": False,
-                    "version": None,
-                    "dictionary_sha256": None,
-                }
-            else:
-                self._jieba, self.segmentation_runtime = _load_pinned_jieba(self._root)
-        flags = (
-            os.O_RDWR
-            | os.O_CREAT
-            | os.O_EXCL
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_BINARY", 0)
-        )
-        self._descriptor = os.open(self.path, flags, 0o600)
+        self._jieba, self.segmentation_runtime = self._segmenter(test_segmenter)
+        self._descriptor = os.open(self.path, _OWNED_INDEX_FLAGS, 0o600)
         self._file_identity = os.fstat(self._descriptor)
         self._connection: sqlite3.Connection | None = None
         self._closed = False
         try:
-            self._check_deadline()
-            self._connection = self._connect_owned_file()
-            self._connection.set_progress_handler(self._progress_handler, 1000)
-            self._connection.execute("PRAGMA journal_mode=DELETE")
-            self._connection.execute("PRAGMA synchronous=FULL")
-            self._build(candidates)
-            self._check_owned_identity()
+            self._initialize(candidates)
         except BaseException:
             self._cleanup(remove=True)
             raise
+
+    def _segmenter(self, test_segmenter) -> tuple[object | None, dict | None]:
+        if self.configuration["segmentation"] is None:
+            return None, None
+        if test_segmenter is None:
+            return _load_pinned_jieba(self._root)
+        if not callable(getattr(test_segmenter, "cut", None)):
+            raise ValueError("test segmenter has no callable cut function")
+        return test_segmenter, dict(_INJECTED_SEGMENTER_RUNTIME)
+
+    def _initialize(self, candidates: Sequence[Candidate]) -> None:
+        self._check_deadline()
+        self._connection = self._connect_owned_file()
+        self._connection.set_progress_handler(self._progress_handler, 1000)
+        self._connection.execute("PRAGMA journal_mode=DELETE")
+        self._connection.execute("PRAGMA synchronous=FULL")
+        self._build(candidates)
+        self._check_owned_identity()
 
     def _check_deadline(self) -> None:
         if time.perf_counter() >= self._deadline:
@@ -1588,24 +1612,24 @@ class SQLiteLexicalAdapter:
         self._connection.commit()
         self._check_deadline()
 
-    def _segment(self, value: str) -> str:
-        assert self._jieba is not None
-        self._check_deadline()
+    def _segmentation_iterator(self, value: str):
         if len(value) > MAX_SEGMENTATION_INPUT_CHARS:
             raise ValueError("segmentation input limit exceeded")
         try:
-            iterator = iter(self._jieba.cut(value, HMM=False))
+            return iter(self._jieba.cut(value, HMM=False))
         except Exception as exc:
             raise ValueError(f"segmentation failed: {exc}") from exc
-        tokens = []
+
+    def _segment(self, value: str) -> str:
+        assert self._jieba is not None
+        self._check_deadline()
+        iterator = self._segmentation_iterator(value)
+        tokens: list[str] = []
         while True:
             self._check_deadline()
-            try:
-                token = next(iterator)
-            except StopIteration:
+            token = _next_segment(iterator)
+            if token is _SEGMENTATION_END:
                 break
-            except Exception as exc:
-                raise ValueError(f"segmentation failed: {exc}") from exc
             normalized = str(token)
             if not normalized:
                 continue
@@ -1628,35 +1652,24 @@ class SQLiteLexicalAdapter:
         tokenizer = self.configuration["indexes"][index_name]
         return _fts5_tokens(value, tokenizer, deadline=self._deadline)
 
-    def _rank_index(
-        self,
-        index_name: str,
-        query_text: str,
-        eligible_ids: set[str],
-        *,
-        limit: int,
-    ) -> list[tuple[str, float]]:
-        assert self._connection is not None
-        self._check_deadline()
-        if not eligible_ids:
-            return []
+    def _fts_match_query(self, index_name: str, query_text: str) -> str | None:
         if index_name == "chinese_trigram":
             normalized = unicodedata.normalize("NFKC", query_text).casefold()
             if len(normalized) < 3:
-                return []
-            fts_query = f'"{normalized.replace(chr(34), chr(34) * 2)}"'
-        else:
-            terms = self._query_terms(index_name, query_text)
-            if not terms:
-                return []
-            fts_query = " OR ".join(
-                f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms
-            )
+                return None
+            return f'"{normalized.replace(chr(34), chr(34) * 2)}"'
+        terms = self._query_terms(index_name, query_text)
+        if not terms:
+            return None
+        return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+
+    def _bm25_rows(self, index_name: str, fts_query: str, eligible_ids: set[str], limit: int) -> list:
+        assert self._connection is not None
         table = f"fts_{index_name}"
         placeholders = ",".join("?" for _ in eligible_ids)
         parameters = [fts_query, *sorted(eligible_ids), limit]
         try:
-            rows = self._connection.execute(
+            return self._connection.execute(
                 f"SELECT evidence_id, bm25({table}) AS score FROM {table} "
                 f"WHERE {table} MATCH ? AND evidence_id IN ({placeholders}) "
                 "ORDER BY score ASC, evidence_id ASC LIMIT ?",
@@ -1666,6 +1679,22 @@ class SQLiteLexicalAdapter:
             if time.perf_counter() >= self._deadline:
                 raise TimeoutError("lexical benchmark absolute deadline exceeded") from exc
             raise ValueError(f"FTS5 query failed for {index_name}") from exc
+
+    def _rank_index(
+        self,
+        index_name: str,
+        query_text: str,
+        eligible_ids: set[str],
+        *,
+        limit: int,
+    ) -> list[tuple[str, float]]:
+        self._check_deadline()
+        if not eligible_ids:
+            return []
+        fts_query = self._fts_match_query(index_name, query_text)
+        if fts_query is None:
+            return []
+        rows = self._bm25_rows(index_name, fts_query, eligible_ids, limit)
         self._check_deadline()
         return [(str(evidence_id), float(score)) for evidence_id, score in rows]
 
@@ -1675,6 +1704,38 @@ class SQLiteLexicalAdapter:
         if "chinese_trigram" in indexes and len(normalized) < 3:
             indexes.remove("chinese_trigram")
         return tuple(indexes)
+
+    def _require_candidate_universe(self, candidates: Sequence[Candidate]) -> None:
+        supplied: dict[str, Candidate] = {}
+        for candidate in candidates:
+            normalized = _normalized_id(candidate.evidence_id)
+            if normalized in supplied:
+                raise ValueError("candidate universe mismatch: duplicate normalized id")
+            supplied[normalized] = candidate
+        if supplied != self._candidate_universe:
+            raise ValueError("candidate universe mismatch")
+
+    def _scored(self, rankings: dict[str, list[tuple[str, float]]], limit: int) -> list[ScoredCandidate]:
+        if self.configuration["fusion"] is not None:
+            fused = _reciprocal_rank_fusion(rankings, k=int(self.configuration["fusion"]["k"]))[:limit]
+            return [ScoredCandidate(self._candidates[evidence_id], score) for evidence_id, score in fused]
+        only_ranking = next(iter(rankings.values()), [])
+        return [
+            ScoredCandidate(self._candidates[evidence_id], -raw_bm25)
+            for evidence_id, raw_bm25 in only_ranking[:limit]
+        ]
+
+    def _ranked(
+        self, query_text: str, scope: QueryScope, candidates: Sequence[Candidate], limit: int
+    ) -> list[ScoredCandidate]:
+        self._check_deadline()
+        self._require_candidate_universe(candidates)
+        eligible_ids = {candidate.evidence_id for candidate in filter_candidates(candidates, scope)}
+        rankings = {
+            index_name: self._rank_index(index_name, query_text, eligible_ids, limit=limit)
+            for index_name in self._active_indexes(query_text)
+        }
+        return self._scored(rankings, limit)
 
     def rank(
         self,
@@ -1687,35 +1748,7 @@ class SQLiteLexicalAdapter:
     ) -> list[ScoredCandidate]:
         del language
         try:
-            self._check_deadline()
-            supplied: dict[str, Candidate] = {}
-            for candidate in candidates:
-                normalized = _normalized_id(candidate.evidence_id)
-                if normalized in supplied:
-                    raise ValueError("candidate universe mismatch: duplicate normalized id")
-                supplied[normalized] = candidate
-            if supplied != self._candidate_universe:
-                raise ValueError("candidate universe mismatch")
-            eligible_ids = {
-                candidate.evidence_id for candidate in filter_candidates(candidates, scope)
-            }
-            rankings = {
-                index_name: self._rank_index(index_name, query_text, eligible_ids, limit=limit)
-                for index_name in self._active_indexes(query_text)
-            }
-            if self.configuration["fusion"] is not None:
-                fused = _reciprocal_rank_fusion(
-                    rankings, k=int(self.configuration["fusion"]["k"])
-                )[:limit]
-                return [
-                    ScoredCandidate(self._candidates[evidence_id], score)
-                    for evidence_id, score in fused
-                ]
-            only_ranking = next(iter(rankings.values()), [])
-            return [
-                ScoredCandidate(self._candidates[evidence_id], -raw_bm25)
-                for evidence_id, raw_bm25 in only_ranking[:limit]
-            ]
+            return self._ranked(query_text, scope, candidates, limit)
         except BaseException:
             self._cleanup(remove=True)
             raise
@@ -1723,23 +1756,34 @@ class SQLiteLexicalAdapter:
     def close(self) -> None:
         self._cleanup(remove=False)
 
+    def _owns_index(self) -> bool:
+        path_owned = _same_path_identity(self.path, self._file_identity)
+        root_owned = _same_path_identity(self._root, self._root_identity)
+        return root_owned and path_owned
+
+    def _close_connection(self) -> None:
+        if self._connection is None:
+            return
+        with contextlib.suppress(sqlite3.Error):
+            self._connection.set_progress_handler(None, 0)
+        with contextlib.suppress(sqlite3.Error):
+            self._connection.close()
+        self._connection = None
+
+    def _remove_index_files(self) -> None:
+        self.path.unlink(missing_ok=True)
+        for suffix in ("-journal", "-shm", "-wal"):
+            (self._root / f"{self.path.name}{suffix}").unlink(missing_ok=True)
+
     def _cleanup(self, *, remove: bool) -> None:
         if self._closed:
             return
-        path_owned = _same_path_identity(self.path, self._file_identity)
-        root_owned = _same_path_identity(self._root, self._root_identity)
-        if self._connection is not None:
-            with contextlib.suppress(sqlite3.Error):
-                self._connection.set_progress_handler(None, 0)
-            with contextlib.suppress(sqlite3.Error):
-                self._connection.close()
-            self._connection = None
+        owned = self._owns_index()
+        self._close_connection()
         os.close(self._descriptor)
         self._closed = True
-        if remove and root_owned and path_owned:
-            self.path.unlink(missing_ok=True)
-            for suffix in ("-journal", "-shm", "-wal"):
-                (self._root / f"{self.path.name}{suffix}").unlink(missing_ok=True)
+        if remove and owned:
+            self._remove_index_files()
 
 
 class FakeEmbeddingAdapter:
@@ -1762,23 +1806,40 @@ class FakeEmbeddingAdapter:
         return sorted(scored, key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
-def _prepare_embedding_vectors(raw, *, rows: int, dimensions: int, allow_truncation: bool):
+def _numpy_or_error():
     try:
         import numpy as np
     except ImportError as exc:
         raise ValueError("model-matrix adapter requires the retrieval-benchmark extra") from exc
-    vectors = np.asarray(raw)
+    return np
+
+
+def _require_vector_rows(vectors, rows: int) -> None:
     if vectors.ndim != 2 or vectors.shape[0] != rows:
         raise ValueError("encoder returned an invalid vector matrix shape")
+
+
+def _require_vector_dimension(vectors, dimensions: int, allow_truncation: bool) -> None:
     if vectors.shape[1] < dimensions or (not allow_truncation and vectors.shape[1] != dimensions):
         raise ValueError("encoder returned an invalid vector dimension")
-    vectors = np.ascontiguousarray(vectors[:, :dimensions], dtype=np.float32)
+
+
+def _unit_rows(np, vectors):
     if not np.isfinite(vectors).all():
         raise ValueError("encoder vectors must be finite")
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     if np.any(norms == 0):
         raise ValueError("encoder vectors must have nonzero norms")
     return np.ascontiguousarray(vectors / norms, dtype=np.float32)
+
+
+def _prepare_embedding_vectors(raw, *, rows: int, dimensions: int, allow_truncation: bool):
+    np = _numpy_or_error()
+    vectors = np.asarray(raw)
+    _require_vector_rows(vectors, rows)
+    _require_vector_dimension(vectors, dimensions, allow_truncation)
+    vectors = np.ascontiguousarray(vectors[:, :dimensions], dtype=np.float32)
+    return _unit_rows(np, vectors)
 
 
 def _numpy_exact_vectors(vectors, query, limit: int):
@@ -1803,6 +1864,51 @@ def _native_usearch_search(vectors, query, limit: int, exact: bool):
     return np.asarray(matches.keys), 1.0 - np.asarray(matches.distances, dtype=np.float32)
 
 
+def _require_search_shapes(vectors, query, candidate_ids: Sequence[str]) -> None:
+    if vectors.ndim != 2 or query.ndim != 1 or vectors.shape[1] != query.shape[0]:
+        raise ValueError("vector search dimension mismatch")
+    if len(candidate_ids) != vectors.shape[0]:
+        raise ValueError("vector search candidate ID mismatch")
+
+
+def _require_finite_search_inputs(np, vectors, query) -> None:
+    if not np.isfinite(vectors).all() or not np.isfinite(query).all():
+        raise ValueError("vector search inputs must be finite")
+
+
+def _require_usearch_parity(np, keys, scores, reference) -> None:
+    reference_keys, reference_scores = reference
+    if not np.array_equal(keys, reference_keys) or not np.allclose(
+        scores, reference_scores, rtol=1e-5, atol=1e-6
+    ):
+        raise ValueError("USearch exact parity check failed")
+
+
+def _usearch_results(np, vectors, query, limit: int, backend: str, usearch_search, reference):
+    search = usearch_search or _native_usearch_search
+    keys, scores = search(vectors, query, limit, backend == "usearch-exact")
+    keys = np.asarray(keys)
+    scores = np.asarray(scores, dtype=np.float32)
+    if backend == "usearch-exact":
+        _require_usearch_parity(np, keys, scores, reference)
+    return keys, scores
+
+
+def _backend_results(np, vectors, query, limit: int, backend: str, usearch_search, reference):
+    if backend in {"usearch-exact", "usearch-hnsw"}:
+        return _usearch_results(np, vectors, query, limit, backend, usearch_search, reference)
+    if backend != "numpy-exact":
+        raise ValueError(f"unknown vector backend: {backend}")
+    return reference
+
+
+def _require_backend_results(np, keys, scores) -> None:
+    if keys.ndim != 1 or scores.ndim != 1 or len(keys) != len(scores):
+        raise ValueError("vector backend returned invalid results")
+    if not np.isfinite(scores).all():
+        raise ValueError("vector backend returned nonfinite scores")
+
+
 def _search_vectors(
     vectors,
     query,
@@ -1814,31 +1920,45 @@ def _search_vectors(
 ) -> tuple[list[str], list[float]]:
     import numpy as np
 
-    if vectors.ndim != 2 or query.ndim != 1 or vectors.shape[1] != query.shape[0]:
-        raise ValueError("vector search dimension mismatch")
-    if len(candidate_ids) != vectors.shape[0]:
-        raise ValueError("vector search candidate ID mismatch")
-    if not np.isfinite(vectors).all() or not np.isfinite(query).all():
-        raise ValueError("vector search inputs must be finite")
-    reference_keys, reference_scores = _numpy_exact_vectors(vectors, query, limit)
-    keys, scores = reference_keys, reference_scores
-    if backend in {"usearch-exact", "usearch-hnsw"}:
-        search = usearch_search or _native_usearch_search
-        keys, scores = search(vectors, query, limit, backend == "usearch-exact")
-        keys = np.asarray(keys)
-        scores = np.asarray(scores, dtype=np.float32)
-        if backend == "usearch-exact" and (
-            not np.array_equal(keys, reference_keys)
-            or not np.allclose(scores, reference_scores, rtol=1e-5, atol=1e-6)
-        ):
-            raise ValueError("USearch exact parity check failed")
-    elif backend != "numpy-exact":
-        raise ValueError(f"unknown vector backend: {backend}")
-    if keys.ndim != 1 or scores.ndim != 1 or len(keys) != len(scores):
-        raise ValueError("vector backend returned invalid results")
-    if not np.isfinite(scores).all():
-        raise ValueError("vector backend returned nonfinite scores")
+    _require_search_shapes(vectors, query, candidate_ids)
+    _require_finite_search_inputs(np, vectors, query)
+    reference = _numpy_exact_vectors(vectors, query, limit)
+    keys, scores = _backend_results(np, vectors, query, limit, backend, usearch_search, reference)
+    _require_backend_results(np, keys, scores)
     return [candidate_ids[int(key)] for key in keys], [float(score) for score in scores]
+
+
+
+def _split_encoder_signals(raw):
+    if not isinstance(raw, dict):
+        return raw, None
+    if set(raw) != {"dense_vecs", "lexical_weights"}:
+        raise ValueError("encoder returned unknown embedding signals")
+    return raw["dense_vecs"], raw["lexical_weights"]
+
+
+def _sparse_weight(token: object, weight: object) -> float:
+    value = float(weight)
+    if not isinstance(token, str) or not token or not math.isfinite(value) or value <= 0:
+        raise ValueError("learned sparse token weights must be finite and positive")
+    return value
+
+
+def _normalized_sparse_row(row: object) -> dict[str, float]:
+    if not isinstance(row, dict):
+        raise ValueError("learned sparse output must contain token-weight mappings")
+    return {token: _sparse_weight(token, weight) for token, weight in row.items()}
+
+
+def _normalized_sparse(sparse: object, model_id: str, count: int) -> list[dict[str, float]]:
+    if model_id != "BAAI/bge-m3" or not isinstance(sparse, list) or len(sparse) != count:
+        raise ValueError("learned sparse output is not valid for this embedding")
+    return [_normalized_sparse_row(row) for row in sparse]
+
+
+def _learned_sparse_bytes(document_sparse: Sequence[dict[str, float]]) -> int:
+    return sum(len(token.encode("utf-8")) + 8 for row in document_sparse for token in row)
+
 
 
 class ModelEmbeddingAdapter:
@@ -1876,12 +1996,7 @@ class ModelEmbeddingAdapter:
             padding_side=inference["padding_side"],
             truncation_side=inference["truncation_side"],
         )
-        sparse = None
-        if isinstance(raw, dict):
-            if set(raw) != {"dense_vecs", "lexical_weights"}:
-                raise ValueError("encoder returned unknown embedding signals")
-            sparse = raw["lexical_weights"]
-            raw = raw["dense_vecs"]
+        raw, sparse = _split_encoder_signals(raw)
         vectors = _prepare_embedding_vectors(
             raw,
             rows=len(texts),
@@ -1889,20 +2004,7 @@ class ModelEmbeddingAdapter:
             allow_truncation=self.selection.variant["mrl"]["enabled"],
         )
         if sparse is not None:
-            if model["id"] != "BAAI/bge-m3" or not isinstance(sparse, list) or len(sparse) != len(texts):
-                raise ValueError("learned sparse output is not valid for this embedding")
-            normalized = []
-            for row in sparse:
-                if not isinstance(row, dict):
-                    raise ValueError("learned sparse output must contain token-weight mappings")
-                values = {}
-                for token, weight in row.items():
-                    value = float(weight)
-                    if not isinstance(token, str) or not token or not math.isfinite(value) or value <= 0:
-                        raise ValueError("learned sparse token weights must be finite and positive")
-                    values[token] = value
-                normalized.append(values)
-            sparse = normalized
+            sparse = _normalized_sparse(sparse, model["id"], len(texts))
         return vectors, sparse
 
     def _encode(self, texts: Sequence[str]):
@@ -1912,20 +2014,19 @@ class ModelEmbeddingAdapter:
         formatting = self.selection.embedding["formatting"]
         return formatting[field].format(text=text, instruction=formatting["instruction"])
 
+    def _index_documents(self, candidates: Sequence[Candidate]) -> None:
+        self._candidate_ids = tuple(candidate.evidence_id for candidate in candidates)
+        self._candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
+        documents = [self._format(_candidate_text(candidate), "document") for candidate in candidates]
+        self.document_vectors, self.document_sparse = self._encode_signals(documents)
+        if self.document_sparse is not None:
+            self.learned_sparse_bytes = _learned_sparse_bytes(self.document_sparse)
+
     def _ensure_documents(self, candidates: Sequence[Candidate]) -> None:
-        ids = tuple(candidate.evidence_id for candidate in candidates)
         if self._candidate_ids is None:
-            self._candidate_ids = ids
-            self._candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
-            documents = [self._format(_candidate_text(candidate), "document") for candidate in candidates]
-            self.document_vectors, self.document_sparse = self._encode_signals(documents)
-            if self.document_sparse is not None:
-                self.learned_sparse_bytes = sum(
-                    len(token.encode("utf-8")) + 8
-                    for row in self.document_sparse
-                    for token in row
-                )
-        elif ids != self._candidate_ids:
+            self._index_documents(candidates)
+            return
+        if tuple(candidate.evidence_id for candidate in candidates) != self._candidate_ids:
             raise ValueError("dense candidate universe mismatch")
 
     def prepare_queries(self, query_texts: Sequence[str]) -> None:
@@ -1935,6 +2036,51 @@ class ModelEmbeddingAdapter:
         if sparse is not None:
             self._query_sparse.update(zip(formatted, sparse))
 
+    def _query_signals(self, formatted_query: str):
+        query_vector = self._query_vectors.get(formatted_query)
+        if query_vector is not None:
+            return query_vector, self._query_sparse.get(formatted_query)
+        vectors, sparse = self._encode_signals([formatted_query])
+        if sparse is None:
+            return vectors[0], None
+        return vectors[0], sparse[0]
+
+    def _eligible_positions(self, candidates: Sequence[Candidate], scope: QueryScope):
+        import numpy as np
+
+        eligible_ids = {item.evidence_id for item in filter_candidates(candidates, scope)}
+        indexes = np.asarray(
+            [index for index, evidence_id in enumerate(self._candidate_ids) if evidence_id in eligible_ids],
+            dtype=np.int64,
+        )
+        ids = tuple(self._candidate_ids[int(index)] for index in indexes)
+        return indexes, ids
+
+    def _dense_ranking(self, query_vector, indexes, ids: tuple[str, ...], limit: int) -> list[ScoredCandidate]:
+        assert self.document_vectors is not None
+        ranked_ids, scores = _search_vectors(
+            self.document_vectors[indexes],
+            query_vector,
+            ids,
+            min(limit, len(ids)),
+            backend=self.vector_backend,
+            usearch_search=self._usearch_search,
+        )
+        return [
+            ScoredCandidate(self._candidate_by_id[evidence_id], score)
+            for evidence_id, score in zip(ranked_ids, scores)
+        ]
+
+    def _sparse_ranking(self, query_sparse: dict, indexes, ids: tuple[str, ...], limit: int) -> list[ScoredCandidate]:
+        sparse_ranked = []
+        for index, evidence_id in zip(indexes, ids):
+            document = self.document_sparse[int(index)]
+            score = sum(weight * document.get(token, 0.0) for token, weight in query_sparse.items())
+            if score > 0:
+                sparse_ranked.append(ScoredCandidate(self._candidate_by_id[evidence_id], score))
+        sparse_ranked.sort(key=lambda item: (-item.score, item.evidence_id))
+        return sparse_ranked[:limit]
+
     def rank(
         self,
         query_text: str,
@@ -1943,51 +2089,18 @@ class ModelEmbeddingAdapter:
         *,
         limit: int,
     ) -> list[ScoredCandidate]:
-        import numpy as np
-
         self._ensure_documents(candidates)
-        assert self._candidate_ids is not None and self.document_vectors is not None
+        assert self._candidate_ids is not None
         formatted_query = self._format(query_text, "query")
-        query_vector = self._query_vectors.get(formatted_query)
-        query_sparse = self._query_sparse.get(formatted_query)
-        if query_vector is None:
-            vectors, sparse = self._encode_signals([formatted_query])
-            query_vector = vectors[0]
-            query_sparse = sparse[0] if sparse is not None else None
-        eligible_ids = {item.evidence_id for item in filter_candidates(candidates, scope)}
-        indexes = np.asarray(
-            [index for index, evidence_id in enumerate(self._candidate_ids) if evidence_id in eligible_ids],
-            dtype=np.int64,
-        )
-        vectors = self.document_vectors[indexes]
-        ids = tuple(self._candidate_ids[int(index)] for index in indexes)
-        ranked_ids, scores = _search_vectors(
-            vectors,
-            query_vector,
-            ids,
-            min(limit, len(ids)),
-            backend=self.vector_backend,
-            usearch_search=self._usearch_search,
-        )
-        dense = [
-            ScoredCandidate(self._candidate_by_id[evidence_id], score)
-            for evidence_id, score in zip(ranked_ids, scores)
-        ]
+        query_vector, query_sparse = self._query_signals(formatted_query)
+        indexes, ids = self._eligible_positions(candidates, scope)
+        dense = self._dense_ranking(query_vector, indexes, ids, limit)
         if self.document_sparse is None:
             return dense
         if query_sparse is None:
             raise ValueError("BGE-M3 query omitted learned sparse output")
-        sparse_ranked = []
-        for index, evidence_id in zip(indexes, ids):
-            document = self.document_sparse[int(index)]
-            score = sum(weight * document.get(token, 0.0) for token, weight in query_sparse.items())
-            if score > 0:
-                sparse_ranked.append(ScoredCandidate(self._candidate_by_id[evidence_id], score))
-        sparse_ranked.sort(key=lambda item: (-item.score, item.evidence_id))
-        sparse_ranked = sparse_ranked[:limit]
-        fused = _fuse_rankings(
-            (dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit
-        )
+        sparse_ranked = self._sparse_ranking(query_sparse, indexes, ids, limit)
+        fused = _fuse_rankings((dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit)
         self.last_trace = {
             "dense_candidate_ids": [item.evidence_id for item in dense],
             "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
@@ -2016,6 +2129,28 @@ class ModelRerankerAdapter:
             ]
         return [{"query": query_text, "document": item.text} for item in candidates]
 
+    def _depth_scores(self, query_text: str, prefix: list[ScoredCandidate]):
+        reranker = self.selection.reranker
+        scores = self._scorer(
+            self._inputs(query_text, prefix),
+            batch_size=reranker["batch_size"],
+            max_length=reranker["formatting"]["max_length_tokens"],
+            contract_type=reranker["formatting"]["contract_type"],
+            score_tokens=reranker["formatting"]["score_tokens"],
+        )
+        if len(scores) != len(prefix) or any(not math.isfinite(float(score)) for score in scores):
+            raise ValueError("reranker returned invalid or nonfinite scores")
+        return scores
+
+    @staticmethod
+    def _rescored(prefix: list[ScoredCandidate], scores) -> list[ScoredCandidate]:
+        rescored = [
+            (index, ScoredCandidate(item.candidate, float(score)))
+            for index, (item, score) in enumerate(zip(prefix, scores))
+        ]
+        rescored.sort(key=lambda pair: (-pair[1].score, pair[0]))
+        return [item for _index, item in rescored]
+
     def rank_all(
         self,
         query_text: str,
@@ -2033,23 +2168,8 @@ class ModelRerankerAdapter:
         for depth in self.selection.matrix["benchmark_contract"]["reranker_depths"]:
             prefix = frozen[:depth]
             started = time.perf_counter()
-            scores = self._scorer(
-                self._inputs(query_text, prefix),
-                batch_size=self.selection.reranker["batch_size"],
-                max_length=self.selection.reranker["formatting"]["max_length_tokens"],
-                contract_type=self.selection.reranker["formatting"]["contract_type"],
-                score_tokens=self.selection.reranker["formatting"]["score_tokens"],
-            )
-            if len(scores) != len(prefix) or any(
-                not math.isfinite(float(score)) for score in scores
-            ):
-                raise ValueError("reranker returned invalid or nonfinite scores")
-            rescored = [
-                (index, ScoredCandidate(item.candidate, float(score)))
-                for index, (item, score) in enumerate(zip(prefix, scores))
-            ]
-            rescored.sort(key=lambda pair: (-pair[1].score, pair[0]))
-            ranked_by_depth[depth] = [item for _index, item in rescored] + frozen[depth:]
+            scores = self._depth_scores(query_text, prefix)
+            ranked_by_depth[depth] = self._rescored(prefix, scores) + frozen[depth:]
             depth_traces[str(depth)] = {
                 "candidate_ids": frozen_ids[:depth],
                 "duration_ms": (time.perf_counter() - started) * 1000,
@@ -2065,6 +2185,14 @@ class ModelRerankerAdapter:
             "depths": depth_traces,
         }
         return ranked_by_depth
+
+
+
+def _keep_best_scored(by_id: dict[str, ScoredCandidate], item: ScoredCandidate, score: float) -> None:
+    current = by_id.get(item.evidence_id)
+    if current is None or score > current.score:
+        by_id[item.evidence_id] = ScoredCandidate(item.candidate, score)
+
 
 
 class FakeRerankerAdapter:
@@ -2086,11 +2214,8 @@ class FakeRerankerAdapter:
         for item in candidates:
             if item.evidence_id not in eligible_ids:
                 continue
-            lexical = _lexical_score(query_text, item.candidate)
-            score = max(item.score, 0.0) + 2.0 * lexical
-            current = by_id.get(item.evidence_id)
-            if current is None or score > current.score:
-                by_id[item.evidence_id] = ScoredCandidate(item.candidate, score)
+            score = max(item.score, 0.0) + 2.0 * _lexical_score(query_text, item.candidate)
+            _keep_best_scored(by_id, item, score)
         return sorted(by_id.values(), key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
@@ -2252,8 +2377,17 @@ def _is_reparse_point(path: Path) -> bool:
     return path.is_symlink() or bool(getattr(stat, "st_file_attributes", 0) & 0x400)
 
 
-@contextlib.contextmanager
-def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
+_MODEL_CACHE_SUBDIRECTORIES = {
+    "HF_HOME": ("huggingface",),
+    "HF_HUB_CACHE": ("huggingface", "hub"),
+    "TRANSFORMERS_CACHE": ("transformers",),
+    "SENTENCE_TRANSFORMERS_HOME": ("sentence-transformers",),
+    "TORCH_HOME": ("torch",),
+    "XDG_CACHE_HOME": ("xdg",),
+}
+
+
+def _prepared_model_cache_root(cache_root: Path | str) -> Path:
     requested = Path(cache_root).expanduser()
     if requested.exists() and _is_reparse_point(requested):
         raise ValueError("model cache root must not be a symlink or reparse point")
@@ -2261,37 +2395,45 @@ def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
     root = _validate_cache_root(requested).resolve(strict=True)
     if _is_reparse_point(root):
         raise ValueError("model cache root must not be a symlink or reparse point")
-    paths = {
-        "HF_HOME": root / "huggingface",
-        "HF_HUB_CACHE": root / "huggingface" / "hub",
-        "TRANSFORMERS_CACHE": root / "transformers",
-        "SENTENCE_TRANSFORMERS_HOME": root / "sentence-transformers",
-        "TORCH_HOME": root / "torch",
-        "XDG_CACHE_HOME": root / "xdg",
-    }
+    return root
+
+
+def _model_cache_paths(root: Path) -> dict[str, Path]:
+    paths = {name: root.joinpath(*parts) for name, parts in _MODEL_CACHE_SUBDIRECTORIES.items()}
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
         if _is_reparse_point(path) or root not in path.resolve(strict=True).parents:
             raise ValueError("model cache path escaped isolated cache root")
+    return paths
+
+
+def _offline_flag(allow_download: bool) -> str:
+    return "0" if allow_download else "1"
+
+
+def _restore_environment(previous: dict[str, str | None]) -> None:
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@contextlib.contextmanager
+def model_cache_environment(cache_root: Path | str, *, allow_download: bool):
+    root = _prepared_model_cache_root(cache_root)
+    paths = _model_cache_paths(root)
     updates = {name: str(path) for name, path in paths.items()}
     updates.update(
-        HF_HUB_OFFLINE="0" if allow_download else "1",
-        TRANSFORMERS_OFFLINE="0" if allow_download else "1",
+        HF_HUB_OFFLINE=_offline_flag(allow_download),
+        TRANSFORMERS_OFFLINE=_offline_flag(allow_download),
     )
     previous = {name: os.environ.get(name) for name in updates}
     os.environ.update(updates)
     try:
-        yield (
-            "download-allowed-explicit-cache"
-            if allow_download
-            else "offline-local-files-only"
-        )
+        yield "download-allowed-explicit-cache" if allow_download else "offline-local-files-only"
     finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        _restore_environment(previous)
 
 
 def _use_posix_dir_fd() -> bool:
