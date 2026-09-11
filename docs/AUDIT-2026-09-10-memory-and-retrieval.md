@@ -94,6 +94,10 @@ disposable, fail-closed, bounded reads, no silent fallback).
 - Verified: ran (lizard, gate), read (hook output).
 - Fix direction: refactor per gate (pipeline of stage functions, guard
   clauses) before the next selection run; do not edit selection semantics.
+- Status: closed 2026-09-11 (`docs/research/2026-09-11-the-retrieval-stand-is-stages-not-one-run.md`).
+  `benchmark/run_retrieval_v2.py`: 0 lizard warnings at CCN 5, gate exit 0,
+  from 57 functions over the limit; 178 passed on the three test files that
+  import the stand. No metric, key, message or tie-break changed.
 
 ### H4 — The compile lock fails open, and a stuck lock is left behind silently [defect]
 - Status: fixed 2026-09-10 (`docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md`).

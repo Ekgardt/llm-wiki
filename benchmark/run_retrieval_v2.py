@@ -4883,90 +4883,99 @@ def _recompute_reranker_depth_metrics(corpus: dict, report: dict) -> dict[str, t
     }
 
 
+_GATE_LANGUAGES = ("EN", "RU", "ZH")
+
+
+def _unit_rate(value: float) -> bool:
+    return math.isfinite(value) and 0 <= value <= 1
+
+
+def _finite_unit_number(value: object) -> bool:
+    return _is_finite_number(value) and 0 <= value <= 1
+
+
+def _language_quality_values(slices: dict) -> list[float]:
+    return [float(slices[language][name]) for language in _GATE_LANGUAGES for name in _RETRIEVAL_GATE_METRICS]
+
+
+def _require_quality_rates(overall: dict, slices: dict) -> list[float]:
+    quality_values = [float(overall[name]) for name in _RETRIEVAL_GATE_METRICS]
+    if not all(_unit_rate(value) for value in quality_values + _language_quality_values(slices)):
+        raise ValueError("raw report quality metrics must be finite rates")
+    return quality_values
+
+
+def _require_false_answer_rates(overall: dict, slices: dict) -> None:
+    values = [
+        overall["no_answer_false_answer_rate"],
+        *(slices[language]["no_answer_false_answer_rate"] for language in _GATE_LANGUAGES),
+    ]
+    if not all(_finite_unit_number(value) for value in values):
+        raise ValueError("raw report false-answer metrics must be finite rates")
+
+
+def _selection_language_passes(metrics: dict) -> bool:
+    gap = THRESHOLDS["max_language_gate_gap"]
+    retrieval = all(float(metrics[name]) >= THRESHOLDS[name] - gap for name in _RETRIEVAL_GATE_METRICS)
+    return retrieval and metrics["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
+
+
+def _require_resource_values(measurements: dict) -> tuple:
+    values = (measurements["warm_latency_p95_ms"], measurements["peak_rss_bytes"], measurements["index_size_bytes"])
+    if not all(_finite_nonnegative(value) for value in values):
+        raise ValueError("raw report has incomplete or nonfinite resource measurements")
+    return values
+
+
+def _improvement_flags(selection: dict, overall: dict, quality_basis_points: int) -> tuple[bool, bool]:
+    baseline = selection["baseline"]
+    material = selection["material_improvement"]
+    parent_ok = round(float(overall["parent_recall_at_10"]) * 10_000) >= baseline["parent_recall_at_10_basis_points"]
+    material_ok = quality_basis_points >= (
+        baseline["overall_basis_points"] + material["minimum_absolute_gain_basis_points"]
+    )
+    return parent_ok, material_ok
+
+
+def _policy_shippable(item: dict | None):
+    if item is None:
+        return True
+    return (
+        item["shipping_eligible"]
+        and not item["exclusion_reasons"]
+        and item["license"] in _SHIPPABLE_LICENSES
+        and item["trust_remote_code"] is False
+    )
+
+
+def _selection_objective(quality_basis_points: int, resources: tuple) -> dict:
+    p95, rss, index_bytes = resources
+    return {
+        "index_bytes": int(index_bytes),
+        "overall": quality_basis_points,
+        "peak_rss_bytes": int(rss),
+        "warm_p95_ms": math.ceil(p95),
+    }
+
+
 def _selection_report_gates(matrix: dict, report: dict, embedding: dict, reranker: dict | None):
     selection = matrix["selection"]
     overall = report["overall"]
     slices = report["slices"]
-    quality_metrics = (
-        "parent_recall_at_10",
-        "all_required_evidence_recall_at_20",
-        "ndcg_at_10",
-        "mrr_at_10",
-    )
-    quality_values = [float(overall[name]) for name in quality_metrics]
-    language_values = [
-        float(slices[language][name])
-        for language in ("EN", "RU", "ZH")
-        for name in quality_metrics
-    ]
-    if not all(math.isfinite(value) and 0 <= value <= 1 for value in quality_values + language_values):
-        raise ValueError("raw report quality metrics must be finite rates")
-    false_answer_values = [
-        overall["no_answer_false_answer_rate"],
-        *(slices[language]["no_answer_false_answer_rate"] for language in ("EN", "RU", "ZH")),
-    ]
-    if not all(
-        isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 1
-        for value in false_answer_values
-    ):
-        raise ValueError("raw report false-answer metrics must be finite rates")
-    quality = sum(quality_values) / len(quality_values)
-    quality_basis_points = round(quality * 10_000)
-    per_language = {
-        language: all(
-            float(slices[language][metric])
-            >= threshold - THRESHOLDS["max_language_gate_gap"]
-            for metric, threshold in (
-                ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-                (
-                    "all_required_evidence_recall_at_20",
-                    THRESHOLDS["all_required_evidence_recall_at_20"],
-                ),
-                ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-                ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-            )
-        )
-        and slices[language]["no_answer_false_answer_rate"]
-        <= THRESHOLDS["no_answer_false_answer_rate"]
-        for language in ("EN", "RU", "ZH")
-    }
-    measurements = report["measurements"]
-    p95 = measurements["warm_latency_p95_ms"]
-    rss = measurements["peak_rss_bytes"]
-    index_bytes = measurements["index_size_bytes"]
-    if not all(
-        isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
-        for value in (p95, rss, index_bytes)
-    ):
-        raise ValueError("raw report has incomplete or nonfinite resource measurements")
-    baseline = selection["baseline"]
-    material = selection["material_improvement"]
-    parent_ok = round(float(overall["parent_recall_at_10"]) * 10_000) >= baseline[
-        "parent_recall_at_10_basis_points"
-    ]
-    material_ok = quality_basis_points >= (
-        baseline["overall_basis_points"] + material["minimum_absolute_gain_basis_points"]
-    )
-    shipping = all(
-        item is None
-        or (
-            item["shipping_eligible"]
-            and not item["exclusion_reasons"]
-            and item["license"] in {"Apache-2.0", "MIT"}
-            and item["trust_remote_code"] is False
-        )
-        for item in (embedding, reranker)
-    )
-    false_answer_ok = (
-        overall["no_answer_false_answer_rate"]
-        <= THRESHOLDS["no_answer_false_answer_rate"]
-    )
+    quality_values = _require_quality_rates(overall, slices)
+    _require_false_answer_rates(overall, slices)
+    quality_basis_points = round(sum(quality_values) / len(quality_values) * 10_000)
+    per_language = {language: _selection_language_passes(slices[language]) for language in _GATE_LANGUAGES}
+    resources = _require_resource_values(report["measurements"])
+    parent_ok, material_ok = _improvement_flags(selection, overall, quality_basis_points)
+    shipping = all(_policy_shippable(item) for item in (embedding, reranker))
+    false_answer_ok = overall["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
     required = {
         "every_language_gate": all(per_language.values()) and false_answer_ok,
-        "latency": p95 <= selection["limits"]["warm_p95_ms"],
+        "latency": resources[0] <= selection["limits"]["warm_p95_ms"],
         "license": shipping,
         "no_parent_recall_at_10_regression": parent_ok,
-        "ram": rss <= selection["limits"]["peak_rss_bytes"],
+        "ram": resources[1] <= selection["limits"]["peak_rss_bytes"],
     }
     gates = {
         "material_improvement": material_ok,
@@ -4976,13 +4985,7 @@ def _selection_report_gates(matrix: dict, report: dict, embedding: dict, reranke
         "required": required,
         "shipping_eligible": shipping,
     }
-    objective = {
-        "index_bytes": int(index_bytes),
-        "overall": quality_basis_points,
-        "peak_rss_bytes": int(rss),
-        "warm_p95_ms": math.ceil(p95),
-    }
-    return gates, objective
+    return gates, _selection_objective(quality_basis_points, resources)
 
 
 def _objective_dominates(left: dict, right: dict, objectives: dict) -> bool:
@@ -4998,6 +5001,425 @@ def _objective_dominates(left: dict, right: dict, objectives: dict) -> bool:
     return all(weak) and any(strict)
 
 
+_CANDIDATE_REPORT_EQUALITIES = (
+    ("schema_version", "retrieval-report/v2"),
+    ("adapter_kind", MODEL_MATRIX_ADAPTER_KIND),
+    ("effective_mode", MODEL_MATRIX_ADAPTER_KIND),
+    ("acquisition_mode", "offline-local-files-only"),
+    ("thresholds", THRESHOLDS),
+)
+_CANDIDATE_REPORT_IDENTITIES = (("release_evidence", False), ("fallback_reason", None))
+_RERANKER_DEPTH_KEYS = frozenset({"10", "20", "50"})
+
+
+def _fields_equal(report: dict, pairs) -> bool:
+    return all(report[field] == expected for field, expected in pairs)
+
+
+def _fields_identical(report: dict, pairs) -> bool:
+    return all(report[field] is expected for field, expected in pairs)
+
+
+def _first_candidate_selection(matrix: dict, matrix_path: Path | str, corpus_path: Path | str) -> ModelSelection:
+    first = matrix["embeddings"][0]
+    return load_model_selection(
+        matrix_path,
+        corpus_path,
+        model_id=first["id"],
+        variant_id=first["variants"][0]["variant_id"],
+    )
+
+
+def _require_utc_timestamp(measured_at: str) -> None:
+    try:
+        parsed_time = datetime.fromisoformat(measured_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("aggregation measured_at must be an ISO UTC timestamp") from exc
+    if not measured_at.endswith("Z") or parsed_time.utcoffset() is None:
+        raise ValueError("aggregation measured_at must be an ISO UTC timestamp")
+
+
+def _absolute_output_request(repo: Path, output_path: Path | str) -> Path:
+    requested = Path(output_path)
+    if requested.is_symlink():
+        raise ValueError("selection output must not be a symlink")
+    if not requested.is_absolute():
+        return repo / requested
+    return requested
+
+
+def _output_relative_to_repo(repo: Path, requested: Path) -> PurePosixPath:
+    try:
+        relative = requested.relative_to(repo)
+    except ValueError as exc:
+        raise ValueError("selection output must be under benchmark/results") from exc
+    return PurePosixPath(relative.as_posix())
+
+
+def _path_names_private(normalized: PurePosixPath) -> bool:
+    return any(marker in normalized.as_posix().casefold() for marker in ("private", "personal"))
+
+
+def _normalized_results_path(normalized: PurePosixPath) -> bool:
+    if normalized.parts[:2] != ("benchmark", "results") or normalized.suffix != ".json":
+        return False
+    if any(part in {"", ".", ".."} for part in normalized.parts):
+        return False
+    return not _path_names_private(normalized)
+
+
+def _selection_output_path(repo: Path, output_path: Path | str) -> Path:
+    normalized = _output_relative_to_repo(repo, _absolute_output_request(repo, output_path))
+    if not _normalized_results_path(normalized):
+        raise ValueError("selection output must be a normalized JSON path under benchmark/results")
+    output = repo / Path(*normalized.parts)
+    if output.exists() or output.is_symlink():
+        raise ValueError("selection output already exists")
+    return output
+
+
+def _bound_baseline_report(repo: Path, baseline: dict) -> dict:
+    baseline_path = repo / Path(*PurePosixPath(baseline["raw_report_path"]).parts)
+    baseline_raw = read_stable_bytes(baseline_path, MAX_CORPUS_BYTES, label="baseline raw report")
+    if hashlib.sha256(baseline_raw).hexdigest() != baseline["raw_report_sha256"]:
+        raise ValueError("bound baseline raw report SHA256 mismatch")
+    try:
+        baseline_report = json.loads(baseline_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("bound baseline raw report is invalid") from exc
+    if baseline_raw != _canonical_report_bytes(baseline_report):
+        raise ValueError("bound baseline raw report must use canonical JSON bytes")
+    return baseline_report
+
+
+def _reject_nonfinite_constant(value: str):
+    raise ValueError(f"nonfinite JSON constant: {value}")
+
+
+def _parsed_candidate_report(raw: bytes) -> dict:
+    try:
+        report = json.loads(raw, parse_constant=_reject_nonfinite_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid candidate raw report: {exc}") from exc
+    _require_exact_keys(report, REPORT_FIELDS, "candidate raw report")
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("candidate raw report must use canonical JSON bytes")
+    return report
+
+
+def _candidate_provenance_complete(report: dict, bound: tuple) -> bool:
+    if report["corpus_id"] not in FROZEN_CORPUS_IDS or report["vector_backend"] == "usearch-hnsw":
+        return False
+    return (
+        _fields_equal(report, _CANDIDATE_REPORT_EQUALITIES)
+        and _fields_identical(report, _CANDIDATE_REPORT_IDENTITIES)
+        and _fields_equal(report, bound)
+    )
+
+
+def _comparable_environment(environment: object) -> object:
+    if not isinstance(environment, dict):
+        return environment
+    comparable = dict(environment)
+    comparable.pop("verified_lock", None)
+    return comparable
+
+
+class _CandidateReports:
+    """The candidate raw reports of one aggregation, each checked and recomputed as it is added."""
+
+    def __init__(self, corpus: dict, matrix: dict, validated: ModelSelection) -> None:
+        self.corpus = corpus
+        self.expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
+        self.contract_hash = _sha256_json(matrix["benchmark_contract"])
+        self.runner_hash = _sha256_file(Path(__file__))
+        self.bound = (
+            ("matrix_sha256", validated.matrix_sha256),
+            ("corpus_sha256", validated.corpus_sha256),
+            ("benchmark_contract_sha256", self.contract_hash),
+            ("benchmark_runner_sha256", self.runner_hash),
+        )
+        self.reports: dict[str, dict] = {}
+        self.report_hashes: dict[str, str] = {}
+        self.report_bytes: dict[str, bytes] = {}
+        self.recomputed_metrics: dict[str, tuple] = {}
+        self.recomputed_depth_metrics: dict[str, dict] = {}
+        self.common_environment = None
+
+    def _require_environment(self, report: dict) -> None:
+        environment = report["methodology"].get("environment_provenance")
+        expected_environment = _environment_provenance(report["vector_backend"])
+        if _comparable_environment(environment) != expected_environment:
+            raise ValueError("candidate environment provenance or lock hash mismatch")
+        if self.common_environment is None:
+            self.common_environment = environment
+            return
+        if environment != self.common_environment:
+            raise ValueError("candidate environment provenance is inconsistent")
+
+    def _new_key(self, report: dict) -> str:
+        key = _candidate_key(report["candidate"])
+        if key not in self.expected or key in self.reports:
+            raise ValueError("candidate raw report is unknown or duplicated")
+        return key
+
+    def add(self, raw_path: Path | str) -> None:
+        raw = read_stable_bytes(Path(raw_path), MAX_CORPUS_BYTES, label="candidate raw report")
+        report = _parsed_candidate_report(raw)
+        if not _candidate_provenance_complete(report, self.bound):
+            raise ValueError("candidate raw report provenance is incomplete")
+        self._require_environment(report)
+        key = self._new_key(report)
+        self.recomputed_metrics[key] = _recompute_report_metrics(self.corpus, report)
+        self.recomputed_depth_metrics[key] = _recompute_reranker_depth_metrics(self.corpus, report)
+        self.reports[key] = report
+        self.report_hashes[key] = hashlib.sha256(raw).hexdigest()
+        self.report_bytes[key] = raw
+
+    def require_complete(self) -> None:
+        if set(self.reports) != set(self.expected):
+            raise ValueError("aggregation requires the complete candidate report set")
+
+
+def _reranker_identity_matches(reranker_report: dict, target: dict) -> bool:
+    return (
+        reranker_report.get("model_id") == target["id"]
+        and reranker_report.get("revision") == target["revision"]
+        and reranker_report.get("variant_id") == target["variant_id"]
+    )
+
+
+def _reranker_depths_complete(reranker_report: dict, matrix: dict) -> bool:
+    return (
+        reranker_report.get("depths") == matrix["benchmark_contract"]["reranker_depths"]
+        and set(reranker_report.get("depth_metrics", {})) == _RERANKER_DEPTH_KEYS
+    )
+
+
+def _require_reranker_depth_evidence(reranker_report: object, target: dict, matrix: dict) -> None:
+    if (
+        not isinstance(reranker_report, dict)
+        or not _reranker_identity_matches(reranker_report, target)
+        or not _reranker_depths_complete(reranker_report, matrix)
+    ):
+        raise ValueError("reranker raw report lacks complete comparable depth evidence")
+
+
+def _depth_variant(report: dict, depth: int, depth_metrics: dict, recomputed: tuple) -> tuple[dict, dict]:
+    derived = dict(report)
+    derived["overall"], derived["slices"] = recomputed
+    derived["measurements"] = dict(report["measurements"])
+    if "warm_latency_p95_ms" in depth_metrics:
+        derived["measurements"]["warm_latency_p95_ms"] = depth_metrics["warm_latency_p95_ms"]
+    candidate = dict(report["candidate"])
+    candidate["rerank_depth"] = depth
+    return candidate, derived
+
+
+def _report_variants(matrix: dict, report: dict, reranker: dict | None, recomputed_depths: dict) -> list:
+    if reranker is None:
+        if report["reranker"] is not None:
+            raise ValueError("embedding-only report contains unexpected reranker evidence")
+        return [(report["candidate"], report)]
+    reranker_report = report["reranker"]
+    _require_reranker_depth_evidence(reranker_report, report["candidate"]["reranker"], matrix)
+    return [
+        _depth_variant(
+            report, depth, reranker_report["depth_metrics"][str(depth)], recomputed_depths[str(depth)]
+        )
+        for depth in matrix["benchmark_contract"]["reranker_depths"]
+    ]
+
+
+def _evaluated_variant(matrix, candidate, evaluated_report, embedding, reranker, raw_hash) -> dict:
+    try:
+        gates, objective = _selection_report_gates(matrix, evaluated_report, embedding, reranker)
+    except (KeyError, TypeError, OverflowError, ValueError) as exc:
+        raise ValueError(f"candidate raw report metrics are invalid: {exc}") from exc
+    return {
+        "candidate": candidate,
+        "gates": gates,
+        "objective_values": objective,
+        "raw_report_sha256": raw_hash,
+    }
+
+
+def _evaluated_report_variants(matrix: dict, collected: _CandidateReports, key: str) -> list[dict]:
+    report = dict(collected.reports[key])
+    report["overall"], report["slices"] = collected.recomputed_metrics[key]
+    embedding, reranker = _candidate_policy(matrix, report["candidate"])
+    variants = _report_variants(matrix, report, reranker, collected.recomputed_depth_metrics[key])
+    return [
+        _evaluated_variant(matrix, candidate, evaluated_report, embedding, reranker, collected.report_hashes[key])
+        for candidate, evaluated_report in variants
+    ]
+
+
+def _evaluated_candidates(matrix: dict, collected: _CandidateReports) -> list[dict]:
+    evaluated: list[dict] = []
+    for key in sorted(collected.reports):
+        evaluated.extend(_evaluated_report_variants(matrix, collected, key))
+    return evaluated
+
+
+def _dominated(item: dict, passing: list[dict], objectives: dict) -> bool:
+    return any(
+        other is not item
+        and _objective_dominates(other["objective_values"], item["objective_values"], objectives)
+        for other in passing
+    )
+
+
+def _pareto_frontier(evaluated: list[dict], objectives: dict) -> list[dict]:
+    passing = [item for item in evaluated if item["gates"]["overall"]]
+    return [item for item in passing if not _dominated(item, passing, objectives)]
+
+
+def _selection_order(item: dict) -> tuple:
+    values = item["objective_values"]
+    return (
+        -values["overall"],
+        values["warm_p95_ms"],
+        values["peak_rss_bytes"],
+        values["index_bytes"],
+        _candidate_key(item["candidate"]),
+    )
+
+
+def _selected_candidate(frontier: list[dict]) -> dict | None:
+    if not frontier:
+        return None
+    return min(frontier, key=_selection_order)
+
+
+def _retained_report_path(digest: str) -> str:
+    return f"benchmark/results/reports/{digest}.json"
+
+
+def _candidate_report_entries(collected: _CandidateReports) -> list[dict]:
+    return [
+        {
+            "candidate": collected.reports[key]["candidate"],
+            "raw_report_sha256": collected.report_hashes[key],
+            "retained_path": _retained_report_path(collected.report_hashes[key]),
+        }
+        for key in sorted(collected.reports)
+    ]
+
+
+def _payload_digest(payload: _WorkerPayload) -> str:
+    return hashlib.sha256(payload.canonical_bytes).hexdigest()
+
+
+def _lexical_report_entries(lexical_results: Sequence[_WorkerPayload] | None) -> list[dict]:
+    return [
+        {
+            "lexical_configuration": item.report["methodology"]["lexical_configuration"]["id"],
+            "raw_report_sha256": _payload_digest(item),
+            "retained_path": _retained_report_path(_payload_digest(item)),
+        }
+        for item in (lexical_results or ())
+    ]
+
+
+def _selection_outcome(selected: dict | None) -> dict:
+    if selected is None:
+        return {
+            "selected": None,
+            "gates": {"outcome": "no-winner", "fallback": "current-bm25"},
+            "measurements": None,
+        }
+    return {
+        "selected": selected["candidate"],
+        "gates": selected["gates"],
+        "measurements": selected["objective_values"],
+    }
+
+
+def _comparison_artifact(
+    matrix: dict,
+    validated: ModelSelection,
+    collected: _CandidateReports,
+    measured_at: str,
+    baseline_observed_runtime: dict,
+    frontier: list[dict],
+    lexical_results: Sequence[_WorkerPayload] | None,
+) -> dict:
+    selected = _selected_candidate(frontier)
+    return {
+        "schema_version": "retrieval-comparison/v1",
+        "quality_claim": False,
+        "release_evidence": False,
+        "measured_at": measured_at,
+        "matrix_sha256": validated.matrix_sha256,
+        "matrix_policy_sha256": matrix_policy_fingerprint(matrix),
+        "corpus_sha256": validated.corpus_sha256,
+        "benchmark_contract_sha256": collected.contract_hash,
+        "benchmark_runner_sha256": collected.runner_hash,
+        "baseline": {**matrix["selection"]["baseline"], "observed_runtime": baseline_observed_runtime},
+        "candidate_reports": _candidate_report_entries(collected) + _lexical_report_entries(lexical_results),
+        "pareto": frontier,
+        **_selection_outcome(selected),
+    }
+
+
+def _require_no_reparse_ancestors(start: Path, repo: Path) -> None:
+    current = start
+    while current != repo:
+        if _is_reparse_point(current):
+            raise ValueError("selection output path must not contain symlinks or reparse points")
+        current = current.parent
+
+
+def _checked_output_parent(repo: Path, output: Path) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = output.parent.resolve(strict=True)
+    if resolved_parent != repo and repo not in resolved_parent.parents:
+        raise ValueError("selection output parent escaped benchmark/results")
+    _require_no_reparse_ancestors(output.parent, repo)
+    return resolved_parent
+
+
+def _retained_reports_root(repo: Path) -> Path:
+    retained_root = repo / "benchmark" / "results" / "reports"
+    retained_root.mkdir(parents=True, exist_ok=True)
+    if retained_root.resolve(strict=True) != retained_root or _is_reparse_point(retained_root):
+        raise ValueError("retained report path must not contain symlinks or reparse points")
+    return retained_root
+
+
+def _remove_created_reports(created_reports: list[tuple[Path, os.stat_result]]) -> None:
+    for retained, identity in reversed(created_reports):
+        with contextlib.suppress(FileNotFoundError):
+            if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
+                retained.unlink()
+
+
+def _publish_retained_and_output(
+    retained_root: Path, retained_reports: list[tuple[str, bytes]], output: Path, serialized: str
+) -> None:
+    created_reports: list[tuple[Path, os.stat_result]] = []
+    try:
+        for digest, data in retained_reports:
+            retained = retained_root / f"{digest}.json"
+            identity = _write_new_bytes(retained, data)
+            created_reports.append((retained, identity))
+        _write_new_output(output, serialized)
+    except BaseException:
+        _remove_created_reports(created_reports)
+        raise
+
+
+def _write_comparison(repo: Path, output: Path, artifact: dict, collected: _CandidateReports, lexical_results) -> None:
+    serialized = (canonical_json_bytes(artifact) + b"\n").decode("utf-8")
+    resolved_parent = _checked_output_parent(repo, output)
+    output = resolved_parent / output.name
+    retained_root = _retained_reports_root(repo)
+    retained_reports = [(collected.report_hashes[key], collected.report_bytes[key]) for key in sorted(collected.reports)]
+    retained_reports += [(_payload_digest(item), item.canonical_bytes) for item in lexical_results or ()]
+    _publish_retained_and_output(retained_root, retained_reports, output, serialized)
+
+
 def _aggregate_reports(
     raw_report_paths: Sequence[Path | str],
     *,
@@ -5009,279 +5431,28 @@ def _aggregate_reports(
     _lexical_results: Sequence[_WorkerPayload] | None = None,
     _write_analysis: bool = True,
 ) -> dict:
-    matrix_raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
-    matrix = json.loads(matrix_raw)
-    first = matrix["embeddings"][0]
-    validated = load_model_selection(
-        matrix_path,
-        corpus_path,
-        model_id=first["id"],
-        variant_id=first["variants"][0]["variant_id"],
-    )
-    try:
-        parsed_time = datetime.fromisoformat(measured_at.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("aggregation measured_at must be an ISO UTC timestamp") from exc
-    if not measured_at.endswith("Z") or parsed_time.utcoffset() is None:
-        raise ValueError("aggregation measured_at must be an ISO UTC timestamp")
-
+    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
+    validated = _first_candidate_selection(matrix, matrix_path, corpus_path)
+    _require_utc_timestamp(measured_at)
     repo = Path(repo_root).resolve(strict=True)
-    requested_output = Path(output_path)
-    if requested_output.is_symlink():
-        raise ValueError("selection output must not be a symlink")
-    if not requested_output.is_absolute():
-        requested_output = repo / requested_output
-    try:
-        relative = requested_output.relative_to(repo)
-    except ValueError as exc:
-        raise ValueError("selection output must be under benchmark/results") from exc
-    normalized = PurePosixPath(relative.as_posix())
-    if (
-        normalized.parts[:2] != ("benchmark", "results")
-        or normalized.suffix != ".json"
-        or any(part in {"", ".", ".."} for part in normalized.parts)
-        or any(marker in normalized.as_posix().casefold() for marker in ("private", "personal"))
-    ):
-        raise ValueError("selection output must be a normalized JSON path under benchmark/results")
-    output = repo / Path(*normalized.parts)
-    if output.exists() or output.is_symlink():
-        raise ValueError("selection output already exists")
-
-    baseline = matrix["selection"]["baseline"]
-    baseline_path = repo / Path(*PurePosixPath(baseline["raw_report_path"]).parts)
-    baseline_raw = read_stable_bytes(baseline_path, MAX_CORPUS_BYTES, label="baseline raw report")
-    if hashlib.sha256(baseline_raw).hexdigest() != baseline["raw_report_sha256"]:
-        raise ValueError("bound baseline raw report SHA256 mismatch")
-    try:
-        baseline_report = json.loads(baseline_raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("bound baseline raw report is invalid") from exc
-    if baseline_raw != _canonical_report_bytes(baseline_report):
-        raise ValueError("bound baseline raw report must use canonical JSON bytes")
+    output = _selection_output_path(repo, output_path)
+    baseline_report = _bound_baseline_report(repo, matrix["selection"]["baseline"])
     _verified_baseline_metrics(matrix, baseline_report, corpus_path=corpus_path)
-    baseline_observed_runtime = _observed_runtime_environment(
-        baseline_report["vector_backend"], lexical_config="L4"
-    )
+    baseline_observed_runtime = _observed_runtime_environment(baseline_report["vector_backend"], lexical_config="L4")
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
-    expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
-    reports = {}
-    report_hashes = {}
-    report_bytes = {}
-    recomputed_metrics = {}
-    recomputed_depth_metrics = {}
-    common_environment = None
-    contract_hash = _sha256_json(matrix["benchmark_contract"])
-    runner_hash = _sha256_file(Path(__file__))
+    collected = _CandidateReports(corpus, matrix, validated)
     for raw_path in raw_report_paths:
-        raw = read_stable_bytes(Path(raw_path), MAX_CORPUS_BYTES, label="candidate raw report")
-        try:
-            report = json.loads(
-                raw,
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"nonfinite JSON constant: {value}")
-                ),
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise ValueError(f"invalid candidate raw report: {exc}") from exc
-        _require_exact_keys(report, REPORT_FIELDS, "candidate raw report")
-        if raw != _canonical_report_bytes(report):
-            raise ValueError("candidate raw report must use canonical JSON bytes")
-        if (
-            report["schema_version"] != "retrieval-report/v2"
-            or report["corpus_id"] not in FROZEN_CORPUS_IDS
-            or report["adapter_kind"] != MODEL_MATRIX_ADAPTER_KIND
-            or report["release_evidence"] is not False
-            or report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND
-            or report["fallback_reason"] is not None
-            or report["matrix_sha256"] != validated.matrix_sha256
-            or report["corpus_sha256"] != validated.corpus_sha256
-            or report["benchmark_contract_sha256"] != contract_hash
-            or report["benchmark_runner_sha256"] != runner_hash
-            or report["acquisition_mode"] != "offline-local-files-only"
-            or report["thresholds"] != THRESHOLDS
-            or report["vector_backend"] == "usearch-hnsw"
-        ):
-            raise ValueError("candidate raw report provenance is incomplete")
-        environment = report["methodology"].get("environment_provenance")
-        expected_environment = _environment_provenance(report["vector_backend"])
-        comparable_environment = dict(environment) if isinstance(environment, dict) else environment
-        if isinstance(comparable_environment, dict):
-            comparable_environment.pop("verified_lock", None)
-        if comparable_environment != expected_environment:
-            raise ValueError("candidate environment provenance or lock hash mismatch")
-        if common_environment is None:
-            common_environment = environment
-        elif environment != common_environment:
-            raise ValueError("candidate environment provenance is inconsistent")
-        key = _candidate_key(report["candidate"])
-        if key not in expected or key in reports:
-            raise ValueError("candidate raw report is unknown or duplicated")
-        recomputed_metrics[key] = _recompute_report_metrics(corpus, report)
-        recomputed_depth_metrics[key] = _recompute_reranker_depth_metrics(corpus, report)
-        reports[key] = report
-        report_hashes[key] = hashlib.sha256(raw).hexdigest()
-        report_bytes[key] = raw
-    if set(reports) != set(expected):
-        raise ValueError("aggregation requires the complete candidate report set")
-
-    evaluated = []
-    for key in sorted(reports):
-        report = dict(reports[key])
-        report["overall"], report["slices"] = recomputed_metrics[key]
-        embedding, reranker = _candidate_policy(matrix, report["candidate"])
-        report_variants = [(report["candidate"], report)]
-        if reranker is not None:
-            reranker_report = report["reranker"]
-            target = report["candidate"]["reranker"]
-            if (
-                not isinstance(reranker_report, dict)
-                or reranker_report.get("model_id") != target["id"]
-                or reranker_report.get("revision") != target["revision"]
-                or reranker_report.get("variant_id") != target["variant_id"]
-                or reranker_report.get("depths") != matrix["benchmark_contract"]["reranker_depths"]
-                or set(reranker_report.get("depth_metrics", {})) != {"10", "20", "50"}
-            ):
-                raise ValueError("reranker raw report lacks complete comparable depth evidence")
-            report_variants = []
-            for depth in matrix["benchmark_contract"]["reranker_depths"]:
-                depth_metrics = reranker_report["depth_metrics"][str(depth)]
-                derived = dict(report)
-                derived["overall"], derived["slices"] = recomputed_depth_metrics[key][str(depth)]
-                derived["measurements"] = dict(report["measurements"])
-                if "warm_latency_p95_ms" in depth_metrics:
-                    derived["measurements"]["warm_latency_p95_ms"] = depth_metrics[
-                        "warm_latency_p95_ms"
-                    ]
-                candidate = dict(report["candidate"])
-                candidate["rerank_depth"] = depth
-                report_variants.append((candidate, derived))
-        elif report["reranker"] is not None:
-            raise ValueError("embedding-only report contains unexpected reranker evidence")
-        for candidate, evaluated_report in report_variants:
-            try:
-                gates, objective = _selection_report_gates(
-                    matrix, evaluated_report, embedding, reranker
-                )
-            except (KeyError, TypeError, OverflowError, ValueError) as exc:
-                raise ValueError(f"candidate raw report metrics are invalid: {exc}") from exc
-            evaluated.append(
-                {
-                    "candidate": candidate,
-                    "gates": gates,
-                    "objective_values": objective,
-                    "raw_report_sha256": report_hashes[key],
-                }
-            )
-    passing = [item for item in evaluated if item["gates"]["overall"]]
-    frontier = [
-        item
-        for item in passing
-        if not any(
-            other is not item
-            and _objective_dominates(
-                other["objective_values"],
-                item["objective_values"],
-                matrix["selection"]["pareto_objectives"],
-            )
-            for other in passing
-        )
-    ]
-    selected = (
-        min(
-            frontier,
-            key=lambda item: (
-                -item["objective_values"]["overall"],
-                item["objective_values"]["warm_p95_ms"],
-                item["objective_values"]["peak_rss_bytes"],
-                item["objective_values"]["index_bytes"],
-                _candidate_key(item["candidate"]),
-            ),
-        )
-        if frontier
-        else None
+        collected.add(raw_path)
+    collected.require_complete()
+    frontier = _pareto_frontier(_evaluated_candidates(matrix, collected), matrix["selection"]["pareto_objectives"])
+    artifact = _comparison_artifact(
+        matrix, validated, collected, measured_at, baseline_observed_runtime, frontier, _lexical_results
     )
-    artifact = {
-        "schema_version": "retrieval-comparison/v1",
-        "quality_claim": False,
-        "release_evidence": False,
-        "measured_at": measured_at,
-        "matrix_sha256": validated.matrix_sha256,
-        "matrix_policy_sha256": matrix_policy_fingerprint(matrix),
-        "corpus_sha256": validated.corpus_sha256,
-        "benchmark_contract_sha256": contract_hash,
-        "benchmark_runner_sha256": runner_hash,
-        "baseline": {**baseline, "observed_runtime": baseline_observed_runtime},
-        "candidate_reports": [
-            {
-                "candidate": reports[key]["candidate"],
-                "raw_report_sha256": report_hashes[key],
-                "retained_path": (
-                    f"benchmark/results/reports/{report_hashes[key]}.json"
-                ),
-            }
-            for key in sorted(reports)
-        ]
-        + [
-            {
-                "lexical_configuration": item.report["methodology"]["lexical_configuration"][
-                    "id"
-                ],
-                "raw_report_sha256": hashlib.sha256(item.canonical_bytes).hexdigest(),
-                "retained_path": (
-                    "benchmark/results/reports/"
-                    f"{hashlib.sha256(item.canonical_bytes).hexdigest()}.json"
-                ),
-            }
-            for item in (_lexical_results or ())
-        ],
-        "pareto": frontier,
-        "selected": selected["candidate"] if selected is not None else None,
-        "gates": (
-            selected["gates"]
-            if selected is not None
-            else {"outcome": "no-winner", "fallback": "current-bm25"}
-        ),
-        "measurements": selected["objective_values"] if selected is not None else None,
-    }
     if set(artifact) != set(matrix["selection"]["aggregation_evidence_contract"]["required_fields"]):
         raise ValueError("selection artifact does not match matrix evidence contract")
     if not _write_analysis:
         return artifact
-    serialized = (canonical_json_bytes(artifact) + b"\n").decode("utf-8")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    resolved_parent = output.parent.resolve(strict=True)
-    if resolved_parent != repo and repo not in resolved_parent.parents:
-        raise ValueError("selection output parent escaped benchmark/results")
-    current = output.parent
-    while current != repo:
-        if _is_reparse_point(current):
-            raise ValueError("selection output path must not contain symlinks or reparse points")
-        current = current.parent
-    output = resolved_parent / output.name
-    retained_root = repo / "benchmark" / "results" / "reports"
-    retained_root.mkdir(parents=True, exist_ok=True)
-    resolved_retained_root = retained_root.resolve(strict=True)
-    if resolved_retained_root != retained_root or _is_reparse_point(retained_root):
-        raise ValueError("retained report path must not contain symlinks or reparse points")
-
-    created_reports = []
-    try:
-        for key in sorted(reports):
-            retained = retained_root / f"{report_hashes[key]}.json"
-            identity = _write_new_bytes(retained, report_bytes[key])
-            created_reports.append((retained, identity))
-        for item in _lexical_results or ():
-            digest = hashlib.sha256(item.canonical_bytes).hexdigest()
-            retained = retained_root / f"{digest}.json"
-            identity = _write_new_bytes(retained, item.canonical_bytes)
-            created_reports.append((retained, identity))
-        _write_new_output(output, serialized)
-    except BaseException:
-        for retained, identity in reversed(created_reports):
-            with contextlib.suppress(FileNotFoundError):
-                if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
-                    retained.unlink()
-        raise
+    _write_comparison(repo, output, artifact, collected, _lexical_results)
     return artifact
 
 
@@ -5305,6 +5476,231 @@ def aggregate_selection(
     )
 
 
+class _TrustedBindings:
+    """The transport and completeness contract an authoritative selection was bound to at import."""
+
+    def __init__(self, **bindings) -> None:
+        self.worker = bindings["worker"]
+        self.process_runner = bindings["process_runner"]
+        self.candidate_enumerator = bindings["candidate_enumerator"]
+        self.lexical_arguments = bindings["lexical_arguments"]
+        self.lexical_selector = bindings["lexical_selector"]
+        self.candidate_arguments = bindings["candidate_arguments"]
+        self.candidate_key = bindings["candidate_key"]
+        self.aggregator = bindings["aggregator"]
+        self.lexical_contract_sha256 = bindings["lexical_contract_sha256"]
+        self.lexical_levels = bindings["lexical_levels"]
+        self.candidate_count = bindings["candidate_count"]
+
+    def _values(self) -> tuple:
+        return (
+            self.worker,
+            self.process_runner,
+            self.candidate_enumerator,
+            self.lexical_arguments,
+            self.lexical_selector,
+            self.candidate_arguments,
+            self.candidate_key,
+            self.aggregator,
+            self.lexical_contract_sha256,
+            self.lexical_levels,
+            self.candidate_count,
+        )
+
+    def _current_identities(self) -> tuple:
+        return (
+            (required_candidate_specs, self.candidate_enumerator),
+            (_lexical_ablation_worker_arguments, self.lexical_arguments),
+            (_select_lexical_winner, self.lexical_selector),
+            (_candidate_worker_arguments, self.candidate_arguments),
+            (_candidate_key, self.candidate_key),
+            (_aggregate_reports, self.aggregator),
+        )
+
+    def _contract_intact(self) -> bool:
+        if any(current is not trusted for current, trusted in self._current_identities()):
+            return False
+        return _sha256_json(LEXICAL_CONFIGURATIONS) == self.lexical_contract_sha256
+
+    def require_intact(self) -> None:
+        if any(item is None for item in self._values()):
+            raise TypeError("authoritative orchestration requires its bound subprocess transport")
+        if not self._contract_intact():
+            raise ValueError("authoritative completeness contract was modified")
+
+
+def _require_candidate_specs(specs: list, trusted: _TrustedBindings) -> None:
+    unique = {trusted.candidate_key(spec) for spec in specs}
+    if len(specs) != trusted.candidate_count or len(unique) != trusted.candidate_count:
+        raise ValueError("authoritative selection requires exactly 27 unique matrix candidates")
+
+
+def _authoritative_inputs(trusted: _TrustedBindings, matrix_path: Path | str) -> tuple[dict, dict, list]:
+    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
+    lexical_configurations = json.loads(json.dumps(LEXICAL_CONFIGURATIONS))
+    if tuple(lexical_configurations) != trusted.lexical_levels:
+        raise ValueError("authoritative selection requires exact L0 through L4 configurations")
+    specs = json.loads(json.dumps(trusted.candidate_enumerator(matrix)))
+    _require_candidate_specs(specs, trusted)
+    return matrix, lexical_configurations, specs
+
+
+def _require_cache_and_deadline(cache_root: object, deadline_seconds: object) -> None:
+    if cache_root is None or deadline_seconds is None:
+        raise ValueError("authoritative orchestration requires cache root and deadline")
+
+
+def _invocation_matches(registered: tuple, argv, expected: dict, payload: _WorkerPayload) -> bool:
+    return (
+        registered[2] == tuple(argv)
+        and registered[3] == _sha256_json(expected)
+        and registered[4] == hashlib.sha256(payload.canonical_bytes).digest()
+    )
+
+
+class _WorkerLedger:
+    """Binds each worker payload to the one invocation that produced it."""
+
+    def __init__(self, worker, deadline_seconds: float, trusted_transport: bool) -> None:
+        self.worker = worker
+        self.deadline_seconds = deadline_seconds
+        self.trusted_transport = trusted_transport
+        self.nonce = secrets.token_bytes(32)
+        self.records: dict[int, tuple] = {}
+
+    def run(self, argv, expected: dict):
+        payload = self.worker(argv, deadline_seconds=self.deadline_seconds)
+        if self.trusted_transport and isinstance(payload, _WorkerPayload):
+            self.records[id(payload)] = (
+                self.nonce,
+                payload,
+                tuple(argv),
+                _sha256_json(expected),
+                hashlib.sha256(payload.canonical_bytes).digest(),
+            )
+        return payload
+
+    def consume(self, payload, argv, expected: dict) -> bool:
+        registered = self.records.pop(id(payload), None)
+        if registered is None:
+            return False
+        if registered[0] is not self.nonce or registered[1] is not payload:
+            return False
+        return _invocation_matches(registered, argv, expected, payload)
+
+
+def _worker_ledger(trusted: _TrustedBindings, deadline_seconds: float) -> _WorkerLedger:
+    worker = _run_bounded_model_worker
+    trusted_transport = worker is trusted.worker and _run_process_tree is trusted.process_runner
+    return _WorkerLedger(worker, deadline_seconds, trusted_transport)
+
+
+def _run_lexical_workers(ledger, trusted, cache_root, deadline_seconds, matrix, corpus_path) -> tuple[list, bool]:
+    lexical_results = []
+    execution_bound = True
+    for argv in trusted.lexical_arguments(cache_root, deadline_seconds, levels=trusted.lexical_levels):
+        expected = {"candidate": None, "lexical_configuration": argv[argv.index("--lexical-config") + 1]}
+        payload = ledger.run(argv, expected)
+        if not isinstance(payload, _WorkerPayload):
+            raise TypeError("lexical worker transport returned an invalid payload")
+        _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
+        execution_bound &= ledger.consume(payload, argv, expected)
+        lexical_results.append(payload)
+    return lexical_results, execution_bound
+
+
+def _lexical_winner(trusted: _TrustedBindings, lexical_results: list, lexical_configurations: dict) -> str:
+    reports = [item.report for item in lexical_results]
+    return trusted.lexical_selector(reports, configurations=lexical_configurations)["id"]
+
+
+def _require_candidate_payload(payload: object, spec: dict, lexical_config: str) -> None:
+    if not isinstance(payload, _WorkerPayload):
+        raise TypeError("authoritative worker transport returned an invalid payload")
+    if payload.report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
+        raise ValueError(
+            f"authoritative candidate {_candidate_key(spec)} degraded: "
+            f"fallback_reason={payload.report.get('fallback_reason')!s}"
+        )
+    if payload.report.get("methodology", {}).get("lexical_configuration", {}).get("id") != lexical_config:
+        raise ValueError("candidate report does not use the frozen lexical winner")
+    _validate_worker_payload(payload.report, payload.canonical_bytes)
+    if payload.report.get("candidate") != spec:
+        raise ValueError("worker result does not match requested matrix candidate")
+
+
+def _run_candidate_workers(ledger, trusted, specs, cache_root, deadline_seconds, lexical_config) -> tuple[list, bool]:
+    candidate_payloads = []
+    execution_bound = True
+    for spec in specs:
+        argv = trusted.candidate_arguments(spec, cache_root, deadline_seconds, lexical_config=lexical_config)
+        expected = {"candidate": spec, "lexical_configuration": lexical_config}
+        payload = ledger.run(argv, expected)
+        _require_candidate_payload(payload, spec, lexical_config)
+        execution_bound &= ledger.consume(payload, argv, expected)
+        candidate_payloads.append(payload)
+    return candidate_payloads, execution_bound
+
+
+def _written_candidate_paths(temporary: Path, candidate_payloads: list) -> list[Path]:
+    paths = []
+    for index, result in enumerate(candidate_payloads):
+        path = temporary / f"candidate-{index}.json"
+        _write_new_bytes(path, result.canonical_bytes)
+        paths.append(path)
+    return paths
+
+
+def _lexical_levels_of(lexical_results: list) -> set[str]:
+    return {item.report["methodology"]["lexical_configuration"]["id"] for item in lexical_results}
+
+
+def _require_complete_selection_evidence(lexical_results: list, candidate_payloads: list, trusted) -> None:
+    if (
+        len(lexical_results) != len(trusted.lexical_levels)
+        or _lexical_levels_of(lexical_results) != set(trusted.lexical_levels)
+        or len(candidate_payloads) != trusted.candidate_count
+    ):
+        raise ValueError("authoritative selection evidence is incomplete")
+
+
+def _aggregate_in_temporary(trusted, candidate_payloads, lexical_results, execution_bound, **locations) -> dict:
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
+        paths = _written_candidate_paths(Path(temporary), candidate_payloads)
+        _require_complete_selection_evidence(lexical_results, candidate_payloads, trusted)
+        return trusted.aggregator(
+            paths,
+            **locations,
+            _lexical_results=lexical_results,
+            _write_analysis=not execution_bound,
+        )
+
+
+def _authoritative_output(repo: Path, output_path: Path | str) -> Path:
+    requested_output = Path(output_path)
+    if not requested_output.is_absolute():
+        requested_output = repo / requested_output
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise ValueError("selection output already exists")
+    return output
+
+
+def _publish_authoritative_selection(artifact, repo_root, output_path, candidate_payloads, lexical_results) -> None:
+    artifact["schema_version"] = "retrieval-selection/v1"
+    artifact["quality_claim"] = artifact["selected"] is not None
+    artifact["release_evidence"] = True
+    serialized = canonical_json_bytes(artifact) + b"\n"
+    repo = Path(repo_root).resolve(strict=True)
+    output = _authoritative_output(repo, output_path)
+    resolved_parent = _checked_output_parent(repo, output)
+    retained_root = _retained_reports_root(repo)
+    retained_reports = [
+        (_payload_digest(payload), payload.canonical_bytes) for payload in [*candidate_payloads, *lexical_results]
+    ]
+    _publish_retained_and_output(retained_root, retained_reports, resolved_parent / output.name, serialized.decode("utf-8"))
+
+
 def _orchestrate_selection_impl(
     *,
     matrix_path: Path | str,
@@ -5326,187 +5722,46 @@ def _orchestrate_selection_impl(
     _trusted_lexical_levels=None,
     _trusted_candidate_count=None,
 ) -> dict:
-    if any(
-        item is None
-        for item in (
-            _trusted_worker,
-            _trusted_process_runner,
-            _trusted_candidate_enumerator,
-            _trusted_lexical_arguments,
-            _trusted_lexical_selector,
-            _trusted_candidate_arguments,
-            _trusted_candidate_key,
-            _trusted_aggregator,
-            _trusted_lexical_contract_sha256,
-            _trusted_lexical_levels,
-            _trusted_candidate_count,
-        )
-    ):
-        raise TypeError("authoritative orchestration requires its bound subprocess transport")
-    if (
-        required_candidate_specs is not _trusted_candidate_enumerator
-        or _lexical_ablation_worker_arguments is not _trusted_lexical_arguments
-        or _select_lexical_winner is not _trusted_lexical_selector
-        or _candidate_worker_arguments is not _trusted_candidate_arguments
-        or _candidate_key is not _trusted_candidate_key
-        or _aggregate_reports is not _trusted_aggregator
-        or _sha256_json(LEXICAL_CONFIGURATIONS) != _trusted_lexical_contract_sha256
-    ):
-        raise ValueError("authoritative completeness contract was modified")
-    matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
-    lexical_configurations = json.loads(json.dumps(LEXICAL_CONFIGURATIONS))
-    if tuple(lexical_configurations) != _trusted_lexical_levels:
-        raise ValueError("authoritative selection requires exact L0 through L4 configurations")
-    specs = json.loads(json.dumps(_trusted_candidate_enumerator(matrix)))
-    if (
-        len(specs) != _trusted_candidate_count
-        or len({_trusted_candidate_key(spec) for spec in specs}) != _trusted_candidate_count
-    ):
-        raise ValueError("authoritative selection requires exactly 27 unique matrix candidates")
-    if cache_root is None or deadline_seconds is None:
-        raise ValueError("authoritative orchestration requires cache root and deadline")
-    requested_cache = Path(cache_root).expanduser()
-    if requested_cache.exists() and _is_reparse_point(requested_cache):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    requested_cache.mkdir(parents=True, exist_ok=True)
-    cache_root = _validate_cache_root(requested_cache).resolve(strict=True)
-    if _is_reparse_point(cache_root):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    worker = _run_bounded_model_worker
-    invocation_nonce = secrets.token_bytes(32)
-    invocation_records = {}
-    trusted_transport = worker is _trusted_worker and _run_process_tree is _trusted_process_runner
-
-    def run_worker(argv, expected):
-        payload = worker(argv, deadline_seconds=deadline_seconds)
-        if trusted_transport and isinstance(payload, _WorkerPayload):
-            invocation_records[id(payload)] = (
-                invocation_nonce,
-                payload,
-                tuple(argv),
-                _sha256_json(expected),
-                hashlib.sha256(payload.canonical_bytes).digest(),
-            )
-        return payload
-
-    def consume_worker(payload, argv, expected):
-        registered = invocation_records.pop(id(payload), None)
-        return (
-            registered is not None
-            and registered[0] is invocation_nonce
-            and registered[1] is payload
-            and registered[2] == tuple(argv)
-            and registered[3] == _sha256_json(expected)
-            and registered[4] == hashlib.sha256(payload.canonical_bytes).digest()
-        )
-
-    lexical_results = []
-    execution_bound = True
-    for argv in _trusted_lexical_arguments(
-        cache_root, deadline_seconds, levels=_trusted_lexical_levels
-    ):
-        lexical_config = argv[argv.index("--lexical-config") + 1]
-        expected = {"candidate": None, "lexical_configuration": lexical_config}
-        payload = run_worker(argv, expected)
-        if not isinstance(payload, _WorkerPayload):
-            raise TypeError("lexical worker transport returned an invalid payload")
-        _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
-        execution_bound &= consume_worker(payload, argv, expected)
-        lexical_results.append(payload)
-    lexical_config = _trusted_lexical_selector(
-        [item.report for item in lexical_results], configurations=lexical_configurations
-    )["id"]
-    candidate_payloads = []
-    for spec in specs:
-        argv = _trusted_candidate_arguments(
-            spec, cache_root, deadline_seconds, lexical_config=lexical_config
-        )
-        expected = {"candidate": spec, "lexical_configuration": lexical_config}
-        payload = run_worker(argv, expected)
-        if not isinstance(payload, _WorkerPayload):
-            raise TypeError("authoritative worker transport returned an invalid payload")
-        if payload.report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
-            raise ValueError(
-                f"authoritative candidate {_candidate_key(spec)} degraded: "
-                f"fallback_reason={payload.report.get('fallback_reason')!s}"
-            )
-        if payload.report.get("methodology", {}).get("lexical_configuration", {}).get(
-            "id"
-        ) != lexical_config:
-            raise ValueError("candidate report does not use the frozen lexical winner")
-        _validate_worker_payload(payload.report, payload.canonical_bytes)
-        if payload.report.get("candidate") != spec:
-            raise ValueError("worker result does not match requested matrix candidate")
-        execution_bound &= consume_worker(payload, argv, expected)
-        candidate_payloads.append(payload)
-    with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
-        paths = []
-        for index, result in enumerate(candidate_payloads):
-            path = Path(temporary) / f"candidate-{index}.json"
-            _write_new_bytes(path, result.canonical_bytes)
-            paths.append(path)
-        if (
-            len(lexical_results) != len(_trusted_lexical_levels)
-            or {
-                item.report["methodology"]["lexical_configuration"]["id"]
-                for item in lexical_results
-            }
-            != set(_trusted_lexical_levels)
-            or len(candidate_payloads) != _trusted_candidate_count
-        ):
-            raise ValueError("authoritative selection evidence is incomplete")
-        artifact = _trusted_aggregator(
-            paths,
-            matrix_path=matrix_path,
-            corpus_path=corpus_path,
-            repo_root=repo_root,
-            output_path=output_path,
-            measured_at=measured_at,
-            _lexical_results=lexical_results,
-            _write_analysis=not execution_bound,
-        )
+    trusted = _TrustedBindings(
+        worker=_trusted_worker,
+        process_runner=_trusted_process_runner,
+        candidate_enumerator=_trusted_candidate_enumerator,
+        lexical_arguments=_trusted_lexical_arguments,
+        lexical_selector=_trusted_lexical_selector,
+        candidate_arguments=_trusted_candidate_arguments,
+        candidate_key=_trusted_candidate_key,
+        aggregator=_trusted_aggregator,
+        lexical_contract_sha256=_trusted_lexical_contract_sha256,
+        lexical_levels=_trusted_lexical_levels,
+        candidate_count=_trusted_candidate_count,
+    )
+    trusted.require_intact()
+    matrix, lexical_configurations, specs = _authoritative_inputs(trusted, matrix_path)
+    _require_cache_and_deadline(cache_root, deadline_seconds)
+    cache_root = _prepared_model_cache_root(cache_root)
+    ledger = _worker_ledger(trusted, deadline_seconds)
+    lexical_results, lexical_bound = _run_lexical_workers(
+        ledger, trusted, cache_root, deadline_seconds, matrix, corpus_path
+    )
+    lexical_config = _lexical_winner(trusted, lexical_results, lexical_configurations)
+    candidate_payloads, candidate_bound = _run_candidate_workers(
+        ledger, trusted, specs, cache_root, deadline_seconds, lexical_config
+    )
+    execution_bound = lexical_bound & candidate_bound
+    artifact = _aggregate_in_temporary(
+        trusted,
+        candidate_payloads,
+        lexical_results,
+        execution_bound,
+        matrix_path=matrix_path,
+        corpus_path=corpus_path,
+        repo_root=repo_root,
+        output_path=output_path,
+        measured_at=measured_at,
+    )
     if not execution_bound:
         return artifact
-
-    artifact["schema_version"] = "retrieval-selection/v1"
-    artifact["quality_claim"] = artifact["selected"] is not None
-    artifact["release_evidence"] = True
-    serialized = canonical_json_bytes(artifact) + b"\n"
-    repo = Path(repo_root).resolve(strict=True)
-    requested_output = Path(output_path)
-    if not requested_output.is_absolute():
-        requested_output = repo / requested_output
-    output = requested_output.parent.resolve() / requested_output.name
-    if output.exists() or output.is_symlink():
-        raise ValueError("selection output already exists")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    resolved_parent = output.parent.resolve(strict=True)
-    if resolved_parent != repo and repo not in resolved_parent.parents:
-        raise ValueError("selection output parent escaped benchmark/results")
-    current = output.parent
-    while current != repo:
-        if _is_reparse_point(current):
-            raise ValueError("selection output path must not contain symlinks or reparse points")
-        current = current.parent
-    retained_root = repo / "benchmark" / "results" / "reports"
-    retained_root.mkdir(parents=True, exist_ok=True)
-    resolved_retained_root = retained_root.resolve(strict=True)
-    if resolved_retained_root != retained_root or _is_reparse_point(retained_root):
-        raise ValueError("retained report path must not contain symlinks or reparse points")
-    created_reports = []
-    try:
-        for payload in [*candidate_payloads, *lexical_results]:
-            digest = hashlib.sha256(payload.canonical_bytes).hexdigest()
-            retained = retained_root / f"{digest}.json"
-            identity = _write_new_bytes(retained, payload.canonical_bytes)
-            created_reports.append((retained, identity))
-        _write_new_output(resolved_parent / output.name, serialized.decode("utf-8"))
-    except BaseException:
-        for retained, identity in reversed(created_reports):
-            with contextlib.suppress(FileNotFoundError):
-                if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
-                    retained.unlink()
-        raise
+    _publish_authoritative_selection(artifact, repo_root, output_path, candidate_payloads, lexical_results)
     return artifact
 
 
@@ -5532,6 +5787,41 @@ def _lexical_ablation_worker_arguments(
     ]
 
 
+_LEXICAL_WORKER_IDENTITIES = (
+    ("quality_claim", False),
+    ("release_evidence", False),
+    ("candidate", None),
+    ("model_id", None),
+    ("fallback_reason", None),
+)
+
+
+def _lexical_worker_configuration_valid(report: dict, lexical: object) -> bool:
+    return lexical in LEXICAL_CONFIGURATIONS and (
+        report["methodology"]["lexical_configuration"] == LEXICAL_CONFIGURATIONS[lexical]
+    )
+
+
+def _lexical_worker_bound_to_matrix(report: dict, matrix: dict) -> bool:
+    if report["corpus_sha256"] != matrix["benchmark_contract"]["corpus"]["sha256"]:
+        return False
+    if report["matrix_sha256"] != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest():
+        return False
+    if report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"]):
+        return False
+    if report["benchmark_runner_sha256"] != _sha256_file(Path(__file__)):
+        return False
+    return report["methodology"].get("environment_provenance") == _environment_provenance(None)
+
+
+def _lexical_worker_provenance_valid(report: dict, lexical: object, matrix: dict) -> bool:
+    if not _lexical_worker_configuration_valid(report, lexical):
+        return False
+    if not _fields_identical(report, _LEXICAL_WORKER_IDENTITIES):
+        return False
+    return _lexical_worker_bound_to_matrix(report, matrix)
+
+
 def _validate_lexical_worker_payload(
     payload: _WorkerPayload, *, matrix: dict, corpus_path: Path | str
 ) -> None:
@@ -5540,21 +5830,7 @@ def _validate_lexical_worker_payload(
         raise ValueError("lexical worker report is not canonical")
     _require_exact_keys(report, REPORT_FIELDS, "lexical worker report")
     lexical = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
-    if (
-        lexical not in LEXICAL_CONFIGURATIONS
-        or report["methodology"]["lexical_configuration"] != LEXICAL_CONFIGURATIONS[lexical]
-        or report["quality_claim"] is not False
-        or report["release_evidence"] is not False
-        or report["candidate"] is not None
-        or report["model_id"] is not None
-        or report["fallback_reason"] is not None
-        or report["corpus_sha256"] != matrix["benchmark_contract"]["corpus"]["sha256"]
-        or report["matrix_sha256"]
-        != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest()
-        or report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"])
-        or report["benchmark_runner_sha256"] != _sha256_file(Path(__file__))
-        or report["methodology"].get("environment_provenance") != _environment_provenance(None)
-    ):
+    if not _lexical_worker_provenance_valid(report, lexical, matrix):
         raise ValueError("lexical worker provenance is incomplete or incomparable")
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
     _recompute_report_metrics(
@@ -5643,86 +5919,121 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate_cli_args(args: argparse.Namespace) -> None:
-    if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-        if (
-            args.cache_root is None
-            or args.selection_output is None
-            or args.measured_at is None
-            or args.deadline_seconds is None
-            or not math.isfinite(args.deadline_seconds)
-            or args.deadline_seconds <= 0
-        ):
-            raise ValueError(
-                "authoritative-selection requires cache root, selection output, measured-at, and deadline"
-            )
-        if args.raw_report or any(
-            value is not None
-            for value in (args.model_id, args.variant_id, args.reranker_id, args.output)
-        ) or args.allow_download:
-            raise ValueError("authoritative-selection derives candidates from the closed matrix")
-    elif args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-        if not args.raw_report or args.selection_output is None or args.measured_at is None:
-            raise ValueError(
-                "selection-aggregation requires explicit --raw-report, --selection-output, and --measured-at"
-            )
-        if any(
-            value is not None
-            for value in (
-                args.cache_root,
-                args.model_id,
-                args.variant_id,
-                args.reranker_id,
-                args.rerank_depth,
-                args.vector_backend,
-                args.lexical_config,
-                args.output,
-            )
-        ) or args.allow_download:
-            raise ValueError("selection-aggregation does not accept model-run options")
-    elif args.adapter == MODEL_MATRIX_ADAPTER_KIND:
-        required = {
-            "--model-id": args.model_id,
-            "--variant-id": args.variant_id,
-            "--cache-root": args.cache_root,
-            "--lexical-config": args.lexical_config,
-            "--vector-backend": args.vector_backend,
-        }
-        missing = [name for name, value in required.items() if value is None]
-        if missing:
-            raise ValueError(
-                "model-matrix adapter requires explicit " + ", ".join(missing)
-            )
-        if args.deadline_seconds is None or not math.isfinite(args.deadline_seconds) or args.deadline_seconds <= 0:
-            raise ValueError("model-matrix adapter requires positive --deadline-seconds")
-        if args.rerank_depth is not None:
-            raise ValueError("reranker evidence automatically runs depths 10, 20, and 50 together")
-    elif any(
-        value is not None
-        for value in (
-            args.model_id,
-            args.variant_id,
-            args.reranker_id,
-            args.rerank_depth,
-            args.vector_backend,
+_MODEL_MATRIX_REQUIRED_OPTIONS = (
+    ("--model-id", "model_id"),
+    ("--variant-id", "variant_id"),
+    ("--cache-root", "cache_root"),
+    ("--lexical-config", "lexical_config"),
+    ("--vector-backend", "vector_backend"),
+)
+
+
+def _positive_finite_deadline(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and value > 0
+
+
+def _any_set(values: Sequence[object]) -> bool:
+    return any(value is not None for value in values)
+
+
+def _authoritative_cli_complete(args: argparse.Namespace) -> bool:
+    return (
+        args.cache_root is not None
+        and args.selection_output is not None
+        and args.measured_at is not None
+        and _positive_finite_deadline(args.deadline_seconds)
+    )
+
+
+def _authoritative_cli_overreach(args: argparse.Namespace):
+    return (
+        args.raw_report
+        or _any_set((args.model_id, args.variant_id, args.reranker_id, args.output))
+        or args.allow_download
+    )
+
+
+def _validate_authoritative_args(args: argparse.Namespace) -> None:
+    if not _authoritative_cli_complete(args):
+        raise ValueError(
+            "authoritative-selection requires cache root, selection output, measured-at, and deadline"
         )
-    ) or args.allow_download:
+    if _authoritative_cli_overreach(args):
+        raise ValueError("authoritative-selection derives candidates from the closed matrix")
+
+
+def _aggregation_cli_complete(args: argparse.Namespace) -> bool:
+    return bool(args.raw_report) and args.selection_output is not None and args.measured_at is not None
+
+
+def _aggregation_run_options(args: argparse.Namespace) -> tuple:
+    return (
+        args.cache_root,
+        args.model_id,
+        args.variant_id,
+        args.reranker_id,
+        args.rerank_depth,
+        args.vector_backend,
+        args.lexical_config,
+        args.output,
+    )
+
+
+def _validate_aggregation_args(args: argparse.Namespace) -> None:
+    if not _aggregation_cli_complete(args):
+        raise ValueError(
+            "selection-aggregation requires explicit --raw-report, --selection-output, and --measured-at"
+        )
+    if _any_set(_aggregation_run_options(args)) or args.allow_download:
+        raise ValueError("selection-aggregation does not accept model-run options")
+
+
+def _missing_model_matrix_options(args: argparse.Namespace) -> list[str]:
+    return [name for name, attribute in _MODEL_MATRIX_REQUIRED_OPTIONS if getattr(args, attribute) is None]
+
+
+def _validate_model_matrix_args(args: argparse.Namespace) -> None:
+    missing = _missing_model_matrix_options(args)
+    if missing:
+        raise ValueError("model-matrix adapter requires explicit " + ", ".join(missing))
+    if not _positive_finite_deadline(args.deadline_seconds):
+        raise ValueError("model-matrix adapter requires positive --deadline-seconds")
+    if args.rerank_depth is not None:
+        raise ValueError("reranker evidence automatically runs depths 10, 20, and 50 together")
+
+
+def _validate_lexical_args(args: argparse.Namespace) -> None:
+    real_model_options = (args.model_id, args.variant_id, args.reranker_id, args.rerank_depth, args.vector_backend)
+    if _any_set(real_model_options) or args.allow_download:
         raise ValueError("real-model options require --adapter model-matrix")
+
+
+def _cli_validator(adapter: str):
+    if adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
+        return _validate_authoritative_args
+    if adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
+        return _validate_aggregation_args
+    if adapter == MODEL_MATRIX_ADAPTER_KIND:
+        return _validate_model_matrix_args
+    return _validate_lexical_args
+
+
+def _validate_cli_args(args: argparse.Namespace) -> None:
+    _cli_validator(args.adapter)(args)
+
+
+_DROPPED_WORKER_FLAGS = frozenset({"--internal-worker", "--json"})
 
 
 def _worker_arguments(argv: Sequence[str], output: Path) -> list[str]:
     cleaned = []
     skip = False
-    for index, value in enumerate(argv):
+    for value in argv:
         if skip:
             skip = False
             continue
-        if value == "--output":
-            skip = True
-            continue
-        if value == "--internal-worker":
-            continue
-        if value == "--json":
+        skip = value == "--output"
+        if skip or value in _DROPPED_WORKER_FLAGS:
             continue
         cleaned.append(value)
     return [*cleaned, "--output", str(output), "--internal-worker"]
@@ -5812,6 +6123,50 @@ def _worker_provenance(report: dict) -> dict:
     }
 
 
+def _termination(returncode: int) -> str:
+    if returncode < 0:
+        return f"signal-{abs(returncode)}"
+    return "exit-code"
+
+
+def _worker_failure_message(completed: subprocess.CompletedProcess, deadline_seconds: float) -> str:
+    error = completed.stderr.decode("utf-8", errors="replace").strip()
+    return (
+        "real benchmark worker failed: "
+        f"returncode={completed.returncode}; timeout_seconds={deadline_seconds}; "
+        f"termination={_termination(completed.returncode)}; stderr={error or 'empty'}"
+    )
+
+
+def _completed_worker(command: list[str], deadline_seconds: float) -> subprocess.CompletedProcess:
+    try:
+        return _run_process_tree(command, timeout=deadline_seconds)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            "real benchmark worker failed: "
+            f"timeout_seconds={deadline_seconds}; termination=deadline-exceeded; {exc}"
+        ) from exc
+
+
+def _require_worker_report(completed: subprocess.CompletedProcess, report_path: Path, deadline_seconds: float) -> None:
+    if completed.returncode not in {0, 2} or not report_path.is_file():
+        raise ValueError(_worker_failure_message(completed, deadline_seconds))
+
+
+def _acquisition_receipt(raw: bytes, report: dict) -> dict:
+    if raw != _canonical_report_bytes(report) or report.get("quality_claim") is not False:
+        raise ValueError("model acquisition receipt is invalid")
+    return report
+
+
+def _transported_payload(raw: bytes, report: dict) -> _WorkerPayload:
+    if raw != _canonical_report_bytes(report):
+        raise ValueError("worker report is not canonical")
+    if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
+        raise ValueError("worker transport received a self-attested payload")
+    return _WorkerPayload(report, raw)
+
+
 def _run_bounded_model_worker(
     argv: Sequence[str], *, deadline_seconds: float
 ) -> _WorkerPayload | dict:
@@ -5822,36 +6177,13 @@ def _run_bounded_model_worker(
             str(Path(__file__).resolve()),
             *_worker_arguments(argv, report_path),
         ]
-        try:
-            completed = _run_process_tree(command, timeout=deadline_seconds)
-        except TimeoutError as exc:
-            raise TimeoutError(
-                "real benchmark worker failed: "
-                f"timeout_seconds={deadline_seconds}; termination=deadline-exceeded; {exc}"
-            ) from exc
-        if completed.returncode not in {0, 2} or not report_path.is_file():
-            error = completed.stderr.decode("utf-8", errors="replace").strip()
-            termination = (
-                f"signal-{abs(completed.returncode)}"
-                if completed.returncode < 0
-                else "exit-code"
-            )
-            raise ValueError(
-                "real benchmark worker failed: "
-                f"returncode={completed.returncode}; timeout_seconds={deadline_seconds}; "
-                f"termination={termination}; stderr={error or 'empty'}"
-            )
+        completed = _completed_worker(command, deadline_seconds)
+        _require_worker_report(completed, report_path, deadline_seconds)
         raw = read_stable_bytes(report_path, MAX_CORPUS_BYTES, label="worker report")
         report = json.loads(raw)
         if report.get("artifact_kind") == "model-acquisition-receipt":
-            if raw != _canonical_report_bytes(report) or report.get("quality_claim") is not False:
-                raise ValueError("model acquisition receipt is invalid")
-            return report
-        if raw != _canonical_report_bytes(report):
-            raise ValueError("worker report is not canonical")
-        if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
-            raise ValueError("worker transport received a self-attested payload")
-        return _WorkerPayload(report, raw)
+            return _acquisition_receipt(raw, report)
+        return _transported_payload(raw, report)
 
 
 def _bind_orchestrator(
@@ -5920,164 +6252,213 @@ del _bind_orchestrator
 del _orchestrate_selection_impl
 
 
+def _pretty_json(value: dict) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+
+
+def _print_json_or(args: argparse.Namespace, serialized: str, message: str) -> None:
+    if args.json:
+        print(serialized, end="")
+        return
+    print(message)
+
+
+def _source_argv(argv: Sequence[str] | None) -> list[str]:
+    if argv is not None:
+        return list(argv)
+    return sys.argv[1:]
+
+
+def _reject_legacy_flags(args: argparse.Namespace) -> None:
+    if args.semantic or args.report:
+        raise ValueError("use --adapter model-matrix instead of legacy --semantic/--report")
+    if args.model:
+        raise ValueError("use exact --model-id and --variant-id selectors")
+
+
+def _run_authoritative_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    del argv
+    artifact = orchestrate_selection(
+        matrix_path=args.matrix,
+        corpus_path=args.corpus,
+        repo_root=args.repo_root,
+        output_path=args.selection_output,
+        measured_at=args.measured_at,
+        cache_root=args.cache_root,
+        deadline_seconds=args.deadline_seconds,
+    )
+    message = (
+        "retrieval-v2 authoritative selection complete; "
+        f"release_evidence={str(artifact['release_evidence']).lower()}"
+    )
+    _print_json_or(args, _pretty_json(artifact), message)
+    return 0
+
+
+def _run_aggregation_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    del argv
+    artifact = aggregate_selection(
+        args.raw_report,
+        matrix_path=args.matrix,
+        corpus_path=args.corpus,
+        repo_root=args.repo_root,
+        output_path=args.selection_output,
+        measured_at=args.measured_at,
+    )
+    _print_json_or(args, _pretty_json(artifact), "retrieval-v2 report comparison complete; release_evidence=false")
+    return 0
+
+
+def _acquisition_receipt_for(args: argparse.Namespace, argv: Sequence[str] | None) -> dict:
+    if not args.internal_worker:
+        return _run_bounded_model_worker(_source_argv(argv), deadline_seconds=args.deadline_seconds)
+    selection = load_model_selection(
+        args.matrix,
+        args.corpus,
+        model_id=args.model_id,
+        variant_id=args.variant_id,
+        reranker_id=args.reranker_id,
+    )
+    return prefetch_models(selection, cache_root=args.cache_root)
+
+
+def _write_acquisition_output(requested: Path, serialized: str) -> None:
+    output = requested.expanduser()
+    if not output.is_absolute():
+        output = Path.cwd() / output
+    if output.exists() or output.is_symlink():
+        raise ValueError("--output must not already exist")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
+
+
+def _run_acquisition_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    receipt = _acquisition_receipt_for(args, argv)
+    serialized = _canonical_report_bytes(receipt).decode("utf-8")
+    if args.output is not None:
+        _write_acquisition_output(args.output, serialized)
+    _print_json_or(args, serialized, "model acquisition complete; quality_claim=false")
+    return 0
+
+
+def _worker_report_or_none(args: argparse.Namespace, argv: Sequence[str] | None) -> dict | None:
+    if args.adapter != MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
+        return None
+    payload = _run_bounded_model_worker(_source_argv(argv), deadline_seconds=args.deadline_seconds)
+    if not isinstance(payload, _WorkerPayload):
+        raise ValueError("benchmark worker did not return a worker payload")
+    _validate_worker_payload(payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema)
+    report = json.loads(json.dumps(payload.report))
+    if args.output is None:
+        report["gates"]["interpretation"] = "stdout-only-non-quality"
+    return report
+
+
+def _run_options_from_args(args: argparse.Namespace) -> dict:
+    run_options = {
+        "adapter": args.adapter,
+        "corpus_path": args.corpus,
+        "matrix_path": args.matrix,
+        "model_id": args.model_id,
+        "variant_id": args.variant_id,
+        "reranker_id": args.reranker_id,
+        "rerank_depth": args.rerank_depth,
+        "vector_backend": args.vector_backend,
+        "allow_download": args.allow_download,
+        "lexical_config": args.lexical_config,
+        "raw_output_written": args.output is not None,
+    }
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.internal_worker:
+        run_options["lexical_deadline_seconds"] = args.deadline_seconds
+    return run_options
+
+
+def _run_cli_benchmark(corpus: dict, args: argparse.Namespace, run_options: dict) -> dict:
+    if args.cache_root is not None:
+        return run_benchmark(corpus, cache_root=args.cache_root, **run_options)
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-v2-") as temporary:
+        return run_benchmark(corpus, cache_root=Path(temporary), **run_options)
+
+
+def _serialized_cli_report(args: argparse.Namespace, report: dict) -> str:
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
+        return _canonical_report_bytes(report).decode("utf-8")
+    return _pretty_json(report)
+
+
+def _new_report_output_path(requested: Path) -> Path:
+    requested_output = requested.expanduser()
+    if requested_output.is_symlink():
+        raise ValueError("--output must not be a symlink")
+    if not requested_output.is_absolute():
+        requested_output = Path.cwd() / requested_output
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise ValueError("--output must not already exist")
+    return output
+
+
+def _source_and_vault_roots() -> list[Path]:
+    forbidden = [ROOT.resolve()]
+    configured_vault = os.environ.get("LLM_WIKI_ROOT")
+    if configured_vault:
+        forbidden.append(Path(configured_vault).expanduser().resolve())
+    return forbidden
+
+
+def _require_outside_source_and_vault(output: Path) -> None:
+    if any(output == root or root in output.parents for root in _source_and_vault_roots()):
+        raise ValueError("--output must be outside source and vault roots")
+
+
+def _write_report_output(requested: Path, serialized: str) -> None:
+    output = _new_report_output_path(requested)
+    _require_outside_source_and_vault(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
+
+
+def _cli_exit_code(report: dict) -> int:
+    gates = report["gates"]
+    if gates["passed_for_orchestration"] and not gates.get("degraded", False):
+        return 0
+    return 2
+
+
+def _run_benchmark_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> int:
+    report = _worker_report_or_none(args, argv)
+    corpus = load_corpus(args.corpus, args.schema)
+    run_options = _run_options_from_args(args)
+    if report is None:
+        report = _run_cli_benchmark(corpus, args, run_options)
+    serialized = _serialized_cli_report(args, report)
+    if args.output is not None:
+        _write_report_output(args.output, serialized)
+    message = (
+        f"retrieval-v2 {report.get('adapter_kind', args.adapter)} complete; "
+        f"quality_claim={str(report['quality_claim']).lower()}; "
+        f"release_evidence={str(report.get('release_evidence', False)).lower()}"
+    )
+    _print_json_or(args, serialized, message)
+    return _cli_exit_code(report)
+
+
+def _cli_mode(args: argparse.Namespace):
+    if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
+        return _run_authoritative_cli
+    if args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
+        return _run_aggregation_cli
+    if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.allow_download:
+        return _run_acquisition_cli
+    return _run_benchmark_cli
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         _validate_cli_args(args)
-        if args.semantic or args.report:
-            raise ValueError("use --adapter model-matrix instead of legacy --semantic/--report")
-        if args.model:
-            raise ValueError("use exact --model-id and --variant-id selectors")
-        if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-            artifact = orchestrate_selection(
-                matrix_path=args.matrix,
-                corpus_path=args.corpus,
-                repo_root=args.repo_root,
-                output_path=args.selection_output,
-                measured_at=args.measured_at,
-                cache_root=args.cache_root,
-                deadline_seconds=args.deadline_seconds,
-            )
-            serialized = json.dumps(
-                artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-            if args.json:
-                print(serialized, end="")
-            else:
-                print(
-                    "retrieval-v2 authoritative selection complete; "
-                    f"release_evidence={str(artifact['release_evidence']).lower()}"
-                )
-            return 0
-        if args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-            artifact = aggregate_selection(
-                args.raw_report,
-                matrix_path=args.matrix,
-                corpus_path=args.corpus,
-                repo_root=args.repo_root,
-                output_path=args.selection_output,
-                measured_at=args.measured_at,
-            )
-            serialized = json.dumps(
-                artifact, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-            if args.json:
-                print(serialized, end="")
-            else:
-                print("retrieval-v2 report comparison complete; release_evidence=false")
-            return 0
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.allow_download:
-            if not args.internal_worker:
-                source_argv = list(argv) if argv is not None else sys.argv[1:]
-                receipt = _run_bounded_model_worker(
-                    source_argv, deadline_seconds=args.deadline_seconds
-                )
-            else:
-                selection = load_model_selection(
-                    args.matrix,
-                    args.corpus,
-                    model_id=args.model_id,
-                    variant_id=args.variant_id,
-                    reranker_id=args.reranker_id,
-                )
-                receipt = prefetch_models(selection, cache_root=args.cache_root)
-            serialized = _canonical_report_bytes(receipt).decode("utf-8")
-            if args.output is not None:
-                output = args.output.expanduser()
-                if not output.is_absolute():
-                    output = Path.cwd() / output
-                if output.exists() or output.is_symlink():
-                    raise ValueError("--output must not already exist")
-                output.parent.mkdir(parents=True, exist_ok=True)
-                _write_new_output(output.parent.resolve(strict=True) / output.name, serialized)
-            if args.json:
-                print(serialized, end="")
-            else:
-                print("model acquisition complete; quality_claim=false")
-            return 0
-        report = None
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and not args.internal_worker:
-            source_argv = list(argv) if argv is not None else sys.argv[1:]
-            payload = _run_bounded_model_worker(
-                source_argv, deadline_seconds=args.deadline_seconds
-            )
-            if not isinstance(payload, _WorkerPayload):
-                raise ValueError("benchmark worker did not return a worker payload")
-            _validate_worker_payload(
-                payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema
-            )
-            report = json.loads(json.dumps(payload.report))
-            if args.output is None:
-                report["gates"]["interpretation"] = "stdout-only-non-quality"
-        corpus = load_corpus(args.corpus, args.schema)
-        run_options = {
-            "adapter": args.adapter,
-            "corpus_path": args.corpus,
-            "matrix_path": args.matrix,
-            "model_id": args.model_id,
-            "variant_id": args.variant_id,
-            "reranker_id": args.reranker_id,
-            "rerank_depth": args.rerank_depth,
-            "vector_backend": args.vector_backend,
-            "allow_download": args.allow_download,
-            "lexical_config": args.lexical_config,
-            "raw_output_written": args.output is not None,
-        }
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.internal_worker:
-            run_options["lexical_deadline_seconds"] = args.deadline_seconds
-        if report is not None:
-            pass
-        elif args.cache_root is None:
-            with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-v2-") as temporary:
-                report = run_benchmark(
-                    corpus,
-                    cache_root=Path(temporary),
-                    **run_options,
-                )
-        else:
-            report = run_benchmark(
-                corpus,
-                cache_root=args.cache_root,
-                **run_options,
-            )
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
-            serialized = _canonical_report_bytes(report).decode("utf-8")
-        else:
-            serialized = json.dumps(
-                report, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
-            ) + "\n"
-        if args.output is not None:
-            requested_output = args.output.expanduser()
-            if requested_output.is_symlink():
-                raise ValueError("--output must not be a symlink")
-            if not requested_output.is_absolute():
-                requested_output = Path.cwd() / requested_output
-            output = requested_output.parent.resolve() / requested_output.name
-            if output.exists() or output.is_symlink():
-                raise ValueError("--output must not already exist")
-            forbidden = [ROOT.resolve()]
-            configured_vault = os.environ.get("LLM_WIKI_ROOT")
-            if configured_vault:
-                forbidden.append(Path(configured_vault).expanduser().resolve())
-            if any(output == root or root in output.parents for root in forbidden):
-                raise ValueError("--output must be outside source and vault roots")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output = output.parent.resolve(strict=True) / output.name
-            _write_new_output(output, serialized)
-        if args.json:
-            print(serialized, end="")
-        else:
-            print(
-                f"retrieval-v2 {report.get('adapter_kind', args.adapter)} complete; "
-                f"quality_claim={str(report['quality_claim']).lower()}; "
-                f"release_evidence={str(report.get('release_evidence', False)).lower()}"
-            )
-        return (
-            0
-            if report["gates"]["passed_for_orchestration"]
-            and not report["gates"].get("degraded", False)
-            else 2
-        )
+        _reject_legacy_flags(args)
+        return _cli_mode(args)(args, argv)
     except (OSError, ValueError, SchemaValidationError) as exc:
         print(f"retrieval-v2 error: {exc}", file=sys.stderr)
         return 2
