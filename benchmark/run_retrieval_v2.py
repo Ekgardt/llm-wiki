@@ -342,6 +342,10 @@ def _candidate_fields(kind: str) -> set[str]:
 def _require_candidate_identity(candidate: dict, kind: str) -> None:
     if candidate["kind"] != kind:
         raise ValueError(f"matrix {kind} kind mismatch")
+    _require_pinned_local_code(candidate, kind)
+
+
+def _require_pinned_local_code(candidate: dict, kind: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", candidate["revision"]):
         raise ValueError(f"matrix {kind} revision is not pinned")
     if candidate["trust_remote_code"] is not False:
@@ -396,11 +400,14 @@ def _require_candidate_formatting(candidate: dict, kind: str) -> None:
         raise ValueError("embedding candidate lacks explicit formatting defaults")
 
 
-def _require_variant(variant: dict, kind: str, contract: dict) -> None:
-    expected = set(_VARIANT_FIELDS)
+def _variant_fields(kind: str) -> set[str]:
     if kind == "embedding":
-        expected.add("mrl")
-    _require_exact_keys(variant, expected, f"{kind} variant")
+        return {*_VARIANT_FIELDS, "mrl"}
+    return set(_VARIANT_FIELDS)
+
+
+def _require_variant(variant: dict, kind: str, contract: dict) -> None:
+    _require_exact_keys(variant, _variant_fields(kind), f"{kind} variant")
     _require_exact_keys(variant["quality"], set(_QUALITY_KEYS), "variant quality")
     _require_exact_keys(variant["quality"]["per_language"], {"EN", "RU", "ZH"}, "variant languages")
     _require_exact_keys(variant["resource_measurements"], set(_RESOURCE_KEYS), "variant resource measurements")
@@ -716,6 +723,10 @@ def _validate_corpus_against_schema(corpus: dict, schema_raw: bytes) -> None:
 def _require_frozen_corpus(corpus: dict, raw: bytes) -> None:
     if canonical_json_bytes(corpus) + b"\n" != raw:
         raise ValueError("corpus bytes are not canonical and frozen")
+    _require_known_corpus_identity(corpus)
+
+
+def _require_known_corpus_identity(corpus: dict) -> None:
     if corpus["schema_version"] != "retrieval-corpus/v2":
         raise ValueError("unsupported retrieval corpus schema version")
     if corpus["corpus_id"] not in FROZEN_CORPUS_IDS:
@@ -856,9 +867,14 @@ def _require_known_gold(query: dict, gold: _GoldSets, parent_by_id: dict, eviden
     query_id = query["query_id"]
     if not gold.relevant_parents <= parent_by_id.keys():
         raise ValueError(f"unknown relevant parent: {query_id}")
-    if not gold.required_evidence <= evidence_by_id.keys() or not gold.graded_evidence <= evidence_by_id.keys():
+    _require_known_gold_evidence(query_id, gold, evidence_by_id)
+
+
+def _require_known_gold_evidence(query_id: str, gold: _GoldSets, evidence_by_id: dict) -> None:
+    known = evidence_by_id.keys()
+    if not gold.required_evidence <= known or not gold.graded_evidence <= known:
         raise ValueError(f"unknown relevant evidence: {query_id}")
-    if not gold.negatives <= evidence_by_id.keys():
+    if not gold.negatives <= known:
         raise ValueError(f"unknown negative evidence: {query_id}")
 
 
@@ -870,6 +886,10 @@ def _require_consistent_gold(query: dict, gold: _GoldSets, evidence_by_id: dict)
     query_id = query["query_id"]
     if gold.required_evidence & gold.negatives or gold.graded_evidence & gold.negatives:
         raise ValueError(f"positive and negative evidence overlap: {query_id}")
+    _require_matching_gold_sets(query_id, gold, evidence_by_id)
+
+
+def _require_matching_gold_sets(query_id: str, gold: _GoldSets, evidence_by_id: dict) -> None:
     if gold.required_evidence != gold.graded_evidence:
         raise ValueError(f"required and graded evidence differ: {query_id}")
     if gold.relevant_parents != _required_parents(gold, evidence_by_id):
@@ -880,6 +900,11 @@ def _require_evidence_in_scope(query: dict, evidence_id: str, document: dict, go
     query_id = query["query_id"]
     if document["parent_id"] not in gold.relevant_parents:
         raise ValueError(f"evidence parent is not relevant: {query_id}")
+    _require_gold_in_query_scope(query, evidence_id, document, scoped)
+
+
+def _require_gold_in_query_scope(query: dict, evidence_id: str, document: dict, scoped: set) -> None:
+    query_id = query["query_id"]
     if document["project"] not in query["project_scope"]:
         raise ValueError(f"project scope excludes gold: {query_id}")
     if evidence_id not in scoped:
@@ -1521,6 +1546,10 @@ class SQLiteLexicalAdapter:
             return None, None
         if test_segmenter is None:
             return _load_pinned_jieba(self._root)
+        return self._injected_segmenter(test_segmenter)
+
+    @staticmethod
+    def _injected_segmenter(test_segmenter) -> tuple[object, dict]:
         if not callable(getattr(test_segmenter, "cut", None)):
             raise ValueError("test segmenter has no callable cut function")
         return test_segmenter, dict(_INJECTED_SEGMENTER_RUNTIME)
@@ -1623,21 +1652,26 @@ class SQLiteLexicalAdapter:
     def _segment(self, value: str) -> str:
         assert self._jieba is not None
         self._check_deadline()
-        iterator = self._segmentation_iterator(value)
+        tokens = self._segment_tokens(self._segmentation_iterator(value))
+        self._check_deadline()
+        return " ".join(tokens)
+
+    def _segment_tokens(self, iterator) -> list[str]:
         tokens: list[str] = []
         while True:
             self._check_deadline()
             token = _next_segment(iterator)
             if token is _SEGMENTATION_END:
-                break
-            normalized = str(token)
-            if not normalized:
-                continue
-            tokens.append(normalized)
-            if len(tokens) > MAX_SEGMENTATION_TOKENS:
-                raise ValueError("segmentation token limit exceeded")
-        self._check_deadline()
-        return " ".join(tokens)
+                return tokens
+            self._append_segment_token(tokens, str(token))
+
+    @staticmethod
+    def _append_segment_token(tokens: list[str], normalized: str) -> None:
+        if not normalized:
+            return
+        tokens.append(normalized)
+        if len(tokens) > MAX_SEGMENTATION_TOKENS:
+            raise ValueError("segmentation token limit exceeded")
 
     def _index_text(self, index_name: str, candidate: Candidate) -> str:
         value = _candidate_text(candidate)
@@ -2101,11 +2135,7 @@ class ModelEmbeddingAdapter:
             raise ValueError("BGE-M3 query omitted learned sparse output")
         sparse_ranked = self._sparse_ranking(query_sparse, indexes, ids, limit)
         fused = _fuse_rankings((dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit)
-        self.last_trace = {
-            "dense_candidate_ids": [item.evidence_id for item in dense],
-            "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
-            "fusion": {"method": "reciprocal-rank-fusion", "k": 60},
-        }
+        self.last_trace = _fusion_trace(dense, sparse_ranked)
         return fused
 
 
@@ -2187,12 +2217,25 @@ class ModelRerankerAdapter:
         return ranked_by_depth
 
 
+def _fusion_trace(dense: list[ScoredCandidate], sparse_ranked: list[ScoredCandidate]) -> dict:
+    return {
+        "dense_candidate_ids": [item.evidence_id for item in dense],
+        "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
+        "fusion": {"method": "reciprocal-rank-fusion", "k": 60},
+    }
+
+
+def _eligible_scored_ids(candidates: Sequence[ScoredCandidate], scope: QueryScope) -> set[str]:
+    return {
+        candidate.evidence_id
+        for candidate in filter_candidates([item.candidate for item in candidates], scope)
+    }
+
 
 def _keep_best_scored(by_id: dict[str, ScoredCandidate], item: ScoredCandidate, score: float) -> None:
     current = by_id.get(item.evidence_id)
     if current is None or score > current.score:
         by_id[item.evidence_id] = ScoredCandidate(item.candidate, score)
-
 
 
 class FakeRerankerAdapter:
@@ -2206,10 +2249,7 @@ class FakeRerankerAdapter:
         *,
         limit: int,
     ) -> list[ScoredCandidate]:
-        eligible_ids = {
-            candidate.evidence_id
-            for candidate in filter_candidates([item.candidate for item in candidates], scope)
-        }
+        eligible_ids = _eligible_scored_ids(candidates, scope)
         by_id: dict[str, ScoredCandidate] = {}
         for item in candidates:
             if item.evidence_id not in eligible_ids:
@@ -3025,10 +3065,15 @@ def _load_transformer_embedding(
     if model_spec["native_library"]["name"] == "sentence-transformers":
         return _sentence_transformer_encoder(model_spec, cache_root, local_files_only)
     torch, tokenizer, model = _transformers_model(model_spec, cache_root, local_files_only)
-    sparse_linear = None
-    if model_spec["id"] == "BAAI/bge-m3":
-        sparse_linear = _bge_m3_sparse_linear(torch, selection, cache_root, local_files_only)
+    sparse_linear = _optional_sparse_linear(torch, selection, cache_root, local_files_only)
     return _TransformerEncoder(torch, tokenizer, model, sparse_linear)
+
+
+def _optional_sparse_linear(torch, selection: ModelSelection, cache_root: Path, local_files_only: bool):
+    """BGE-M3's learned sparse head; None for every other embedder."""
+    if selection.embedding["id"] != "BAAI/bge-m3":
+        return None
+    return _bge_m3_sparse_linear(torch, selection, cache_root, local_files_only)
 
 
 def _token_ids(tokenizer, text: str) -> list[int]:
@@ -3205,6 +3250,10 @@ def _remove_artifact(path: Path) -> None:
     if _is_reparse_point(path):
         _remove_reparse_point(path)
         return
+    _remove_plain_artifact(path)
+
+
+def _remove_plain_artifact(path: Path) -> None:
     if path.is_file():
         path.unlink(missing_ok=True)
         return
@@ -3485,6 +3534,10 @@ def _require_supported_adapter(adapter: str) -> None:
 def _require_real_mode_choices(options: _RunOptions) -> None:
     if options.adapter != MODEL_MATRIX_ADAPTER_KIND:
         return
+    _require_explicit_matrix_choices(options)
+
+
+def _require_explicit_matrix_choices(options: _RunOptions) -> None:
     if not all((options.model_id, options.variant_id, options.lexical_config, options.vector_backend)):
         raise ValueError("model-matrix mode requires explicit model, variant, lexical, and vector choices")
     if options.rerank_depth is not None:
@@ -3513,6 +3566,10 @@ def _empty_accelerator_caches() -> None:
         return
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    _empty_mps_cache(torch)
+
+
+def _empty_mps_cache(torch) -> None:
     mps = getattr(torch, "mps", None)
     if mps is not None and mps.is_available():
         mps.empty_cache()
@@ -3657,12 +3714,10 @@ class _BenchmarkRun:
             self._load_embedding()
         self.build_time_ms = (time.perf_counter() - self.build_started) * 1000
         self.rerank_rows = self._rerank_row_slots()
-        fallback = self._prepare_real_retrieval()
-        if fallback is not None:
-            return fallback
-        fallback = self._evaluate_queries()
-        if fallback is not None:
-            return fallback
+        for stage in (self._prepare_real_retrieval, self._evaluate_queries):
+            fallback = stage()
+            if fallback is not None:
+                return fallback
         return self._report()
 
     # --- shared cleanup --------------------------------------------------------
@@ -4122,11 +4177,15 @@ class _BenchmarkRun:
             return None
         matrix_raw = read_stable_bytes(Path(self.o.matrix_path), MAX_CORPUS_BYTES, label="model matrix")
         lexical_matrix = json.loads(matrix_raw)
+        self._require_frozen_lexical_matrix(lexical_matrix, matrix_raw, Path(self.o.corpus_path))
+        return lexical_matrix
+
+    @staticmethod
+    def _require_frozen_lexical_matrix(lexical_matrix: dict, matrix_raw: bytes, corpus_path: Path) -> None:
         if canonical_json_bytes(lexical_matrix) + b"\n" != matrix_raw:
             raise ValueError("model matrix bytes are not canonical and frozen")
-        if _sha256_file(Path(self.o.corpus_path)) != lexical_matrix["benchmark_contract"]["corpus"]["sha256"]:
+        if _sha256_file(corpus_path) != lexical_matrix["benchmark_contract"]["corpus"]["sha256"]:
             raise ValueError("lexical ablation corpus does not match the benchmark contract")
-        return lexical_matrix
 
     def _adapter_kind(self) -> str:
         if self.real_mode:
@@ -4364,6 +4423,10 @@ def _metric_matcher(recomputed: object):
         return _dict_metrics_match
     if isinstance(recomputed, list):
         return _list_metrics_match
+    return _scalar_metric_matcher(recomputed)
+
+
+def _scalar_metric_matcher(recomputed: object):
     if recomputed is None or isinstance(recomputed, int):
         return _exact_metric_match
     return _float_metric_match
@@ -4615,6 +4678,10 @@ def _environment_bindings_valid(report: dict, environment: dict, verified: dict,
         return False
     if environment["runner_sha256"] != report.get("benchmark_runner_sha256"):
         return False
+    return _lock_bindings_valid(environment, verified, frozen_packages)
+
+
+def _lock_bindings_valid(environment: dict, verified: dict, frozen_packages: dict) -> bool:
     if not _is_recorded_digest(environment["uv_lock_sha256"]):
         return False
     if verified["uv_lock_sha256"] != environment["uv_lock_sha256"]:
@@ -5151,6 +5218,9 @@ class _CandidateReports:
         expected_environment = _environment_provenance(report["vector_backend"])
         if _comparable_environment(environment) != expected_environment:
             raise ValueError("candidate environment provenance or lock hash mismatch")
+        self._require_common_environment(environment)
+
+    def _require_common_environment(self, environment: object) -> None:
         if self.common_environment is None:
             self.common_environment = environment
             return
@@ -5617,16 +5687,20 @@ def _lexical_winner(trusted: _TrustedBindings, lexical_results: list, lexical_co
 def _require_candidate_payload(payload: object, spec: dict, lexical_config: str) -> None:
     if not isinstance(payload, _WorkerPayload):
         raise TypeError("authoritative worker transport returned an invalid payload")
-    if payload.report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
-        raise ValueError(
-            f"authoritative candidate {_candidate_key(spec)} degraded: "
-            f"fallback_reason={payload.report.get('fallback_reason')!s}"
-        )
-    if payload.report.get("methodology", {}).get("lexical_configuration", {}).get("id") != lexical_config:
-        raise ValueError("candidate report does not use the frozen lexical winner")
+    _require_undegraded_candidate(payload.report, spec, lexical_config)
     _validate_worker_payload(payload.report, payload.canonical_bytes)
     if payload.report.get("candidate") != spec:
         raise ValueError("worker result does not match requested matrix candidate")
+
+
+def _require_undegraded_candidate(report: dict, spec: dict, lexical_config: str) -> None:
+    if report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
+        raise ValueError(
+            f"authoritative candidate {_candidate_key(spec)} degraded: "
+            f"fallback_reason={report.get('fallback_reason')!s}"
+        )
+    if report.get("methodology", {}).get("lexical_configuration", {}).get("id") != lexical_config:
+        raise ValueError("candidate report does not use the frozen lexical winner")
 
 
 def _run_candidate_workers(ledger, trusted, specs, cache_root, deadline_seconds, lexical_config) -> tuple[list, bool]:
@@ -5807,6 +5881,10 @@ def _lexical_worker_bound_to_matrix(report: dict, matrix: dict) -> bool:
         return False
     if report["matrix_sha256"] != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest():
         return False
+    return _lexical_worker_bound_to_runner(report, matrix)
+
+
+def _lexical_worker_bound_to_runner(report: dict, matrix: dict) -> bool:
     if report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"]):
         return False
     if report["benchmark_runner_sha256"] != _sha256_file(Path(__file__)):
@@ -5996,6 +6074,10 @@ def _validate_model_matrix_args(args: argparse.Namespace) -> None:
     missing = _missing_model_matrix_options(args)
     if missing:
         raise ValueError("model-matrix adapter requires explicit " + ", ".join(missing))
+    _require_matrix_deadline_and_depth(args)
+
+
+def _require_matrix_deadline_and_depth(args: argparse.Namespace) -> None:
     if not _positive_finite_deadline(args.deadline_seconds):
         raise ValueError("model-matrix adapter requires positive --deadline-seconds")
     if args.rerank_depth is not None:
@@ -6009,13 +6091,12 @@ def _validate_lexical_args(args: argparse.Namespace) -> None:
 
 
 def _cli_validator(adapter: str):
-    if adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-        return _validate_authoritative_args
-    if adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-        return _validate_aggregation_args
-    if adapter == MODEL_MATRIX_ADAPTER_KIND:
-        return _validate_model_matrix_args
-    return _validate_lexical_args
+    validators = {
+        AUTHORITATIVE_SELECTION_ADAPTER_KIND: _validate_authoritative_args,
+        SELECTION_AGGREGATION_ADAPTER_KIND: _validate_aggregation_args,
+        MODEL_MATRIX_ADAPTER_KIND: _validate_model_matrix_args,
+    }
+    return validators.get(adapter, _validate_lexical_args)
 
 
 def _validate_cli_args(args: argparse.Namespace) -> None:
@@ -6068,6 +6149,10 @@ def _require_worker_report_shape(report: dict, raw: bytes) -> None:
     if raw != _canonical_report_bytes(report):
         raise ValueError("worker report is not canonical")
     _require_exact_keys(report, REPORT_FIELDS, "worker report")
+    _require_unattested_quality_mode(report)
+
+
+def _require_unattested_quality_mode(report: dict) -> None:
     if report["quality_claim"] is not False or report["release_evidence"] is not False:
         raise ValueError("worker payload attempted to self-attest")
     if report["effective_mode"] != MODEL_MATRIX_ADAPTER_KIND:
@@ -6348,8 +6433,12 @@ def _worker_report_or_none(args: argparse.Namespace, argv: Sequence[str] | None)
     if not isinstance(payload, _WorkerPayload):
         raise ValueError("benchmark worker did not return a worker payload")
     _validate_worker_payload(payload.report, payload.canonical_bytes, args.matrix, args.corpus, args.schema)
-    report = json.loads(json.dumps(payload.report))
-    if args.output is None:
+    return _interpreted_worker_report(payload.report, args.output)
+
+
+def _interpreted_worker_report(worker_report: dict, output: Path | None) -> dict:
+    report = json.loads(json.dumps(worker_report))
+    if output is None:
         report["gates"]["interpretation"] = "stdout-only-non-quality"
     return report
 
@@ -6386,12 +6475,17 @@ def _serialized_cli_report(args: argparse.Namespace, report: dict) -> str:
     return _pretty_json(report)
 
 
+def _absolute_output_path(requested_output: Path) -> Path:
+    if requested_output.is_absolute():
+        return requested_output
+    return Path.cwd() / requested_output
+
+
 def _new_report_output_path(requested: Path) -> Path:
     requested_output = requested.expanduser()
     if requested_output.is_symlink():
         raise ValueError("--output must not be a symlink")
-    if not requested_output.is_absolute():
-        requested_output = Path.cwd() / requested_output
+    requested_output = _absolute_output_path(requested_output)
     output = requested_output.parent.resolve() / requested_output.name
     if output.exists() or output.is_symlink():
         raise ValueError("--output must not already exist")
@@ -6444,10 +6538,13 @@ def _run_benchmark_cli(args: argparse.Namespace, argv: Sequence[str] | None) -> 
 
 
 def _cli_mode(args: argparse.Namespace):
-    if args.adapter == AUTHORITATIVE_SELECTION_ADAPTER_KIND:
-        return _run_authoritative_cli
-    if args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
-        return _run_aggregation_cli
+    selection_modes = {
+        AUTHORITATIVE_SELECTION_ADAPTER_KIND: _run_authoritative_cli,
+        SELECTION_AGGREGATION_ADAPTER_KIND: _run_aggregation_cli,
+    }
+    mode = selection_modes.get(args.adapter)
+    if mode is not None:
+        return mode
     if args.adapter == MODEL_MATRIX_ADAPTER_KIND and args.allow_download:
         return _run_acquisition_cli
     return _run_benchmark_cli
