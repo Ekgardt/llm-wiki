@@ -53,6 +53,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **A `recall` row carries its page, not the trace.** Through MCP each row
+  repeated the twelve trace fields and thirteen per-signal scores the
+  envelope already reports once; rows now carry the page, its score and
+  one per-signal score. Measured on one five-row call: a row 1 112 → 541
+  bytes, the envelope 8 849 → 4 996 (audit M7, rule 4). Research:
+  `docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md`.
 - **The installer job runs on macOS too.** The LaunchAgent path had no CI
   evidence (audit OPS-14); `macos-15` joins the installer matrix. Research:
   `docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`.

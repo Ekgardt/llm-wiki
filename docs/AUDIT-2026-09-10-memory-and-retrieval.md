@@ -227,6 +227,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   retrieval telemetry / a bounded log line so doctor can surface it.
 
 ### M7 — Every returned row repeats the twelve trace fields and carries `content` [inference]
+- Status: measured and fixed at the MCP boundary 2026-09-11 (`docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md`); `search_memory`/`retrieval` rows are unchanged for their own callers.
 - Rule: R4 token economy.
 - Evidence: `scripts/retrieval.py:3504-3518` (`_legacy_trace_fields`),
   `3633-3644` (`row.update(trace_fields)` per candidate), `3487-3501`

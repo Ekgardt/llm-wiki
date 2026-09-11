@@ -5031,12 +5031,39 @@ def _tool_recall(arguments: dict, deadline: float):
         deadline=deadline,
         trace_sink=reported,
     )
+    trace = _retrieval_trace(arguments["query"], results, reported)
     data = {
-        "results": results,
-        "retrieval_trace": _retrieval_trace(arguments["query"], results, reported),
+        "results": [_agent_row(row) for row in results],
+        "retrieval_trace": trace,
         "_meta": _call_with_deadline(_meta, deadline=deadline),
     }
     return data, limit_clamped
+
+
+# What an agent reads from a recall row: the page and its score. The trace is
+# in the envelope once; the per-signal scores are the fusion's own bookkeeping
+# (audit M7, docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md).
+AGENT_ROW_FIELDS = (
+    "candidate_id",
+    "path",
+    "title",
+    "summary",
+    "content",
+    "score",
+    # One per-signal score stays: `_carries_score` reads it to tell a fused
+    # answer from a lexical-only one when no trace was reported.
+    "vector_score",
+    "fused_score",
+    "chunk_id",
+    "heading_ancestry",
+    "project",
+    "timestamp",
+    "source_sha256",
+)
+
+
+def _agent_row(row: Mapping[str, object]) -> dict[str, object]:
+    return {key: row[key] for key in AGENT_ROW_FIELDS if key in row}
 
 
 def _tool_read_page(arguments: dict, deadline: float):
