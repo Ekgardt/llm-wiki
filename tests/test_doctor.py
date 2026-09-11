@@ -4885,3 +4885,23 @@ def test_repair_on_an_adopted_vault_does_not_run_the_retired_v2_migration(tmp_pa
     assert runtime["details"].get("repair_errors", []) == []
     assert not (state_root / "run" / "queue-migrated-v2").exists()
     assert all(item["action"] != "migrate_queue" for item in report["repaired"])
+
+
+def test_a_stale_nightly_that_skipped_names_its_reason():
+    """Audit OPS-23: the skip reason reaches the message, not only `details`."""
+    from doctor import _stale_nightly_message
+
+    skipped = {
+        "last_nightly_at": "2026-07-10T03:00:00",
+        "last_nightly_skip": {"skipped_at": "2026-07-13T03:00:00", "reason": "owner_busy"},
+    }
+    ran_later = {
+        "last_nightly_at": "2026-07-14T03:00:00",
+        "last_nightly_skip": {"skipped_at": "2026-07-13T03:00:00", "reason": "owner_busy"},
+    }
+
+    assert _stale_nightly_message(skipped) == (
+        "Nightly maintenance is stale; the last pass skipped: owner_busy (2026-07-13)."
+    )
+    assert _stale_nightly_message(ran_later) == "Nightly maintenance is stale."
+    assert _stale_nightly_message({}) == "Nightly maintenance is stale."

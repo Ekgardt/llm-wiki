@@ -415,6 +415,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-20 — `install.sh` hides why V3 adoption failed
 
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md`).
+
 - Rule: L3.
 - Evidence: `install.sh:620` (`2>/dev/null ... || echo unknown`), `:624`
   (`>/dev/null 2>&1`), `:628-635` (the warning tells the user to run the same
@@ -447,6 +449,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 - Fix direction: carry the owner token in the return value of the claim.
 
 ### OPS-23 — The nightly skip reason never reaches the doctor's message
+
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md`).
 
 - Rule: L3.
 - Evidence: `scripts/scheduled_nightly.py:581-591` (a marker older than 30 min

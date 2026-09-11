@@ -96,6 +96,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A skipped night and a failed adoption say why.** The doctor's stale
+  nightly message names the last pass's skip reason when the skip is newer
+  than the last run; `install.sh` keeps the V3 adoption's stderr in
+  `logs/install-adoption.err.log` and quotes its tail on failure instead of
+  telling the user to rerun the command blind (audit OPS-23, OPS-20).
+  Research: `docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md`.
 - **Nine small findings closed at once.** A bad `MEMORY_LLM_TIMEOUT_S` is
   refused by name; the compile budget is written once; the session record
   renders its transcript once; the self-alias of `GenerationSealChanged` is

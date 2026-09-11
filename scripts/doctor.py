@@ -5345,7 +5345,23 @@ def _nightly_freshness_result(
     """Whether a recorded, non-failed nightly run is still current."""
     if _nightly_is_current(state, status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
-    return _result("scheduler", "degraded", "Nightly maintenance is stale.", details)
+    return _result("scheduler", "degraded", _stale_nightly_message(state), details)
+
+
+def _stale_nightly_message(state: dict) -> str:
+    """A pass that ran and skipped says so, with its reason (audit OPS-23)."""
+    skip = state.get("last_nightly_skip")
+    if not isinstance(skip, dict) or not _skip_is_newer_than_run(state, skip):
+        return "Nightly maintenance is stale."
+    reason = skip.get("reason") or "unknown"
+    when = str(skip.get("skipped_at") or skip.get("date") or "")[:10]
+    return f"Nightly maintenance is stale; the last pass skipped: {reason} ({when})."
+
+
+def _skip_is_newer_than_run(state: dict, skip: dict) -> bool:
+    skipped_at = str(skip.get("skipped_at") or skip.get("date") or "")
+    ran_at = str(state.get("last_nightly_at") or state.get("last_nightly_date") or "")
+    return skipped_at >= ran_at
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
