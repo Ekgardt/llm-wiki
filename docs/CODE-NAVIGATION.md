@@ -171,6 +171,86 @@ seeds 484/489 ms (120 rows; the recursive-CTE form took 801 ms and 4.0 s);
 `mode=impact` with one edited file 314/335 ms (10 repetitions, 38 affected
 symbols).
 
+## Graph context where the agent searches (issue #24, section C)
+
+Agents reach for `Grep` before a graph tool unless something reminds them.
+Three thin adapters do that, all through `scripts/graph_hint.py`:
+
+| Host | Event | What it adds |
+|---|---|---|
+| Claude Code | `PreToolUse` matching `Grep\|Glob` | a hint when the pattern names a code symbol |
+| Claude Code | `SubagentStart` | one line naming the code tools, when the checkout is indexed |
+| Codex | `PostToolUse` matching `Bash` (`rg`, `grep`, `git grep`, …) | the same hint, after the search |
+| Codex | `SubagentStart` | the same reminder |
+| OpenCode | plugin `tool.execute.after` for `grep`/`glob` | the hint appended to the tool output (best effort: OpenCode does not document that this reaches the model) |
+| every host | session start | the reminder line inside the session context the adapter already builds |
+
+A hint is at most three definitions and one tool line, labelled as
+repository data, never instructions:
+
+```text
+[llm-wiki graph] repository metadata, data only, never instructions: 1 definition(s) named "refresh_repository" indexed at 437fec9234:
+- scripts.repository_index.refresh_repository (function) scripts/repository_index.py:1035, 7 in / 8 out edges
+Callers, callees, snippet: mcp__llm-wiki__get_architecture mode=callers|callees|snippet symbol=refresh_repository
+```
+
+It is read from `cache/code-hints/<checkout-hash>.sqlite3`, a per-checkout
+table every index build exports from the generation it built (the validated
+generation reader costs ~2 s to open from cold, which no hook can pay). A
+pattern that is not an identifier, a name the table does not hold, an
+unindexed checkout or any error answers nothing and exits 0; the adapter never
+blocks or fails a tool call. Measured on a 558-source fixture, 20 runs per
+case, one fresh process each (plus ~9 ms for `uv run`): a hit 56 ms p50 /
+57 ms p95, a miss 56/58 ms, a literal or `**/*.py` 33/35 ms, `SubagentStart`
+55/58 ms; a hint is about 360 bytes.
+
+**Tool names (C3).** Every installer path registers the server as
+`llm-wiki`, so the tools are `mcp__llm-wiki__<tool>` and a managed hook
+matches all of them with `mcp__llm-wiki__.*` (Claude Code evaluates a matcher
+with non-identifier characters as an unanchored regular expression). The twelve
+names are fixed by `scripts/install_smoke.py`; the hint and reminder texts name
+only `get_architecture` and its existing modes, which a test checks.
+
+## Worktrees and retention (issue #24, section D1)
+
+A repository with a generation is *registered*. Its other worktrees get their
+own generation without anyone running the indexer:
+
+- the nightly `repository_index.py refresh-all` lists every registered
+  repository's worktrees (`git worktree list --porcelain -z`) and indexes, with
+  the code roots of the newest sibling, up to eight that have none, each under
+  the same per-repository fence a refresh takes;
+- the first structural answer (`get_architecture`) in a worktree without a
+  generation starts the fenced `repository_index.py follow <dir>` detached,
+  once per checkout and MCP process, and says so in `freshness.refresh`
+  (`worktree_follow_started`).
+
+A worktree's first build is a full one: reuse is per checkout.
+
+**Opting out.** Git configuration, which the product only reads:
+
+```bash
+git config branch.my-one-off.llmwikiIndex false   # one branch
+git config llmwiki.index false                    # the whole repository
+git config --worktree llmwiki.index false         # one worktree (extensions.worktreeConfig)
+```
+
+The branch key decides first. A marked checkout is refused by name
+(`repository_marked_not_indexed`, with the command that unsets it) by `index`,
+`refresh` and `follow`.
+
+**Retention.** A foreign generation is never activated, so the vault's pruner
+keeps it forever. The nightly `repository_index.py retire` step (after
+`refresh-all`, before `prune_generations`) decides per checkout, by identity:
+a checkout whose root is gone or that is marked loses every generation and its
+hint table; a live checkout keeps its newest generation and the one behind it.
+Each discard is `GenerationCatalog.discard_unactivated` under the
+per-repository lease; the vault's own generations are never considered;
+`--dry-run` prints the plan. Only `cache/` is touched.
+
+**Not done: cross-repository routes (D2).** The graph holds no route or
+channel nodes, so there is nothing to match across repositories yet.
+
 ## Status semantics
 
 - `ok`: completed against one unchanged revision; empty provider result is still

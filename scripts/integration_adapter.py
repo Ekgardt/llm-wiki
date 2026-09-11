@@ -2234,16 +2234,53 @@ def _compile_context(items: Sequence[Any], *, trailing_newline: bool = False) ->
     return fit_to_char_ceiling(list(items), _render)
 
 
+def _append_code_graph_item(items: list[Any], reminder: str | None, item_type: type) -> None:
+    """One line naming the code tools when this checkout is indexed (#24, C1).
+
+    Every host reaches it: Claude Code and Codex through their SessionStart
+    hook, OpenCode through the session context its plugin pushes."""
+    if not reminder:
+        return
+    items.append(
+        item_type(
+            item_id="session-start:code-graph",
+            text=reminder,
+            source="code-graph",
+            priority=4,
+            relevance=0.8,
+            confidence="high",
+            freshness="fresh",
+            token_cost=len(reminder.encode("utf-8")),
+            mandatory=False,
+            representation="l1",
+            parent_id="code-graph",
+            priority_class="evidence",
+        )
+    )
+
+
+def _code_graph_reminder(project_dir: Path | None) -> str | None:
+    """Silence, never an error: a session must start whatever the index says."""
+    try:
+        from graph_hint import reminder_for
+
+        return reminder_for(project_dir)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _append_context(
     context_items: Sequence[Any] | str,
     handoff: Sequence[Any] | str,
     *,
     trailing_newline: bool = False,
+    code_graph: str | None = None,
 ) -> str:
     from context_budget import ContextItem
 
     items = _global_context_items(context_items, ContextItem)
     _append_handoff_item(items, handoff, ContextItem)
+    _append_code_graph_item(items, code_graph, ContextItem)
     if not items:
         return ""
     return _compile_context(items, trailing_newline=trailing_newline)
@@ -2278,6 +2315,7 @@ def _ingest_session_start(
         build_session_start_context(),
         _recover_project_handoff(slug, project_dir),
         trailing_newline=True,
+        code_graph=_code_graph_reminder(project_dir),
     )
 
 

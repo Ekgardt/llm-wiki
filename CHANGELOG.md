@@ -8,6 +8,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The graph meets the agent where it searches (#24, C).** A Claude Code
+  `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
+  indexed repository gets a hint of at most three definitions (qualified name,
+  path:line, resolved in/out degree) and the `mcp__llm-wiki__get_architecture`
+  call that answers authoritatively; `SubagentStart` (Claude Code, Codex) and
+  every session start get one line naming the code tools; the OpenCode plugin
+  appends the hint to its `grep`/`glob` output (best effort: OpenCode does not
+  document that this reaches the model). One adapter, `scripts/graph_hint.py`,
+  reads `cache/code-hints/<checkout-hash>.sqlite3`, a per-checkout table each
+  index build exports from its generation through the new
+  `EvidenceGraph.symbol_page` (the validated reader costs ~2 s cold; a hook
+  cannot). Measured, one fresh process per call, 558-source fixture: 56 ms p50
+  / 58 ms p95 for a hit or a miss, 33 ms for a literal, plus ~9 ms for
+  `uv run`. Silent on anything else and on every error; never blocks a tool
+  call; the text is labelled as repository data. Codex ownership recognises the
+  new handlers through one rule (`scripts/codex_hook_identity.py`) shared by the
+  installer merge and the doctor's runtime-hook check, which would otherwise
+  have called every installed Codex `runtime_hooks_mismatch`; the OpenCode plugin was rewritten under the complexity gate
+  with unchanged lifecycle behaviour. Tool names stay `mcp__llm-wiki__*` (C3).
+- **Repository indexes follow worktrees, and are retired (#24, D1).** The
+  nightly `refresh-all` indexes up to eight new worktrees of every registered
+  repository with their sibling's code roots, and the first structural answer
+  in a new worktree starts the fenced `repository_index.py follow` detached. A
+  new nightly step, `repository_index.py retire`, removes every generation of
+  a checkout whose root is gone or that is marked not indexed, and all but the
+  newest two of a live one — foreign generations were never activated, so the
+  pruner had kept every one — each repository under its refresh fence, the
+  vault's own generations never considered; hint tables without a generation
+  go with them. `git config branch.<name>.llmwikiIndex false` or
+  `llmwiki.index false` marks a checkout; `index`, `refresh` and `follow`
+  refuse it by name. Cross-repository routes (D2) are not done: the graph has
+  no route nodes. Research:
+  `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
 - CI installs the production profile into a clean environment on Windows and macOS too, and runs the install smoke there (audit OPS-14).
 - One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
 - **The query surface answers the whole graph (#24, B).** `get_architecture`
@@ -56,7 +89,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
-- The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings except `codex_memory` and `merge_claude_settings`, whose last five findings are already fixed on the #24 branch. The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
+- The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
 - Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
 
 - The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).

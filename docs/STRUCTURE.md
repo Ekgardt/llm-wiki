@@ -93,6 +93,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── claims.sqlite3               derived claim candidate index
 │   ├── code-tools/                  managed code-tool artifacts
 │   │   └── pyright/1.1.411/           reserved pinned Pyright installation root
+│   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
+│   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 │   ├── access_log.jsonl             legacy bounded read-only access history
 │   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
@@ -571,6 +573,15 @@ or nonzero active state remains fail-closed.
   v4.0: `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
+- `cache/code-hints/<checkout-hash>.sqlite3` — issue #24 C1: the classes,
+  functions and methods of one foreign checkout's newest generation, with
+  qualified name, first location and resolved in/out degree, exported once by
+  each index build and read by the `Grep`/`Glob`/`SubagentStart` hook adapter
+  (`scripts/graph_hint.py`) in one indexed query. Disposable and derived: a
+  missing or foreign file answers nothing, `refresh` re-exports it, and
+  `repository_index.py retire` removes the file of a checkout that has no
+  generation left. It is not a generation member and not a second catalog.
+  Research: `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
 - `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
   telemetry generation state, built over `knowledge/` only (the checkout's own
   code and docs are not memory; repositories have their own generations).

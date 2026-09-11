@@ -16,12 +16,68 @@ const MAX_MESSAGES = 12;
 const MAX_TRANSCRIPT_CHARS = 8000;
 const configuredTimeout = Number(process.env.LLM_WIKI_CAPTURE_TIMEOUT_MS || 5000);
 const CAPTURE_TIMEOUT_MS = Math.min(Math.max(configuredTimeout || 5000, 10), 10000);
+const CHANGING_TOOLS = new Set(["edit", "write", "multi_edit", "multiedit", "notebook_edit", "notebookedit"]);
+// Issue #24, C2: after a grep/glob whose pattern names a code symbol, the
+// graph's definitions are appended to the tool output. OpenCode documents that
+// this mutation does not reach its UI (anomalyco/opencode#13574); whether it
+// reaches the model is not documented, so the hint is best effort.
+const HINTED_TOOLS = new Set(["grep", "glob"]);
+
+const isText = (value) => typeof value === "string" && value.length > 0;
+const textOr = (value, fallback) => (isText(value) ? value : fallback);
+const asList = (value) => (Array.isArray(value) ? value : []);
+
+function asObject(value) {
+  if (value && typeof value === "object") return value;
+  return null;
+}
+
+function sessionId(input) {
+  const candidates = [input?.sessionInfo?.id, input?.sessionID, input?.sessionId];
+  return candidates.find(isText) || null;
+}
+
+function toolName(input) {
+  return textOr(input?.tool, "").toLowerCase();
+}
+
+function partsText(message) {
+  return asList(message?.parts).map((part) => textOr(part?.text, ""));
+}
+
+function parsedObject(stdout) {
+  try {
+    return asObject(stdout ? JSON.parse(stdout) : null);
+  } catch {
+    return null;
+  }
+}
+
+function hostProperties(hostEvent) {
+  const properties = { ...(asObject(hostEvent?.properties) || {}) };
+  if (isText(hostEvent?.id)) properties.source_event_id = hostEvent.id;
+  return properties;
+}
+
+function userPrompt(output) {
+  return asList(output?.parts)
+    .filter((part) => part?.type === "text")
+    .map((part) => textOr(part?.text, "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isUserMessage(output) {
+  const role = output?.message?.role;
+  return role === undefined || role === "user";
+}
 
 export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
   const sessionContexts = new Map();
   const dirtySessions = new Set();
+  const workingDirectory = () => (typeof directory === "string" ? directory : null);
   const comparablePath = (value) => {
-    if (typeof value !== "string" || !value) return null;
+    if (!isText(value)) return null;
     const resolved = path.resolve(value);
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   };
@@ -29,7 +85,8 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
   const isVault = () => {
     const dir = comparablePath(directory);
     const root = comparablePath(_LLM_WIKI_ROOT);
-    return Boolean(dir && root) && (dir === root || dir.startsWith(`${root}${path.sep}`));
+    if (!dir || !root) return false;
+    return dir === root || dir.startsWith(`${root}${path.sep}`);
   };
 
   async function settleWithin(promise, fallback = null) {
@@ -47,19 +104,39 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
   }
 
   async function collectTranscript(input) {
-    const sessionId = input?.sessionInfo?.id || input?.sessionId || input?.sessionID;
-    if (typeof sessionId !== "string" || !client?.session?.messages) return "";
+    const id = sessionId(input);
+    if (!id || !client?.session?.messages) return "";
     const response = await settleWithin(
-      client.session.messages({ path: { id: sessionId }, query: { limit: MAX_MESSAGES } }),
+      client.session.messages({ path: { id }, query: { limit: MAX_MESSAGES } }),
       { data: [] },
     );
-    const messages = Array.isArray(response?.data) ? response.data.slice(-MAX_MESSAGES) : [];
-    return messages
-      .flatMap((message) => Array.isArray(message?.parts) ? message.parts : [])
-      .map((part) => typeof part?.text === "string" ? part.text : "")
+    return asList(response?.data)
+      .slice(-MAX_MESSAGES)
+      .flatMap(partsText)
       .filter(Boolean)
       .join("\n\n")
       .slice(-MAX_TRANSCRIPT_CHARS);
+  }
+
+  function stdoutText(proc) {
+    if (!proc.stdout) return Promise.resolve("");
+    return new Response(proc.stdout).text().catch(() => "");
+  }
+
+  async function awaitExit(proc) {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill(); } catch {}
+    }, CAPTURE_TIMEOUT_MS);
+    try {
+      await proc.exited;
+      return !timedOut;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function runCapture(args, payload) {
@@ -69,70 +146,66 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
       stdout: "pipe",
       stderr: "ignore",
     });
-    const stdout = proc.stdout
-      ? new Response(proc.stdout).text().catch(() => "")
-      : Promise.resolve("");
+    const stdout = stdoutText(proc);
     proc.stdin.write(payload);
     proc.stdin.end();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { proc.kill(); } catch {}
-    }, CAPTURE_TIMEOUT_MS);
+    const exited = await awaitExit(proc);
+    return exited ? await stdout : null;
+  }
+
+  function lifecyclePayload(input) {
     try {
-      await proc.exited;
-      return timedOut ? null : await stdout;
+      return JSON.stringify({
+        ...(input || {}),
+        directory: typeof directory === "string" ? directory : null,
+      });
     } catch {
       return null;
-    } finally {
-      clearTimeout(timer);
     }
   }
 
   async function forwardLifecycle(event, input) {
-    if (!_LLM_WIKI_ROOT || isVault()) return null;
-    try {
-      const payload = JSON.stringify({
-        ...(input || {}),
-        directory: typeof directory === "string" ? directory : null,
-      });
-      const stdout = await runCapture(
-        [
-          "uv",
-          "run",
-          "--locked",
-          "--no-sync",
-          "--directory",
-          _LLM_WIKI_ROOT,
-          "python",
-          `${SCRIPTS}/integration_adapter.py`,
-          "--source",
-          "opencode",
-          "--event",
-          event,
-        ],
-        payload,
-      );
-      if (!stdout) return null;
-      const parsed = JSON.parse(stdout);
-      return parsed && typeof parsed === "object" ? parsed : null;
-    } catch {
-      return null;
-    }
+    const payload = lifecyclePayload(input);
+    if (!_LLM_WIKI_ROOT || isVault() || payload === null) return null;
+    const stdout = await runCapture(
+      ["uv", "run", "--locked", "--no-sync", "--directory", _LLM_WIKI_ROOT, "python",
+        `${SCRIPTS}/integration_adapter.py`, "--source", "opencode", "--event", event],
+      payload,
+    ).catch(() => null);
+    return parsedObject(stdout);
   }
 
-  function sessionId(input) {
-    const value = input?.sessionInfo?.id || input?.sessionID || input?.sessionId;
-    return typeof value === "string" && value ? value : null;
+  function hintPayload(tool, input) {
+    return JSON.stringify({ tool, args: asObject(input?.args) || {}, directory: workingDirectory() });
+  }
+
+  async function graphHint(input) {
+    const tool = toolName(input);
+    if (!_LLM_WIKI_ROOT || !HINTED_TOOLS.has(tool)) return null;
+    const payload = hintPayload(tool, input);
+    const stdout = await runCapture(
+      ["uv", "run", "--locked", "--no-sync", "--directory", _LLM_WIKI_ROOT, "python",
+        `${SCRIPTS}/graph_hint.py`, "--source", "opencode"],
+      payload,
+    ).catch(() => null);
+    return textOr(parsedObject(stdout)?.context, null);
+  }
+
+  async function appendGraphHint(input, output) {
+    const hint = await graphHint(input);
+    if (!hint || typeof output?.output !== "string") return;
+    output.output = `${output.output}\n\n${hint}`;
+  }
+
+  function rememberContext(id, context) {
+    if (!id || !isText(context)) return;
+    sessionContexts.set(id, context);
+    if (sessionContexts.size > 32) sessionContexts.delete(sessionContexts.keys().next().value);
   }
 
   async function handleSessionCreated(input) {
     const result = await forwardLifecycle("session_start", input);
-    const id = sessionId(input);
-    if (id && typeof result?.context === "string" && result.context) {
-      sessionContexts.set(id, result.context);
-      if (sessionContexts.size > 32) sessionContexts.delete(sessionContexts.keys().next().value);
-    }
+    rememberContext(sessionId(input), result?.context);
   }
 
   async function handleSessionIdle(input) {
@@ -147,30 +220,29 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
     if (id) dirtySessions.delete(id);
   }
 
+  const hostEventHandlers = {
+    "session.created": handleSessionCreated,
+    "session.idle": handleSessionIdle,
+  };
+
+  async function recordToolUse(input) {
+    const id = sessionId(input);
+    const changed = CHANGING_TOOLS.has(toolName(input));
+    if (id && changed) dirtySessions.add(id);
+    const signals = changed ? { changed: true, dirty: true, significant: true } : {};
+    await forwardLifecycle("post_tool_use", { ...(input || {}), ...signals });
+  }
+
   return {
     event: async (input) => {
       const hostEvent = input?.event;
-      const properties = hostEvent?.properties && typeof hostEvent.properties === "object"
-        ? { ...hostEvent.properties }
-        : {};
-      if (typeof hostEvent?.id === "string" && hostEvent.id) {
-        properties.source_event_id = hostEvent.id;
-      }
-      if (hostEvent?.type === "session.created") {
-        await handleSessionCreated(properties);
-      } else if (hostEvent?.type === "session.idle") {
-        await handleSessionIdle(properties);
-      }
+      const handler = hostEventHandlers[hostEvent?.type];
+      if (handler) await handler(hostProperties(hostEvent));
     },
 
     "chat.message": async (input, output) => {
-      const role = output?.message?.role;
-      if (role !== undefined && role !== "user") return;
-      const prompt = (Array.isArray(output?.parts) ? output.parts : [])
-        .filter((part) => part?.type === "text")
-        .map((part) => typeof part?.text === "string" ? part.text.trim() : "")
-        .filter(Boolean)
-        .join("\n");
+      if (!isUserMessage(output)) return;
+      const prompt = userPrompt(output);
       if (!prompt) return;
       await forwardLifecycle("user_prompt", {
         ...(input || {}),
@@ -184,15 +256,9 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
       if (context && Array.isArray(output?.system)) output.system.push(context);
     },
 
-    "tool.execute.after": async (input) => {
-      const id = sessionId(input);
-      const tool = typeof input?.tool === "string" ? input.tool.toLowerCase() : "";
-      const changed = ["edit", "write", "multi_edit", "multiedit", "notebook_edit", "notebookedit"].includes(tool);
-      if (id && changed) dirtySessions.add(id);
-      await forwardLifecycle("post_tool_use", {
-        ...(input || {}),
-        ...(changed ? { changed: true, dirty: true, significant: true } : {}),
-      });
+    "tool.execute.after": async (input, output) => {
+      await recordToolUse(input);
+      await appendGraphHint(input, output);
     },
 
     "experimental.session.compacting": async (input) => {

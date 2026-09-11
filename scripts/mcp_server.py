@@ -1835,11 +1835,65 @@ _REFRESH_REQUESTED_LOCK = threading.Lock()
 
 
 def _freshness_fields(resolved: Path, architecture) -> dict:
-    """Only answers read from a generation have a commit to compare."""
+    """Only answers read from a generation have a commit to compare; an answer
+    without one may be a new worktree of a registered repository (#24, D1)."""
     if _architecture_report(architecture).get("source_generation") is None:
-        return {}
+        return _worktree_follow_fields(resolved)
     freshness = _repository_freshness(resolved)
     return {} if freshness is None else {"freshness": freshness}
+
+
+# Issue #24, section D1: a worktree of a registered repository gets its own
+# generation without anyone running the indexer. The first structural answer
+# that finds none starts the fenced `follow` detached, once per checkout in
+# this process, and says so; the nightly `refresh-all` covers the rest.
+_FOLLOW_REQUESTED: set[str] = set()
+
+
+def _unindexed_worktree(resolved: Path) -> Path | None:
+    import subprocess
+
+    from repository_worktrees import unindexed_worktree_root
+
+    try:
+        return unindexed_worktree_root(resolved, deadline=time.monotonic() + 5.0)
+    except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+        return None
+
+
+def _worktree_follow_fields(resolved: Path) -> dict:
+    if _is_the_vault(resolved):
+        return {}
+    checkout = _unindexed_worktree(resolved)
+    if checkout is None:
+        return {}
+    return {"freshness": {"generation_commit": None, "refresh": _request_worktree_follow(checkout)}}
+
+
+def _follow_log_paths(checkout: Path) -> tuple[Path, Path]:
+    from memory_state import STATE_ROOT
+
+    folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
+    stem = "follow-" + hashlib.sha256(str(checkout).encode("utf-8")).hexdigest()[:16]
+    return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
+
+
+def _request_worktree_follow(checkout: Path) -> str:
+    """Start the fenced worktree index once per checkout; never wait for it."""
+    from memory_state import spawn_detached
+
+    with _REFRESH_REQUESTED_LOCK:
+        if str(checkout) in _FOLLOW_REQUESTED:
+            return "worktree_follow_already_requested"
+        _FOLLOW_REQUESTED.add(str(checkout))
+    out_log, err_log = _follow_log_paths(checkout)
+    script = Path(__file__).resolve().parent / "repository_index.py"
+    pid = spawn_detached(
+        [sys.executable, str(script), "follow", str(checkout)],
+        stdout_path=out_log,
+        stderr_path=err_log,
+    )
+    return "worktree_follow_started" if pid is not None else "spawn_failed"
 
 
 def _repository_freshness(resolved: Path) -> dict | None:
