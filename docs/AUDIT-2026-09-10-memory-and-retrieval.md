@@ -319,7 +319,10 @@ disposable, fail-closed, bounded reads, no silent fallback).
   one-sided. The test edit was made to shrink for now.
 - Fix direction: map the old side only (the generation knows those bytes),
   or re-parse the working-tree file for the new side.
-- Status: open.
+- Status: closed 2026-09-11. `_map_symbols` matches every hunk against the
+  generation's occurrences by its old range only, on both sides; the
+  query-surface test grows the line again and expects `helper` alone
+  (`docs/research/2026-09-11-a-grown-line-does-not-reach-the-next-symbol.md`).
 
 ## Low
 

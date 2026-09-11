@@ -105,6 +105,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Impact analysis no longer names the symbol after a grown line as changed: a hunk is matched against the generation's occurrences by its old byte range, the coordinate system the generation indexed (audit M13).
 - **Git warnings are not diff records.** `impact_analysis` read Git's
   stderr together with the `-z` record stream, so on a checkout with
   `core.autocrlf=true` the advisory line about line endings made every

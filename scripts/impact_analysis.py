@@ -680,6 +680,61 @@ def _symbol_record(node: dict, occurrence: dict, side: str, changed: dict) -> di
     }
 
 
+_SYMBOL_KINDS = frozenset({"symbol", "function", "method", "class"})
+
+
+def _code_path(change: dict, side: str) -> str | None:
+    """The path on `side` when it holds a code file the generation could index."""
+    if change[f"{side}_blob"] is None:
+        return None
+    path = change[f"{side}_path"]
+    if not path or Path(path).suffix.lower() not in CODE_EXTENSIONS:
+        return None
+    return path
+
+
+def _changed_occurrence(graph, node: dict, path: str, old_range: dict, deadline: float):
+    """The node's occurrence in `path` that the hunk's old range touches, or None."""
+    for occurrence in graph.occurrences(node["node_id"], max_rows=32, deadline=deadline):
+        if occurrence["relative_path"] == path and _overlaps(occurrence, old_range):
+            return occurrence
+    return None
+
+
+def _note_symbol(symbols: dict, node: dict, occurrence: dict, side: str, old_range: dict) -> None:
+    existing = symbols.get(node["node_id"])
+    if existing is None:
+        symbols[node["node_id"]] = _symbol_record(node, occurrence, side, old_range)
+    elif side not in existing["sides"]:
+        existing["sides"].append(side)
+
+
+def _map_side(graph, symbols: dict, change: dict, changed_range: dict, side: str, bounds, deadline):
+    """Name the symbols one side of one hunk touches.
+
+    The overlap always uses the hunk's *old* range: the generation's
+    occurrences are offsets into the bytes it indexed, and a grown line on
+    the new side otherwise reached the next symbol (audit M13,
+    docs/research/2026-09-11-a-grown-line-does-not-reach-the-next-symbol.md).
+    """
+    path = _code_path(change, side)
+    if path is None:
+        return
+    old_range = changed_range["old"]
+    for node in graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline):
+        if node["kind"] not in _SYMBOL_KINDS:
+            continue
+        occurrence = _changed_occurrence(graph, node, path, old_range, deadline)
+        if occurrence is not None:
+            _note_symbol(symbols, node, occurrence, side, old_range)
+            _require_symbol_ceiling(symbols, bounds)
+
+
+def _require_symbol_ceiling(symbols: dict, bounds: ImpactLimits) -> None:
+    if len(symbols) > bounds.max_symbols:
+        raise ValueError("changed symbol ceiling exceeded")
+
+
 def _map_symbols(graph, changes: list[dict], bounds: ImpactLimits, deadline: float) -> list[dict]:
     symbols: dict[str, dict] = {}
     for change in changes:
@@ -687,33 +742,7 @@ def _map_symbols(graph, changes: list[dict], bounds: ImpactLimits, deadline: flo
             for side in ("old", "new"):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("impact analysis deadline reached")
-                if change[f"{side}_blob"] is None:
-                    continue
-                path = change[f"{side}_path"]
-                if not path or Path(path).suffix.lower() not in CODE_EXTENSIONS:
-                    continue
-                nodes = graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline)
-                for node in nodes:
-                    if node["kind"] not in {"symbol", "function", "method", "class"}:
-                        continue
-                    occurrences = graph.occurrences(
-                        node["node_id"], max_rows=32, deadline=deadline
-                    )
-                    for occurrence in occurrences:
-                        if occurrence["relative_path"] != path or not _overlaps(
-                            occurrence, changed_range[side]
-                        ):
-                            continue
-                        existing = symbols.get(node["node_id"])
-                        if existing is None:
-                            symbols[node["node_id"]] = _symbol_record(
-                                node, occurrence, side, changed_range[side]
-                            )
-                        elif side not in existing["sides"]:
-                            existing["sides"].append(side)
-                        if len(symbols) > bounds.max_symbols:
-                            raise ValueError("changed symbol ceiling exceeded")
-                        break
+                _map_side(graph, symbols, change, changed_range, side, bounds, deadline)
     return sorted(symbols.values(), key=lambda item: (item["path"], item["name"], item["node_id"]))
 
 

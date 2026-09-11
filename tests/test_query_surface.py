@@ -121,12 +121,9 @@ def _values(rows: list, key: str) -> list:
 def _with_edited_core(repository: Path, call, *arguments):
     """Run `call` while `pkg/core.py` differs from the indexed bytes."""
     target = repository / "pkg/core.py"
-    # The edit changes the file's size: a Windows runner rewrote the file in
-    # the same second as the index with the same size, and `git diff` saw no
-    # change at all (run 34540064380, `changes: []`). It shrinks rather than
-    # grows: new-side byte ranges are matched against the generation's old
-    # offsets, so a grown line spills into the next symbol (audit M13).
-    _write(target, CORE.replace("value + 1", "value"))
+    # The edit grows the line: a grown new-side range once reached the next
+    # symbol's old offset and named `caller` too (audit M13, fixed 2026-09-11).
+    _write(target, CORE.replace("value + 1", "value + 1000"))
     try:
         return call(*arguments)
     finally:
