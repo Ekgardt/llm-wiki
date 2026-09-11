@@ -459,30 +459,39 @@ def main() -> int:
     p.add_argument("--stats", type=str, default=None, help="Show stats for a slug.")
     p.add_argument("--decay", type=str, default=None, help="Show decay score for a slug.")
     args = p.parse_args()
+    for flag, action in (("flush", _flush_command), ("stats", _stats_command), ("decay", _decay_command)):
+        if getattr(args, flag):
+            return action(args)
+    _print_telemetry_locations()
+    return 0
 
-    if args.flush:
-        n = flush_all()
-        print(f"Exported durable telemetry to {n} page(s).")
-        for failure in last_flush_failures():
-            print(f"  not exported: {failure['slug']}: {failure['error']}")
-        return 0
 
-    if args.stats:
-        stats = get_access_stats(args.stats)
-        print(json.dumps(stats, indent=2))
-        return 0
+def _flush_command(args) -> int:
+    n = flush_all()
+    print(f"Exported durable telemetry to {n} page(s).")
+    for failure in last_flush_failures():
+        print(f"  not exported: {failure['slug']}: {failure['error']}")
+    return 0
 
-    if args.decay:
-        score = decay_score(args.decay)
-        print(f"Decay score for {args.decay}: {score}")
-        return 0
 
+def _stats_command(args) -> int:
+    stats = get_access_stats(args.stats)
+    print(json.dumps(stats, indent=2))
+    return 0
+
+
+def _decay_command(args) -> int:
+    score = decay_score(args.decay)
+    print(f"Decay score for {args.decay}: {score}")
+    return 0
+
+
+def _print_telemetry_locations() -> None:
     from retrieval_telemetry import TELEMETRY_DB
 
     print(f"Durable telemetry: {TELEMETRY_DB}")
     print(f"Legacy read-only access history: {ACCESS_LOG_FILE}")
     print("Use --flush for explicit bounded frontmatter promotion.")
-    return 0
 
 
 if __name__ == "__main__":

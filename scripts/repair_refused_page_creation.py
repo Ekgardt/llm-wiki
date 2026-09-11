@@ -78,11 +78,14 @@ def _recorded_content(directory: Path, operation: dict) -> bytes | None:
     after = operation.get("after")
     if not isinstance(after, dict):
         return None
-    artifact = directory / str(after.get("artifact", ""))
+    return _intact_after_image(directory / str(after.get("artifact", "")), after.get("sha256"))
+
+
+def _intact_after_image(artifact: Path, expected_sha256: object) -> bytes | None:
     if not artifact.is_file():
         return None
     content = _image_bytes(artifact)
-    if sha256_bytes(content) != after.get("sha256"):
+    if sha256_bytes(content) != expected_sha256:
         return None
     return content
 

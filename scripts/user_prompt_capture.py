@@ -366,6 +366,10 @@ def _maybe_periodic_work(hook: dict, session_id: str, prompt_count: int) -> None
     """Advisory refresh and periodic flush ride on the prompt counter."""
     if not prompt_count:
         return
+    _periodic_work(hook, session_id, prompt_count)
+
+
+def _periodic_work(hook: dict, session_id: str, prompt_count: int) -> None:
     if prompt_count % ADVISORY_REFRESH_INTERVAL == 0:
         _write_advisory_output(_build_advisory_refresh())
     if prompt_count % FLUSH_MESSAGE_INTERVAL == 0:

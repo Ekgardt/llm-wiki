@@ -22,6 +22,10 @@ MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
 def _validated_deadline(deadline: float | None) -> float | None:
     if deadline is None:
         return None
+    return _finite_deadline(deadline)
+
+
+def _finite_deadline(deadline: object) -> float:
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         raise TypeError("deadline must be a monotonic timestamp or None")
     if not math.isfinite(deadline):

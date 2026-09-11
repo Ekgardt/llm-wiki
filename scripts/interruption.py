@@ -72,13 +72,18 @@ def _detached_secondary(
     secondary: BaseException, interruption: BaseException
 ) -> BaseException | None:
     """The secondary error with any chain back to the interruption cut."""
-    if exception_reaches(secondary.__cause__, interruption):
-        secondary.__cause__ = None
-    if exception_reaches(secondary.__context__, interruption):
-        secondary.__context__ = None
+    _cut_chain_to(secondary, interruption)
     if exception_reaches(secondary, interruption):
         return None
     return secondary
+
+
+def _cut_chain_to(error: BaseException, interruption: BaseException) -> None:
+    """Drop the error's cause and its context wherever either leads back to the interruption."""
+    if exception_reaches(error.__cause__, interruption):
+        error.__cause__ = None
+    if exception_reaches(error.__context__, interruption):
+        error.__context__ = None
 
 
 def _secondary_error(
@@ -97,10 +102,7 @@ def _secondary_error(
 
 def _cut_self_reference(interruption: BaseException) -> None:
     """An exception must not end up as its own cause or context."""
-    if exception_reaches(interruption.__cause__, interruption):
-        interruption.__cause__ = None
-    if exception_reaches(interruption.__context__, interruption):
-        interruption.__context__ = None
+    _cut_chain_to(interruption, interruption)
     if interruption.__context__ is interruption.__cause__:
         interruption.__context__ = None
 

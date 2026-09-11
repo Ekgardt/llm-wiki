@@ -65,9 +65,13 @@ def _destination_exists(destination: Path) -> bool:
         raise ValueError("integration config must not be a symlink")
     if not destination.exists():
         return False
+    _require_regular_config(destination)
+    return True
+
+
+def _require_regular_config(destination: Path) -> None:
     if not destination.is_file():
         raise ValueError("integration config must be a regular file")
-    return True
 
 
 def _require_bounded_size(size: int, max_bytes: int | None) -> None:
@@ -190,17 +194,19 @@ def _atomic_write_verified(
 def _owned_backup(
     candidate: Path, owned_name: re.Pattern[str]
 ) -> tuple[Path, os.stat_result] | None:
-    if not owned_name.fullmatch(candidate.name):
+    if not owned_name.fullmatch(candidate.name) or candidate.is_symlink():
         return None
-    if candidate.is_symlink():
-        return None
-    try:
-        metadata = candidate.stat()
-    except OSError:
-        return None
-    if not stat.S_ISREG(metadata.st_mode):
+    metadata = _stat_or_none(candidate)
+    if metadata is None or not stat.S_ISREG(metadata.st_mode):
         return None
     return candidate, metadata
+
+
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except OSError:
+        return None
 
 
 def _owned_backups(destination: Path) -> list[tuple[Path, os.stat_result]]:

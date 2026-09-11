@@ -298,6 +298,10 @@ def migrate_file(path: Path) -> tuple[str, str | None]:
     status, content = _read_page(path)
     if content is None:
         return (status, None)
+    return _content_migration(path, content)
+
+
+def _content_migration(path: Path, content: str) -> tuple[str, str | None]:
     if has_okf_type(content):
         return ("skip_already_okf", None)
     type_name = infer_type(path.relative_to(ROOT).as_posix())

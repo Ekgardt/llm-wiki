@@ -63,9 +63,13 @@ def _read_config(path: Path) -> tuple[dict[str, object], bytes | None]:
     raw = _existing_config_bytes(path)
     if raw is None:
         return {}, None
+    return _decoded_bounded(raw), raw
+
+
+def _decoded_bounded(raw: bytes) -> dict[str, object]:
     if len(raw) > MAX_CONFIG_BYTES:
         raise InstallControlError("integration_hook_config_oversized")
-    return _decode_object(raw), raw
+    return _decode_object(raw)
 
 
 def _template_raw(root: Path, relative: str) -> bytes:
@@ -138,9 +142,7 @@ def _cursor_event_state(current: Sequence[object], expected: Sequence[object]) -
     total = sum(expected_counts.values())
     if matched == 0:
         return "absent"
-    if matched != total:
-        return "conflict"
-    if not _expected_counts_match(actual_counts, expected_counts):
+    if matched != total or not _expected_counts_match(actual_counts, expected_counts):
         return "conflict"
     return "present"
 
@@ -272,6 +274,11 @@ def _antigravity_projection_any(
     current = config.get("llm-wiki", _MISSING)
     if current is _MISSING:
         return None
+    return _owned_antigravity_projection(current, candidates)
+
+
+def _owned_antigravity_projection(current: object, candidates: Sequence[bytes]) -> bytes:
+    """The projection's bytes when they are one this installer wrote."""
     if not isinstance(current, dict):
         raise InstallControlError("integration_antigravity_ownership_conflict")
     encoded = canonical_json_bytes(current)
@@ -558,12 +565,9 @@ def _replacement_parts(
     if replacement is None:
         return {}, {}
     value = _decode_object(replacement)
-    if set(value) != {"env", "hooks"}:
+    if set(value) != {"env", "hooks"} or not isinstance(value["env"], dict):
         raise _family_error(family, "projection_invalid")
-    env = value["env"]
-    if not isinstance(env, dict):
-        raise _family_error(family, "projection_invalid")
-    return {key: str(item) for key, item in env.items()}, _family_hooks(value, family)
+    return {key: str(item) for key, item in value["env"].items()}, _family_hooks(value, family)
 
 
 def _require_family_expected(

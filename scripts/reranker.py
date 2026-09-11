@@ -184,11 +184,14 @@ def _release_heap() -> None:
 
 def _get_reranker_bundle() -> dict[str, Any] | None:
     """Lazy-load model and tokenizer together. Returns None if unavailable."""
-    global _reranker_bundle, _reranker_unavailable_reason
-    if _reranker_bundle is not None:
+    if _reranker_bundle is not None or _reranker_unavailable_reason is not None:
         return _reranker_bundle
-    if _reranker_unavailable_reason is not None:
-        return None
+    return _load_reranker_bundle()
+
+
+def _load_reranker_bundle() -> dict[str, Any] | None:
+    """Load once; a failure is remembered so the stage degrades instead of retrying."""
+    global _reranker_bundle, _reranker_unavailable_reason
     identity = _loadable_identity()
     if identity is None:
         return None

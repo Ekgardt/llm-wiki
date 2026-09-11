@@ -55,6 +55,9 @@ class _StringState:
         if self._escaped:
             self._escaped = False
             return
+        self._escape_or_close(character)
+
+    def _escape_or_close(self, character: str) -> None:
         if character == "\\":
             self._escaped = True
             return
@@ -83,13 +86,18 @@ class _JsoncScanner:
         if self._state.consume(current):
             self._emit(current)
             return
+        if not self._skipped_comment():
+            self._emit(current)
+
+    def _skipped_comment(self) -> bool:
+        """Skip a comment starting here; whether there was one."""
         if self._at("//"):
             self._skip_line_comment()
-            return
+            return True
         if self._at("/*"):
             self._skip_block_comment()
-            return
-        self._emit(current)
+            return True
+        return False
 
     def _emit(self, character: str) -> None:
         self._output.append(character)
@@ -762,30 +770,41 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "profile":
-        replace_profile_block(args.profile, args.root, args.state_root)
-        return 0
-    if args.command == "cron":
-        print(
-            build_cron_command(
-                root=args.root,
-                state_root=args.state_root,
-                uv_path=args.uv_path,
-                kind=args.kind,
-                log_path=args.log_path,
-            )
+    command = _COMMANDS.get(args.command, _configure_opencode_command)
+    return command(args)
+
+
+def _profile_command(args: argparse.Namespace) -> int:
+    replace_profile_block(args.profile, args.root, args.state_root)
+    return 0
+
+
+def _cron_command(args: argparse.Namespace) -> int:
+    print(
+        build_cron_command(
+            root=args.root,
+            state_root=args.state_root,
+            uv_path=args.uv_path,
+            kind=args.kind,
+            log_path=args.log_path,
         )
-        return 0
-    if args.command == "sync-args":
-        environment, arguments = uv_sync_arguments(args.root, args.environment)
-        print(
-            json.dumps(
-                {"environment": str(environment), "arguments": arguments},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+    )
+    return 0
+
+
+def _sync_args_command(args: argparse.Namespace) -> int:
+    environment, arguments = uv_sync_arguments(args.root, args.environment)
+    print(
+        json.dumps(
+            {"environment": str(environment), "arguments": arguments},
+            ensure_ascii=False,
+            sort_keys=True,
         )
-        return 0
+    )
+    return 0
+
+
+def _configure_opencode_command(args: argparse.Namespace) -> int:
     result = configure_opencode(
         root=args.root,
         state_root=args.state_root,
@@ -796,6 +815,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False))
     return 0
+
+
+_COMMANDS = {
+    "profile": _profile_command,
+    "cron": _cron_command,
+    "sync-args": _sync_args_command,
+}
 
 
 if __name__ == "__main__":

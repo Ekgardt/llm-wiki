@@ -56,10 +56,14 @@ def _finite_timestamp(deadline: object) -> bool:
 def _check_deadline(deadline: float | None, monotonic: Callable[[], float]) -> None:
     if deadline is None:
         return
-    if not _finite_timestamp(deadline):
-        raise ValueError("deadline must be a finite monotonic timestamp")
+    _require_finite_timestamp(deadline)
     if monotonic() >= deadline:
         raise TimeoutError("knowledge extraction deadline reached")
+
+
+def _require_finite_timestamp(deadline: object) -> None:
+    if not _finite_timestamp(deadline):
+        raise ValueError("deadline must be a finite monotonic timestamp")
 
 
 def _check_stop(
