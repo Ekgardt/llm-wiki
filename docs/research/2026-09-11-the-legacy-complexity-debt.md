@@ -95,3 +95,13 @@ feedback it loaded before the per-decision updates, erasing them — which
 only never mattered because nothing ran it. It goes with
 `tests/test_session_feedback.py` and its `tests/shard_weights.json` entry,
 as the dead LLM branches of contextual retrieval went earlier today.
+
+## The code-intelligence files do not wait
+
+The issue #24 branch, once finished, touched none of `scripts/code_workspace.py`,
+`scripts/code_extractor.py`, `scripts/code_navigation.py`,
+`scripts/code_intelligence.py` or `scripts/install_control.py` (its diff is
+`code_hints`, `graph_hint`, `repository_*`, `codex_*`, `merge_claude_settings`,
+`integration_adapter`, `evidence_graph`, `mcp_server`, `scheduled_nightly`,
+`doctor` and the OpenCode plugin), so these five are taken now; only the files
+that branch changed wait for it.
