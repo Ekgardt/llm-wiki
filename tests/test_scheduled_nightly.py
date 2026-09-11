@@ -77,11 +77,13 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
     assert scheduled_nightly.main() == 0
 
     state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
-    assert "nightly_catchup_claim" not in state
-    assert state["last_nightly_status"] == "success"
-    assert state["last_nightly_date"] == "2026-07-11"
-    assert state["last_nightly_skip"]["reason"] == "maintenance_lock_held"
-    assert "last_nightly_failure" not in state
+    assert (
+        "nightly_catchup_claim" in state,
+        state["last_nightly_status"],
+        state["last_nightly_date"],
+        state["last_nightly_skip"]["reason"],
+        "last_nightly_failure" in state,
+    ) == (False, "success", "2026-07-11", "maintenance_lock_held", False)
 
 
 @pytest.mark.parametrize("role", ["nightly", "weekly"])
@@ -138,17 +140,31 @@ def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():
     assert "from access_tracking import flush_all" not in source
 
 
-def test_the_nightly_pass_pays_the_backlinks_the_vault_owes():
-    """The repair only helps if the pass that runs unattended actually calls it."""
+def _post_compile_labels() -> list[str]:
     import scheduled_nightly
 
-    steps = scheduled_nightly._post_compile_steps()
-    labels = [step.label for step in steps]
-    backlinks = next(step for step in steps if step.label == "backlinks")
+    return [step.label for step in scheduled_nightly._post_compile_steps()]
 
-    assert labels.index("backlinks") > labels.index("lint")
-    assert backlinks.command[-1] == "--apply"
-    assert backlinks.command[-2].endswith("repair_backlinks.py")
+
+def _post_compile_step(label: str):
+    import scheduled_nightly
+
+    return next(step for step in scheduled_nightly._post_compile_steps() if step.label == label)
+
+
+def _runs_after_with_apply(label: str, earlier: str, script: str) -> tuple[bool, str, bool]:
+    labels = _post_compile_labels()
+    command = _post_compile_step(label).command
+    return labels.index(label) > labels.index(earlier), command[-1], command[-2].endswith(script)
+
+
+def test_the_nightly_pass_pays_the_backlinks_the_vault_owes():
+    """The repair only helps if the pass that runs unattended actually calls it."""
+    assert _runs_after_with_apply("backlinks", "lint", "repair_backlinks.py") == (
+        True,
+        "--apply",
+        True,
+    )
 
 
 @pytest.mark.parametrize("status", ["deferred", "error"])
@@ -233,6 +249,39 @@ def test_a_vault_that_never_compiled_reports_no_failure(monkeypatch):
     assert scheduled_nightly._compile_failed_this_pass(None) is None
 
 
+_KILLED_TONIGHT = {
+    "last_compile_started_at": "2026-09-12T03:01:03",
+    "last_compile_status": "running",
+    "last_compile_finished_at": "2026-09-11T03:03:30",
+}
+
+
+def test_a_compile_killed_before_its_outcome_is_a_nightly_failure(monkeypatch):
+    """A killed compile writes no finished stamp; its start stamp still moved."""
+    import scheduled_nightly
+
+    _state(monkeypatch, _KILLED_TONIGHT)
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
+
+    error = scheduled_nightly._compile_failed_this_pass(
+        "2026-09-11T03:03:30", "2026-09-11T03:01:03"
+    )
+    assert error == scheduled_nightly.COMPILE_DIED_WITHOUT_OUTCOME
+
+
+def test_a_compile_still_running_or_started_last_night_is_not_counted_dead(monkeypatch):
+    """A hook may start a compile after the wait; last night's start is history."""
+    import scheduled_nightly
+
+    _state(monkeypatch, _KILLED_TONIGHT)
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: True)
+    running = scheduled_nightly._compile_failed_this_pass("2026-09-11T03:03:30", "2026-09-11T03:01:03")
+    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
+    unchanged = scheduled_nightly._compile_failed_this_pass("2026-09-11T03:03:30", "2026-09-12T03:01:03")
+
+    assert (running, unchanged) == (None, None)
+
+
 def test_a_running_compile_is_followed_up_to_the_wait_bound_and_then_deferred(monkeypatch):
     """Issue #21: a healthy 6.5-minute compile was recorded as failures=2 after a 5-minute wait."""
     import scheduled_nightly
@@ -267,15 +316,11 @@ def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monk
 
 def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
     """Issue #29: five generations, 1.05 GB, accumulated in one day with nothing removing them."""
-    import scheduled_nightly
-
-    steps = scheduled_nightly._post_compile_steps()
-    labels = [step.label for step in steps]
-    prune = next(step for step in steps if step.label == "prune_generations")
-
-    assert labels.index("prune_generations") > labels.index("search")
-    assert prune.command[-1] == "--apply"
-    assert prune.command[-2].endswith("prune_generations.py")
+    assert _runs_after_with_apply("prune_generations", "search", "prune_generations.py") == (
+        True,
+        "--apply",
+        True,
+    )
 
 
 def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkeypatch) -> None:
@@ -322,13 +367,15 @@ def test_the_repository_refresh_step_hands_its_budget_to_the_child_and_waits_lon
     import repository_index
     import scheduled_nightly
 
-    step = next(s for s in scheduled_nightly._post_compile_steps() if s.label == "repositories")
+    step = _post_compile_step("repositories")
+    budget = repository_index.REFRESH_ALL_BUDGET_SECONDS
+    margin = scheduled_nightly.STEP_START_MARGIN_SECONDS
 
-    assert step.command[-2:] == ["--budget-seconds", str(repository_index.REFRESH_ALL_BUDGET_SECONDS)]
-    assert step.timeout == (
-        repository_index.REFRESH_ALL_BUDGET_SECONDS + scheduled_nightly.STEP_START_MARGIN_SECONDS
+    assert (step.command[-2:], step.timeout, margin > 0) == (
+        ["--budget-seconds", str(budget)],
+        budget + margin,
+        True,
     )
-    assert scheduled_nightly.STEP_START_MARGIN_SECONDS > 0
 
 
 def _redirected_night(tmp_path, monkeypatch) -> Path:
@@ -379,15 +426,30 @@ def test_a_night_with_one_failing_step_names_it_and_records_the_failure(tmp_path
     fake.write_text(FAILING_STEP_SCRIPT, encoding="utf-8")
     monkeypatch.setattr(scheduled_nightly, "_script", lambda name: [sys.executable, str(fake), name])
 
-    assert scheduled_nightly._run_nightly_body(ownership=None) == 1
+    failures = scheduled_nightly._run_nightly_body(ownership=None)
 
-    report = next((tmp_path / "logs").glob("nightly-*.md")).read_text(encoding="utf-8")
-    assert "  lint: lint: 3 pages without frontmatter" in report
-    assert "  lint: full output → logs/maintenance/" in report
-    assert "  search: ok search_memory.py" in report
-    assert "=== Nightly pass complete (failures=1) ===" in report
-    artifact = next((tmp_path / "logs" / "maintenance").glob("*-lint-*.err.log"))
-    assert artifact.read_text(encoding="utf-8") == "lint: 3 pages without frontmatter\n"
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert state["last_nightly_status"] == "failed"
-    assert state["last_nightly_failure"]["failures"] == 1
+    assert (failures, _missing_report_lines(tmp_path), _lint_artifact(tmp_path)) == (
+        1,
+        [],
+        "lint: 3 pages without frontmatter\n",
+    )
+    assert (state["last_nightly_status"], state["last_nightly_failure"]["failures"]) == ("failed", 1)
+
+
+_EXPECTED_REPORT_LINES = (
+    "  lint: lint: 3 pages without frontmatter",
+    "  lint: full output → logs/maintenance/",
+    "  search: ok search_memory.py",
+    "=== Nightly pass complete (failures=1) ===",
+)
+
+
+def _missing_report_lines(tmp_path) -> list[str]:
+    report = next((tmp_path / "logs").glob("nightly-*.md")).read_text(encoding="utf-8")
+    return [line for line in _EXPECTED_REPORT_LINES if line not in report]
+
+
+def _lint_artifact(tmp_path) -> str:
+    artifact = next((tmp_path / "logs" / "maintenance").glob("*-lint-*.err.log"))
+    return artifact.read_text(encoding="utf-8")

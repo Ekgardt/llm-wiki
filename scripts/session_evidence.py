@@ -16,6 +16,7 @@ See knowledge/notes/session-evidence-retention-decision.md.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -31,16 +32,39 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 _TOOL_INPUT_FIELDS = ("command", "file_path", "path", "pattern", "query", "url")
 
 
+_NAME_LIMIT = 64
+_NAME_DIGEST_CHARS = 12
+
+
 def _safe_component(value: str, fallback: str) -> str:
     cleaned = _SAFE_NAME.sub("-", str(value or "")).strip("-")
-    return cleaned[:64] or fallback
+    return cleaned[:_NAME_LIMIT] or fallback
 
 
-def evidence_relative_path(day: str, session_id: str) -> str:
+def _session_component(session_id: str, document: bytes) -> str:
+    """The session's own id when it is a safe name, else a name that cannot collide.
+
+    Replacing characters, cutting at 64 or falling back for a missing id maps
+    many sessions to one name, and the write replaces the file: the second
+    session's record took the first one's place. Such a name carries a digest
+    of the raw id (of the record itself when there is no id); an id that is
+    already safe keeps its name (research
+    2026-09-11-the-seven-questions-the-audits-left-open.md, memory Q3).
+    """
+    safe = _safe_component(session_id, "")
+    if safe and safe == session_id:
+        return safe
+    source = session_id.encode("utf-8") if session_id else document
+    digest = hashlib.sha256(source).hexdigest()[:_NAME_DIGEST_CHARS]
+    stem = (safe or "unknown-session")[: _NAME_LIMIT - _NAME_DIGEST_CHARS - 1]
+    return f"{stem}-{digest}"
+
+
+def evidence_relative_path(day: str, session_id: str, document: bytes = b"") -> str:
     """`knowledge/raw/sessions/<day>/<session>.md`, always inside the vault."""
     return (
         f"{SESSION_EVIDENCE_DIR}/{_safe_component(day, 'undated')}"
-        f"/{_safe_component(session_id, 'unknown-session')}.md"
+        f"/{_session_component(str(session_id or ''), document)}.md"
     )
 
 
@@ -241,9 +265,11 @@ def write_session_evidence(
     if not body:
         return None
     document = _document_from_body(fields, body)
-    relative = evidence_relative_path(_capture_day(fields), str(fields.get("session") or ""))
-    path = Path(vault) / relative
     encoded = document.encode("utf-8")
+    relative = evidence_relative_path(
+        _capture_day(fields), str(fields.get("session") or ""), encoded
+    )
+    path = Path(vault) / relative
     try:
         _write_record(
             stable_operation_id("session-evidence", relative, encoded),
