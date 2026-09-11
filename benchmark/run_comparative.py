@@ -134,6 +134,61 @@ def _read_bounded_json(path: Path, maximum: int, label: str) -> tuple[bytes, dic
     return raw, value
 
 
+_CANONICAL_CLAIM_GATE = {
+    "comparisons": {
+        "quality": "10000*quality_difference_lower_confidence_bound>-200",
+        "token_ratio": "10000*token_ratio_upper_confidence_bound<9000",
+    },
+    "consumed_report_fields": {
+        "quality": "quality_difference_lower_confidence_bound",
+        "token_ratio": "token_ratio_upper_confidence_bound",
+    },
+    "hard_gates": ["crash", "evidence", "freshness"],
+    "quality_lower_bound_basis_points_strictly_greater_than": -200,
+    "requires_gate_f": True,
+    "requires_real_evidence": True,
+    "token_ratio_upper_bound_basis_points_strictly_less_than": 9000,
+}
+
+
+def _require_unique_contract_lists(contract: dict) -> None:
+    _require_unique((adapter["id"] for adapter in contract["adapters"]), "adapter ids")
+    _require_unique(contract["fairness"]["identical_inputs"], "identical inputs")
+    _require_unique(contract["metrics"]["latency_summary"], "latency summary")
+    _require_unique(contract["metrics"]["per_task_fields"], "metric fields")
+    _require_unique(contract["public_claim_gate"]["hard_gates"], "hard gates")
+    _require_unique(contract["statistics"]["agent_seeds"], "agent seeds")
+    _require_unique(contract["statistics"]["pairing"]["key"], "pairing keys")
+
+
+def _require_contract_sets(contract: dict) -> None:
+    if {adapter["id"] for adapter in contract["adapters"]} != ADAPTER_IDS:
+        raise ValueError("comparative adapter set is incomplete")
+    if set(contract["fairness"]["identical_inputs"]) != FAIRNESS_KEYS:
+        raise ValueError("comparative contract does not require all identical inputs")
+    if set(contract["metrics"]["per_task_fields"]) != METRIC_FIELDS:
+        raise ValueError("comparative per-task metric ledger is incomplete")
+
+
+def _require_pinned_graphify(contract: dict) -> None:
+    graphify = contract["provenance"]["graphify"]
+    if (
+        graphify["commit"] != GRAPHIFY_COMMIT
+        or graphify["dependency_lock"]["git_blob_sha1"] != GRAPHIFY_LOCK_BLOB
+    ):
+        raise ValueError("Graphify source or dependency lock is not pinned")
+
+
+def _require_frozen_gate_and_availability(contract: dict) -> None:
+    if contract["public_claim_gate"] != _CANONICAL_CLAIM_GATE:
+        raise ValueError("public claim gate differs from canonical Task 27 claim gate")
+    availability = contract["availability"]
+    if availability["gate_f_passed"] or availability["heavy_comparison_available"]:
+        raise ValueError("early comparative contract must keep real execution unavailable")
+    if contract["provenance"]["configuration"]["sha256"] != configuration_fingerprint(contract):
+        raise ValueError("comparative configuration fingerprint mismatch")
+
+
 def load_contract(contract_path: Path | str, schema_path: Path | str) -> dict:
     """Load a canonical contract and reject weakened or incomplete semantics."""
     contract_path = Path(contract_path)
@@ -145,47 +200,10 @@ def load_contract(contract_path: Path | str, schema_path: Path | str) -> dict:
     validate_schema_object(contract, schema)
     if raw != canonical_json_bytes(contract) + b"\n":
         raise ValueError("comparative contract bytes are not canonical and frozen")
-
-    _require_unique((adapter["id"] for adapter in contract["adapters"]), "adapter ids")
-    _require_unique(contract["fairness"]["identical_inputs"], "identical inputs")
-    _require_unique(contract["metrics"]["latency_summary"], "latency summary")
-    _require_unique(contract["metrics"]["per_task_fields"], "metric fields")
-    _require_unique(contract["public_claim_gate"]["hard_gates"], "hard gates")
-    _require_unique(contract["statistics"]["agent_seeds"], "agent seeds")
-    _require_unique(contract["statistics"]["pairing"]["key"], "pairing keys")
-    if {adapter["id"] for adapter in contract["adapters"]} != ADAPTER_IDS:
-        raise ValueError("comparative adapter set is incomplete")
-    if set(contract["fairness"]["identical_inputs"]) != FAIRNESS_KEYS:
-        raise ValueError("comparative contract does not require all identical inputs")
-    if set(contract["metrics"]["per_task_fields"]) != METRIC_FIELDS:
-        raise ValueError("comparative per-task metric ledger is incomplete")
-    graphify = contract["provenance"]["graphify"]
-    if (
-        graphify["commit"] != GRAPHIFY_COMMIT
-        or graphify["dependency_lock"]["git_blob_sha1"] != GRAPHIFY_LOCK_BLOB
-    ):
-        raise ValueError("Graphify source or dependency lock is not pinned")
-    gate = contract["public_claim_gate"]
-    if gate != {
-        "comparisons": {
-            "quality": "10000*quality_difference_lower_confidence_bound>-200",
-            "token_ratio": "10000*token_ratio_upper_confidence_bound<9000",
-        },
-        "consumed_report_fields": {
-            "quality": "quality_difference_lower_confidence_bound",
-            "token_ratio": "token_ratio_upper_confidence_bound",
-        },
-        "hard_gates": ["crash", "evidence", "freshness"],
-        "quality_lower_bound_basis_points_strictly_greater_than": -200,
-        "requires_gate_f": True,
-        "requires_real_evidence": True,
-        "token_ratio_upper_bound_basis_points_strictly_less_than": 9000,
-    }:
-        raise ValueError("public claim gate differs from canonical Task 27 claim gate")
-    if contract["availability"]["gate_f_passed"] or contract["availability"]["heavy_comparison_available"]:
-        raise ValueError("early comparative contract must keep real execution unavailable")
-    if contract["provenance"]["configuration"]["sha256"] != configuration_fingerprint(contract):
-        raise ValueError("comparative configuration fingerprint mismatch")
+    _require_unique_contract_lists(contract)
+    _require_contract_sets(contract)
+    _require_pinned_graphify(contract)
+    _require_frozen_gate_and_availability(contract)
     return contract
 
 
@@ -222,31 +240,49 @@ def _require_unique(values, label: str) -> None:
         fingerprints.append(fingerprint)
 
 
-def _canonical_evidence_value(value: object) -> object:
-    if value is None or isinstance(value, bool):
-        return value
+def _canonical_number(value: float) -> object:
+    if not math.isfinite(value):
+        raise ValueError("canonical evidence numbers must be finite")
+    if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+        return int(value)
+    return value
+
+
+def _canonical_key(key: object) -> str:
+    if not isinstance(key, str):
+        raise TypeError("canonical evidence object keys must be strings")
+    return unicodedata.normalize("NFC", key)
+
+
+def _canonical_object(value: dict) -> dict:
+    normalized: dict = {}
+    for key, item in value.items():
+        normalized_key = _canonical_key(key)
+        if normalized_key in normalized:
+            raise ValueError(f"normalized evidence-key collision: {normalized_key!r}")
+        normalized[normalized_key] = _canonical_evidence_value(item)
+    return normalized
+
+
+def _canonical_scalar(value: object) -> tuple[bool, object]:
+    """(handled, canonical form) for None, bool, int, float and str."""
+    if value is None or isinstance(value, (bool, int)):
+        return True, value
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("canonical evidence numbers must be finite")
-        if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
-            return int(value)
-        return value
-    if isinstance(value, int):
-        return value
+        return True, _canonical_number(value)
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        return True, unicodedata.normalize("NFC", value)
+    return False, None
+
+
+def _canonical_evidence_value(value: object) -> object:
+    handled, canonical = _canonical_scalar(value)
+    if handled:
+        return canonical
     if isinstance(value, list):
         return [_canonical_evidence_value(item) for item in value]
     if isinstance(value, dict):
-        normalized = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("canonical evidence object keys must be strings")
-            normalized_key = unicodedata.normalize("NFC", key)
-            if normalized_key in normalized:
-                raise ValueError(f"normalized evidence-key collision: {normalized_key!r}")
-            normalized[normalized_key] = _canonical_evidence_value(item)
-        return normalized
+        return _canonical_object(value)
     raise TypeError(f"canonical evidence does not permit {type(value).__name__} values")
 
 
@@ -306,6 +342,13 @@ def validate_ledger(ledger: dict, schema_path: Path | str = DEFAULT_LEDGER_SCHEM
     return _validate_ledger_object(ledger, schema)
 
 
+def _require_ledger_set(ledgers: list[dict]) -> None:
+    if {ledger["adapter_id"] for ledger in ledgers} != ADAPTER_IDS:
+        raise ValueError("smoke report adapter ledger set is incomplete")
+    if len({ledger["input_fingerprint"] for ledger in ledgers}) != 1:
+        raise ValueError("smoke report adapters did not receive identical inputs")
+
+
 def validate_report(
     report: dict,
     report_schema_path: Path | str = DEFAULT_REPORT_SCHEMA,
@@ -321,66 +364,64 @@ def validate_report(
     )
     validate_schema_object(report, report_schema)
     canonical_evidence_json_bytes(report)
-    for ledger in report["raw_task_ledgers"]:
+    ledgers = report["raw_task_ledgers"]
+    for ledger in ledgers:
         _validate_ledger_object(ledger, ledger_schema)
     _require_unique(report["statistics"]["agent_seeds"], "report agent seeds")
-    _require_unique(
-        (ledger["adapter_id"] for ledger in report["raw_task_ledgers"]),
-        "report adapter ids",
-    )
-    if {ledger["adapter_id"] for ledger in report["raw_task_ledgers"]} != ADAPTER_IDS:
-        raise ValueError("smoke report adapter ledger set is incomplete")
-    if len({ledger["input_fingerprint"] for ledger in report["raw_task_ledgers"]}) != 1:
-        raise ValueError("smoke report adapters did not receive identical inputs")
+    _require_unique((ledger["adapter_id"] for ledger in ledgers), "report adapter ids")
+    _require_ledger_set(ledgers)
     return report
+
+
+def _smoke_source_revision(adapter_id: str) -> dict:
+    if adapter_id == "graphify-pinned":
+        return {"kind": "git-commit", "value": GRAPHIFY_COMMIT}
+    return {"kind": "unavailable", "value": None}
+
+
+def _smoke_failure() -> dict:
+    return {
+        "category": "orchestration",
+        "code": "real-adapter-disabled",
+        "message": "Pinned Graphify is not executed by deterministic smoke.",
+        "phase": "smoke",
+        "retryable": False,
+    }
+
+
+def _smoke_ledger(
+    contract: dict, adapter: dict, task: dict, fingerprint: str, unavailable_metrics: dict
+) -> dict:
+    failed = adapter["id"] == contract["smoke"]["intentional_failure_adapter"]
+    return {
+        "adapter_id": adapter["id"],
+        "adapter_provenance": {
+            "configuration_sha256": contract["provenance"]["configuration"]["sha256"],
+            "implementation_status": adapter["implementation_status"],
+            "source_revision": _smoke_source_revision(adapter["id"]),
+        },
+        "attempt": 1,
+        "failure": _smoke_failure() if failed else None,
+        "input_fingerprint": fingerprint,
+        "inputs": task["inputs"],
+        "metrics": dict(unavailable_metrics),
+        "outcome": "failure" if failed else "orchestration-pass",
+        "seed": contract["statistics"]["agent_seeds"][0],
+        "task_id": task["id"],
+    }
 
 
 def run_smoke(contract: dict) -> dict:
     """Exercise every adapter ledger shape without running any real backend."""
     task = contract["tasks"][0]
-    inputs = task["inputs"]
-    fingerprint = _fingerprint(inputs)
+    fingerprint = _fingerprint(task["inputs"])
     bound_fields = contract["public_claim_gate"]["consumed_report_fields"]
     runtime_provenance = verify_runtime_provenance(contract, real_mode=False)
     unavailable_metrics = {field: None for field in sorted(METRIC_FIELDS)}
-    ledgers = []
-    for adapter in contract["adapters"]:
-        failed = adapter["id"] == contract["smoke"]["intentional_failure_adapter"]
-        ledgers.append(
-            {
-                "adapter_id": adapter["id"],
-                "adapter_provenance": {
-                    "configuration_sha256": contract["provenance"]["configuration"][
-                        "sha256"
-                    ],
-                    "implementation_status": adapter["implementation_status"],
-                    "source_revision": (
-                        {"kind": "git-commit", "value": GRAPHIFY_COMMIT}
-                        if adapter["id"] == "graphify-pinned"
-                        else {"kind": "unavailable", "value": None}
-                    ),
-                },
-                "attempt": 1,
-                "failure": (
-                    {
-                        "category": "orchestration",
-                        "code": "real-adapter-disabled",
-                        "message": "Pinned Graphify is not executed by deterministic smoke.",
-                        "phase": "smoke",
-                        "retryable": False,
-                    }
-                    if failed
-                    else None
-                ),
-                "input_fingerprint": fingerprint,
-                "inputs": inputs,
-                "metrics": dict(unavailable_metrics),
-                "outcome": "failure" if failed else "orchestration-pass",
-                "seed": contract["statistics"]["agent_seeds"][0],
-                "task_id": task["id"],
-            }
-        )
-
+    ledgers = [
+        _smoke_ledger(contract, adapter, task, fingerprint, unavailable_metrics)
+        for adapter in contract["adapters"]
+    ]
     return {
         "bounded": {
             "adapter_count": len(contract["adapters"]),
@@ -438,36 +479,44 @@ def _finding(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _artifact_verified(artifact: object, base: Path) -> bool:
+    if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
+        return False
+    artifact_path = Path(artifact["path"])
+    if not artifact_path.is_absolute():
+        artifact_path = base / artifact_path
+    if not artifact_path.is_file():
+        return False
+    return hashlib.sha256(artifact_path.read_bytes()).hexdigest() == artifact["sha256"]
+
+
+def _evidence_shape_complete(evidence: dict) -> bool:
+    if set(evidence) != {"artifacts", "checks", "passed", "schema_version"}:
+        return False
+    if evidence["schema_version"] != "gate-f-evidence/v1" or evidence["passed"] is not True:
+        return False
+    return evidence["checks"] == {name: True for name in sorted(GATE_F_CHECKS)}
+
+
+def _artifacts_verified(evidence: dict, base: Path) -> bool:
+    artifacts = evidence["artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        return False
+    return all(_artifact_verified(artifact, base) for artifact in artifacts)
+
+
 def _gate_f_evidence_complete(path: Path) -> bool:
     try:
         _raw, evidence = _read_bounded_json(path, MAX_MANIFEST_BYTES, "Gate F evidence")
-        if set(evidence) != {"artifacts", "checks", "passed", "schema_version"}:
+        if not _evidence_shape_complete(evidence):
             return False
-        if evidence["schema_version"] != "gate-f-evidence/v1" or evidence["passed"] is not True:
-            return False
-        if evidence["checks"] != {name: True for name in sorted(GATE_F_CHECKS)}:
-            return False
-        artifacts = evidence["artifacts"]
-        if not isinstance(artifacts, list) or not artifacts:
-            return False
-        for artifact in artifacts:
-            if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
-                return False
-            artifact_path = Path(artifact["path"])
-            if not artifact_path.is_absolute():
-                artifact_path = path.parent / artifact_path
-            if (
-                not artifact_path.is_file()
-                or hashlib.sha256(artifact_path.read_bytes()).hexdigest() != artifact["sha256"]
-            ):
-                return False
-        return True
+        return _artifacts_verified(evidence, path.parent)
     except (OSError, TypeError, UnicodeError, ValueError, RecursionError):
         return False
 
 
-def _validate_real_manifest(manifest: dict) -> None:
-    required = {
+_REAL_MANIFEST_REQUIRED = frozenset(
+    {
         "adapters",
         "context_budget",
         "gate_f",
@@ -481,122 +530,196 @@ def _validate_real_manifest(manifest: dict) -> None:
         "seeds",
         "tasks",
     }
-    if not isinstance(manifest, dict) or set(manifest) - (required | {"hard_gates"}):
+)
+
+
+def _manifest_fields_known(manifest: object) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    return not (set(manifest) - (_REAL_MANIFEST_REQUIRED | {"hard_gates"}))
+
+
+def _require_manifest_shape(manifest: object) -> None:
+    if not _manifest_fields_known(manifest):
         raise ValueError("real manifest has unknown fields")
-    if not required <= set(manifest) or manifest.get("schema_version") != "comparative-run/v1":
+    if not _REAL_MANIFEST_REQUIRED <= set(manifest) or manifest.get("schema_version") != "comparative-run/v1":
         raise ValueError("real manifest is incomplete or has the wrong schema version")
     if set(manifest["adapters"]) != ADAPTER_IDS:
         raise ValueError("real manifest adapter set is incomplete")
-    repository = manifest["repository"]
+
+
+def _non_empty_str(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _bounded_str(value: object, low: int, high: int) -> bool:
+    return isinstance(value, str) and low <= len(value) <= high
+
+
+def _valid_commit(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _repository_fields_valid(repository: dict) -> bool:
+    if not _non_empty_str(repository["path"]) or not _bounded_str(repository["url"], 3, 500):
+        return False
+    return _valid_commit(repository["commit"])
+
+
+def _require_manifest_repository(repository: object) -> None:
     if not isinstance(repository, dict) or set(repository) != {"commit", "path", "url"}:
         raise ValueError("real manifest repository is invalid")
-    if (
-        not isinstance(repository["path"], str)
-        or not repository["path"]
-        or not isinstance(repository["url"], str)
-        or not 3 <= len(repository["url"]) <= 500
-        or not isinstance(repository["commit"], str)
-        or re.fullmatch(r"[0-9a-f]{40}", repository["commit"]) is None
-    ):
+    if not _repository_fields_valid(repository):
         raise ValueError("real manifest repository is invalid")
-    graphify = manifest["graphify"]
-    if not isinstance(graphify, dict) or set(graphify) != {"path"} or not isinstance(
-        graphify["path"], str
-    ) or not graphify["path"]:
+
+
+def _require_manifest_graphify(graphify: object) -> None:
+    if not isinstance(graphify, dict) or set(graphify) != {"path"} or not _non_empty_str(graphify["path"]):
         raise ValueError("real manifest Graphify path is invalid")
-    model = manifest["model"]
-    if (
-        not isinstance(model, dict)
-        or set(model) != {"id", "probe_command"}
-        or not isinstance(model["id"], str)
-        or not 3 <= len(model["id"]) <= 200
-        or not isinstance(model["probe_command"], list)
-        or not model["probe_command"]
-        or not all(isinstance(part, str) and part for part in model["probe_command"])
-    ):
-        raise ValueError("real manifest model is invalid")
-    if (
-        not isinstance(manifest["hardware"], str)
-        or not 3 <= len(manifest["hardware"]) <= 200
-        or isinstance(manifest["context_budget"], bool)
-        or not isinstance(manifest["context_budget"], int)
-        or not 1 <= manifest["context_budget"] <= 1_000_000
+
+
+def _all_non_empty_strings(values) -> bool:
+    return all(isinstance(part, str) and part for part in values)
+
+
+def _non_empty_string_list(values: object) -> bool:
+    return isinstance(values, list) and bool(values) and _all_non_empty_strings(values)
+
+
+def _model_valid(model: object) -> bool:
+    if not isinstance(model, dict) or set(model) != {"id", "probe_command"}:
+        return False
+    if not _bounded_str(model["id"], 3, 200):
+        return False
+    return _non_empty_string_list(model["probe_command"])
+
+
+def _positive_int_within(value: object, low: int, high: int) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return low <= value <= high
+
+
+def _positive_int(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value > 0
+
+
+def _require_hardware_and_budget(manifest: dict) -> None:
+    if not _bounded_str(manifest["hardware"], 3, 200) or not _positive_int_within(
+        manifest["context_budget"], 1, 1_000_000
     ):
         raise ValueError("real manifest hardware or context budget is invalid")
-    if (
-        not isinstance(manifest["tasks"], list)
-        or not manifest["tasks"]
-        or len(manifest["tasks"]) > MAX_REAL_TASKS
-    ):
+
+
+def _task_valid(task: object) -> bool:
+    if not isinstance(task, dict) or set(task) != {"id", "task"}:
+        return False
+    if not isinstance(task["id"], str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{2,127}", task["id"]) is None:
+        return False
+    return _bounded_str(task["task"], 1, 2000)
+
+
+def _tasks_bounded(tasks: object) -> bool:
+    return isinstance(tasks, list) and bool(tasks) and len(tasks) <= MAX_REAL_TASKS
+
+
+def _require_manifest_tasks(tasks: object) -> None:
+    if not _tasks_bounded(tasks):
         raise ValueError("real manifest requires at least one task")
-    for task in manifest["tasks"]:
-        if (
-            not isinstance(task, dict)
-            or set(task) != {"id", "task"}
-            or not isinstance(task["id"], str)
-            or re.fullmatch(r"[a-z0-9][a-z0-9-]{2,127}", task["id"]) is None
-            or not isinstance(task["task"], str)
-            or not 1 <= len(task["task"]) <= 2000
-        ):
+    for task in tasks:
+        if not _task_valid(task):
             raise ValueError("real manifest task is invalid")
-    task_ids = [task["id"] for task in manifest["tasks"]]
-    _require_unique(task_ids, "real task ids")
-    seeds = manifest["seeds"]
+    _require_unique([task["id"] for task in tasks], "real task ids")
+
+
+def _require_manifest_seeds(seeds: object) -> None:
     if not isinstance(seeds, list) or len(seeds) < 3:
         raise ValueError("real manifest requires multiple seeds")
     _require_unique(seeds, "real seeds")
-    if seeds != manifest.get("seeds") or any(
-        isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2_147_483_647
-        for seed in seeds
-    ):
+    if any(not _positive_int_within(seed, 0, 2_147_483_647) for seed in seeds):
         raise ValueError("real manifest seeds are invalid")
-    retry = manifest["retry_policy"]
-    if set(retry) != {"backoff", "max_attempts"} or retry["backoff"] not in {
-        "none",
-        "fixed",
-        "exponential",
-    } or not 1 <= retry["max_attempts"] <= 10:
+
+
+def _require_retry_policy(retry: dict) -> None:
+    if set(retry) != {"backoff", "max_attempts"}:
         raise ValueError("real manifest retry policy is invalid")
-    limits = manifest["limits"]
+    if retry["backoff"] not in {"none", "fixed", "exponential"}:
+        raise ValueError("real manifest retry policy is invalid")
+    if not 1 <= retry["max_attempts"] <= 10:
+        raise ValueError("real manifest retry policy is invalid")
+
+
+def _limits_within_hard_bounds(limits: dict) -> bool:
+    if limits["max_stdout_bytes"] > 16 * 1024 * 1024 or limits["max_stderr_bytes"] > 16 * 1024 * 1024:
+        return False
+    return limits["timeout_seconds"] <= 3600
+
+
+def _require_limits(limits: dict) -> None:
     if set(limits) != {"max_stderr_bytes", "max_stdout_bytes", "timeout_seconds"}:
         raise ValueError("real manifest limits are incomplete")
-    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in limits.values()):
+    if any(not _positive_int(value) for value in limits.values()):
         raise ValueError("real manifest limits must be positive integers")
-    if (
-        limits["max_stdout_bytes"] > 16 * 1024 * 1024
-        or limits["max_stderr_bytes"] > 16 * 1024 * 1024
-        or limits["timeout_seconds"] > 3600
-    ):
+    if not _limits_within_hard_bounds(limits):
         raise ValueError("real manifest limits exceed hard bounds")
-    gate_f = manifest["gate_f"]
-    if not isinstance(gate_f, dict) or set(gate_f) != {
-        "evidence_path",
-        "evidence_sha256",
-        "passed",
-    } or not isinstance(gate_f["evidence_path"], str) or not gate_f["evidence_path"] or re.fullmatch(
-        r"[0-9a-f]{64}", gate_f["evidence_sha256"]
-    ) is None or not isinstance(gate_f["passed"], bool):
+
+
+def _gate_f_valid(gate_f: object) -> bool:
+    if not isinstance(gate_f, dict) or set(gate_f) != {"evidence_path", "evidence_sha256", "passed"}:
+        return False
+    if not _non_empty_str(gate_f["evidence_path"]):
+        return False
+    if re.fullmatch(r"[0-9a-f]{64}", gate_f["evidence_sha256"]) is None:
+        return False
+    return isinstance(gate_f["passed"], bool)
+
+
+def _hard_gates_valid(hard_gates: object) -> bool:
+    if hard_gates is None:
+        return True
+    if not isinstance(hard_gates, dict) or set(hard_gates) != {"crash", "evidence", "freshness"}:
+        return False
+    return all(isinstance(value, bool) for value in hard_gates.values())
+
+
+def _command_list_valid(command: object, max_length: int) -> bool:
+    return _non_empty_string_list(command) and len(command) <= max_length
+
+
+def _env_list_valid(names: object) -> bool:
+    if not isinstance(names, list) or len(names) > 64:
+        return False
+    return _all_non_empty_strings(names)
+
+
+def _require_adapter_config(adapter_id: str, config: dict) -> None:
+    if set(config) != {"command", "required_env"}:
+        raise ValueError(f"adapter {adapter_id} configuration is not closed")
+    if not _command_list_valid(config["command"], 32):
+        raise ValueError(f"adapter {adapter_id} command is invalid")
+    if not _env_list_valid(config["required_env"]):
+        raise ValueError(f"adapter {adapter_id} environment list is invalid")
+
+
+def _validate_real_manifest(manifest: dict) -> None:
+    _require_manifest_shape(manifest)
+    _require_manifest_repository(manifest["repository"])
+    _require_manifest_graphify(manifest["graphify"])
+    if not _model_valid(manifest["model"]):
+        raise ValueError("real manifest model is invalid")
+    _require_hardware_and_budget(manifest)
+    _require_manifest_tasks(manifest["tasks"])
+    _require_manifest_seeds(manifest["seeds"])
+    _require_retry_policy(manifest["retry_policy"])
+    _require_limits(manifest["limits"])
+    if not _gate_f_valid(manifest["gate_f"]):
         raise ValueError("real manifest Gate F declaration is invalid")
-    hard_gates = manifest.get("hard_gates")
-    if hard_gates is not None and (
-        not isinstance(hard_gates, dict)
-        or set(hard_gates) != {"crash", "evidence", "freshness"}
-        or not all(isinstance(value, bool) for value in hard_gates.values())
-    ):
+    if not _hard_gates_valid(manifest.get("hard_gates")):
         raise ValueError("real manifest hard gates are invalid")
     for adapter_id, config in manifest["adapters"].items():
-        if set(config) != {"command", "required_env"}:
-            raise ValueError(f"adapter {adapter_id} configuration is not closed")
-        if not isinstance(config["command"], list) or not config["command"] or len(
-            config["command"]
-        ) > 32 or not all(
-            isinstance(part, str) and part for part in config["command"]
-        ):
-            raise ValueError(f"adapter {adapter_id} command is invalid")
-        if not isinstance(config["required_env"], list) or len(config["required_env"]) > 64 or not all(
-            isinstance(name, str) and name for name in config["required_env"]
-        ):
-            raise ValueError(f"adapter {adapter_id} environment list is invalid")
+        _require_adapter_config(adapter_id, config)
 
 
 def load_real_manifest(path: Path | str) -> dict:
@@ -604,6 +727,114 @@ def load_real_manifest(path: Path | str) -> dict:
     _raw, manifest = _read_bounded_json(Path(path), MAX_MANIFEST_BYTES, "real run manifest")
     _validate_real_manifest(manifest)
     return manifest
+
+
+def _python_findings(contract: dict) -> list[dict[str, str]]:
+    expected_python = contract["provenance"]["python"]
+    observed_python = {
+        "implementation": platform.python_implementation(),
+        "version": platform.python_version(),
+    }
+    if observed_python != expected_python:
+        return [_finding("python-runtime-mismatch", "Python runtime is not the pinned version")]
+    return []
+
+
+def _repository_findings(command_runner, repository: dict) -> list[dict[str, str]]:
+    try:
+        result = _run_probe(command_runner, ["git", "rev-parse", "HEAD"], cwd=Path(repository["path"]))
+        if result.returncode != 0 or result.stdout.strip() != repository["commit"]:
+            raise ValueError
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return [_finding("repository-commit-unverified", "Repository HEAD does not match")]
+    return []
+
+
+def _append_graphify_probe_findings(command_runner, graphify_path: Path, findings: list) -> None:
+    head = _run_probe(command_runner, ["git", "rev-parse", "HEAD"], cwd=graphify_path)
+    if head.returncode != 0 or head.stdout.strip() != GRAPHIFY_COMMIT:
+        findings.append(_finding("graphify-commit-mismatch", "Graphify HEAD is not pinned"))
+    lock = _run_probe(command_runner, ["git", "hash-object", "uv.lock"], cwd=graphify_path)
+    if lock.returncode != 0 or lock.stdout.strip() != GRAPHIFY_LOCK_BLOB:
+        findings.append(_finding("graphify-lock-mismatch", "Graphify uv.lock blob is not pinned"))
+
+
+def _append_graphify_findings(command_runner, graphify_path: Path, findings: list) -> None:
+    if not graphify_path.is_dir() or not (graphify_path / "uv.lock").is_file():
+        findings.append(
+            _finding("graphify-checkout-unavailable", "Pinned Graphify checkout and uv.lock are required")
+        )
+        return
+    try:
+        _append_graphify_probe_findings(command_runner, graphify_path, findings)
+    except (OSError, subprocess.SubprocessError):
+        findings.append(_finding("graphify-probe-failed", "Graphify provenance could not be read"))
+
+
+def _model_probe_findings(probe, model: dict) -> list[dict[str, str]]:
+    if probe.returncode != 0:
+        return [_finding("model-unavailable", "Model identity probe failed")]
+    if probe.stdout.strip() != model.get("id"):
+        return [_finding("model-identity-mismatch", "Model identity is not exact")]
+    return []
+
+
+def _append_model_findings(command_runner, model: dict, findings: list) -> None:
+    probe_command = model.get("probe_command")
+    if not isinstance(probe_command, list) or not probe_command or not _command_available(probe_command):
+        findings.append(_finding("model-unavailable", "Model identity probe is unavailable"))
+        return
+    try:
+        probe = _run_probe(command_runner, probe_command)
+    except (OSError, subprocess.SubprocessError):
+        findings.append(_finding("model-unavailable", "Model identity probe failed"))
+        return
+    findings.extend(_model_probe_findings(probe, model))
+
+
+def _adapter_config_findings(adapter_id: str, config: dict, environ: dict[str, str]) -> list:
+    findings = []
+    if not _command_available(config["command"]):
+        findings.append(_finding("adapter-command-unavailable", f"{adapter_id} command is unavailable"))
+    missing = [name for name in config["required_env"] if not environ.get(name)]
+    if missing:
+        findings.append(
+            _finding(
+                "required-environment-unavailable",
+                f"{adapter_id} requires {','.join(sorted(missing))}",
+            )
+        )
+    return findings
+
+
+def _append_adapter_findings(manifest: dict, environ: dict[str, str], findings: list) -> None:
+    for adapter_id, config in manifest["adapters"].items():
+        findings.extend(_adapter_config_findings(adapter_id, config, environ))
+
+
+def _gate_f_evidence_findings(evidence_path: Path, gate_f: dict) -> list[dict[str, str]]:
+    digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    if digest != gate_f.get("evidence_sha256"):
+        return [_finding("gate-f-evidence-mismatch", "Gate F evidence hash differs")]
+    if not _gate_f_evidence_complete(evidence_path):
+        return [_finding("gate-f-evidence-invalid", "Gate F evidence is incomplete or unverifiable")]
+    return []
+
+
+def _append_gate_f_findings(gate_f: dict, findings: list) -> None:
+    evidence_path = Path(gate_f.get("evidence_path", ""))
+    if not gate_f.get("passed"):
+        findings.append(_finding("gate-f-unavailable", "Gate F is not recorded as passed"))
+    if not evidence_path.is_file():
+        findings.append(_finding("gate-f-evidence-unavailable", "Gate F evidence file is unavailable"))
+        return
+    findings.extend(_gate_f_evidence_findings(evidence_path, gate_f))
+
+
+def _hard_gate_findings(manifest: dict) -> list[dict[str, str]]:
+    if manifest.get("hard_gates") != {"crash": True, "evidence": True, "freshness": True}:
+        return [_finding("hard-gates-unavailable", "All hard gates require explicit evidence")]
+    return []
 
 
 def preflight_real_run(
@@ -618,92 +849,20 @@ def preflight_real_run(
     if manifest["seeds"] != contract["statistics"]["agent_seeds"]:
         raise ValueError("real manifest differs from frozen agent seeds")
     environ = dict(os.environ if environ is None else environ)
-    findings: list[dict[str, str]] = []
-    expected_python = contract["provenance"]["python"]
-    observed_python = {
-        "implementation": platform.python_implementation(),
-        "version": platform.python_version(),
-    }
-    if observed_python != expected_python:
-        findings.append(_finding("python-runtime-mismatch", "Python runtime is not the pinned version"))
-
-    repository = manifest["repository"]
-    repository_path = Path(repository["path"])
-    try:
-        result = _run_probe(command_runner, ["git", "rev-parse", "HEAD"], cwd=repository_path)
-        if result.returncode != 0 or result.stdout.strip() != repository["commit"]:
-            raise ValueError
-    except (OSError, subprocess.SubprocessError, ValueError):
-        findings.append(_finding("repository-commit-unverified", "Repository HEAD does not match"))
-
-    graphify_path = Path(manifest["graphify"]["path"])
-    if not graphify_path.is_dir() or not (graphify_path / "uv.lock").is_file():
-        findings.append(
-            _finding("graphify-checkout-unavailable", "Pinned Graphify checkout and uv.lock are required")
-        )
-    else:
-        try:
-            head = _run_probe(command_runner, ["git", "rev-parse", "HEAD"], cwd=graphify_path)
-            if head.returncode != 0 or head.stdout.strip() != GRAPHIFY_COMMIT:
-                findings.append(_finding("graphify-commit-mismatch", "Graphify HEAD is not pinned"))
-            lock = _run_probe(
-                command_runner, ["git", "hash-object", "uv.lock"], cwd=graphify_path
-            )
-            if lock.returncode != 0 or lock.stdout.strip() != GRAPHIFY_LOCK_BLOB:
-                findings.append(_finding("graphify-lock-mismatch", "Graphify uv.lock blob is not pinned"))
-        except (OSError, subprocess.SubprocessError):
-            findings.append(_finding("graphify-probe-failed", "Graphify provenance could not be read"))
-
-    model = manifest["model"]
-    probe_command = model.get("probe_command")
-    if not isinstance(probe_command, list) or not probe_command or not _command_available(probe_command):
-        findings.append(_finding("model-unavailable", "Model identity probe is unavailable"))
-    else:
-        try:
-            probe = _run_probe(command_runner, probe_command)
-            if probe.returncode != 0:
-                findings.append(_finding("model-unavailable", "Model identity probe failed"))
-            elif probe.stdout.strip() != model.get("id"):
-                findings.append(_finding("model-identity-mismatch", "Model identity is not exact"))
-        except (OSError, subprocess.SubprocessError):
-            findings.append(_finding("model-unavailable", "Model identity probe failed"))
-
-    for adapter_id, config in manifest["adapters"].items():
-        if not _command_available(config["command"]):
-            findings.append(_finding("adapter-command-unavailable", f"{adapter_id} command is unavailable"))
-        missing = [name for name in config["required_env"] if not environ.get(name)]
-        if missing:
-            findings.append(
-                _finding(
-                    "required-environment-unavailable",
-                    f"{adapter_id} requires {','.join(sorted(missing))}",
-                )
-            )
-
-    gate_f = manifest["gate_f"]
-    evidence_path = Path(gate_f.get("evidence_path", ""))
-    if not gate_f.get("passed"):
-        findings.append(_finding("gate-f-unavailable", "Gate F is not recorded as passed"))
-    if not evidence_path.is_file():
-        findings.append(_finding("gate-f-evidence-unavailable", "Gate F evidence file is unavailable"))
-    else:
-        digest = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
-        if digest != gate_f.get("evidence_sha256"):
-            findings.append(_finding("gate-f-evidence-mismatch", "Gate F evidence hash differs"))
-        elif not _gate_f_evidence_complete(evidence_path):
-            findings.append(
-                _finding("gate-f-evidence-invalid", "Gate F evidence is incomplete or unverifiable")
-            )
-    hard_gates = manifest.get("hard_gates")
-    if hard_gates != {"crash": True, "evidence": True, "freshness": True}:
-        findings.append(_finding("hard-gates-unavailable", "All hard gates require explicit evidence"))
+    findings = _python_findings(contract)
+    findings.extend(_repository_findings(command_runner, manifest["repository"]))
+    _append_graphify_findings(command_runner, Path(manifest["graphify"]["path"]), findings)
+    _append_model_findings(command_runner, manifest["model"], findings)
+    _append_adapter_findings(manifest, environ, findings)
+    _append_gate_f_findings(manifest["gate_f"], findings)
+    findings.extend(_hard_gate_findings(manifest))
     if findings:
         raise PreflightError(findings)
     return {
-        "gate_f_evidence_sha256": gate_f["evidence_sha256"],
+        "gate_f_evidence_sha256": manifest["gate_f"]["evidence_sha256"],
         "graphify_commit": GRAPHIFY_COMMIT,
-        "model": model["id"],
-        "repository_commit": repository["commit"],
+        "model": manifest["model"]["id"],
+        "repository_commit": manifest["repository"]["commit"],
         "status": "ready",
     }
 
@@ -752,93 +911,162 @@ def _percentile(values: list[float], basis_points: int) -> float:
     return ordered[low] * (1 - fraction) + ordered[high] * fraction
 
 
+def _attempts_by_key(ledgers: list[dict], candidate_id: str) -> dict[tuple[str, str, int], list[dict]]:
+    attempts: dict[tuple[str, str, int], list[dict]] = {}
+    for ledger in ledgers:
+        if ledger["adapter_id"] not in {candidate_id, "graphify-pinned"}:
+            continue
+        key = (ledger["adapter_id"], ledger["task_id"], ledger["seed"])
+        attempts.setdefault(key, []).append(ledger)
+    return attempts
+
+
+def _seeds_for(attempts: dict, adapter_id: str, task_id: str) -> set[int]:
+    return {key[2] for key in attempts if key[:2] == (adapter_id, task_id)}
+
+
+def _pair_row(attempts: dict, candidate_id: str, task_id: str, seed: int) -> tuple[float, int, int]:
+    """(quality difference, candidate tokens, baseline tokens) for one task and seed."""
+    candidate_attempts = sorted(attempts[(candidate_id, task_id, seed)], key=lambda x: x["attempt"])
+    baseline_attempts = sorted(attempts[("graphify-pinned", task_id, seed)], key=lambda x: x["attempt"])
+    return (
+        _quality(candidate_attempts[-1]) - _quality(baseline_attempts[-1]),
+        sum(_tokens(item) for item in candidate_attempts),
+        sum(_tokens(item) for item in baseline_attempts),
+    )
+
+
+def _task_cluster(attempts: dict, candidate_id: str, task_id: str) -> list[tuple[float, int, int]]:
+    candidate_seeds = _seeds_for(attempts, candidate_id, task_id)
+    baseline_seeds = _seeds_for(attempts, "graphify-pinned", task_id)
+    if candidate_seeds != baseline_seeds or not candidate_seeds:
+        raise ValueError("candidate and baseline must have identical seed sets")
+    return [_pair_row(attempts, candidate_id, task_id, seed) for seed in sorted(candidate_seeds)]
+
+
+def _paired_clusters(ledgers: list[dict], candidate_id: str) -> list[list[tuple[float, int, int]]]:
+    attempts = _attempts_by_key(ledgers, candidate_id)
+    tasks = sorted({key[1] for key in attempts})
+    clusters = [_task_cluster(attempts, candidate_id, task_id) for task_id in tasks]
+    if not clusters:
+        raise ValueError("paired observations are unavailable")
+    return clusters
+
+
+def _cluster_mean(cluster: list[tuple[float, int, int]]) -> float:
+    return sum(row[0] for row in cluster) / len(cluster)
+
+
+def _token_totals(rows: list[tuple[float, int, int]]) -> tuple[int, int]:
+    return sum(row[1] for row in rows), sum(row[2] for row in rows)
+
+
+def _observed(clusters: list[list[tuple[float, int, int]]]) -> tuple[float, float]:
+    """(observed quality difference, observed token ratio) over every cluster."""
+    observed_quality = sum(_cluster_mean(cluster) for cluster in clusters) / len(clusters)
+    candidate_tokens, baseline_tokens = _token_totals([row for cluster in clusters for row in cluster])
+    if baseline_tokens == 0:
+        raise ValueError("zero Graphify token denominator")
+    return observed_quality, candidate_tokens / baseline_tokens
+
+
+def _bootstrap_sample(rng: _Sha256CounterRng, clusters: list) -> tuple[float, float]:
+    """(mean quality difference, token ratio) of one cluster-then-row resample."""
+    selected_clusters = [clusters[rng.index(len(clusters))] for _ in clusters]
+    quality_total = 0.0
+    candidate_tokens = 0
+    baseline_tokens = 0
+    for cluster in selected_clusters:
+        selected_rows = [cluster[rng.index(len(cluster))] for _ in cluster]
+        quality_total += _cluster_mean(selected_rows)
+        sampled_candidate, sampled_baseline = _token_totals(selected_rows)
+        candidate_tokens += sampled_candidate
+        baseline_tokens += sampled_baseline
+    if baseline_tokens == 0:
+        raise ValueError("zero Graphify token denominator")
+    return quality_total / len(selected_clusters), candidate_tokens / baseline_tokens
+
+
+def _bootstrap_distributions(
+    rng: _Sha256CounterRng, clusters: list, resamples: int
+) -> tuple[list[float], list[float]]:
+    quality_distribution: list[float] = []
+    ratio_distribution: list[float] = []
+    for _ in range(resamples):
+        quality, ratio = _bootstrap_sample(rng, clusters)
+        quality_distribution.append(quality)
+        ratio_distribution.append(ratio)
+    return quality_distribution, ratio_distribution
+
+
+def _sign(rng: _Sha256CounterRng) -> int:
+    return -1 if rng.index(2) else 1
+
+
+def _sign_flip_extremes(
+    rng: _Sha256CounterRng, cluster_differences: list[float], observed_quality: float, permutations: int
+) -> int:
+    extreme = 0
+    for _ in range(permutations):
+        value = sum(difference * _sign(rng) for difference in cluster_differences) / len(cluster_differences)
+        if abs(value) >= abs(observed_quality) - 1e-15:
+            extreme += 1
+    return extreme
+
+
 def compute_paired_statistics(contract: dict, ledgers: list[dict], *, candidate_id: str) -> dict:
     """Compute the frozen cluster/seed paired bootstrap and sign-flip diagnostic."""
     if candidate_id == "graphify-pinned" or candidate_id not in ADAPTER_IDS:
         raise ValueError("candidate must be a non-Graphify canonical adapter")
-    relevant = [
-        ledger for ledger in ledgers if ledger["adapter_id"] in {candidate_id, "graphify-pinned"}
-    ]
-    attempts: dict[tuple[str, str, int], list[dict]] = {}
-    for ledger in relevant:
-        key = (ledger["adapter_id"], ledger["task_id"], ledger["seed"])
-        attempts.setdefault(key, []).append(ledger)
-    tasks = sorted({key[1] for key in attempts})
-    clusters = []
-    for task_id in tasks:
-        candidate_seeds = {key[2] for key in attempts if key[:2] == (candidate_id, task_id)}
-        baseline_seeds = {
-            key[2] for key in attempts if key[:2] == ("graphify-pinned", task_id)
-        }
-        if candidate_seeds != baseline_seeds or not candidate_seeds:
-            raise ValueError("candidate and baseline must have identical seed sets")
-        rows = []
-        for seed in sorted(candidate_seeds):
-            candidate_attempts = sorted(attempts[(candidate_id, task_id, seed)], key=lambda x: x["attempt"])
-            baseline_attempts = sorted(
-                attempts[("graphify-pinned", task_id, seed)], key=lambda x: x["attempt"]
-            )
-            rows.append(
-                (
-                    _quality(candidate_attempts[-1]) - _quality(baseline_attempts[-1]),
-                    sum(_tokens(item) for item in candidate_attempts),
-                    sum(_tokens(item) for item in baseline_attempts),
-                )
-            )
-        clusters.append(rows)
-    if not clusters:
-        raise ValueError("paired observations are unavailable")
-
-    observed_quality = sum(sum(row[0] for row in cluster) / len(cluster) for cluster in clusters) / len(clusters)
-    candidate_tokens = sum(row[1] for cluster in clusters for row in cluster)
-    baseline_tokens = sum(row[2] for cluster in clusters for row in cluster)
-    if baseline_tokens == 0:
-        raise ValueError("zero Graphify token denominator")
-    observed_ratio = candidate_tokens / baseline_tokens
-
+    clusters = _paired_clusters(ledgers, candidate_id)
+    observed_quality, observed_ratio = _observed(clusters)
     settings = contract["statistics"]
-    rng = _Sha256CounterRng(settings["rng"]["bootstrap_seed_hex"])
-    quality_distribution: list[float] = []
-    ratio_distribution: list[float] = []
-    for _ in range(settings["resampling"]["resamples"]):
-        selected_clusters = [clusters[rng.index(len(clusters))] for _ in clusters]
-        quality_total = 0.0
-        sampled_candidate_tokens = 0
-        sampled_baseline_tokens = 0
-        for cluster in selected_clusters:
-            selected_rows = [cluster[rng.index(len(cluster))] for _ in cluster]
-            quality_total += sum(row[0] for row in selected_rows) / len(selected_rows)
-            sampled_candidate_tokens += sum(row[1] for row in selected_rows)
-            sampled_baseline_tokens += sum(row[2] for row in selected_rows)
-        if sampled_baseline_tokens == 0:
-            raise ValueError("zero Graphify token denominator")
-        quality_distribution.append(quality_total / len(selected_clusters))
-        ratio_distribution.append(sampled_candidate_tokens / sampled_baseline_tokens)
-
-    cluster_differences = [sum(row[0] for row in cluster) / len(cluster) for cluster in clusters]
-    random_rng = _Sha256CounterRng(settings["rng"]["randomization_seed_hex"])
-    extreme = 0
-    permutations = settings["resampling"]["resamples"]
-    for _ in range(permutations):
-        value = sum(
-            difference * (-1 if random_rng.index(2) else 1)
-            for difference in cluster_differences
-        ) / len(cluster_differences)
-        if abs(value) >= abs(observed_quality) - 1e-15:
-            extreme += 1
+    resamples = settings["resampling"]["resamples"]
+    quality_distribution, ratio_distribution = _bootstrap_distributions(
+        _Sha256CounterRng(settings["rng"]["bootstrap_seed_hex"]), clusters, resamples
+    )
+    cluster_differences = [_cluster_mean(cluster) for cluster in clusters]
+    extreme = _sign_flip_extremes(
+        _Sha256CounterRng(settings["rng"]["randomization_seed_hex"]),
+        cluster_differences,
+        observed_quality,
+        resamples,
+    )
     return {
         "candidate_id": candidate_id,
         "quality_difference": observed_quality,
         "quality_difference_lower_confidence_bound": _percentile(
             quality_distribution, settings["interval"]["quality_quantile_basis_points"]
         ),
-        "randomization_p_value": (extreme + 1) / (permutations + 1),
-        "resamples": settings["resampling"]["resamples"],
+        "randomization_p_value": (extreme + 1) / (resamples + 1),
+        "resamples": resamples,
         "token_ratio": observed_ratio,
         "token_ratio_upper_confidence_bound": _percentile(
             ratio_distribution, settings["interval"]["token_ratio_quantile_basis_points"]
         ),
     }
+
+
+def _quality_condition(quality: float | None, gate: dict) -> str | None:
+    if quality is None:
+        return "quality-confidence-interval-unavailable"
+    if 10000 * quality <= gate["quality_lower_bound_basis_points_strictly_greater_than"]:
+        return "quality-bound-not-met"
+    return None
+
+
+def _ratio_condition(ratio: float | None, gate: dict) -> str | None:
+    if ratio is None:
+        return "token-ratio-confidence-interval-unavailable"
+    if 10000 * ratio >= gate["token_ratio_upper_bound_basis_points_strictly_less_than"]:
+        return "token-ratio-bound-not-met"
+    return None
+
+
+def _hard_gates_condition(hard_gates: dict[str, bool], gate: dict) -> str | None:
+    if set(hard_gates) != set(gate["hard_gates"]) or not all(hard_gates.values()):
+        return "hard-gates-not-passed"
+    return None
 
 
 def evaluate_public_claim_gate(
@@ -858,16 +1086,12 @@ def evaluate_public_claim_gate(
     quality = statistics.get("quality_difference_lower_confidence_bound")
     ratio = statistics.get("token_ratio_upper_confidence_bound")
     gate = contract["public_claim_gate"]
-    if quality is None:
-        failed.append("quality-confidence-interval-unavailable")
-    elif 10000 * quality <= gate["quality_lower_bound_basis_points_strictly_greater_than"]:
-        failed.append("quality-bound-not-met")
-    if ratio is None:
-        failed.append("token-ratio-confidence-interval-unavailable")
-    elif 10000 * ratio >= gate["token_ratio_upper_bound_basis_points_strictly_less_than"]:
-        failed.append("token-ratio-bound-not-met")
-    if set(hard_gates) != set(gate["hard_gates"]) or not all(hard_gates.values()):
-        failed.append("hard-gates-not-passed")
+    conditions = (
+        _quality_condition(quality, gate),
+        _ratio_condition(ratio, gate),
+        _hard_gates_condition(hard_gates, gate),
+    )
+    failed.extend(condition for condition in conditions if condition is not None)
     return {
         "eligible": not failed,
         "failed_conditions": failed,
@@ -893,9 +1117,10 @@ def _failure_result(code: str, message: str, *, phase: str, retryable: bool) -> 
     }
 
 
-def _invoke_adapter(command: list[str], request: dict, limits: dict) -> dict:
+def _run_adapter_command(command: list[str], request: dict, limits: dict):
+    """The completed process, or the failure result when it could not run."""
     try:
-        completed = subprocess.run(
+        return subprocess.run(
             command,
             input=canonical_evidence_json_bytes(request),
             capture_output=True,
@@ -906,6 +1131,9 @@ def _invoke_adapter(command: list[str], request: dict, limits: dict) -> dict:
         return _failure_result("adapter-timeout", "adapter deadline exceeded", phase="query", retryable=True)
     except OSError as exc:
         return _failure_result("adapter-crash", str(exc), phase="setup", retryable=False)
+
+
+def _adapter_output_failure(completed, limits: dict) -> dict | None:
     if len(completed.stdout) > limits["max_stdout_bytes"] or len(completed.stderr) > limits["max_stderr_bytes"]:
         return _failure_result("adapter-output-limit", "adapter output exceeded limit", phase="query", retryable=False)
     if completed.returncode != 0:
@@ -915,125 +1143,183 @@ def _invoke_adapter(command: list[str], request: dict, limits: dict) -> dict:
             phase="query",
             retryable=True,
         )
+    return None
+
+
+def _parsed_adapter_result(stdout: bytes) -> dict:
+    result = json.loads(stdout.decode("utf-8", errors="strict"))
+    if set(result) != {"failure", "metrics", "outcome"} or set(result["metrics"]) != METRIC_FIELDS:
+        raise ValueError("adapter result shape is not closed")
+    canonical_evidence_json_bytes(result)
+    if (result["outcome"] == "failure") != (result["failure"] is not None):
+        raise ValueError("adapter failure does not match outcome")
+    return result
+
+
+def _invoke_adapter(command: list[str], request: dict, limits: dict) -> dict:
+    completed = _run_adapter_command(command, request, limits)
+    if isinstance(completed, dict):
+        return completed
+    failure = _adapter_output_failure(completed, limits)
+    if failure is not None:
+        return failure
     try:
-        result = json.loads(completed.stdout.decode("utf-8", errors="strict"))
-        if set(result) != {"failure", "metrics", "outcome"} or set(result["metrics"]) != METRIC_FIELDS:
-            raise ValueError("adapter result shape is not closed")
-        canonical_evidence_json_bytes(result)
-        if (result["outcome"] == "failure") != (result["failure"] is not None):
-            raise ValueError("adapter failure does not match outcome")
-        return result
+        return _parsed_adapter_result(completed.stdout)
     except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         return _failure_result("adapter-invalid-output", str(exc), phase="evaluation", retryable=False)
 
 
-def execute_comparison(contract: dict, manifest: dict, *, fixture_mode: bool = False) -> dict:
-    """Execute bounded adapters and retain every attempt, including retries."""
-    _validate_real_manifest(manifest)
-    if manifest["seeds"] != contract["statistics"]["agent_seeds"]:
-        raise ValueError("real manifest differs from frozen agent seeds")
-    if not fixture_mode:
-        preflight_real_run(contract, manifest)
-    specs = real_adapter_specs()
-    raw_ledgers = []
-    _ledger_schema_raw, ledger_schema = _read_bounded_json(
-        DEFAULT_LEDGER_SCHEMA, MAX_SCHEMA_BYTES, "ledger schema"
-    )
+class _RunContext:
+    """One `execute_comparison`: its contract, manifest, adapter specs and the ledgers so far."""
+
+    def __init__(self, contract: dict, manifest: dict, specs: dict, ledger_schema: dict) -> None:
+        self.contract = contract
+        self.manifest = manifest
+        self.specs = specs
+        self.ledger_schema = ledger_schema
+        self.repository = manifest["repository"]
+        self.raw_ledgers: list[dict] = []
+
+
+def _task_inputs(manifest: dict, task: dict) -> dict:
     repository = manifest["repository"]
-    for task in manifest["tasks"]:
-        inputs = {
-            "commit": repository["commit"],
-            "context_budget": manifest["context_budget"],
-            "hardware": manifest["hardware"],
-            "model": manifest["model"]["id"],
-            "repository": repository["url"],
-            "retry_policy": manifest["retry_policy"],
-            "task": task["task"],
-        }
-        fingerprint = _fingerprint(inputs)
-        for seed in manifest["seeds"]:
-            for adapter_id in sorted(ADAPTER_IDS):
-                config = manifest["adapters"][adapter_id]
-                for attempt in range(1, manifest["retry_policy"]["max_attempts"] + 1):
-                    request = {
-                        "adapter": {
-                            "backend": specs[adapter_id].backend,
-                            "id": adapter_id,
-                            "max_results": specs[adapter_id].max_results,
-                            "profile": specs[adapter_id].profile,
-                        },
-                        "attempt": attempt,
-                        "inputs": inputs,
-                        "schema_version": "comparative-adapter-input/v1",
-                        "seed": seed,
-                        "task_id": task["id"],
-                    }
-                    result = _invoke_adapter(config["command"], request, manifest["limits"])
-                    ledger_base = {
-                        "adapter_id": adapter_id,
-                        "adapter_provenance": {
-                            "configuration_sha256": contract["provenance"]["configuration"]["sha256"],
-                            "implementation_status": "implemented-pinned",
-                            "source_revision": {
-                                "kind": "git-commit",
-                                "value": GRAPHIFY_COMMIT
-                                if adapter_id == "graphify-pinned"
-                                else repository["commit"],
-                            },
-                        },
-                        "attempt": attempt,
-                        "input_fingerprint": fingerprint,
-                        "inputs": inputs,
-                        "seed": seed,
-                        "task_id": task["id"],
-                    }
-                    ledger = {
-                        **ledger_base,
-                        "failure": result["failure"],
-                        "metrics": result["metrics"],
-                        "outcome": result["outcome"],
-                    }
-                    try:
-                        _validate_ledger_object(ledger, ledger_schema)
-                    except (TypeError, ValueError) as exc:
-                        result = _failure_result(
-                            "adapter-invalid-metrics",
-                            str(exc),
-                            phase="evaluation",
-                            retryable=False,
-                        )
-                        ledger = {
-                            **ledger_base,
-                            "failure": result["failure"],
-                            "metrics": result["metrics"],
-                            "outcome": result["outcome"],
-                        }
-                    raw_ledgers.append(ledger)
-                    if result["outcome"] != "failure" or not result["failure"]["retryable"]:
-                        break
-    statistics_error = None
+    return {
+        "commit": repository["commit"],
+        "context_budget": manifest["context_budget"],
+        "hardware": manifest["hardware"],
+        "model": manifest["model"]["id"],
+        "repository": repository["url"],
+        "retry_policy": manifest["retry_policy"],
+        "task": task["task"],
+    }
+
+
+def _adapter_request(specs: dict, adapter_id: str, attempt: int, inputs: dict, seed: int, task_id: str) -> dict:
+    return {
+        "adapter": {
+            "backend": specs[adapter_id].backend,
+            "id": adapter_id,
+            "max_results": specs[adapter_id].max_results,
+            "profile": specs[adapter_id].profile,
+        },
+        "attempt": attempt,
+        "inputs": inputs,
+        "schema_version": "comparative-adapter-input/v1",
+        "seed": seed,
+        "task_id": task_id,
+    }
+
+
+def _source_revision_value(adapter_id: str, repository_commit: str) -> str:
+    if adapter_id == "graphify-pinned":
+        return GRAPHIFY_COMMIT
+    return repository_commit
+
+
+def _ledger_base(
+    ctx: _RunContext, adapter_id: str, attempt: int, fingerprint: str, inputs: dict, seed: int, task_id: str
+) -> dict:
+    return {
+        "adapter_id": adapter_id,
+        "adapter_provenance": {
+            "configuration_sha256": ctx.contract["provenance"]["configuration"]["sha256"],
+            "implementation_status": "implemented-pinned",
+            "source_revision": {
+                "kind": "git-commit",
+                "value": _source_revision_value(adapter_id, ctx.repository["commit"]),
+            },
+        },
+        "attempt": attempt,
+        "input_fingerprint": fingerprint,
+        "inputs": inputs,
+        "seed": seed,
+        "task_id": task_id,
+    }
+
+
+def _ledger_with_result(ledger_base: dict, result: dict) -> dict:
+    return {
+        **ledger_base,
+        "failure": result["failure"],
+        "metrics": result["metrics"],
+        "outcome": result["outcome"],
+    }
+
+
+def _validated_ledger(ledger_base: dict, result: dict, ledger_schema: dict) -> tuple[dict, dict]:
+    """(ledger, result) after validation; an invalid ledger becomes a failure ledger."""
+    ledger = _ledger_with_result(ledger_base, result)
     try:
-        statistics = compute_paired_statistics(
-            contract, raw_ledgers, candidate_id="adaptive-context-compiler"
-        )
-        statistics["computed"] = True
+        _validate_ledger_object(ledger, ledger_schema)
     except (TypeError, ValueError) as exc:
-        statistics_error = " ".join(str(exc).split())[:500]
-        statistics = {
+        result = _failure_result("adapter-invalid-metrics", str(exc), phase="evaluation", retryable=False)
+        ledger = _ledger_with_result(ledger_base, result)
+    return ledger, result
+
+
+def _retry_done(result: dict) -> bool:
+    return result["outcome"] != "failure" or not result["failure"]["retryable"]
+
+
+def _run_attempts(ctx: _RunContext, task: dict, inputs: dict, fingerprint: str, seed: int, adapter_id: str) -> None:
+    config = ctx.manifest["adapters"][adapter_id]
+    for attempt in range(1, ctx.manifest["retry_policy"]["max_attempts"] + 1):
+        request = _adapter_request(ctx.specs, adapter_id, attempt, inputs, seed, task["id"])
+        result = _invoke_adapter(config["command"], request, ctx.manifest["limits"])
+        base = _ledger_base(ctx, adapter_id, attempt, fingerprint, inputs, seed, task["id"])
+        ledger, result = _validated_ledger(base, result, ctx.ledger_schema)
+        ctx.raw_ledgers.append(ledger)
+        if _retry_done(result):
+            return
+
+
+def _run_task(ctx: _RunContext, task: dict) -> None:
+    inputs = _task_inputs(ctx.manifest, task)
+    fingerprint = _fingerprint(inputs)
+    for seed in ctx.manifest["seeds"]:
+        for adapter_id in sorted(ADAPTER_IDS):
+            _run_attempts(ctx, task, inputs, fingerprint, seed, adapter_id)
+
+
+def _paired_statistics_or_reason(contract: dict, raw_ledgers: list[dict]) -> tuple[dict, str | None]:
+    try:
+        statistics = compute_paired_statistics(contract, raw_ledgers, candidate_id="adaptive-context-compiler")
+    except (TypeError, ValueError) as exc:
+        reason = " ".join(str(exc).split())[:500]
+        return {
             "candidate_id": "adaptive-context-compiler",
             "computed": False,
             "quality_difference_lower_confidence_bound": None,
-            "reason": statistics_error,
+            "reason": reason,
             "token_ratio_upper_confidence_bound": None,
-        }
-    expected_terminal = len(ADAPTER_IDS) * len(manifest["tasks"]) * len(manifest["seeds"])
-    terminal = {}
+        }, reason
+    statistics["computed"] = True
+    return statistics, None
+
+
+def _evidence_complete(raw_ledgers: list[dict], expected_terminal: int) -> bool:
+    terminal: dict[tuple[str, str, int], dict] = {}
     for ledger in raw_ledgers:
-        key = (ledger["adapter_id"], ledger["task_id"], ledger["seed"])
-        terminal[key] = ledger
-    complete = len(terminal) == expected_terminal and all(
-        ledger["outcome"] != "failure" for ledger in terminal.values()
-    )
+        terminal[(ledger["adapter_id"], ledger["task_id"], ledger["seed"])] = ledger
+    if len(terminal) != expected_terminal:
+        return False
+    return all(ledger["outcome"] != "failure" for ledger in terminal.values())
+
+
+def _latency_summary(raw_ledgers: list[dict], adapter_id: str) -> dict:
+    latencies = [
+        float(ledger["metrics"]["query_latency_ms"])
+        for ledger in raw_ledgers
+        if ledger["adapter_id"] == adapter_id and ledger["metrics"]["query_latency_ms"] is not None
+    ]
+    if not latencies:
+        return {"query_latency_ms": {"p50": None, "p95": None}}
+    return {"query_latency_ms": {"p50": _percentile(latencies, 5000), "p95": _percentile(latencies, 9500)}}
+
+
+def _claim_gate(
+    contract: dict, manifest: dict, statistics: dict, statistics_error: str | None, complete: bool, fixture_mode: bool
+) -> dict:
     hard_gates = manifest.get("hard_gates", {"crash": False, "evidence": False, "freshness": False})
     claim_gate = evaluate_public_claim_gate(
         contract,
@@ -1045,26 +1331,47 @@ def execute_comparison(contract: dict, manifest: dict, *, fixture_mode: bool = F
     if statistics_error is not None:
         claim_gate["failed_conditions"].append("statistics-unavailable")
         claim_gate["eligible"] = False
-    metric_summaries = {}
-    for adapter_id in sorted(ADAPTER_IDS):
-        latencies = [
-            float(ledger["metrics"]["query_latency_ms"])
-            for ledger in raw_ledgers
-            if ledger["adapter_id"] == adapter_id
-            and ledger["metrics"]["query_latency_ms"] is not None
-        ]
-        metric_summaries[adapter_id] = {
-            "query_latency_ms": {
-                "p50": _percentile(latencies, 5000) if latencies else None,
-                "p95": _percentile(latencies, 9500) if latencies else None,
-            }
-        }
+    return claim_gate
+
+
+def _comparison_mode(fixture_mode: bool) -> str:
+    if fixture_mode:
+        return "deterministic-adapter-integration-fixture"
+    return "real-bounded-comparison"
+
+
+def execute_comparison(contract: dict, manifest: dict, *, fixture_mode: bool = False) -> dict:
+    """Execute bounded adapters and retain every attempt, including retries."""
+    _validate_real_manifest(manifest)
+    if manifest["seeds"] != contract["statistics"]["agent_seeds"]:
+        raise ValueError("real manifest differs from frozen agent seeds")
+    if not fixture_mode:
+        preflight_real_run(contract, manifest)
+    _ledger_schema_raw, ledger_schema = _read_bounded_json(
+        DEFAULT_LEDGER_SCHEMA, MAX_SCHEMA_BYTES, "ledger schema"
+    )
+    ctx = _RunContext(contract, manifest, real_adapter_specs(), ledger_schema)
+    for task in manifest["tasks"]:
+        _run_task(ctx, task)
+    statistics, statistics_error = _paired_statistics_or_reason(contract, ctx.raw_ledgers)
+    expected_terminal = len(ADAPTER_IDS) * len(manifest["tasks"]) * len(manifest["seeds"])
+    claim_gate = _claim_gate(
+        contract,
+        manifest,
+        statistics,
+        statistics_error,
+        _evidence_complete(ctx.raw_ledgers, expected_terminal),
+        fixture_mode,
+    )
+    metric_summaries = {
+        adapter_id: _latency_summary(ctx.raw_ledgers, adapter_id) for adapter_id in sorted(ADAPTER_IDS)
+    }
     return {
         "metric_summaries": metric_summaries,
-        "mode": "deterministic-adapter-integration-fixture" if fixture_mode else "real-bounded-comparison",
+        "mode": _comparison_mode(fixture_mode),
         "public_claim_gate": claim_gate,
         "quality_claim": claim_gate["eligible"],
-        "raw_task_ledgers": raw_ledgers,
+        "raw_task_ledgers": ctx.raw_ledgers,
         "schema_version": "comparative-run-report/v1",
         "statistics": statistics,
     }
@@ -1119,40 +1426,59 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _needs_manifest(args: argparse.Namespace) -> bool:
+    return args.preflight or args.run or args.fixture
+
+
+def _missing_manifest(args: argparse.Namespace) -> bool:
+    return _needs_manifest(args) and args.manifest is None
+
+
+def _missing_output(args: argparse.Namespace) -> bool:
+    return (args.run or args.fixture) and args.output is None
+
+
+def _argument_error(args: argparse.Namespace) -> str | None:
+    if not any((args.smoke, args.preflight, args.run, args.fixture)):
+        return "real comparative execution is unavailable until Gate F and complete evidence"
+    if _missing_manifest(args):
+        return "comparative execution failed: --manifest is required"
+    if _missing_output(args):
+        return "comparative execution failed: --output is required"
+    return None
+
+
+def _execute(args: argparse.Namespace) -> dict:
+    contract = load_contract(args.contract, args.schema)
+    if args.smoke:
+        result = run_smoke(contract)
+        validate_report(result)
+        return result
+    assert args.manifest is not None
+    manifest = load_real_manifest(args.manifest)
+    if args.preflight:
+        return preflight_real_run(contract, manifest)
+    result = execute_comparison(contract, manifest, fixture_mode=args.fixture)
+    assert args.output is not None
+    write_run_artifacts(result, args.output)
+    return result
+
+
+def _rendered(result: dict, as_json: bool) -> str:
+    output = canonical_evidence_json_bytes(result).decode("utf-8")
+    if as_json:
+        return output
+    return json.dumps(result, indent=2, sort_keys=True, allow_nan=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if not any((args.smoke, args.preflight, args.run, args.fixture)):
-        print(
-            "real comparative execution is unavailable until Gate F and complete evidence",
-            file=sys.stderr,
-        )
-        return 2
-    if (args.preflight or args.run or args.fixture) and args.manifest is None:
-        print("comparative execution failed: --manifest is required", file=sys.stderr)
-        return 2
-    if (args.run or args.fixture) and args.output is None:
-        print("comparative execution failed: --output is required", file=sys.stderr)
+    error = _argument_error(args)
+    if error is not None:
+        print(error, file=sys.stderr)
         return 2
     try:
-        contract = load_contract(args.contract, args.schema)
-        if args.smoke:
-            result = run_smoke(contract)
-            validate_report(result)
-        else:
-            assert args.manifest is not None
-            manifest = load_real_manifest(args.manifest)
-            if args.preflight:
-                result = preflight_real_run(contract, manifest)
-            else:
-                result = execute_comparison(contract, manifest, fixture_mode=args.fixture)
-                assert args.output is not None
-                write_run_artifacts(result, args.output)
-        output = canonical_evidence_json_bytes(result).decode("utf-8")
-        rendered = (
-            output
-            if args.json
-            else json.dumps(result, indent=2, sort_keys=True, allow_nan=False)
-        )
+        rendered = _rendered(_execute(args), args.json)
     except (OSError, subprocess.SubprocessError, TypeError, UnicodeError, ValueError, RecursionError) as exc:
         message = " ".join(str(exc).split())[:500]
         print(f"comparative execution failed: {message}", file=sys.stderr)

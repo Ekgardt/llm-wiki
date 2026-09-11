@@ -394,7 +394,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   `run_contradiction_benchmark.py` 1 (`build_corpus` 10, nesting 4). The
   LongMemEval files (`run_longmemeval.py`, `longmemeval_vault.py`,
   `longmemeval_score.py`, `longmemeval_judge.py`) pass. Verified: ran.
-- Status: in progress. `generate_python_qualification.py` and `run_contradiction_benchmark.py` closed 2026-09-11 (`docs/research/2026-09-11-two-small-benchmark-files-under-the-gate.md`); `run_scale_matrix.py` closed 2026-09-11 (`docs/research/2026-09-11-the-scale-stand-is-one-adapter-cell-shape.md`); `run_comparative.py` (12), `run_code_navigation.py` (28) open, measured 2026-09-11.
+- Status: in progress. `generate_python_qualification.py` and `run_contradiction_benchmark.py` closed 2026-09-11 (`docs/research/2026-09-11-two-small-benchmark-files-under-the-gate.md`); `run_scale_matrix.py` closed 2026-09-11 (`docs/research/2026-09-11-the-scale-stand-is-one-adapter-cell-shape.md`); `run_comparative.py` closed 2026-09-11 (`docs/research/2026-09-11-the-comparative-stand-checks-one-thing-per-function.md`); `run_code_navigation.py` (28) open, measured 2026-09-11.
 
 ---
 

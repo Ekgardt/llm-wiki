@@ -55,6 +55,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The comparative stand obeys the complexity gate: one check per manifest section, one finding collector per preflight probe, the paired statistics as named steps; messages, codes and RNG consumption unchanged (audit L13).
 - The scale stand obeys the complexity gate: the three optional adapter cells share one cell shape, the crash matrix is one outcome per point with named steps; reports and adoption reasons unchanged (audit L13).
 - The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
 - `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
