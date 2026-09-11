@@ -274,8 +274,8 @@ def _require_exact_keys(value: dict, expected: set[str], label: str) -> None:
         raise ValueError(f"{label} is not a closed canonical matrix object")
 
 
-def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) -> None:
-    fields = {
+_CANDIDATE_FIELDS = frozenset(
+    {
         "architecture",
         "batch_size",
         "benchmark_max_tokens",
@@ -294,109 +294,304 @@ def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) ->
         "trust_remote_code",
         "variants",
     }
+)
+_EMBEDDING_FORMATTING_KEYS = frozenset({"document", "instruction", "query"})
+_EMBEDDING_INFERENCE_KEYS = frozenset(
+    {"l2_normalize", "max_length_tokens", "padding_side", "pooling", "truncation_side"}
+)
+_RERANKER_FORMATTING_KEYS = frozenset(
+    {
+        "assistant_suffix",
+        "contract_type",
+        "document_template",
+        "instruction",
+        "max_length_tokens",
+        "query_template",
+        "score_tokens",
+        "scoring",
+        "system_prefix",
+        "truncation",
+        "user_template",
+    }
+)
+_VARIANT_FIELDS = frozenset({"dimensions", "precision", "quality", "resource_measurements", "variant_id"})
+_QUALITY_KEYS = frozenset({"claim", "overall", "per_language", "status"})
+_RESOURCE_KEYS = frozenset(
+    {
+        "cold_first_query_ms",
+        "index_bytes",
+        "indexing_throughput_documents_per_second",
+        "model_load_ms",
+        "peak_rss_bytes",
+        "status",
+        "vector_bytes_per_document",
+        "warm_p50_ms",
+        "warm_p95_ms",
+    }
+)
+_MRL_KEYS = frozenset({"enabled", "renormalize_after_truncation", "truncate_to_dimensions"})
+
+
+def _candidate_fields(kind: str) -> set[str]:
+    fields = set(_CANDIDATE_FIELDS)
     if kind == "embedding":
         fields.add("inference")
-    _require_exact_keys(candidate, fields, f"{kind} candidate")
+    return fields
+
+
+def _require_candidate_identity(candidate: dict, kind: str) -> None:
     if candidate["kind"] != kind:
         raise ValueError(f"matrix {kind} kind mismatch")
     if not re.fullmatch(r"[0-9a-f]{40}", candidate["revision"]):
         raise ValueError(f"matrix {kind} revision is not pinned")
     if candidate["trust_remote_code"] is not False:
         raise ValueError(f"matrix {kind} requires remote code")
+
+
+def _require_candidate_contract(candidate: dict, kind: str, contract: dict) -> None:
     if candidate["cache_policy"] != contract["cache_policy"]:
         raise ValueError(f"matrix {kind} cache policy mismatch")
     if candidate["batch_size"] != contract["batch_size"]:
         raise ValueError(f"matrix {kind} batch size mismatch")
-    if candidate["license"] not in {"Apache-2.0", "Gemma", "MIT"}:
-        raise ValueError(f"matrix {kind} license is unknown")
+
+
+def _require_shipping_policy(candidate: dict, kind: str) -> None:
     if candidate["shipping_eligible"]:
         if candidate["license"] not in {"Apache-2.0", "MIT"} or candidate["exclusion_reasons"]:
             raise ValueError(f"matrix {kind} shipping policy is inconsistent")
-    elif not candidate["exclusion_reasons"]:
+        return
+    if not candidate["exclusion_reasons"]:
         raise ValueError(f"matrix {kind} exclusion lacks a reason")
+
+
+def _require_candidate_license(candidate: dict, kind: str, contract: dict) -> None:
+    if candidate["license"] not in {"Apache-2.0", "Gemma", "MIT"}:
+        raise ValueError(f"matrix {kind} license is unknown")
+    _require_shipping_policy(candidate, kind)
     if not candidate["languages"] or not set(candidate["languages"]) <= set(contract["languages"]):
         raise ValueError(f"matrix {kind} language coverage is invalid")
-    _require_exact_keys(candidate["native_library"], {"name", "support"}, "native library")
-    if (
-        candidate["native_library"]["name"] not in {"sentence-transformers", "transformers"}
-        or candidate["native_library"]["support"] != "native"
-    ):
+
+
+def _require_native_library(candidate: dict, kind: str) -> None:
+    library = candidate["native_library"]
+    _require_exact_keys(library, {"name", "support"}, "native library")
+    if library["name"] not in {"sentence-transformers", "transformers"} or library["support"] != "native":
         raise ValueError(f"matrix {kind} lacks native library support")
-    if candidate["source_url"] != (
-        f"https://huggingface.co/{candidate['id']}/tree/{candidate['revision']}"
-    ):
+
+
+def _require_candidate_source(candidate: dict, kind: str) -> None:
+    if candidate["source_url"] != f"https://huggingface.co/{candidate['id']}/tree/{candidate['revision']}":
         raise ValueError(f"matrix {kind} source is not revision pinned")
     if not candidate["variants"]:
         raise ValueError(f"matrix {kind} has no explicit variants")
+
+
+def _require_candidate_formatting(candidate: dict, kind: str) -> None:
+    if kind != "embedding":
+        _require_exact_keys(candidate["formatting"], set(_RERANKER_FORMATTING_KEYS), "reranker formatting")
+        return
+    _require_exact_keys(candidate["formatting"], set(_EMBEDDING_FORMATTING_KEYS), "embedding formatting")
+    _require_exact_keys(candidate["inference"], set(_EMBEDDING_INFERENCE_KEYS), "embedding inference")
+    if not candidate["formatting"]["query"] or not candidate["formatting"]["document"]:
+        raise ValueError("embedding candidate lacks explicit formatting defaults")
+
+
+def _require_variant(variant: dict, kind: str, contract: dict) -> None:
+    expected = set(_VARIANT_FIELDS)
     if kind == "embedding":
-        _require_exact_keys(
-            candidate["formatting"], {"document", "instruction", "query"}, "embedding formatting"
-        )
-        _require_exact_keys(
-            candidate["inference"],
-            {"l2_normalize", "max_length_tokens", "padding_side", "pooling", "truncation_side"},
-            "embedding inference",
-        )
-        if not candidate["formatting"]["query"] or not candidate["formatting"]["document"]:
-            raise ValueError("embedding candidate lacks explicit formatting defaults")
-    else:
-        _require_exact_keys(
-            candidate["formatting"],
-            {
-                "assistant_suffix",
-                "contract_type",
-                "document_template",
-                "instruction",
-                "max_length_tokens",
-                "query_template",
-                "score_tokens",
-                "scoring",
-                "system_prefix",
-                "truncation",
-                "user_template",
-            },
-            "reranker formatting",
-        )
+        expected.add("mrl")
+    _require_exact_keys(variant, expected, f"{kind} variant")
+    _require_exact_keys(variant["quality"], set(_QUALITY_KEYS), "variant quality")
+    _require_exact_keys(variant["quality"]["per_language"], {"EN", "RU", "ZH"}, "variant languages")
+    _require_exact_keys(variant["resource_measurements"], set(_RESOURCE_KEYS), "variant resource measurements")
+    if variant["precision"] != contract["precision"]:
+        raise ValueError(f"matrix {kind} variant precision mismatch")
+    if kind == "embedding":
+        _require_exact_keys(variant["mrl"], set(_MRL_KEYS), "embedding MRL")
+
+
+def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) -> None:
+    _require_exact_keys(candidate, _candidate_fields(kind), f"{kind} candidate")
+    _require_candidate_identity(candidate, kind)
+    _require_candidate_contract(candidate, kind, contract)
+    _require_candidate_license(candidate, kind, contract)
+    _require_native_library(candidate, kind)
+    _require_candidate_source(candidate, kind)
+    _require_candidate_formatting(candidate, kind)
     for variant in candidate["variants"]:
-        expected = {
-            "dimensions",
-            "precision",
-            "quality",
-            "resource_measurements",
-            "variant_id",
-        }
-        if kind == "embedding":
-            expected.add("mrl")
-        _require_exact_keys(variant, expected, f"{kind} variant")
-        _require_exact_keys(
-            variant["quality"], {"claim", "overall", "per_language", "status"}, "variant quality"
-        )
-        _require_exact_keys(
-            variant["quality"]["per_language"], {"EN", "RU", "ZH"}, "variant languages"
-        )
-        _require_exact_keys(
-            variant["resource_measurements"],
-            {
-                "cold_first_query_ms",
-                "index_bytes",
-                "indexing_throughput_documents_per_second",
-                "model_load_ms",
-                "peak_rss_bytes",
-                "status",
-                "vector_bytes_per_document",
-                "warm_p50_ms",
-                "warm_p95_ms",
-            },
-            "variant resource measurements",
-        )
-        if variant["precision"] != contract["precision"]:
-            raise ValueError(f"matrix {kind} variant precision mismatch")
-        if kind == "embedding":
-            _require_exact_keys(
-                variant["mrl"],
-                {"enabled", "renormalize_after_truncation", "truncate_to_dimensions"},
-                "embedding MRL",
-            )
+        _require_variant(variant, kind, contract)
+
+
+_MATRIX_KEYS = frozenset(
+    {"artifact_kind", "benchmark_contract", "embeddings", "lexical", "rerankers", "schema_version", "selection"}
+)
+_CONTRACT_KEYS = frozenset(
+    {"batch_size", "cache_policy", "corpus", "languages", "precision", "quality_claims_allowed", "reranker_depths"}
+)
+_SELECTION_KEYS = frozenset(
+    {
+        "aggregation_evidence_contract",
+        "baseline",
+        "default_embedding",
+        "default_reranker",
+        "limits",
+        "material_improvement",
+        "pareto_objectives",
+        "predetermined_winner",
+        "required_gates",
+        "requires_pareto_efficient",
+        "requires_raw_benchmark_result",
+        "result_evidence",
+        "result_evidence_contract",
+        "selection_target_fields",
+        "status",
+    }
+)
+_AGGREGATION_CONTRACT_KEYS = frozenset(
+    {"artifact_schema", "complete_candidate_set", "output_path_policy", "required_fields", "schema_version"}
+)
+_BASELINE_KEYS = frozenset(
+    {
+        "overall_basis_points",
+        "parent_recall_at_10_basis_points",
+        "policy_sha256",
+        "raw_report_path",
+        "raw_report_sha256",
+    }
+)
+_LEXICAL_POLICY_KEYS = frozenset(
+    {
+        "dictionary_sha256",
+        "dictionary_sha256_status",
+        "exclusion_reasons",
+        "hmm",
+        "id",
+        "kind",
+        "license",
+        "package_sha256",
+        "quality",
+        "query_document_configuration_identical",
+        "resource_measurements",
+        "shipping_eligible",
+        "source_url",
+        "version",
+    }
+)
+_BENCHMARK_CACHE_POLICY = {"network_access": "prefetch_only", "offline_required": True, "revision_scoped": True}
+
+
+def _parsed_matrix(raw: bytes) -> dict:
+    try:
+        matrix = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"cannot load model matrix: {exc}") from exc
+    if canonical_json_bytes(matrix) + b"\n" != raw:
+        raise ValueError("model matrix bytes are not canonical and frozen")
+    return matrix
+
+
+def _require_matrix_shape(matrix: dict) -> None:
+    _require_exact_keys(matrix, set(_MATRIX_KEYS), "model matrix")
+    if matrix["artifact_kind"] != "model-policy-matrix" or matrix["schema_version"] != 1:
+        raise ValueError("unsupported model matrix")
+
+
+def _require_contract_shape(contract: dict) -> None:
+    _require_exact_keys(contract, set(_CONTRACT_KEYS), "benchmark contract")
+    _require_exact_keys(
+        contract["cache_policy"], {"network_access", "offline_required", "revision_scoped"}, "benchmark cache policy"
+    )
+    _require_exact_keys(contract["corpus"], {"path", "sha256"}, "benchmark corpus")
+
+
+def _require_aggregation_contract(aggregation_contract: dict) -> None:
+    _require_exact_keys(aggregation_contract, set(_AGGREGATION_CONTRACT_KEYS), "aggregation evidence contract")
+    if set(aggregation_contract["required_fields"]) != SELECTION_ARTIFACT_FIELDS:
+        raise ValueError("aggregation evidence fields do not match runner contract")
+    if (
+        aggregation_contract["schema_version"] != 1
+        or aggregation_contract["artifact_schema"] != "retrieval-selection/v1"
+        or aggregation_contract["output_path_policy"] != "normalized_repo_relative_json_under_benchmark_results"
+    ):
+        raise ValueError("unsupported aggregation evidence contract")
+
+
+def _require_selection_shape(selection: dict) -> None:
+    _require_exact_keys(selection, set(_SELECTION_KEYS), "matrix selection")
+    _require_aggregation_contract(selection["aggregation_evidence_contract"])
+    _require_exact_keys(selection["baseline"], set(_BASELINE_KEYS), "selection baseline")
+    _require_exact_keys(selection["limits"], {"peak_rss_bytes", "warm_p95_ms"}, "selection limits")
+    _require_exact_keys(
+        selection["material_improvement"],
+        {"metric", "minimum_absolute_gain_basis_points"},
+        "selection material improvement",
+    )
+
+
+def _require_contract_values(contract: dict) -> None:
+    if contract["precision"] != "float32" or contract["batch_size"] != 8:
+        raise ValueError("unsupported benchmark precision or batch size")
+    if contract["quality_claims_allowed"] is not True:
+        raise ValueError("matrix does not permit provenance-bound candidate quality claims")
+
+
+def _require_contract_policy(contract: dict) -> None:
+    if contract["cache_policy"] != _BENCHMARK_CACHE_POLICY:
+        raise ValueError("unsupported benchmark cache policy")
+    if contract["reranker_depths"] != [10, 20, 50]:
+        raise ValueError("unsupported reranker depths")
+
+
+def _verified_corpus_hash(corpus_path: Path, contract: dict) -> str:
+    corpus_hash = _sha256_file(corpus_path)
+    if corpus_hash != contract["corpus"]["sha256"]:
+        raise ValueError("benchmark corpus SHA256 does not match matrix")
+    return corpus_hash
+
+
+def _require_matrix_candidates(matrix: dict, contract: dict) -> None:
+    for candidate in matrix["embeddings"]:
+        _validate_matrix_candidate(candidate, kind="embedding", contract=contract)
+    for candidate in matrix["rerankers"]:
+        _validate_matrix_candidate(candidate, kind="reranker", contract=contract)
+
+
+def _selected_embedding(matrix: dict, model_id: str) -> dict:
+    embedding = next((item for item in matrix["embeddings"] if item["id"] == model_id), None)
+    if embedding is None:
+        raise ValueError(f"unknown embedding model: {model_id}")
+    return embedding
+
+
+def _require_pinned_variant(variant: dict) -> None:
+    if variant["precision"] != "float32" or not isinstance(variant["dimensions"], int):
+        raise ValueError("embedding variant is not pinned to float32 dimensions")
+
+
+def _selected_variant(embedding: dict, variant_id: str) -> dict:
+    variant = next((item for item in embedding["variants"] if item["variant_id"] == variant_id), None)
+    if variant is None:
+        raise ValueError(f"unknown embedding variant: {variant_id}")
+    _require_pinned_variant(variant)
+    return variant
+
+
+def _reranker_variant(reranker: dict) -> dict:
+    if len(reranker["variants"]) != 1:
+        raise ValueError("reranker lacks one explicit matrix variant")
+    reranker_variant = reranker["variants"][0]
+    if reranker_variant["precision"] != "float32":
+        raise ValueError("reranker variant is not pinned to float32")
+    return reranker_variant
+
+
+def _selected_reranker(matrix: dict, reranker_id: str | None) -> tuple[dict | None, dict | None]:
+    if reranker_id is None:
+        return None, None
+    reranker = next((item for item in matrix["rerankers"] if item["id"] == reranker_id), None)
+    if reranker is None:
+        raise ValueError(f"unknown reranker model: {reranker_id}")
+    return reranker, _reranker_variant(reranker)
 
 
 def load_model_selection(
@@ -407,163 +602,20 @@ def load_model_selection(
     variant_id: str,
     reranker_id: str | None = None,
 ) -> ModelSelection:
-    matrix_path = Path(matrix_path)
-    raw = read_stable_bytes(matrix_path, MAX_CORPUS_BYTES, label="model matrix")
-    try:
-        matrix = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"cannot load model matrix: {exc}") from exc
-    if canonical_json_bytes(matrix) + b"\n" != raw:
-        raise ValueError("model matrix bytes are not canonical and frozen")
-    _require_exact_keys(
-        matrix,
-        {"artifact_kind", "benchmark_contract", "embeddings", "lexical", "rerankers", "schema_version", "selection"},
-        "model matrix",
-    )
-    if matrix["artifact_kind"] != "model-policy-matrix" or matrix["schema_version"] != 1:
-        raise ValueError("unsupported model matrix")
+    raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
+    matrix = _parsed_matrix(raw)
+    _require_matrix_shape(matrix)
     contract = matrix["benchmark_contract"]
-    _require_exact_keys(
-        contract,
-        {
-            "batch_size",
-            "cache_policy",
-            "corpus",
-            "languages",
-            "precision",
-            "quality_claims_allowed",
-            "reranker_depths",
-        },
-        "benchmark contract",
-    )
-    _require_exact_keys(
-        contract["cache_policy"],
-        {"network_access", "offline_required", "revision_scoped"},
-        "benchmark cache policy",
-    )
-    _require_exact_keys(contract["corpus"], {"path", "sha256"}, "benchmark corpus")
-    _require_exact_keys(
-        matrix["selection"],
-        {
-            "aggregation_evidence_contract",
-            "baseline",
-            "default_embedding",
-            "default_reranker",
-            "limits",
-            "material_improvement",
-            "pareto_objectives",
-            "predetermined_winner",
-            "required_gates",
-            "requires_pareto_efficient",
-            "requires_raw_benchmark_result",
-            "result_evidence",
-            "result_evidence_contract",
-            "selection_target_fields",
-            "status",
-        },
-        "matrix selection",
-    )
-    aggregation_contract = matrix["selection"]["aggregation_evidence_contract"]
-    _require_exact_keys(
-        aggregation_contract,
-        {
-            "artifact_schema",
-            "complete_candidate_set",
-            "output_path_policy",
-            "required_fields",
-            "schema_version",
-        },
-        "aggregation evidence contract",
-    )
-    if set(aggregation_contract["required_fields"]) != SELECTION_ARTIFACT_FIELDS:
-        raise ValueError("aggregation evidence fields do not match runner contract")
-    if (
-        aggregation_contract["schema_version"] != 1
-        or aggregation_contract["artifact_schema"] != "retrieval-selection/v1"
-        or aggregation_contract["output_path_policy"]
-        != "normalized_repo_relative_json_under_benchmark_results"
-    ):
-        raise ValueError("unsupported aggregation evidence contract")
-    _require_exact_keys(
-        matrix["selection"]["baseline"],
-        {
-            "overall_basis_points",
-            "parent_recall_at_10_basis_points",
-            "policy_sha256",
-            "raw_report_path",
-            "raw_report_sha256",
-        },
-        "selection baseline",
-    )
-    _require_exact_keys(
-        matrix["selection"]["limits"],
-        {"peak_rss_bytes", "warm_p95_ms"},
-        "selection limits",
-    )
-    _require_exact_keys(
-        matrix["selection"]["material_improvement"],
-        {"metric", "minimum_absolute_gain_basis_points"},
-        "selection material improvement",
-    )
-    _require_exact_keys(
-        matrix["lexical"],
-        {
-            "dictionary_sha256",
-            "dictionary_sha256_status",
-            "exclusion_reasons",
-            "hmm",
-            "id",
-            "kind",
-            "license",
-            "package_sha256",
-            "quality",
-            "query_document_configuration_identical",
-            "resource_measurements",
-            "shipping_eligible",
-            "source_url",
-            "version",
-        },
-        "matrix lexical policy",
-    )
-    if contract["precision"] != "float32" or contract["batch_size"] != 8:
-        raise ValueError("unsupported benchmark precision or batch size")
-    if contract["quality_claims_allowed"] is not True:
-        raise ValueError("matrix does not permit provenance-bound candidate quality claims")
-    if contract["cache_policy"] != {
-        "network_access": "prefetch_only",
-        "offline_required": True,
-        "revision_scoped": True,
-    }:
-        raise ValueError("unsupported benchmark cache policy")
-    if contract["reranker_depths"] != [10, 20, 50]:
-        raise ValueError("unsupported reranker depths")
-    corpus_path = Path(corpus_path)
-    corpus_hash = _sha256_file(corpus_path)
-    if corpus_hash != contract["corpus"]["sha256"]:
-        raise ValueError("benchmark corpus SHA256 does not match matrix")
-    for candidate in matrix["embeddings"]:
-        _validate_matrix_candidate(candidate, kind="embedding", contract=contract)
-    for candidate in matrix["rerankers"]:
-        _validate_matrix_candidate(candidate, kind="reranker", contract=contract)
-    embedding = next((item for item in matrix["embeddings"] if item["id"] == model_id), None)
-    if embedding is None:
-        raise ValueError(f"unknown embedding model: {model_id}")
-    variant = next((item for item in embedding["variants"] if item["variant_id"] == variant_id), None)
-    if variant is None:
-        raise ValueError(f"unknown embedding variant: {variant_id}")
-    if variant["precision"] != "float32" or not isinstance(variant["dimensions"], int):
-        raise ValueError("embedding variant is not pinned to float32 dimensions")
-    reranker = None
-    reranker_variant = None
-    if reranker_id is not None:
-        reranker = next((item for item in matrix["rerankers"] if item["id"] == reranker_id), None)
-        if reranker is None:
-            raise ValueError(f"unknown reranker model: {reranker_id}")
-        if len(reranker["variants"]) != 1:
-            raise ValueError("reranker lacks one explicit matrix variant")
-        reranker_variant = reranker["variants"][0]
-        if reranker_variant["precision"] != "float32":
-            raise ValueError("reranker variant is not pinned to float32")
+    _require_contract_shape(contract)
+    _require_selection_shape(matrix["selection"])
+    _require_exact_keys(matrix["lexical"], set(_LEXICAL_POLICY_KEYS), "matrix lexical policy")
+    _require_contract_values(contract)
+    _require_contract_policy(contract)
+    corpus_hash = _verified_corpus_hash(Path(corpus_path), contract)
+    _require_matrix_candidates(matrix, contract)
+    embedding = _selected_embedding(matrix, model_id)
+    variant = _selected_variant(embedding, variant_id)
+    reranker, reranker_variant = _selected_reranker(matrix, reranker_id)
     return ModelSelection(
         matrix=matrix,
         embedding=embedding,
@@ -607,17 +659,25 @@ def _assert_unique(values: Iterable[str], label: str) -> None:
         raise ValueError(f"duplicate normalized {label}")
 
 
+def _path_has_forbidden_characters(value: str) -> bool:
+    return "\\" in value or ":" in value
+
+
+def _path_is_not_plain(value: str, path: PurePosixPath) -> bool:
+    return path.is_absolute() or str(path) != value or any(part in {"", ".", ".."} for part in path.parts)
+
+
+def _path_looks_private(lowered: str) -> bool:
+    return any(marker in lowered for marker in ("/users/", "/home/", "private", "personal"))
+
+
 def _validate_relative_path(value: str) -> None:
-    lowered = value.casefold()
     path = PurePosixPath(value)
     if (
         not value.startswith("synthetic/")
-        or "\\" in value
-        or ":" in value
-        or path.is_absolute()
-        or str(path) != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or any(marker in lowered for marker in ("/users/", "/home/", "private", "personal"))
+        or _path_has_forbidden_characters(value)
+        or _path_is_not_plain(value, path)
+        or _path_looks_private(value.casefold())
     ):
         raise ValueError(f"non-public or non-relative synthetic path: {value}")
 
@@ -629,24 +689,31 @@ def _parse_date(value: str, label: str) -> date:
         raise ValueError(f"invalid {label} date: {value}") from exc
 
 
-def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
-    """Load and fail closed on schema, frozen-byte, and cross-reference errors."""
-    corpus_path = Path(corpus_path)
-    schema_path = Path(schema_path)
+def _read_corpus(corpus_path: Path) -> tuple[bytes, dict]:
     try:
         raw = read_stable_bytes(corpus_path, MAX_CORPUS_BYTES, label="retrieval corpus")
-        corpus = json.loads(raw)
+        return raw, json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load corpus {corpus_path}: {exc}") from exc
+
+
+def _read_schema(schema_path: Path) -> bytes:
     try:
         schema_raw = read_stable_bytes(schema_path, MAX_SCHEMA_BYTES, label="retrieval schema")
         json.loads(schema_raw)
+        return schema_raw
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot load schema {schema_path}: {exc}") from exc
+
+
+def _validate_corpus_against_schema(corpus: dict, schema_raw: bytes) -> None:
     with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-schema-") as temporary:
         bounded_schema = Path(temporary) / "schema.json"
         bounded_schema.write_bytes(schema_raw)
         validate_schema(corpus, bounded_schema)
+
+
+def _require_frozen_corpus(corpus: dict, raw: bytes) -> None:
     if canonical_json_bytes(corpus) + b"\n" != raw:
         raise ValueError("corpus bytes are not canonical and frozen")
     if corpus["schema_version"] != "retrieval-corpus/v2":
@@ -654,8 +721,8 @@ def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
     if corpus["corpus_id"] not in FROZEN_CORPUS_IDS:
         raise ValueError("unexpected frozen corpus id")
 
-    documents = corpus["documents"]
-    queries = corpus["queries"]
+
+def _require_frozen_order(documents: list[dict], queries: list[dict]) -> None:
     if documents != sorted(documents, key=lambda item: item["parent_id"]):
         raise ValueError("documents must be frozen in parent_id order")
     if queries != sorted(queries, key=lambda item: item["query_id"]):
@@ -663,128 +730,222 @@ def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
     _assert_unique((document["parent_id"] for document in documents), "parent id")
     _assert_unique((query["query_id"] for query in queries), "query id")
 
-    parent_by_id = {document["parent_id"]: document for document in documents}
-    evidence_by_id: dict[str, tuple[dict, dict]] = {}
-    for document in documents:
-        _validate_relative_path(document["relative_path"])
-        valid_from = _parse_date(document["valid_from"], f"{document['parent_id']} valid_from")
-        valid_to = (
-            _parse_date(document["valid_to"], f"{document['parent_id']} valid_to")
-            if document["valid_to"] is not None
-            else None
-        )
-        if valid_to is not None and valid_from >= valid_to:
-            raise ValueError(f"invalid validity interval for {document['parent_id']}")
-        if document["status"] == "active":
-            if document["valid_to"] is not None or document["superseded_by"] is not None:
-                raise ValueError(f"active parent has supersession metadata: {document['parent_id']}")
-        else:
-            if document["valid_to"] is None or document["superseded_by"] is None:
-                raise ValueError(f"superseded parent lacks lifecycle metadata: {document['parent_id']}")
-        encoded = document["parent_text"].encode("utf-8")
-        ranges: list[tuple[int, int]] = []
-        for span in document["evidence_spans"]:
-            evidence_id = span["evidence_id"]
-            if _normalized_id(evidence_id) in {
-                _normalized_id(existing) for existing in evidence_by_id
-            }:
-                raise ValueError(f"duplicate normalized evidence id: {evidence_id}")
-            start = span["byte_start"]
-            end = span["byte_end"]
-            if start >= end or end > len(encoded):
-                raise ValueError(f"invalid UTF-8 range for {evidence_id}")
-            try:
-                selected = encoded[start:end].decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ValueError(f"range splits UTF-8 for {evidence_id}") from exc
-            if selected != span["text"]:
-                raise ValueError(f"UTF-8 range text mismatch for {evidence_id}")
-            digest = hashlib.sha256(span["text"].encode("utf-8")).hexdigest()
-            if digest != span["span_sha256"]:
-                raise ValueError(f"span hash mismatch for {evidence_id}")
-            if any(start < other_end and other_start < end for other_start, other_end in ranges):
-                raise ValueError(f"overlapping evidence spans in {document['parent_id']}")
-            ranges.append((start, end))
-            evidence_by_id[evidence_id] = (document, span)
 
+def _require_validity_interval(document: dict) -> None:
+    parent_id = document["parent_id"]
+    valid_from = _parse_date(document["valid_from"], f"{parent_id} valid_from")
+    if document["valid_to"] is None:
+        return
+    valid_to = _parse_date(document["valid_to"], f"{parent_id} valid_to")
+    if valid_from >= valid_to:
+        raise ValueError(f"invalid validity interval for {parent_id}")
+
+
+def _require_superseded_lifecycle(document: dict) -> None:
+    if document["valid_to"] is None or document["superseded_by"] is None:
+        raise ValueError(f"superseded parent lacks lifecycle metadata: {document['parent_id']}")
+
+
+def _require_lifecycle(document: dict) -> None:
+    if document["status"] != "active":
+        _require_superseded_lifecycle(document)
+        return
+    if document["valid_to"] is not None or document["superseded_by"] is not None:
+        raise ValueError(f"active parent has supersession metadata: {document['parent_id']}")
+
+
+def _require_unique_evidence_id(evidence_id: str, evidence_by_id: dict) -> None:
+    if _normalized_id(evidence_id) in {_normalized_id(existing) for existing in evidence_by_id}:
+        raise ValueError(f"duplicate normalized evidence id: {evidence_id}")
+
+
+def _span_text(span: dict, encoded: bytes) -> str:
+    evidence_id = span["evidence_id"]
+    start = span["byte_start"]
+    end = span["byte_end"]
+    if start >= end or end > len(encoded):
+        raise ValueError(f"invalid UTF-8 range for {evidence_id}")
+    try:
+        return encoded[start:end].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"range splits UTF-8 for {evidence_id}") from exc
+
+
+def _require_span_text(span: dict, selected: str) -> None:
+    evidence_id = span["evidence_id"]
+    if selected != span["text"]:
+        raise ValueError(f"UTF-8 range text mismatch for {evidence_id}")
+    if hashlib.sha256(span["text"].encode("utf-8")).hexdigest() != span["span_sha256"]:
+        raise ValueError(f"span hash mismatch for {evidence_id}")
+
+
+def _require_disjoint_span(span: dict, ranges: list[tuple[int, int]], parent_id: str) -> None:
+    start = span["byte_start"]
+    end = span["byte_end"]
+    if any(start < other_end and other_start < end for other_start, other_end in ranges):
+        raise ValueError(f"overlapping evidence spans in {parent_id}")
+
+
+def _register_spans(document: dict, evidence_by_id: dict[str, tuple[dict, dict]]) -> None:
+    encoded = document["parent_text"].encode("utf-8")
+    ranges: list[tuple[int, int]] = []
+    for span in document["evidence_spans"]:
+        _require_unique_evidence_id(span["evidence_id"], evidence_by_id)
+        _require_span_text(span, _span_text(span, encoded))
+        _require_disjoint_span(span, ranges, document["parent_id"])
+        ranges.append((span["byte_start"], span["byte_end"]))
+        evidence_by_id[span["evidence_id"]] = (document, span)
+
+
+def _register_document(document: dict, evidence_by_id: dict[str, tuple[dict, dict]]) -> None:
+    _validate_relative_path(document["relative_path"])
+    _require_validity_interval(document)
+    _require_lifecycle(document)
+    _register_spans(document, evidence_by_id)
+
+
+def _require_supersession_targets(documents: list[dict], parent_by_id: dict[str, dict]) -> None:
     for document in documents:
         target = document["superseded_by"]
-        if target is not None:
-            if target not in parent_by_id or parent_by_id[target]["status"] != "active":
-                raise ValueError(f"invalid supersession target for {document['parent_id']}")
+        if target is None:
+            continue
+        if target not in parent_by_id or parent_by_id[target]["status"] != "active":
+            raise ValueError(f"invalid supersession target for {document['parent_id']}")
 
-    for query in queries:
-        answerable = query["answerability"] == "answerable"
-        gold_fields = (
-            query["relevant_parents"],
-            query["required_evidence_spans"],
-            query["graded_evidence"],
-        )
-        if answerable:
-            if not all(gold_fields) or query["allowed_abstention_reason"] is not None:
-                raise ValueError(f"invalid answerable gold contract: {query['query_id']}")
-        elif any(gold_fields) or query["allowed_abstention_reason"] is None:
-            raise ValueError(f"invalid unanswerable gold contract: {query['query_id']}")
-        if query["temporal_scope"]["mode"] == "current":
-            if query["temporal_scope"]["as_of"] is not None:
-                raise ValueError(f"current query has as_of: {query['query_id']}")
-        elif query["temporal_scope"]["as_of"] is None:
-            raise ValueError(f"historical query lacks as_of: {query['query_id']}")
-        else:
-            _parse_date(query["temporal_scope"]["as_of"], f"{query['query_id']} as_of")
 
-        for field in ("relevant_parents", "required_evidence_spans", "negative_candidates"):
-            _assert_unique(query[field], field.replace("_", " "))
-        _assert_unique(
-            (item["evidence_id"] for item in query["graded_evidence"]),
-            "graded evidence",
-        )
-        relevant_parents = set(query["relevant_parents"])
-        required_evidence = set(query["required_evidence_spans"])
-        graded_evidence = {item["evidence_id"] for item in query["graded_evidence"]}
-        negatives = set(query["negative_candidates"])
-        if not relevant_parents <= parent_by_id.keys():
-            raise ValueError(f"unknown relevant parent: {query['query_id']}")
-        if not required_evidence <= evidence_by_id.keys() or not graded_evidence <= evidence_by_id.keys():
-            raise ValueError(f"unknown relevant evidence: {query['query_id']}")
-        if not negatives <= evidence_by_id.keys():
-            raise ValueError(f"unknown negative evidence: {query['query_id']}")
-        if required_evidence & negatives or graded_evidence & negatives:
-            raise ValueError(f"positive and negative evidence overlap: {query['query_id']}")
-        if required_evidence != graded_evidence:
-            raise ValueError(f"required and graded evidence differ: {query['query_id']}")
-        required_parents = {
-            evidence_by_id[evidence_id][0]["parent_id"] for evidence_id in required_evidence
-        }
-        if relevant_parents != required_parents:
-            raise ValueError(
-                f"relevant parents must exactly match required evidence parents: {query['query_id']}"
-            )
+def _require_unanswerable_gold(query: dict, gold_fields: tuple) -> None:
+    if any(gold_fields) or query["allowed_abstention_reason"] is None:
+        raise ValueError(f"invalid unanswerable gold contract: {query['query_id']}")
 
-        scope = _query_scope(query)
-        scoped = {candidate.evidence_id for candidate in filter_candidates(build_candidates(corpus), scope)}
-        for evidence_id in required_evidence:
-            document, _span = evidence_by_id[evidence_id]
-            if document["parent_id"] not in relevant_parents:
-                raise ValueError(f"evidence parent is not relevant: {query['query_id']}")
-            if document["project"] not in query["project_scope"]:
-                raise ValueError(f"project scope excludes gold: {query['query_id']}")
-            if evidence_id not in scoped:
-                raise ValueError(f"temporal scope excludes gold: {query['query_id']}")
-        if not negatives & scoped:
-            raise ValueError(f"query lacks an eligible negative candidate: {query['query_id']}")
 
+def _require_gold_contract(query: dict) -> None:
+    gold_fields = (query["relevant_parents"], query["required_evidence_spans"], query["graded_evidence"])
+    if query["answerability"] != "answerable":
+        _require_unanswerable_gold(query, gold_fields)
+        return
+    if not all(gold_fields) or query["allowed_abstention_reason"] is not None:
+        raise ValueError(f"invalid answerable gold contract: {query['query_id']}")
+
+
+def _require_temporal_scope(query: dict) -> None:
+    scope = query["temporal_scope"]
+    if scope["mode"] == "current":
+        if scope["as_of"] is not None:
+            raise ValueError(f"current query has as_of: {query['query_id']}")
+        return
+    if scope["as_of"] is None:
+        raise ValueError(f"historical query lacks as_of: {query['query_id']}")
+    _parse_date(scope["as_of"], f"{query['query_id']} as_of")
+
+
+def _require_unique_query_fields(query: dict) -> None:
+    for field in ("relevant_parents", "required_evidence_spans", "negative_candidates"):
+        _assert_unique(query[field], field.replace("_", " "))
+    _assert_unique((item["evidence_id"] for item in query["graded_evidence"]), "graded evidence")
+
+
+class _GoldSets:
+    def __init__(self, query: dict) -> None:
+        self.relevant_parents = set(query["relevant_parents"])
+        self.required_evidence = set(query["required_evidence_spans"])
+        self.graded_evidence = {item["evidence_id"] for item in query["graded_evidence"]}
+        self.negatives = set(query["negative_candidates"])
+
+
+def _require_known_gold(query: dict, gold: _GoldSets, parent_by_id: dict, evidence_by_id: dict) -> None:
+    query_id = query["query_id"]
+    if not gold.relevant_parents <= parent_by_id.keys():
+        raise ValueError(f"unknown relevant parent: {query_id}")
+    if not gold.required_evidence <= evidence_by_id.keys() or not gold.graded_evidence <= evidence_by_id.keys():
+        raise ValueError(f"unknown relevant evidence: {query_id}")
+    if not gold.negatives <= evidence_by_id.keys():
+        raise ValueError(f"unknown negative evidence: {query_id}")
+
+
+def _required_parents(gold: _GoldSets, evidence_by_id: dict) -> set[str]:
+    return {evidence_by_id[evidence_id][0]["parent_id"] for evidence_id in gold.required_evidence}
+
+
+def _require_consistent_gold(query: dict, gold: _GoldSets, evidence_by_id: dict) -> None:
+    query_id = query["query_id"]
+    if gold.required_evidence & gold.negatives or gold.graded_evidence & gold.negatives:
+        raise ValueError(f"positive and negative evidence overlap: {query_id}")
+    if gold.required_evidence != gold.graded_evidence:
+        raise ValueError(f"required and graded evidence differ: {query_id}")
+    if gold.relevant_parents != _required_parents(gold, evidence_by_id):
+        raise ValueError(f"relevant parents must exactly match required evidence parents: {query_id}")
+
+
+def _require_evidence_in_scope(query: dict, evidence_id: str, document: dict, gold: _GoldSets, scoped: set) -> None:
+    query_id = query["query_id"]
+    if document["parent_id"] not in gold.relevant_parents:
+        raise ValueError(f"evidence parent is not relevant: {query_id}")
+    if document["project"] not in query["project_scope"]:
+        raise ValueError(f"project scope excludes gold: {query_id}")
+    if evidence_id not in scoped:
+        raise ValueError(f"temporal scope excludes gold: {query_id}")
+
+
+def _require_scope_covers_gold(query: dict, gold: _GoldSets, evidence_by_id: dict, corpus: dict) -> None:
+    scope = _query_scope(query)
+    scoped = {candidate.evidence_id for candidate in filter_candidates(build_candidates(corpus), scope)}
+    for evidence_id in gold.required_evidence:
+        document, _span = evidence_by_id[evidence_id]
+        _require_evidence_in_scope(query, evidence_id, document, gold, scoped)
+    if not gold.negatives & scoped:
+        raise ValueError(f"query lacks an eligible negative candidate: {query['query_id']}")
+
+
+def _require_query(query: dict, parent_by_id: dict, evidence_by_id: dict, corpus: dict) -> None:
+    _require_gold_contract(query)
+    _require_temporal_scope(query)
+    _require_unique_query_fields(query)
+    gold = _GoldSets(query)
+    _require_known_gold(query, gold, parent_by_id, evidence_by_id)
+    _require_consistent_gold(query, gold, evidence_by_id)
+    _require_scope_covers_gold(query, gold, evidence_by_id, corpus)
+
+
+def _language_tallies(queries: list[dict]) -> tuple[dict[str, int], dict[str, set[str]]]:
     language_counts = {language: 0 for language in ("EN", "RU", "ZH")}
-    language_answers = {language: set() for language in language_counts}
+    language_answers: dict[str, set[str]] = {language: set() for language in language_counts}
     for query in queries:
         language_counts[query["language"]] += 1
         language_answers[query["language"]].add(query["answerability"])
+    return language_counts, language_answers
+
+
+def _require_cross_language_slice(queries: list[dict]) -> None:
+    if sum(query["cross_language"] for query in queries) < 3:
+        raise ValueError("cross-language slice requires at least three queries")
+
+
+def _require_language_coverage(queries: list[dict]) -> None:
+    language_counts, language_answers = _language_tallies(queries)
     if any(count < 6 for count in language_counts.values()):
         raise ValueError("each native language requires at least six queries")
     if any(values != {"answerable", "unanswerable"} for values in language_answers.values()):
         raise ValueError("each native language requires answerable and no-answer cases")
-    if sum(query["cross_language"] for query in queries) < 3:
-        raise ValueError("cross-language slice requires at least three queries")
+    _require_cross_language_slice(queries)
+
+
+def load_corpus(corpus_path: Path | str, schema_path: Path | str) -> dict:
+    """Load and fail closed on schema, frozen-byte, and cross-reference errors."""
+    raw, corpus = _read_corpus(Path(corpus_path))
+    schema_raw = _read_schema(Path(schema_path))
+    _validate_corpus_against_schema(corpus, schema_raw)
+    _require_frozen_corpus(corpus, raw)
+    documents = corpus["documents"]
+    queries = corpus["queries"]
+    _require_frozen_order(documents, queries)
+    parent_by_id = {document["parent_id"]: document for document in documents}
+    evidence_by_id: dict[str, tuple[dict, dict]] = {}
+    for document in documents:
+        _register_document(document, evidence_by_id)
+    _require_supersession_targets(documents, parent_by_id)
+    for query in queries:
+        _require_query(query, parent_by_id, evidence_by_id, corpus)
+    _require_language_coverage(queries)
     return corpus
 
 
@@ -809,22 +970,21 @@ def build_candidates(corpus: dict) -> list[Candidate]:
     return sorted(candidates, key=lambda candidate: candidate.evidence_id)
 
 
+def _in_temporal_scope(candidate: Candidate, scope: QueryScope) -> bool:
+    if scope.temporal_mode == "current":
+        return candidate.status == "active"
+    assert scope.as_of is not None
+    if candidate.valid_from > scope.as_of:
+        return False
+    return candidate.valid_to is None or scope.as_of < candidate.valid_to
+
+
 def filter_candidates(candidates: Sequence[Candidate], scope: QueryScope) -> list[Candidate]:
-    filtered = []
-    for candidate in candidates:
-        if candidate.project not in scope.projects:
-            continue
-        if scope.temporal_mode == "current":
-            if candidate.status != "active":
-                continue
-        else:
-            assert scope.as_of is not None
-            if candidate.valid_from > scope.as_of:
-                continue
-            if candidate.valid_to is not None and scope.as_of >= candidate.valid_to:
-                continue
-        filtered.append(candidate)
-    return filtered
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.project in scope.projects and _in_temporal_scope(candidate, scope)
+    ]
 
 
 ALIASES = {
@@ -909,16 +1069,20 @@ def _lexical_score(query_text: str, candidate: Candidate) -> float:
     return len(overlap) / math.sqrt(len(query) * len(text)) + phrase_bonus
 
 
+def _unit_vector(vector: list[float]) -> tuple[float, ...]:
+    norm = math.sqrt(sum(component * component for component in vector))
+    if norm:
+        return tuple(component / norm for component in vector)
+    return tuple(vector)
+
+
 def _hash_vector(value: str, dimensions: int = 64) -> tuple[float, ...]:
     vector = [0.0] * dimensions
     for token in _tokens(value):
         digest = hashlib.sha256(token.encode("utf-8")).digest()
         index = int.from_bytes(digest[:4], "big") % dimensions
         vector[index] += 1.0 if digest[4] & 1 else -1.0
-    norm = math.sqrt(sum(component * component for component in vector))
-    if norm:
-        vector = [component / norm for component in vector]
-    return tuple(vector)
+    return _unit_vector(vector)
 
 
 def _dot(left: Sequence[float], right: Sequence[float]) -> float:
@@ -941,53 +1105,76 @@ class FakeLexicalAdapter:
         return sorted(scored, key=lambda item: (-item.score, item.evidence_id))[:limit]
 
 
-def _fts5_tokens(
-    value: str, tokenizer: str, *, deadline: float | None = None
-) -> tuple[str, ...]:
-    allowed = {
+_LEXICAL_DEADLINE_MESSAGE = "lexical benchmark absolute deadline exceeded"
+
+
+def _allowed_fts5_tokenizers() -> set[str]:
+    return {
         specification
         for configuration in LEXICAL_CONFIGURATIONS.values()
         for specification in configuration["indexes"].values()
     }
-    if tokenizer not in allowed:
+
+
+def _require_lexical_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.perf_counter() >= deadline:
+        raise TimeoutError(_LEXICAL_DEADLINE_MESSAGE)
+
+
+def _fts5_vocabulary(connection: sqlite3.Connection, value: str, tokenizer: str) -> tuple[str, ...]:
+    connection.execute(f"CREATE VIRTUAL TABLE token_source USING fts5(text, tokenize='{tokenizer}')")
+    connection.execute("CREATE VIRTUAL TABLE token_vocab USING fts5vocab(token_source, 'row')")
+    connection.execute("INSERT INTO token_source(text) VALUES (?)", (value,))
+    return tuple(row[0] for row in connection.execute("SELECT term FROM token_vocab ORDER BY term"))
+
+
+def _fts5_failure(deadline: float | None, tokenizer: str) -> Exception:
+    if deadline is not None and time.perf_counter() >= deadline:
+        return TimeoutError(_LEXICAL_DEADLINE_MESSAGE)
+    return ValueError(f"required SQLite FTS5 tokenizer unavailable: {tokenizer}")
+
+
+def _fts5_tokens(
+    value: str, tokenizer: str, *, deadline: float | None = None
+) -> tuple[str, ...]:
+    if tokenizer not in _allowed_fts5_tokenizers():
         raise ValueError(f"unsupported FTS5 tokenizer: {tokenizer}")
     connection = sqlite3.connect(":memory:")
     try:
+        _require_lexical_deadline(deadline)
         if deadline is not None:
-            if time.perf_counter() >= deadline:
-                raise TimeoutError("lexical benchmark absolute deadline exceeded")
             connection.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
-        connection.execute(f"CREATE VIRTUAL TABLE token_source USING fts5(text, tokenize='{tokenizer}')")
-        connection.execute("CREATE VIRTUAL TABLE token_vocab USING fts5vocab(token_source, 'row')")
-        connection.execute("INSERT INTO token_source(text) VALUES (?)", (value,))
-        result = tuple(
-            row[0] for row in connection.execute("SELECT term FROM token_vocab ORDER BY term")
-        )
-        if deadline is not None and time.perf_counter() >= deadline:
-            raise TimeoutError("lexical benchmark absolute deadline exceeded")
+        result = _fts5_vocabulary(connection, value, tokenizer)
+        _require_lexical_deadline(deadline)
         return result
     except sqlite3.Error as exc:
-        if deadline is not None and time.perf_counter() >= deadline:
-            raise TimeoutError("lexical benchmark absolute deadline exceeded") from exc
-        raise ValueError(f"required SQLite FTS5 tokenizer unavailable: {tokenizer}") from exc
+        raise _fts5_failure(deadline, tokenizer) from exc
     finally:
         connection.close()
+
+
+def _add_rrf_contributions(scores: dict[str, float], ranking: Sequence[tuple[str, float]], k: int) -> None:
+    seen: set[str] = set()
+    for rank, (evidence_id, _raw_bm25) in enumerate(ranking, 1):
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        scores[evidence_id] = scores.get(evidence_id, 0.0) + 1.0 / (k + rank)
+
+
+def _active_rankings(rankings: dict[str, Sequence[tuple[str, float]]]) -> dict[str, Sequence[tuple[str, float]]]:
+    return {name: ranking for name, ranking in rankings.items() if ranking}
 
 
 def _reciprocal_rank_fusion(
     rankings: dict[str, Sequence[tuple[str, float]]], *, k: int
 ) -> list[tuple[str, float]]:
-    active_rankings = {name: ranking for name, ranking in rankings.items() if ranking}
+    active_rankings = _active_rankings(rankings)
     if not active_rankings:
         return []
     scores: dict[str, float] = {}
     for index_name in sorted(active_rankings):
-        seen = set()
-        for rank, (evidence_id, _raw_bm25) in enumerate(active_rankings[index_name], 1):
-            if evidence_id in seen:
-                continue
-            seen.add(evidence_id)
-            scores[evidence_id] = scores.get(evidence_id, 0.0) + 1.0 / (k + rank)
+        _add_rrf_contributions(scores, active_rankings[index_name], k)
     theoretical_max = len(active_rankings) / (k + 1)
     scores = {evidence_id: score / theoretical_max for evidence_id, score in scores.items()}
     return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
@@ -1005,42 +1192,56 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def matrix_policy_fingerprint(matrix: dict) -> str:
-    policy = json.loads(json.dumps(matrix))
-    selection = policy["selection"]
-    selection.update(
-        default_embedding=None,
-        default_reranker=None,
-        result_evidence=None,
-        status="awaiting_raw_benchmark",
-    )
+def _measurement_objects(policy: dict) -> tuple[list[dict], list[dict]]:
     quality_objects = [policy["lexical"]["quality"]]
     resource_objects = [policy["lexical"]["resource_measurements"]]
     for candidate in policy["embeddings"] + policy["rerankers"]:
         for variant in candidate["variants"]:
             quality_objects.append(variant["quality"])
             resource_objects.append(variant["resource_measurements"])
+    return quality_objects, resource_objects
+
+
+def _blank_quality(quality: dict) -> None:
+    quality.update(
+        claim=None,
+        overall=None,
+        per_language={language: None for language in ("EN", "RU", "ZH")},
+        status="unmeasured",
+    )
+
+
+def _blank_resources(resources: dict) -> None:
+    for field in resources:
+        resources[field] = "unmeasured" if field == "status" else None
+
+
+def matrix_policy_fingerprint(matrix: dict) -> str:
+    policy = json.loads(json.dumps(matrix))
+    policy["selection"].update(
+        default_embedding=None,
+        default_reranker=None,
+        result_evidence=None,
+        status="awaiting_raw_benchmark",
+    )
+    quality_objects, resource_objects = _measurement_objects(policy)
     for quality in quality_objects:
-        quality.update(
-            claim=None,
-            overall=None,
-            per_language={language: None for language in ("EN", "RU", "ZH")},
-            status="unmeasured",
-        )
+        _blank_quality(quality)
     for resources in resource_objects:
-        for field in resources:
-            resources[field] = "unmeasured" if field == "status" else None
+        _blank_resources(resources)
     return _sha256_json(policy)
+
+
+def _installed_version_or_none(name: str) -> str | None:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
 
 
 def _environment_provenance(vector_backend: str | None) -> dict:
     names = ("sentence-transformers", "transformers", "torch", "numpy", "usearch")
-    versions = {}
-    for name in names:
-        try:
-            versions[name] = importlib_metadata.version(name)
-        except importlib_metadata.PackageNotFoundError:
-            versions[name] = None
+    versions = {name: _installed_version_or_none(name) for name in names}
     if vector_backend not in {"usearch-exact", "usearch-hnsw"}:
         versions["usearch"] = None
     return {
@@ -1055,23 +1256,30 @@ def _observed_runtime_environment(
 ) -> dict:
     observed = _environment_provenance(vector_backend)
     if lexical_config in {"L3", "L4"}:
-        try:
-            observed["packages"]["jieba"] = importlib_metadata.version("jieba")
-        except importlib_metadata.PackageNotFoundError:
-            observed["packages"]["jieba"] = None
+        observed["packages"]["jieba"] = _installed_version_or_none("jieba")
     return observed
 
 
-def _locked_package_versions(lock_path: Path) -> dict[str, str]:
+def _lock_packages(lock_path: Path) -> list[dict]:
     raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
-    parsed = tomllib.loads(raw.decode("utf-8"))
+    return tomllib.loads(raw.decode("utf-8")).get("package", [])
+
+
+def _package_name(package: dict) -> str:
+    return package["name"].casefold().replace("_", "-")
+
+
+def _resolution_applies(package: dict) -> bool:
+    markers = package.get("resolution-markers", [])
+    return not markers or any(Marker(marker).evaluate() for marker in markers)
+
+
+def _locked_package_versions(lock_path: Path) -> dict[str, str]:
     observed: dict[str, set[str]] = {}
-    for package in parsed.get("package", []):
-        markers = package.get("resolution-markers", [])
-        if markers and not any(Marker(marker).evaluate() for marker in markers):
+    for package in _lock_packages(lock_path):
+        if not _resolution_applies(package):
             continue
-        name = package["name"].casefold().replace("_", "-")
-        observed.setdefault(name, set()).add(package["version"])
+        observed.setdefault(_package_name(package), set()).add(package["version"])
     return {name: next(iter(versions)) for name, versions in observed.items() if len(versions) == 1}
 
 
@@ -1087,13 +1295,31 @@ def _is_recorded_digest(value: object) -> bool:
 
 
 def _locked_package_version_sets(lock_path: Path) -> dict[str, set[str]]:
-    raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
-    parsed = tomllib.loads(raw.decode("utf-8"))
     observed: dict[str, set[str]] = {}
-    for package in parsed.get("package", []):
-        name = package["name"].casefold().replace("_", "-")
-        observed.setdefault(name, set()).add(package["version"])
+    for package in _lock_packages(lock_path):
+        observed.setdefault(_package_name(package), set()).add(package["version"])
     return observed
+
+
+def _required_locked_packages(vector_backend: str, lexical_config: str) -> set[str]:
+    required = {"sentence-transformers", "transformers", "torch", "numpy"}
+    if vector_backend in {"usearch-exact", "usearch-hnsw"}:
+        required.add("usearch")
+    if lexical_config in {"L3", "L4"}:
+        required.add("jieba")
+    return required
+
+
+def _verified_installed_version(name: str, locked: dict[str, str], version_getter) -> str:
+    if name not in locked:
+        raise ValueError(f"{name} is absent from uv.lock")
+    try:
+        installed = version_getter(name)
+    except (KeyError, importlib_metadata.PackageNotFoundError) as exc:
+        raise ValueError(f"{name} locked dependency is not installed") from exc
+    if installed != locked[name]:
+        raise ValueError(f"{name} installed version {installed} does not match locked {locked[name]}")
+    return installed
 
 
 def _verify_locked_environment(
@@ -1103,24 +1329,8 @@ def _verify_locked_environment(
     version_getter=importlib_metadata.version,
 ) -> dict:
     locked = _locked_package_versions(ROOT / "uv.lock")
-    required = {"sentence-transformers", "transformers", "torch", "numpy"}
-    if vector_backend in {"usearch-exact", "usearch-hnsw"}:
-        required.add("usearch")
-    if lexical_config in {"L3", "L4"}:
-        required.add("jieba")
-    verified = {}
-    for name in sorted(required):
-        if name not in locked:
-            raise ValueError(f"{name} is absent from uv.lock")
-        try:
-            installed = version_getter(name)
-        except (KeyError, importlib_metadata.PackageNotFoundError) as exc:
-            raise ValueError(f"{name} locked dependency is not installed") from exc
-        if installed != locked[name]:
-            raise ValueError(
-                f"{name} installed version {installed} does not match locked {locked[name]}"
-            )
-        verified[name] = installed
+    required = _required_locked_packages(vector_backend, lexical_config)
+    verified = {name: _verified_installed_version(name, locked, version_getter) for name in sorted(required)}
     return {
         "packages": verified,
         "package_map_sha256": _sha256_json(verified),
@@ -1128,7 +1338,7 @@ def _verify_locked_environment(
     }
 
 
-def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
+def _pinned_jieba_distribution() -> tuple[object, object]:
     try:
         module = importlib.import_module("jieba")
         distribution = importlib_metadata.distribution("jieba")
@@ -1136,50 +1346,88 @@ def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
         raise ValueError(f"lexical configuration requires installed jieba {JIEBA_VERSION}") from exc
     if distribution.version != JIEBA_VERSION:
         raise ValueError(f"lexical configuration requires exactly jieba {JIEBA_VERSION}")
-    providers = importlib_metadata.packages_distributions().get("jieba", [])
-    if providers != ["jieba"]:
+    if importlib_metadata.packages_distributions().get("jieba", []) != ["jieba"]:
         raise ValueError("jieba import does not have exact distribution provenance")
+    return module, distribution
+
+
+def _jieba_dictionary_path(module: object, distribution) -> Path:
     files = {str(path).replace("\\", "/") for path in distribution.files or ()}
-    required_files = {"jieba/__init__.py", "jieba/dict.txt"}
-    if not required_files <= files:
+    if not {"jieba/__init__.py", "jieba/dict.txt"} <= files:
         raise ValueError("jieba distribution provenance lacks required package files")
     module_path = Path(getattr(module, "__file__", "")).resolve()
     expected_module = Path(distribution.locate_file("jieba/__init__.py")).resolve()
-    dictionary_path = Path(distribution.locate_file("jieba/dict.txt")).resolve()
     if module_path != expected_module:
         raise ValueError("jieba import path does not match distribution provenance")
+    return Path(distribution.locate_file("jieba/dict.txt")).resolve()
+
+
+def _pinned_jieba_dictionary_hash(dictionary_path: Path) -> str:
     dictionary_hash = _sha256_file(dictionary_path)
     if dictionary_hash != JIEBA_DEFAULT_DICTIONARY_SHA256:
         raise ValueError("jieba default dictionary SHA256 does not match pinned artifact")
+    return dictionary_hash
+
+
+def _jieba_tokenizer_type(module: object):
     tokenizer_type = getattr(module, "Tokenizer", None)
     if not callable(tokenizer_type):
         raise ValueError("installed jieba package has no Tokenizer class")
+    return tokenizer_type
+
+
+def _require_not_reparse(path: Path, message: str) -> None:
+    if path.exists() and _is_reparse_point(path):
+        raise ValueError(message)
+
+
+def _jieba_cache_directory(cache_root: Path) -> Path:
     cache_dir = cache_root / "jieba"
-    if cache_dir.exists() and _is_reparse_point(cache_dir):
-        raise ValueError("jieba cache directory must not be a symlink or reparse point")
+    _require_not_reparse(cache_dir, "jieba cache directory must not be a symlink or reparse point")
     cache_dir.mkdir(mode=0o700, exist_ok=True)
     if _is_reparse_point(cache_dir):
         raise ValueError("jieba cache directory must not be a symlink or reparse point")
     resolved_cache_dir = cache_dir.resolve(strict=True)
     if resolved_cache_dir.parent != cache_root or cache_root not in resolved_cache_dir.parents:
         raise ValueError("jieba cache directory escaped lexical cache root")
+    return resolved_cache_dir
+
+
+def _require_owner_only_cache(resolved_cache_dir: Path) -> None:
     cache_stat = resolved_cache_dir.stat(follow_symlinks=False)
     if hasattr(os, "getuid") and cache_stat.st_uid != os.getuid():
         raise PermissionError("jieba cache directory is not owned by the current user")
     if os.name == "posix" and stat.S_IMODE(cache_stat.st_mode) & 0o077:
         raise PermissionError("jieba cache directory must be owner-controlled")
+
+
+def _jieba_cache_file(resolved_cache_dir: Path) -> tuple[str, Path]:
     cache_name = f"jieba-{JIEBA_VERSION}.cache"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", cache_name):
         raise ValueError("jieba cache filename is not a bounded basename")
     cache_path = resolved_cache_dir / cache_name
-    if cache_path.exists() and _is_reparse_point(cache_path):
-        raise ValueError("jieba cache file must not be a symlink or reparse point")
+    _require_not_reparse(cache_path, "jieba cache file must not be a symlink or reparse point")
+    return cache_name, cache_path
+
+
+def _initialized_jieba_tokenizer(tokenizer_type, resolved_cache_dir: Path, cache_name: str, cache_path: Path):
     tokenizer = tokenizer_type()
     tokenizer.tmp_dir = str(resolved_cache_dir)
     tokenizer.cache_file = cache_name
     tokenizer.initialize()
     if not cache_path.is_file() or _is_reparse_point(cache_path):
         raise ValueError("jieba cache file was not safely created")
+    return tokenizer
+
+
+def _load_pinned_jieba(cache_root: Path) -> tuple[object, dict]:
+    module, distribution = _pinned_jieba_distribution()
+    dictionary_hash = _pinned_jieba_dictionary_hash(_jieba_dictionary_path(module, distribution))
+    tokenizer_type = _jieba_tokenizer_type(module)
+    resolved_cache_dir = _jieba_cache_directory(cache_root)
+    _require_owner_only_cache(resolved_cache_dir)
+    cache_name, cache_path = _jieba_cache_file(resolved_cache_dir)
+    tokenizer = _initialized_jieba_tokenizer(tokenizer_type, resolved_cache_dir, cache_name, cache_path)
     return tokenizer, {
         "provenance": "pinned-installed",
         "quality_evidence": True,
