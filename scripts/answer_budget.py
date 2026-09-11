@@ -61,7 +61,7 @@ MIN_BUDGET_TOKENS = 32
 # Research: `docs/research/2026-08-29-a-default-budget-for-a-dead-code-answer.md`.
 DEFAULT_BUDGET_TOKENS = MAX_BUDGET_TOKENS
 
-# `code:<kind>:<32 hex>` - the form scripts/code_extractor.py:226 mints.
+# `code:<kind>:<32 hex>` - the form `code_extractor._identifier` mints.
 _OPAQUE_IDENTIFIER = re.compile(r"\Acode:[a-z]+:[0-9a-f]{32}\Z")
 
 # Derivable from a field that stays; dropped only under budget pressure.

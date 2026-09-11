@@ -105,3 +105,30 @@ The issue #24 branch, once finished, touched none of `scripts/code_workspace.py`
 `integration_adapter`, `evidence_graph`, `mcp_server`, `scheduled_nightly`,
 `doctor` and the OpenCode plugin), so these five are taken now; only the files
 that branch changed wait for it.
+
+## The extractor keeps its version
+
+`scripts/code_extractor.py` (46 findings) mints every node, assertion and
+observation the evidence graph holds, so the refactor is judged by its
+output, not by its tests alone: the old and the new `extract_code` over all
+541 tracked sources of this repository (Python, Bash, JavaScript,
+TypeScript) return equal records — 28,181 nodes, 77,807 assertions, 83,122
+observations — and equal ones again with 200 SCIP symbols and 30
+co-changes, with a deadline set, and for every refused input (same
+exception, same message). A cancellation callback counting its own calls
+fires at the same call in both (1, 6, 501, 50,001), so every stop check
+sits where it sat. Because the output is byte-identical,
+`EXTRACTOR_VERSION` stays `code-extractor/v11`: a bump would only force a
+full graph rebuild for nothing.
+
+The first cut was 7-14% slower (23.4 s → 25.6 s on the repository). The
+profile named the cost: argument validation repeated in each of 6.6 million
+stop checks, one extra call per scalar in `_deep_freeze`, and one extra call
+per AST node. The collector now validates `deadline` and `cancelled` once,
+in its constructor (`extract_code` already validated them before building
+it), `_deep_freeze` returns scalars first, and the edge passes filter node
+types before calling out. The second cut runs 23.8 s against 23.9 s.
+
+`scripts/answer_budget.py` pointed at "scripts/code_extractor.py:226" for
+the identifier form; the line had already drifted, and the comment now
+names `code_extractor._identifier` instead.
