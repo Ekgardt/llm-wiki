@@ -292,7 +292,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   backend or drop the recall columns for the exact cell.
 
 ### M12 — Test helpers over the gate [defect]
-- Status: open — `_damage_v3` and the other helpers are a mechanical table-dispatch rewrite; not started 2026-09-11.
+- Status: closed 2026-09-11. `_damage_v3` is a table of damage → SQL plus three named multi-statement damages and one `eof-` prefix rule; the six other functions are split into named helpers. lizard reports no function over 5 in the seven files the finding named (`docs/research/2026-09-11-test-helpers-obey-the-same-gate.md`).
 - Rule: R5 (tests are code the owner maintains).
 - Evidence: lizard: `tests/test_evidence_graph.py:377` `_damage_v3` CCN 26
   (an `if/elif` ladder of 24 arms), `:774` CCN 10, `:1075` CCN 8;

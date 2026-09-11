@@ -84,46 +84,86 @@ def test_compile_context_items_preserves_mandatory_items_and_drops_history_whole
     assert "history-must-not-be-sliced" not in packed.text
 
 
-def _resolved_call_targets(source: str) -> set[str]:
-    tree = ast.parse(source)
+def _local_name(alias: ast.alias) -> str:
+    return alias.asname or alias.name
+
+
+def _bindings_of_import(node: ast.AST) -> dict[str, str]:
+    """Local name -> dotted target for one `import` or `from ... import`; else empty."""
+    if isinstance(node, ast.Import):
+        return {_local_name(alias): alias.name for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return _bindings_of_import_from(node)
+    return {}
+
+
+def _bindings_of_import_from(node: ast.ImportFrom) -> dict[str, str]:
+    if not node.module:
+        return {}
+    return {_local_name(alias): f"{node.module}.{alias.name}" for alias in node.names}
+
+
+def _import_bindings(tree: ast.AST) -> dict[str, str]:
     bindings: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        bindings.update(_bindings_of_import(node))
+    return bindings
 
-    def resolve(expression: ast.expr) -> str | None:
-        if isinstance(expression, ast.Name):
-            return bindings.get(expression.id, expression.id)
-        if isinstance(expression, ast.Attribute):
-            owner = resolve(expression.value)
-            return f"{owner}.{expression.attr}" if owner else None
+
+def _resolve(bindings: dict[str, str], expression: ast.expr) -> str | None:
+    if isinstance(expression, ast.Name):
+        return bindings.get(expression.id, expression.id)
+    if not isinstance(expression, ast.Attribute):
         return None
+    owner = _resolve(bindings, expression.value)
+    if owner is None:
+        return None
+    return f"{owner}.{expression.attr}"
 
+
+def _single_name_assignments(tree: ast.AST) -> list[tuple[str, ast.expr]]:
+    pairs = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        if isinstance(node.targets[0], ast.Name):
+            pairs.append((node.targets[0].id, node.value))
+    return pairs
+
+
+def _bind_assignment(bindings: dict[str, str], name: str, value: ast.expr) -> bool:
+    """Bind `name` to what `value` resolves to; True when the binding changed."""
+    target = _resolve(bindings, value)
+    if target is None or bindings.get(name) == target:
+        return False
+    bindings[name] = target
+    return True
+
+
+def _propagate_assignments(tree: ast.AST, bindings: dict[str, str]) -> None:
+    """Follow `x = module.attr` chains to a fixed point."""
+    assignments = _single_name_assignments(tree)
     changed = True
     while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-            ):
-                target = resolve(node.value)
-                name = node.targets[0].id
-                if target and bindings.get(name) != target:
-                    bindings[name] = target
-                    changed = True
+        changed = any([_bind_assignment(bindings, name, value) for name, value in assignments])
 
-    return {
-        target
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        if (target := resolve(node.func)) is not None
-    }
+
+def _resolved_call_targets(source: str) -> set[str]:
+    tree = ast.parse(source)
+    bindings = _import_bindings(tree)
+    _propagate_assignments(tree, bindings)
+    calls = [node.func for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    targets = {_resolve(bindings, function) for function in calls}
+    targets.discard(None)
+    return targets
+
+
+def _calls_pack_context_directly(calls: set[str]) -> bool:
+    return bool(calls & {"context_budget.pack_context", "pack_context"})
+
+
+def _crosses_compile_boundary(calls: set[str], approved: set[str]) -> bool:
+    return "context_compiler.compile_context_items" in calls or bool(calls & approved)
 
 
 def _producer_boundary_errors(
@@ -133,10 +173,9 @@ def _producer_boundary_errors(
 ) -> tuple[str, ...]:
     calls = _resolved_call_targets(source)
     errors = []
-    if "context_budget.pack_context" in calls or "pack_context" in calls:
+    if _calls_pack_context_directly(calls):
         errors.append("direct pack_context call")
-    approved = approved_structured_apis or set()
-    if "context_compiler.compile_context_items" not in calls and not calls & approved:
+    if not _crosses_compile_boundary(calls, approved_structured_apis or set()):
         errors.append("missing compile_context_items boundary")
     return tuple(errors)
 
@@ -384,21 +423,27 @@ def test_source_hash_invalidation_rejects_stale_items():
     page_v1 = _page("auth.md", "Auth", "First summary.", "First body.")
     snapshot_v1 = _snapshot((page_v1,))
 
-    first = compile_context(snapshot_v1)
-    first_item_ids = {i.item_id for i in first.items}
+    first_item_ids = _item_ids(compile_context(snapshot_v1))
 
     # Same logical_id, different bytes → different source SHA-256.
     page_v2 = _page("auth.md", "Auth", "Second summary.", "Second body.")
     snapshot_v2 = _snapshot((page_v2,))
 
-    second = compile_context(snapshot_v2)
-    second_item_ids = {i.item_id for i in second.items}
+    second_item_ids = _item_ids(compile_context(snapshot_v2))
 
     assert first_item_ids != second_item_ids
     # Item IDs embed the source hash so cache keys cannot conflate versions.
-    assert all(page_v1.record.sha256 not in item_id for item_id in second_item_ids)
-    assert any(page_v2.record.sha256 in i.item_id for i in second.items)
-    assert any(page_v1.record.sha256 in i.item_id for i in first.items)
+    assert not _ids_naming(page_v1.record.sha256, second_item_ids)
+    assert _ids_naming(page_v2.record.sha256, second_item_ids)
+    assert _ids_naming(page_v1.record.sha256, first_item_ids)
+
+
+def _item_ids(result) -> set[str]:
+    return {item.item_id for item in result.items}
+
+
+def _ids_naming(sha256: str, item_ids: set[str]) -> set[str]:
+    return {item_id for item_id in item_ids if sha256 in item_id}
 
 
 def test_duplicate_stems_are_detected_without_conflation():
@@ -779,9 +824,7 @@ def test_requested_l2_evidence_outranks_l1_orientation_under_constrained_budget(
         evidence_chunk_ids=(chunk.id,),
         small_parent_chars=1,
     )
-    l1 = next(item for item in unconstrained.items if item.representation == "l1")
-    l2 = next(item for item in unconstrained.items if item.representation == "l2")
-    one_item_budget = max(len(l1.text.encode()), len(l2.text.encode()))
+    one_item_budget = max(_representation_bytes(unconstrained, "l1", "l2"))
 
     constrained = compile_context(
         snapshot,
@@ -791,9 +834,20 @@ def test_requested_l2_evidence_outranks_l1_orientation_under_constrained_budget(
         budget=ContextBudget(None, one_item_budget, 0, 0),
     )
 
-    assert any(item.representation == "l2" for item in constrained.items)
-    assert not any(item.representation == "l1" for item in constrained.items)
+    assert _representations(constrained) == {"l2"}
     assert constrained.trace.retrieval.evidence_chunk_ids == (chunk.id,)
+
+
+def _representations(result) -> set[str]:
+    return {item.representation for item in result.items}
+
+
+def _representation_bytes(result, *representations: str) -> list[int]:
+    """The encoded size of the first item of each named representation."""
+    by_representation = {}
+    for item in result.items:
+        by_representation.setdefault(item.representation, len(item.text.encode()))
+    return [by_representation[name] for name in representations]
 
 
 def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):

@@ -374,137 +374,141 @@ def test_v3_expansion_ceiling_rejects_before_database_creation(
     assert not path.exists()
 
 
+_SCOPE_COPY = (
+    "INSERT INTO analysis_scope SELECT '{scope}',run_id,source_manifest_sha256,"
+    "{target},build_configuration,0,?,generated_sources,dependency_resolution,"
+    "analyzer_support FROM analysis_scope LIMIT 1"
+)
+_EMPTY_SET_SHA = hashlib.sha256(b"[]").hexdigest()
+_BAD_SHA = "f" * 64
+
+# damage name -> one SQL statement and its parameters.
+_V3_DAMAGE_SQL: dict[str, tuple[str, tuple]] = {
+    "missing-scope": ("DELETE FROM analysis_scope", ()),
+    "extra-scope": (
+        _SCOPE_COPY.format(scope="scope:extra", target="build_target||'-extra'"),
+        (_EMPTY_SET_SHA,),
+    ),
+    "duplicate-target-configuration": (
+        _SCOPE_COPY.format(scope="scope:duplicate", target="build_target"),
+        (_EMPTY_SET_SHA,),
+    ),
+    "scope-set-hash": ("UPDATE analyzer_run SET expected_scope_set_sha256=?", (_BAD_SHA,)),
+    "scope-source-manifest": ("UPDATE analysis_scope SET source_manifest_sha256=?", (_BAD_SHA,)),
+    "missing-capability": (
+        "DELETE FROM run_capability WHERE capability="
+        "(SELECT capability FROM run_capability LIMIT 1)",
+        (),
+    ),
+    "capability-set-hash": (
+        "UPDATE analyzer_run SET declared_capabilities_sha256=?",
+        (_BAD_SHA,),
+    ),
+    "missing-source": (
+        "DELETE FROM expected_source WHERE source_id="
+        "(SELECT source_id FROM expected_source LIMIT 1)",
+        (),
+    ),
+    "source-set-hash": ("UPDATE analysis_scope SET expected_source_set_sha256=?", (_BAD_SHA,)),
+    "missing-coverage": (
+        "DELETE FROM coverage WHERE capability=(SELECT capability FROM coverage LIMIT 1)",
+        (),
+    ),
+    "extra-coverage": ("INSERT INTO coverage SELECT * FROM coverage LIMIT 1", ()),
+    "duplicate-selected-slice": (
+        "INSERT INTO slice_activation SELECT slice_id||':duplicate',slice_key,"
+        "run_id,scope_id,capability,1,selection_reason FROM slice_activation LIMIT 1",
+        (),
+    ),
+    "missing-selected-slice": ("UPDATE slice_activation SET selected=0 WHERE selected=1", ()),
+    "invalid-validity-subject": (
+        "INSERT INTO validity VALUES ('validity:invalid',NULL,NULL,NULL,'current',NULL)",
+        (),
+    ),
+    "wrong-repository": ("UPDATE analyzer_run SET repository_id=repository_id||':wrong'", ()),
+    "wrong-checkout": ("UPDATE analyzer_run SET checkout_id=checkout_id||':wrong'", ()),
+    "wrong-publication-generation": (
+        "UPDATE analyzer_run SET publication_generation_id='wrong-generation'",
+        (),
+    ),
+    "wrong-expected-active": (
+        "UPDATE analyzer_run SET publication_expected_active='wrong-active'",
+        (),
+    ),
+    "bad-analysis-hash": ("UPDATE analyzer_run SET analysis_sha256=?", (_BAD_SHA,)),
+    "bad-component-hash": ("UPDATE analyzer_run SET manifest_sha256=?", (_BAD_SHA,)),
+}
+
+
+def _damage_extra_capability(database: sqlite3.Connection) -> None:
+    run_id = database.execute("SELECT run_id FROM analyzer_run").fetchone()[0]
+    database.execute("INSERT INTO run_capability VALUES (?, 'diagnostics')", (run_id,))
+
+
+def _damage_extra_source(database: sqlite3.Connection) -> None:
+    empty_sha = hashlib.sha256(b"").hexdigest()
+    database.execute(
+        "INSERT INTO source VALUES "
+        "('source:extra','extra.py',?,0,'text/x-python','python',NULL,X'')",
+        (empty_sha,),
+    )
+    scope_id, run_id = database.execute("SELECT scope_id,run_id FROM analysis_scope").fetchone()
+    database.execute(
+        "INSERT INTO expected_source VALUES (?,?, 'source:extra',?,'included')",
+        (scope_id, run_id, empty_sha),
+    )
+
+
+def _damage_expected_source_hash_mismatch(database: sqlite3.Connection) -> None:
+    """Every expected source hash is wrong, and the set hash is recomputed over them."""
+    from reliable_memory import canonical_json_bytes
+
+    database.execute("UPDATE expected_source SET source_sha256=?", (_BAD_SHA,))
+    scope_id = database.execute("SELECT scope_id FROM analysis_scope").fetchone()[0]
+    rows = database.execute(
+        "SELECT source_id,source_sha256,disposition FROM expected_source "
+        "WHERE scope_id=? ORDER BY source_id",
+        (scope_id,),
+    ).fetchall()
+    entries = [{"source_id": row[0], "sha256": row[1], "disposition": row[2]} for row in rows]
+    digest = hashlib.sha256(canonical_json_bytes(entries)).hexdigest()
+    database.execute(
+        "UPDATE analysis_scope SET expected_source_set_sha256=? WHERE scope_id=?",
+        (digest, scope_id),
+    )
+
+
+def _damage_eof(database: sqlite3.Connection, table: str) -> None:
+    database.execute(
+        f"UPDATE {table} SET byte_end="
+        f"(SELECT size + 1 FROM source WHERE source_id={table}.source_id)"
+    )
+
+
+_V3_DAMAGE_FUNCTIONS = {
+    "extra-capability": _damage_extra_capability,
+    "extra-source": _damage_extra_source,
+    "expected-source-hash-mismatch": _damage_expected_source_hash_mismatch,
+}
+
+
+def _apply_v3_damage(database: sqlite3.Connection, damage: str) -> None:
+    if damage.startswith("eof-"):
+        _damage_eof(database, damage.removeprefix("eof-"))
+        return
+    function = _V3_DAMAGE_FUNCTIONS.get(damage)
+    if function is not None:
+        function(database)
+        return
+    if damage not in _V3_DAMAGE_SQL:
+        raise AssertionError(damage)
+    sql, params = _V3_DAMAGE_SQL[damage]
+    database.execute(sql, params)
+
+
 def _damage_v3(path: Path, damage: str) -> None:
     with sqlite3.connect(path) as database:
-        if damage == "missing-scope":
-            database.execute("DELETE FROM analysis_scope")
-        elif damage == "extra-scope":
-            empty_set = hashlib.sha256(b"[]").hexdigest()
-            database.execute(
-                "INSERT INTO analysis_scope SELECT 'scope:extra',run_id,"
-                "source_manifest_sha256,build_target||'-extra',build_configuration,0,?,"
-                "generated_sources,dependency_resolution,analyzer_support "
-                "FROM analysis_scope LIMIT 1",
-                (empty_set,),
-            )
-        elif damage == "duplicate-target-configuration":
-            empty_set = hashlib.sha256(b"[]").hexdigest()
-            database.execute(
-                "INSERT INTO analysis_scope SELECT 'scope:duplicate',run_id,"
-                "source_manifest_sha256,build_target,build_configuration,0,?,"
-                "generated_sources,dependency_resolution,analyzer_support "
-                "FROM analysis_scope LIMIT 1",
-                (empty_set,),
-            )
-        elif damage == "scope-set-hash":
-            database.execute(
-                "UPDATE analyzer_run SET expected_scope_set_sha256=?", ("f" * 64,)
-            )
-        elif damage == "scope-source-manifest":
-            database.execute(
-                "UPDATE analysis_scope SET source_manifest_sha256=?", ("f" * 64,)
-            )
-        elif damage == "missing-capability":
-            database.execute(
-                "DELETE FROM run_capability WHERE capability="
-                "(SELECT capability FROM run_capability LIMIT 1)"
-            )
-        elif damage == "extra-capability":
-            run_id = database.execute("SELECT run_id FROM analyzer_run").fetchone()[0]
-            database.execute(
-                "INSERT INTO run_capability VALUES (?, 'diagnostics')", (run_id,)
-            )
-        elif damage == "capability-set-hash":
-            database.execute(
-                "UPDATE analyzer_run SET declared_capabilities_sha256=?", ("f" * 64,)
-            )
-        elif damage == "missing-source":
-            database.execute(
-                "DELETE FROM expected_source WHERE source_id="
-                "(SELECT source_id FROM expected_source LIMIT 1)"
-            )
-        elif damage == "extra-source":
-            empty_sha = hashlib.sha256(b"").hexdigest()
-            database.execute(
-                "INSERT INTO source VALUES "
-                "('source:extra','extra.py',?,0,'text/x-python','python',NULL,X'')",
-                (empty_sha,),
-            )
-            scope_id, run_id = database.execute(
-                "SELECT scope_id,run_id FROM analysis_scope"
-            ).fetchone()
-            database.execute(
-                "INSERT INTO expected_source VALUES (?,?, 'source:extra',?,'included')",
-                (scope_id, run_id, empty_sha),
-            )
-        elif damage == "source-set-hash":
-            database.execute(
-                "UPDATE analysis_scope SET expected_source_set_sha256=?", ("f" * 64,)
-            )
-        elif damage == "missing-coverage":
-            database.execute(
-                "DELETE FROM coverage WHERE capability="
-                "(SELECT capability FROM coverage LIMIT 1)"
-            )
-        elif damage == "extra-coverage":
-            database.execute("INSERT INTO coverage SELECT * FROM coverage LIMIT 1")
-        elif damage == "duplicate-selected-slice":
-            database.execute(
-                "INSERT INTO slice_activation SELECT slice_id||':duplicate',slice_key,"
-                "run_id,scope_id,capability,1,selection_reason "
-                "FROM slice_activation LIMIT 1"
-            )
-        elif damage == "missing-selected-slice":
-            database.execute("UPDATE slice_activation SET selected=0 WHERE selected=1")
-        elif damage == "invalid-validity-subject":
-            database.execute(
-                "INSERT INTO validity VALUES "
-                "('validity:invalid',NULL,NULL,NULL,'current',NULL)"
-            )
-        elif damage in {"wrong-repository", "wrong-checkout"}:
-            column = "repository_id" if damage == "wrong-repository" else "checkout_id"
-            database.execute(f"UPDATE analyzer_run SET {column}={column}||':wrong'")
-        elif damage == "wrong-publication-generation":
-            database.execute(
-                "UPDATE analyzer_run SET publication_generation_id='wrong-generation'"
-            )
-        elif damage == "wrong-expected-active":
-            database.execute(
-                "UPDATE analyzer_run SET publication_expected_active='wrong-active'"
-            )
-        elif damage in {"bad-analysis-hash", "bad-component-hash"}:
-            column = "analysis_sha256" if damage == "bad-analysis-hash" else "manifest_sha256"
-            database.execute(f"UPDATE analyzer_run SET {column}=?", ("f" * 64,))
-        elif damage == "expected-source-hash-mismatch":
-            from reliable_memory import canonical_json_bytes
-
-            database.execute("UPDATE expected_source SET source_sha256=?", ("f" * 64,))
-            scope_id = database.execute("SELECT scope_id FROM analysis_scope").fetchone()[0]
-            rows = database.execute(
-                "SELECT source_id,source_sha256,disposition FROM expected_source "
-                "WHERE scope_id=? ORDER BY source_id",
-                (scope_id,),
-            ).fetchall()
-            digest = hashlib.sha256(
-                canonical_json_bytes(
-                    [
-                        {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
-                        for row in rows
-                    ]
-                )
-            ).hexdigest()
-            database.execute(
-                "UPDATE analysis_scope SET expected_source_set_sha256=? WHERE scope_id=?",
-                (digest, scope_id),
-            )
-        elif damage.startswith("eof-"):
-            table = damage.removeprefix("eof-")
-            database.execute(
-                f"UPDATE {table} SET byte_end="
-                f"(SELECT size + 1 FROM source WHERE source_id={table}.source_id)"
-            )
-        else:
-            raise AssertionError(damage)
+        _apply_v3_damage(database, damage)
 
 
 @pytest.mark.parametrize(
@@ -776,26 +780,9 @@ def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
     graph.close()
 
     with closing(sqlite3.connect(tmp_path / "evidence.sqlite3")) as database:
-        tables = {
-            row[0]
-            for row in database.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            )
-        }
-        indexes = {
-            row[0]
-            for row in database.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
-            )
-        }
-        evidence_indexes = {
-            row[1]: tuple(
-                column[2]
-                for column in database.execute(f"PRAGMA index_info({row[1]})")
-            )
-            for row in database.execute("PRAGMA index_list(evidence)")
-            if row[2] == 0
-        }
+        tables = _schema_names(database, "table")
+        indexes = _schema_names(database, "index")
+        evidence_indexes = _non_unique_index_columns(database, "evidence")
         validation_plan = database.execute(
             """
 EXPLAIN QUERY PLAN
@@ -832,10 +819,33 @@ LIMIT 1
         "occurrence_source_span",
     } <= indexes
     assert evidence_indexes["evidence_assertion"][:1] == ("assertion_id",)
-    evidence_steps = [detail for *_prefix, detail in validation_plan if " e" in detail]
-    assert any("SEARCH e" in detail for detail in evidence_steps), evidence_steps
-    assert all("SCAN e" not in detail for detail in evidence_steps), evidence_steps
+    evidence_steps = _plan_steps_over(validation_plan, " e")
+    assert _plan_mentions(evidence_steps, "SEARCH e"), evidence_steps
+    assert not _plan_mentions(evidence_steps, "SCAN e"), evidence_steps
     assert not (tmp_path / "evidence.sqlite3-wal").exists()
+
+
+def _schema_names(database: sqlite3.Connection, kind: str) -> set[str]:
+    rows = database.execute("SELECT name FROM sqlite_master WHERE type=?", (kind,))
+    return {row[0] for row in rows}
+
+
+def _index_columns(database: sqlite3.Connection, index: str) -> tuple[str, ...]:
+    return tuple(column[2] for column in database.execute(f"PRAGMA index_info({index})"))
+
+
+def _non_unique_index_columns(database: sqlite3.Connection, table: str) -> dict[str, tuple]:
+    rows = database.execute(f"PRAGMA index_list({table})").fetchall()
+    return {row[1]: _index_columns(database, row[1]) for row in rows if row[2] == 0}
+
+
+def _plan_steps_over(plan: list[tuple], alias: str) -> list[str]:
+    details = [row[-1] for row in plan]
+    return [detail for detail in details if alias in detail]
+
+
+def _plan_mentions(steps: list[str], text: str) -> bool:
+    return any(text in detail for detail in steps)
 
 
 def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(tmp_path):
@@ -1072,17 +1082,21 @@ def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_p
         evidence_graph.create_generation_database(tmp_path / "bad.sqlite3", **records)
 
 
+def _ids(rows) -> list[str]:
+    return [row["node_id"] for row in rows]
+
+
 def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(tmp_path):
     graph = _create(tmp_path)
 
-    assert [row["node_id"] for row in graph.neighbors("caller", direction="out")] == ["callee"]
-    assert [row["node_id"] for row in graph.neighbors("callee", direction="in")] == ["caller"]
+    assert _ids(graph.neighbors("caller", direction="out")) == ["callee"]
+    assert _ids(graph.neighbors("callee", direction="in")) == ["caller"]
     assert graph.path("caller", "callee")[0]["assertion_ids"] == ["call"]
-    assert [row["node_id"] for row in graph.callers("callee")] == ["caller"]
-    assert [row["node_id"] for row in graph.callees("caller")] == ["callee"]
-    assert [row["node_id"] for row in graph.dependencies("decision")] == ["caller"]
-    assert [row["node_id"] for row in graph.code_to_doc("caller")] == ["decision"]
-    assert [row["node_id"] for row in graph.doc_to_code("decision")] == ["caller"]
+    assert _ids(graph.callers("callee")) == ["caller"]
+    assert _ids(graph.callees("caller")) == ["callee"]
+    assert _ids(graph.dependencies("decision")) == ["caller"]
+    assert _ids(graph.code_to_doc("caller")) == ["decision"]
+    assert _ids(graph.doc_to_code("decision")) == ["caller"]
     assert graph.evidence(assertion_id="call")[0]["span_sha256"] == _sha(b"callee()")
     graph.close()
 

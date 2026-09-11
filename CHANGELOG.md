@@ -54,6 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
 - **A `recall` row carries its page, not the trace.** Through MCP each row
   repeated the twelve trace fields and thirteen per-signal scores the
   envelope already reports once; rows now carry the page, its score and
