@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -50,9 +51,12 @@ def _redact_feedback(value):
             redact_secrets(str(key)): _redact_feedback(item)
             for key, item in value.items()
         }
-    if isinstance(value, list):
-        return [_redact_feedback(item) for item in value]
-    if isinstance(value, tuple):
+    return _redact_sequence(value)
+
+
+def _redact_sequence(value):
+    """Lists and tuples come back as redacted lists; any other value unchanged."""
+    if isinstance(value, (list, tuple)):
         return [_redact_feedback(item) for item in value]
     return value
 
@@ -78,25 +82,26 @@ def _detect_feedback_type(text: str) -> tuple[str | None, float]:
 
     Returns (type, confidence) or (None, 0).
     """
-    if not text or len(text.strip()) < 10:
+    if _feedback_noise(text):
         return None, 0.0
-    if NOISE_PATTERNS.match(text.strip()):
-        return None, 0.0
-
-    matches = []
-    for pattern, ftype in CORRECTION_PATTERNS:
-        if pattern.search(text):
-            matches.append((ftype, 0.7))
-
+    matches = [(ftype, 0.7) for pattern, ftype in CORRECTION_PATTERNS if pattern.search(text)]
     if not matches:
         return None, 0.0
-
-    # Higher confidence if multiple patterns match
     best_type, best_conf = max(matches, key=lambda x: x[1])
-    if len(matches) >= 2:
-        best_conf = min(1.0, best_conf + 0.2)
+    return best_type, _boosted_confidence(best_conf, len(matches))
 
-    return best_type, best_conf
+
+def _feedback_noise(text: str) -> bool:
+    if not text or len(text.strip()) < 10:
+        return True
+    return bool(NOISE_PATTERNS.match(text.strip()))
+
+
+def _boosted_confidence(confidence: float, match_count: int) -> float:
+    # Higher confidence if multiple patterns match
+    if match_count >= 2:
+        return min(1.0, confidence + 0.2)
+    return confidence
 
 
 def capture_from_text(
@@ -180,25 +185,78 @@ _FEEDBACK_TYPE_MAP: dict[str, str] = {
 }
 
 
+_CATEGORY_TYPES = {
+    "debugging": "debugging",
+    "qa": "qa",
+    "decisions": "decision",
+    "concepts": "concept",
+    "workflow": "workflow",
+}
+
+
 def promote_candidate(candidate_id: str, category: str = "patterns") -> str | None:
     """Promote a feedback candidate to a knowledge page.
 
     Creates knowledge/notes/<category>/feedback-<id>.md with the
     feedback text as the page body.
     """
+    promotion = _promotion(candidate_id, category)
+    if promotion is None:
+        return None
+    page_key = promotion.page_path.relative_to(ROOT).as_posix()
+    mutate_knowledge(
+        stable_operation_id(
+            "feedback-promote", candidate_id, promotion.page_bytes + promotion.candidate_bytes
+        ),
+        {promotion.page_path: promotion.page_bytes, promotion.candidate_file: promotion.candidate_bytes},
+        preconditions={
+            page_key: ABSENT,
+            promotion.candidate_file.relative_to(ROOT).as_posix(): sha256_bytes(
+                promotion.candidate_bytes_before
+            ),
+        },
+    )
+    return page_key
+
+
+@dataclass(frozen=True)
+class _Promotion:
+    """The page to create and the candidate's new bytes, bound to the bytes it was read as."""
+
+    page_path: Path
+    page_bytes: bytes
+    candidate_file: Path
+    candidate_bytes: bytes
+    candidate_bytes_before: bytes
+
+
+def _promotion(candidate_id: str, category: str) -> _Promotion | None:
+    category = _allowed_category(candidate_id, category)
+    if category is None:
+        return None
+    candidate_file = FEEDBACK_DIR / f"{candidate_id}.json"
+    loaded = _read_candidate(candidate_file)
+    if loaded is None:
+        return None
+    return _prepared_promotion(candidate_id, category, candidate_file, *loaded)
+
+
+def _allowed_category(candidate_id: str, category: str) -> str | None:
+    """The normalized category when both the ID and the category are acceptable."""
     # candidate_id is a SHA-256 hash prefix (hex). Reject anything that
     # could traverse outside FEEDBACK_DIR (path traversal, H-009).
     if not re.match(r"^[a-f0-9]{6,64}$", candidate_id or ""):
         return None
-
     category = (category or "patterns").strip().lower()
-    if category not in ALLOWED_FEEDBACK_CATEGORIES or "/" in category or ".." in category:
+    if category not in ALLOWED_FEEDBACK_CATEGORIES:
         return None
+    return category
 
-    candidate_file = FEEDBACK_DIR / f"{candidate_id}.json"
+
+def _read_candidate(candidate_file: Path) -> tuple[dict, bytes] | None:
+    """(redacted candidate, its bytes as read); None when absent or unreadable."""
     if not candidate_file.exists():
         return None
-
     try:
         candidate_bytes_before = read_stable_bytes(
             candidate_file,
@@ -208,49 +266,50 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         candidate = json.loads(candidate_bytes_before.decode("utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
         return None
-    candidate = _redact_feedback(candidate)
+    return _redact_feedback(candidate), candidate_bytes_before
 
+
+def _prepared_promotion(
+    candidate_id: str, category: str, candidate_file: Path, candidate: dict, candidate_bytes_before: bytes
+) -> _Promotion | None:
     # Create knowledge page (containment-checked, flat layout)
     notes_root = (ROOT / "knowledge" / "notes").resolve()
-    knowledge_dir = notes_root  # flat layout
-    page_name = f"feedback-{candidate_id[:8]}.md"
-    page_path = knowledge_dir / page_name
-
+    page_path = notes_root / f"feedback-{candidate_id[:8]}.md"
     # Containment guard: the resolved page path must stay inside the
     # knowledge root (defense-in-depth on top of the category whitelist).
     if not page_path.resolve().is_relative_to(notes_root):
         return None
+    page_bytes = _promoted_page(candidate, candidate_id, _promoted_type(category, candidate)).encode("utf-8")
+    # Update candidate status
+    candidate["status"] = "promoted"
+    candidate["promoted_to"] = page_path.relative_to(ROOT).as_posix()
+    candidate_bytes = json.dumps(candidate, indent=2, ensure_ascii=False).encode("utf-8")
+    return _Promotion(page_path, page_bytes, candidate_file, candidate_bytes, candidate_bytes_before)
 
-    # YAML-escape interpolated fields (backslashes, quotes, newlines) using
-    # the same pattern as compile_memory.py to prevent frontmatter injection.
-    def _esc(s: str) -> str:
-        return (
-            str(s)
-            .replace(chr(92), chr(92) + chr(92))
-            .replace(chr(34), chr(92) + chr(34))
-            .replace(chr(10), " ")
-            .replace(chr(13), " ")
-        )
 
-    # Map category to canonical type if provided. The `--category` CLI
-    # arg otherwise only affected the (now-flat) path, so an explicit
-    # category was silently ignored in the frontmatter.
-    if category and category != "patterns":
-        type_from_category = {
-            "debugging": "debugging",
-            "qa": "qa",
-            "decisions": "decision",
-            "concepts": "concept",
-            "workflow": "workflow",
-        }.get(category)
-        if type_from_category:
-            page_type = type_from_category
-        else:
-            page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
-    else:
-        page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+def _promoted_type(category: str, candidate: dict) -> str:
+    """The page type an explicit category names; otherwise the candidate's mapped type.
 
-    page_content = (
+    The `--category` CLI arg otherwise only affected the (now-flat) path, so
+    an explicit category was silently ignored in the frontmatter.
+    """
+    return _CATEGORY_TYPES.get(category) or _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+
+
+def _yaml_escape(s: str) -> str:
+    """YAML-escape interpolated fields (backslashes, quotes, newlines) like compile_memory.py."""
+    return (
+        str(s)
+        .replace(chr(92), chr(92) + chr(92))
+        .replace(chr(34), chr(92) + chr(34))
+        .replace(chr(10), " ")
+        .replace(chr(13), " ")
+    )
+
+
+def _promoted_page(candidate: dict, candidate_id: str, page_type: str) -> str:
+    _esc = _yaml_escape
+    return (
         "---\n"
         f"type: {_esc(page_type)}\n"
         f"feedback_type: {_esc(candidate['type'])}\n"
@@ -273,23 +332,6 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         f"## Related\n"
         f"- [[knowledge/feedback/{candidate_id}.json]]\n"
     )
-    # Update candidate status
-    candidate["status"] = "promoted"
-    candidate["promoted_to"] = page_path.relative_to(ROOT).as_posix()
-    candidate_bytes = json.dumps(candidate, indent=2, ensure_ascii=False).encode("utf-8")
-    page_bytes = page_content.encode("utf-8")
-    mutate_knowledge(
-        stable_operation_id("feedback-promote", candidate_id, page_bytes + candidate_bytes),
-        {page_path: page_bytes, candidate_file: candidate_bytes},
-        preconditions={
-            page_path.relative_to(ROOT).as_posix(): ABSENT,
-            candidate_file.relative_to(ROOT).as_posix(): sha256_bytes(
-                candidate_bytes_before
-            ),
-        },
-    )
-
-    return page_path.relative_to(ROOT).as_posix()
 
 
 def _capture_from_stdin() -> int:
@@ -297,37 +339,61 @@ def _capture_from_stdin() -> int:
 
     Payload: {"text": "...", "session_id": "...", "slug": "...", "trigger": "..."}
     """
-    try:
-        raw = sys.stdin.read()
-    except OSError:
-        return 0
-    if not raw.strip():
-        return 0
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    text = str(payload.get("text") or "")
-    if not text.strip():
+    payload = _stdin_payload()
+    if payload is None:
         return 0
     cid = capture_from_text(
-        text,
-        session_id=str(payload.get("session_id") or "unknown"),
-        slug=str(payload.get("slug") or "unknown"),
-        trigger=str(payload.get("trigger") or "stdin"),
+        _payload_field(payload, "text", ""),
+        session_id=_payload_field(payload, "session_id", "unknown"),
+        slug=_payload_field(payload, "slug", "unknown"),
+        trigger=_payload_field(payload, "trigger", "stdin"),
     )
     if cid:
         print(cid)
     return 0
 
 
+def _payload_field(payload: dict, name: str, default: str) -> str:
+    return str(payload.get(name) or default)
+
+
+def _stdin_payload() -> dict | None:
+    """The JSON object on stdin when it carries non-blank text; None otherwise."""
+    payload = _stdin_json()
+    if not isinstance(payload, dict):
+        return None
+    if not _payload_field(payload, "text", "").strip():
+        return None
+    return payload
+
+
+def _stdin_json() -> object:
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 def main() -> int:
     # No args + non-TTY stdin → capture path (OpenCode plugin).
     if len(sys.argv) == 1 and not sys.stdin.isatty():
         return _capture_from_stdin()
+    parser = _argument_parser()
+    args = parser.parse_args()
+    command = _COMMANDS.get(args.command)
+    if command is None:
+        parser.print_help()
+        return 0
+    return command(args)
 
+
+def _argument_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Feedback capture and management.")
     sub = p.add_subparsers(dest="command")
 
@@ -344,56 +410,81 @@ def main() -> int:
     capture.add_argument("--session-id", default="unknown")
     capture.add_argument("--slug", default="unknown")
     capture.add_argument("--trigger", default="cli")
+    return p
 
-    args = p.parse_args()
 
-    if args.command == "list":
-        candidates = list_candidates("candidate")
-        if not candidates:
-            print("(no feedback candidates)")
-            return 0
-        print(f"Feedback candidates ({len(candidates)}):\n")
-        for c in candidates:
-            print(f"  [{c['id'][:8]}] ({c['type']}, conf={c['confidence']}) {c['text'][:80]}...")
-            print(f"    project: {c['project']}, captured: {c['captured_at']}")
-            print()
-    elif args.command == "list-all":
-        all_c = list_candidates("candidate") + list_candidates("promoted")
-        print(f"All feedback ({len(all_c)}):\n")
-        for c in all_c:
-            status = "✅" if c["status"] == "promoted" else "⏳"
-            print(f"  {status} [{c['id'][:8]}] ({c['type']}) {c['text'][:60]}...")
-    elif args.command == "promote":
-        result = promote_candidate(args.id, args.category)
-        if result:
-            print(f"Promoted to: {result}")
-        else:
-            print(f"Candidate {args.id} not found")
-            return 1
-    elif args.command == "capture":
-        text = args.text or ""
-        if args.transcript:
-            try:
-                text = Path(args.transcript).read_text(encoding="utf-8", errors="ignore")
-            except OSError as e:
-                print(f"feedback_capture: cannot read transcript: {e}", file=sys.stderr)
-                return 1
-        if not text.strip():
-            print("feedback_capture: no text provided", file=sys.stderr)
-            return 1
-        cid = capture_from_text(
-            text,
-            session_id=args.session_id,
-            slug=args.slug,
-            trigger=args.trigger,
-        )
-        if cid:
-            print(cid)
-        else:
-            print("(no feedback detected)")
-    else:
-        p.print_help()
+def _list_command(args: argparse.Namespace) -> int:
+    candidates = list_candidates("candidate")
+    if not candidates:
+        print("(no feedback candidates)")
+        return 0
+    print(f"Feedback candidates ({len(candidates)}):\n")
+    for c in candidates:
+        print(f"  [{c['id'][:8]}] ({c['type']}, conf={c['confidence']}) {c['text'][:80]}...")
+        print(f"    project: {c['project']}, captured: {c['captured_at']}")
+        print()
     return 0
+
+
+def _list_all_command(args: argparse.Namespace) -> int:
+    all_c = list_candidates("candidate") + list_candidates("promoted")
+    print(f"All feedback ({len(all_c)}):\n")
+    for c in all_c:
+        status = "✅" if c["status"] == "promoted" else "⏳"
+        print(f"  {status} [{c['id'][:8]}] ({c['type']}) {c['text'][:60]}...")
+    return 0
+
+
+def _promote_command(args: argparse.Namespace) -> int:
+    result = promote_candidate(args.id, args.category)
+    if not result:
+        print(f"Candidate {args.id} not found")
+        return 1
+    print(f"Promoted to: {result}")
+    return 0
+
+
+def _capture_command(args: argparse.Namespace) -> int:
+    text = _capture_text(args)
+    if text is None:
+        return 1
+    cid = capture_from_text(
+        text,
+        session_id=args.session_id,
+        slug=args.slug,
+        trigger=args.trigger,
+    )
+    print(cid if cid else "(no feedback detected)")
+    return 0
+
+
+def _capture_text(args: argparse.Namespace) -> str | None:
+    """The text to scan; None after saying on stderr why there is none."""
+    text = _source_text(args)
+    if text is None:
+        return None
+    if not text.strip():
+        print("feedback_capture: no text provided", file=sys.stderr)
+        return None
+    return text
+
+
+def _source_text(args: argparse.Namespace) -> str | None:
+    if not args.transcript:
+        return args.text or ""
+    try:
+        return Path(args.transcript).read_text(encoding="utf-8", errors="ignore")
+    except OSError as e:
+        print(f"feedback_capture: cannot read transcript: {e}", file=sys.stderr)
+        return None
+
+
+_COMMANDS = {
+    "list": _list_command,
+    "list-all": _list_all_command,
+    "promote": _promote_command,
+    "capture": _capture_command,
+}
 
 
 if __name__ == "__main__":
