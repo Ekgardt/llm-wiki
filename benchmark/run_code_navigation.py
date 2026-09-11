@@ -187,14 +187,18 @@ def _check_probe_error(error: BaseException, scenario: str) -> None:
     raise RuntimeError("ownership probe reached the wrong terminal") from error
 
 
-def _check_probe_terminal(
-    outcome: list[tuple[str, object]], scenario: str, dispatched: bool
-) -> None:
-    """What the probe ended with, refusing anything that measured nothing."""
+def _require_single_terminal(outcome: list[tuple[str, object]], dispatched: bool) -> None:
     if not dispatched:
         raise RuntimeError("ownership probe request was not sent")
     if len(outcome) != 1:
         raise RuntimeError("ownership probe did not reach the expected terminal")
+
+
+def _check_probe_terminal(
+    outcome: list[tuple[str, object]], scenario: str, dispatched: bool
+) -> None:
+    """What the probe ended with, refusing anything that measured nothing."""
+    _require_single_terminal(outcome, dispatched)
     if outcome[0][0] != "error":
         # The server answered inside the window between dispatch and the
         # interruption. Nothing was in flight to interrupt, so this attempt
@@ -390,15 +394,19 @@ def _validate_number(value: object, schema: dict) -> None:
         raise _SchemaViolation("number is above schema maximum")
 
 
+def _kind_validators() -> tuple:
+    return (
+        (lambda value: isinstance(value, dict), _validate_object),
+        (lambda value: isinstance(value, list), _validate_array),
+        (lambda value: isinstance(value, str), lambda value, schema, _root: _validate_string(value, schema)),
+        (_finite_number, lambda value, schema, _root: _validate_number(value, schema)),
+    )
+
+
 def _validate_by_kind(value: object, schema: dict, root: Mapping[str, object]) -> None:
-    if isinstance(value, dict):
-        _validate_object(value, schema, root)
-    if isinstance(value, list):
-        _validate_array(value, schema, root)
-    if isinstance(value, str):
-        _validate_string(value, schema)
-    if _finite_number(value):
-        _validate_number(value, schema)
+    for applies, validate in _kind_validators():
+        if applies(value):
+            validate(value, schema, root)
 
 
 def _validate_one_of(value: object, schema: dict, root: Mapping[str, object]) -> None:
@@ -1457,11 +1465,14 @@ class _RealNavigationRuntime:
             return self._session.definition(anchor, deadline=deadline)
         if request.capability is Capability.REFERENCES:
             return self._session.references(anchor, deadline=deadline)
-        if request.capability is Capability.CALLS:
-            if request.direction == "incoming":
-                return self._session.incoming_calls(anchor, deadline=deadline)
-            return self._session.outgoing_calls(anchor, deadline=deadline)
-        raise ValueError("unsupported direct qualification capability")
+        return self._direct_calls(request, anchor, deadline)
+
+    def _direct_calls(self, request: NavigationRequest, anchor: object, deadline: float) -> object:
+        if request.capability is not Capability.CALLS:
+            raise ValueError("unsupported direct qualification capability")
+        if request.direction == "incoming":
+            return self._session.incoming_calls(anchor, deadline=deadline)
+        return self._session.outgoing_calls(anchor, deadline=deadline)
 
     @property
     def position_encoding(self) -> PositionEncoding | None:
@@ -1664,14 +1675,18 @@ class _RealNavigationRuntime:
             self._recover_ownership_scenario()
             return None, False
 
+    def _ownership_attempt_or_stop(self, scenario: str, deadline: float) -> tuple[int | None, bool]:
+        """One attempt, or (None, False) when no attempt may start."""
+        if not self._can_attempt_ownership(deadline):
+            return None, False
+        return self._attempt_ownership_scenario(scenario, deadline)
+
     def _ownership_outcome(
         self, scenario: str, deadline: float
     ) -> dict[str, int | bool | None]:
         """One scenario's result, retrying attempts that measured nothing."""
         for _attempt in range(_OWNERSHIP_PROBE_ATTEMPTS):
-            if not self._can_attempt_ownership(deadline):
-                break
-            orphan, retry = self._attempt_ownership_scenario(scenario, deadline)
+            orphan, retry = self._ownership_attempt_or_stop(scenario, deadline)
             if orphan is not None:
                 return {"available": True, "orphan_count": orphan}
             if not retry:
@@ -1963,6 +1978,10 @@ def _definition_token_action(token, expect_name: bool) -> str | None:
         return "start"
     if not expect_name:
         return None
+    return _awaited_name_action(token)
+
+
+def _awaited_name_action(token) -> str | None:
     if token.type == tokenize.NAME:
         return "name"
     if token.type not in {tokenize.NL, tokenize.INDENT}:
@@ -2060,6 +2079,10 @@ def _entry_is_link(entry, metadata) -> bool:
 def _classify_entry(entry, metadata) -> str:
     if _entry_is_link(entry, metadata):
         return "skip"
+    return _unlinked_entry_kind(entry, metadata)
+
+
+def _unlinked_entry_kind(entry, metadata) -> str:
     if stat.S_ISDIR(metadata.st_mode):
         return "directory"
     if stat.S_ISREG(metadata.st_mode) and Path(entry.path).suffix == ".py":
@@ -2087,17 +2110,22 @@ def _visit_directory(scan: _OperatorScan, current: Path, depth: int) -> None:
     child_directories: list[tuple[Path, int]] = []
     for entry in sorted(entries, key=lambda item: item.name):
         _check_run_deadline(scan.deadline)
-        kind = _classify_entry(entry, _entry_metadata(entry))
-        path = Path(entry.path)
-        if kind == "directory":
-            child_directories.append(_child_directory(path, depth))
-            continue
-        if kind != "python":
-            continue
-        scan.files.append(_contained_python_file(path, scan.root))
-        if len(scan.files) >= OPERATOR_MAX_PYTHON_FILES:
+        if _visit_entry(scan, entry, depth, child_directories):
             break
     scan.stack.extend(reversed(child_directories))
+
+
+def _visit_entry(scan: _OperatorScan, entry, depth: int, child_directories: list[tuple[Path, int]]) -> bool:
+    """Record one entry; True once the file bound is reached."""
+    kind = _classify_entry(entry, _entry_metadata(entry))
+    path = Path(entry.path)
+    if kind == "directory":
+        child_directories.append(_child_directory(path, depth))
+        return False
+    if kind != "python":
+        return False
+    scan.files.append(_contained_python_file(path, scan.root))
+    return len(scan.files) >= OPERATOR_MAX_PYTHON_FILES
 
 
 def _operator_python_files(
@@ -2490,18 +2518,23 @@ class _FixtureRun:
                 return False
         return True
 
+    def _pair_error(self, query: GoldQuery, direct_results, facade_results) -> dict[str, str] | None:
+        if not _direct_results_are_exact(
+            self.runtime, self.repository, self.scope, query, direct_results, deadline=self.operation_deadline()
+        ):
+            return {"phase": "performance_direct", "code": "UnsuccessfulDirectResult"}
+        if not self._facade_valid(query, facade_results):
+            return {"phase": "performance_facade", "code": "UnsuccessfulNavigationResult"}
+        return None
+
     def _performance_query(self, query: GoldQuery) -> None:
         measured = self._measure_pair(_navigation_request(query, self.scope))
         if measured is None:
             return
         direct_results, facade_results, direct_ms, facade_ms = measured
-        if not _direct_results_are_exact(
-            self.runtime, self.repository, self.scope, query, direct_results, deadline=self.operation_deadline()
-        ):
-            self.errors.append({"phase": "performance_direct", "code": "UnsuccessfulDirectResult"})
-            return
-        if not self._facade_valid(query, facade_results):
-            self.errors.append({"phase": "performance_facade", "code": "UnsuccessfulNavigationResult"})
+        error = self._pair_error(query, direct_results, facade_results)
+        if error is not None:
+            self.errors.append(error)
             return
         self.direct_pyright.append(direct_ms)
         self.warm_facade.append(facade_ms)
@@ -3040,11 +3073,15 @@ def _gate_value_measured(value: object, measured: bool) -> bool:
 def _gate_passed(field: str, value: object, threshold: object, measured: bool) -> bool:
     if not _gate_value_measured(value, measured):
         return False
+    return _meets_threshold(field, float(value), float(threshold))
+
+
+def _meets_threshold(field: str, value: float, threshold: float) -> bool:
     if field in _MINIMUM_GATES:
-        return float(value) >= float(threshold)
+        return value >= threshold
     if field == "client_rss_mib":
-        return float(value) < float(threshold)
-    return float(value) <= float(threshold)
+        return value < threshold
+    return value <= threshold
 
 
 def _gate_entry(field: str, value: object, complete: bool) -> dict[str, object]:
@@ -3125,11 +3162,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not args.fixture:
         parser.error("--fixture is required")
+    _validate_path_arguments(parser, args)
+    return args
+
+
+def _validate_path_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.operator_corpus is not None:
         args.operator_corpus = _validated_operator_corpus(parser, args.operator_corpus)
     if args.state_root is not None and not args.state_root.is_absolute():
         parser.error("--state-root must be absolute")
-    return args
 
 
 def _error_exit(code_name: str, exit_code: int) -> int:

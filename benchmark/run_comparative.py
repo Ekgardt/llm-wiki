@@ -161,13 +161,30 @@ def _require_unique_contract_lists(contract: dict) -> None:
     _require_unique(contract["statistics"]["pairing"]["key"], "pairing keys")
 
 
+def _raise_on_first(checks: tuple) -> None:
+    """Raise ValueError with the message of the first check that fails, in order."""
+    for failed, message in checks:
+        if failed():
+            raise ValueError(message)
+
+
 def _require_contract_sets(contract: dict) -> None:
-    if {adapter["id"] for adapter in contract["adapters"]} != ADAPTER_IDS:
-        raise ValueError("comparative adapter set is incomplete")
-    if set(contract["fairness"]["identical_inputs"]) != FAIRNESS_KEYS:
-        raise ValueError("comparative contract does not require all identical inputs")
-    if set(contract["metrics"]["per_task_fields"]) != METRIC_FIELDS:
-        raise ValueError("comparative per-task metric ledger is incomplete")
+    _raise_on_first(
+        (
+            (
+                lambda: {adapter["id"] for adapter in contract["adapters"]} != ADAPTER_IDS,
+                "comparative adapter set is incomplete",
+            ),
+            (
+                lambda: set(contract["fairness"]["identical_inputs"]) != FAIRNESS_KEYS,
+                "comparative contract does not require all identical inputs",
+            ),
+            (
+                lambda: set(contract["metrics"]["per_task_fields"]) != METRIC_FIELDS,
+                "comparative per-task metric ledger is incomplete",
+            ),
+        )
+    )
 
 
 def _require_pinned_graphify(contract: dict) -> None:
@@ -179,14 +196,28 @@ def _require_pinned_graphify(contract: dict) -> None:
         raise ValueError("Graphify source or dependency lock is not pinned")
 
 
-def _require_frozen_gate_and_availability(contract: dict) -> None:
-    if contract["public_claim_gate"] != _CANONICAL_CLAIM_GATE:
-        raise ValueError("public claim gate differs from canonical Task 27 claim gate")
+def _real_execution_available(contract: dict) -> bool:
     availability = contract["availability"]
-    if availability["gate_f_passed"] or availability["heavy_comparison_available"]:
-        raise ValueError("early comparative contract must keep real execution unavailable")
-    if contract["provenance"]["configuration"]["sha256"] != configuration_fingerprint(contract):
-        raise ValueError("comparative configuration fingerprint mismatch")
+    return bool(availability["gate_f_passed"] or availability["heavy_comparison_available"])
+
+
+def _require_frozen_gate_and_availability(contract: dict) -> None:
+    _raise_on_first(
+        (
+            (
+                lambda: contract["public_claim_gate"] != _CANONICAL_CLAIM_GATE,
+                "public claim gate differs from canonical Task 27 claim gate",
+            ),
+            (
+                lambda: _real_execution_available(contract),
+                "early comparative contract must keep real execution unavailable",
+            ),
+            (
+                lambda: contract["provenance"]["configuration"]["sha256"] != configuration_fingerprint(contract),
+                "comparative configuration fingerprint mismatch",
+            ),
+        )
+    )
 
 
 def load_contract(contract_path: Path | str, schema_path: Path | str) -> dict:
@@ -268,6 +299,10 @@ def _canonical_scalar(value: object) -> tuple[bool, object]:
     """(handled, canonical form) for None, bool, int, float and str."""
     if value is None or isinstance(value, (bool, int)):
         return True, value
+    return _canonical_float_or_text(value)
+
+
+def _canonical_float_or_text(value: object) -> tuple[bool, object]:
     if isinstance(value, float):
         return True, _canonical_number(value)
     if isinstance(value, str):
@@ -279,6 +314,10 @@ def _canonical_evidence_value(value: object) -> object:
     handled, canonical = _canonical_scalar(value)
     if handled:
         return canonical
+    return _canonical_container(value)
+
+
+def _canonical_container(value: object) -> object:
     if isinstance(value, list):
         return [_canonical_evidence_value(item) for item in value]
     if isinstance(value, dict):
@@ -479,12 +518,17 @@ def _finding(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
 
 
+def _artifact_path(raw: object, base: Path) -> Path:
+    artifact_path = Path(raw)
+    if not artifact_path.is_absolute():
+        return base / artifact_path
+    return artifact_path
+
+
 def _artifact_verified(artifact: object, base: Path) -> bool:
     if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256"}:
         return False
-    artifact_path = Path(artifact["path"])
-    if not artifact_path.is_absolute():
-        artifact_path = base / artifact_path
+    artifact_path = _artifact_path(artifact["path"], base)
     if not artifact_path.is_file():
         return False
     return hashlib.sha256(artifact_path.read_bytes()).hexdigest() == artifact["sha256"]
@@ -539,13 +583,21 @@ def _manifest_fields_known(manifest: object) -> bool:
     return not (set(manifest) - (_REAL_MANIFEST_REQUIRED | {"hard_gates"}))
 
 
+def _manifest_incomplete(manifest: dict) -> bool:
+    return not _REAL_MANIFEST_REQUIRED <= set(manifest) or manifest.get("schema_version") != "comparative-run/v1"
+
+
 def _require_manifest_shape(manifest: object) -> None:
-    if not _manifest_fields_known(manifest):
-        raise ValueError("real manifest has unknown fields")
-    if not _REAL_MANIFEST_REQUIRED <= set(manifest) or manifest.get("schema_version") != "comparative-run/v1":
-        raise ValueError("real manifest is incomplete or has the wrong schema version")
-    if set(manifest["adapters"]) != ADAPTER_IDS:
-        raise ValueError("real manifest adapter set is incomplete")
+    _raise_on_first(
+        (
+            (lambda: not _manifest_fields_known(manifest), "real manifest has unknown fields"),
+            (
+                lambda: _manifest_incomplete(manifest),
+                "real manifest is incomplete or has the wrong schema version",
+            ),
+            (lambda: set(manifest["adapters"]) != ADAPTER_IDS, "real manifest adapter set is incomplete"),
+        )
+    )
 
 
 def _non_empty_str(value: object) -> bool:
@@ -642,12 +694,16 @@ def _require_manifest_seeds(seeds: object) -> None:
         raise ValueError("real manifest seeds are invalid")
 
 
+def _retry_policy_valid(retry: dict) -> bool:
+    return (
+        set(retry) == {"backoff", "max_attempts"}
+        and retry["backoff"] in {"none", "fixed", "exponential"}
+        and 1 <= retry["max_attempts"] <= 10
+    )
+
+
 def _require_retry_policy(retry: dict) -> None:
-    if set(retry) != {"backoff", "max_attempts"}:
-        raise ValueError("real manifest retry policy is invalid")
-    if retry["backoff"] not in {"none", "fixed", "exponential"}:
-        raise ValueError("real manifest retry policy is invalid")
-    if not 1 <= retry["max_attempts"] <= 10:
+    if not _retry_policy_valid(retry):
         raise ValueError("real manifest retry policy is invalid")
 
 
@@ -658,22 +714,33 @@ def _limits_within_hard_bounds(limits: dict) -> bool:
 
 
 def _require_limits(limits: dict) -> None:
-    if set(limits) != {"max_stderr_bytes", "max_stdout_bytes", "timeout_seconds"}:
-        raise ValueError("real manifest limits are incomplete")
-    if any(not _positive_int(value) for value in limits.values()):
-        raise ValueError("real manifest limits must be positive integers")
-    if not _limits_within_hard_bounds(limits):
-        raise ValueError("real manifest limits exceed hard bounds")
+    _raise_on_first(
+        (
+            (
+                lambda: set(limits) != {"max_stderr_bytes", "max_stdout_bytes", "timeout_seconds"},
+                "real manifest limits are incomplete",
+            ),
+            (
+                lambda: any(not _positive_int(value) for value in limits.values()),
+                "real manifest limits must be positive integers",
+            ),
+            (lambda: not _limits_within_hard_bounds(limits), "real manifest limits exceed hard bounds"),
+        )
+    )
+
+
+def _gate_f_fields_valid(gate_f: dict) -> bool:
+    return (
+        _non_empty_str(gate_f["evidence_path"])
+        and re.fullmatch(r"[0-9a-f]{64}", gate_f["evidence_sha256"]) is not None
+        and isinstance(gate_f["passed"], bool)
+    )
 
 
 def _gate_f_valid(gate_f: object) -> bool:
     if not isinstance(gate_f, dict) or set(gate_f) != {"evidence_path", "evidence_sha256", "passed"}:
         return False
-    if not _non_empty_str(gate_f["evidence_path"]):
-        return False
-    if re.fullmatch(r"[0-9a-f]{64}", gate_f["evidence_sha256"]) is None:
-        return False
-    return isinstance(gate_f["passed"], bool)
+    return _gate_f_fields_valid(gate_f)
 
 
 def _hard_gates_valid(hard_gates: object) -> bool:
@@ -695,29 +762,41 @@ def _env_list_valid(names: object) -> bool:
 
 
 def _require_adapter_config(adapter_id: str, config: dict) -> None:
-    if set(config) != {"command", "required_env"}:
-        raise ValueError(f"adapter {adapter_id} configuration is not closed")
-    if not _command_list_valid(config["command"], 32):
-        raise ValueError(f"adapter {adapter_id} command is invalid")
-    if not _env_list_valid(config["required_env"]):
-        raise ValueError(f"adapter {adapter_id} environment list is invalid")
+    _raise_on_first(
+        (
+            (lambda: set(config) != {"command", "required_env"}, f"adapter {adapter_id} configuration is not closed"),
+            (lambda: not _command_list_valid(config["command"], 32), f"adapter {adapter_id} command is invalid"),
+            (
+                lambda: not _env_list_valid(config["required_env"]),
+                f"adapter {adapter_id} environment list is invalid",
+            ),
+        )
+    )
+
+
+def _require_model(model: object) -> None:
+    if not _model_valid(model):
+        raise ValueError("real manifest model is invalid")
+
+
+def _require_declared_gates(manifest: dict) -> None:
+    if not _gate_f_valid(manifest["gate_f"]):
+        raise ValueError("real manifest Gate F declaration is invalid")
+    if not _hard_gates_valid(manifest.get("hard_gates")):
+        raise ValueError("real manifest hard gates are invalid")
 
 
 def _validate_real_manifest(manifest: dict) -> None:
     _require_manifest_shape(manifest)
     _require_manifest_repository(manifest["repository"])
     _require_manifest_graphify(manifest["graphify"])
-    if not _model_valid(manifest["model"]):
-        raise ValueError("real manifest model is invalid")
+    _require_model(manifest["model"])
     _require_hardware_and_budget(manifest)
     _require_manifest_tasks(manifest["tasks"])
     _require_manifest_seeds(manifest["seeds"])
     _require_retry_policy(manifest["retry_policy"])
     _require_limits(manifest["limits"])
-    if not _gate_f_valid(manifest["gate_f"]):
-        raise ValueError("real manifest Gate F declaration is invalid")
-    if not _hard_gates_valid(manifest.get("hard_gates")):
-        raise ValueError("real manifest hard gates are invalid")
+    _require_declared_gates(manifest)
     for adapter_id, config in manifest["adapters"].items():
         _require_adapter_config(adapter_id, config)
 
@@ -883,10 +962,14 @@ class _Sha256CounterRng:
 def _quality(ledger: dict) -> float:
     if ledger["outcome"] == "failure":
         return 0.0
-    executable = ledger["metrics"]["executable_task_success"]
+    return _metric_quality(ledger["metrics"])
+
+
+def _metric_quality(metrics: dict) -> float:
+    executable = metrics["executable_task_success"]
     if executable is not None:
         return 1.0 if executable else 0.0
-    factual = ledger["metrics"]["blinded_factual_correctness"]
+    factual = metrics["blinded_factual_correctness"]
     if factual is None:
         raise ValueError("missing quality metric")
     return float(factual)
@@ -1441,6 +1524,10 @@ def _missing_output(args: argparse.Namespace) -> bool:
 def _argument_error(args: argparse.Namespace) -> str | None:
     if not any((args.smoke, args.preflight, args.run, args.fixture)):
         return "real comparative execution is unavailable until Gate F and complete evidence"
+    return _missing_argument_error(args)
+
+
+def _missing_argument_error(args: argparse.Namespace) -> str | None:
     if _missing_manifest(args):
         return "comparative execution failed: --manifest is required"
     if _missing_output(args):

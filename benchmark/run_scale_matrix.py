@@ -212,6 +212,11 @@ def _ordered_top(scores: Any, active: Any, id_list: list[str], take: int) -> Sea
     )
 
 
+def _require_finite_inputs(np, matrix, q) -> None:
+    if not np.isfinite(matrix).all() or not np.isfinite(q).all():
+        raise ValueError("vectors and query must be finite")
+
+
 def exact_numpy_search(
     vectors: Any,
     query: Any,
@@ -227,8 +232,7 @@ def exact_numpy_search(
     _require_positive_int("k", k)
     q = _validated_query(query, matrix)
     id_list = _validated_ids(ids, matrix.shape[0])
-    if not np.isfinite(matrix).all() or not np.isfinite(q).all():
-        raise ValueError("vectors and query must be finite")
+    _require_finite_inputs(np, matrix, q)
     active = _validated_mask(mask, matrix)
     if not bool(active.any()):
         return SearchResult(ids=(), scores=())
@@ -261,6 +265,10 @@ def _percentile(values: Sequence[float], q: float) -> float | None:
     ordered = _ordered_finite(values)
     if len(ordered) == 1:
         return ordered[0]
+    return _interpolated(ordered, q)
+
+
+def _interpolated(ordered: list[float], q: float) -> float:
     pos = (len(ordered) - 1) * q
     lo = int(math.floor(pos))
     hi = int(math.ceil(pos))
@@ -357,6 +365,10 @@ def _valid_gate_values(values: dict[str, object]) -> tuple[dict[str, float], lis
 def _recall_reason(name: str, value: float | None) -> str | None:
     if value is None:
         return None
+    return _measured_recall_reason(name, value)
+
+
+def _measured_recall_reason(name: str, value: float) -> str | None:
     if not 0.0 <= value <= 1.0:
         return f"{name} must be in [0, 1]"
     if value < ADOPTION_RECALL_FLOOR:
@@ -397,7 +409,10 @@ def _both_positive(exact: float | None, candidate: float | None) -> bool:
 def _speedup(exact: float | None, candidate: float | None) -> tuple[float | None, str | None]:
     if not _both_positive(exact, candidate):
         return None, None
-    speedup = exact / candidate
+    return _speedup_verdict(exact / candidate)
+
+
+def _speedup_verdict(speedup: float) -> tuple[float | None, str | None]:
     if not math.isfinite(speedup):
         return None, "latency speedup is nonfinite"
     if speedup < ADOPTION_LATENCY_SPEEDUP_FLOOR:
@@ -711,14 +726,17 @@ def _require_adapter_arguments(adapter_id: str, queries: Any, k: int, selectivit
     _require_fraction("selectivity", selectivity)
 
 
+def _flat_cell_runner(adapter_id: str):
+    runners = {"usearch": _run_usearch_cell, "sqlite-vec": _run_sqlite_vec_cell}
+    if adapter_id not in runners:
+        raise RuntimeError(f"adapter not implemented: {adapter_id}")
+    return runners[adapter_id]
+
+
 def _run_optional_cell(adapter_id: str, **cell_arguments: Any) -> dict[str, Any]:
-    if adapter_id == "usearch":
-        return _run_usearch_cell(**cell_arguments)
     if adapter_id.startswith("lancedb"):
         return _run_lancedb_cell(**cell_arguments, ann=adapter_id.endswith("ann"))
-    if adapter_id == "sqlite-vec":
-        return _run_sqlite_vec_cell(**cell_arguments)
-    raise RuntimeError(f"adapter not implemented: {adapter_id}")
+    return _flat_cell_runner(adapter_id)(**cell_arguments)
 
 
 def _adoption_for(cell: dict[str, Any], exact_p95_ms: float | None) -> dict[str, Any]:
@@ -1505,6 +1523,10 @@ def _require_plan_inputs(
         raise ValueError("corpus_sizes must be non-empty and positive")
     if not _valid_adapters(adapters):
         raise ValueError("adapters must be non-empty and known")
+    _require_selectivity(selectivity)
+
+
+def _require_selectivity(selectivity: Sequence[float]) -> None:
     if not selectivity:
         raise ValueError("selectivity must be non-empty and in (0, 1]")
     for fraction in selectivity:
@@ -1726,6 +1748,10 @@ def _provenance_consistent(value: Any, metric_provenance: dict[str, Any]) -> boo
     status = metric_provenance.get("status")
     if (value is None) != (status == "unavailable"):
         return False
+    return _status_consistent(status, metric_provenance)
+
+
+def _status_consistent(status: object, metric_provenance: dict[str, Any]) -> bool:
     if status == "measured":
         return _measured_consistent(metric_provenance)
     if status == "unavailable":
