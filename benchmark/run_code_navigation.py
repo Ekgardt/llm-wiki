@@ -245,22 +245,22 @@ def _json_equal(left: object, right: object) -> bool:
     return left == right
 
 
+_SCHEMA_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
+    "null": lambda value: value is None,
+    "boolean": lambda value: isinstance(value, bool),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "number": lambda value: _finite_number(value),
+    "string": lambda value: isinstance(value, str),
+    "array": lambda value: isinstance(value, list),
+    "object": lambda value: isinstance(value, dict),
+}
+
+
 def _schema_type_matches(value: object, expected: str) -> bool:
-    if expected == "null":
-        return value is None
-    if expected == "boolean":
-        return isinstance(value, bool)
-    if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected == "number":
-        return _finite_number(value)
-    if expected == "string":
-        return isinstance(value, str)
-    if expected == "array":
-        return isinstance(value, list)
-    if expected == "object":
-        return isinstance(value, dict)
-    raise _SchemaViolation("unsupported schema type")
+    check = _SCHEMA_TYPE_CHECKS.get(expected)
+    if check is None:
+        raise _SchemaViolation("unsupported schema type")
+    return check(value)
 
 
 def _schema_accepts(value: object, schema: object, root: Mapping[str, object]) -> bool:
@@ -269,6 +269,163 @@ def _schema_accepts(value: object, schema: object, root: Mapping[str, object]) -
     except _SchemaViolation:
         return False
     return True
+
+
+def _reference_step(target: object, component: str) -> object:
+    if not isinstance(target, dict) or component not in target:
+        raise _SchemaViolation("schema reference is unresolved")
+    return target[component]
+
+
+def _resolve_reference(reference: object, root: Mapping[str, object]) -> object:
+    if not isinstance(reference, str) or not reference.startswith("#/"):
+        raise _SchemaViolation("only local schema references are supported")
+    target: object = root
+    for component in reference[2:].split("/"):
+        target = _reference_step(target, component)
+    return target
+
+
+def _all_strings(values: object) -> bool:
+    return isinstance(values, list) and all(isinstance(item, str) for item in values)
+
+
+def _expected_types(expected_type: object) -> list[str]:
+    expected_types = [expected_type] if isinstance(expected_type, str) else expected_type
+    if not _all_strings(expected_types) or not expected_types:
+        raise _SchemaViolation("schema type is invalid")
+    return expected_types
+
+
+def _validate_type(value: object, schema: dict) -> None:
+    expected_type = schema.get("type")
+    if expected_type is None:
+        return
+    if not any(_schema_type_matches(value, item) for item in _expected_types(expected_type)):
+        raise _SchemaViolation("value has the wrong type")
+
+
+def _in_enum(value: object, choices: object) -> bool:
+    return isinstance(choices, list) and any(_json_equal(value, item) for item in choices)
+
+
+def _validate_const_enum(value: object, schema: dict) -> None:
+    if "const" in schema and not _json_equal(value, schema["const"]):
+        raise _SchemaViolation("value differs from schema const")
+    if "enum" in schema and not _in_enum(value, schema["enum"]):
+        raise _SchemaViolation("value is outside schema enum")
+
+
+def _require_required_keys(value: dict, required: list) -> None:
+    if any(key not in value for key in required):
+        raise _SchemaViolation("required property is absent")
+
+
+def _require_no_additional(value: dict, schema: dict, properties: dict) -> None:
+    if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+        raise _SchemaViolation("additional property is forbidden")
+
+
+def _validate_properties(value: dict, properties: dict, root: Mapping[str, object]) -> None:
+    for key, child_schema in properties.items():
+        if key in value:
+            _validate_schema_node(value[key], child_schema, root)
+
+
+def _validate_object(value: dict, schema: dict, root: Mapping[str, object]) -> None:
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    if not _all_strings(required):
+        raise _SchemaViolation("schema required list is invalid")
+    if not isinstance(properties, dict):
+        raise _SchemaViolation("schema properties are invalid")
+    _require_required_keys(value, required)
+    _require_no_additional(value, schema, properties)
+    _validate_properties(value, properties, root)
+
+
+def _require_array_length(value: list, schema: dict) -> None:
+    minimum_items = schema.get("minItems")
+    maximum_items = schema.get("maxItems")
+    if isinstance(minimum_items, int) and len(value) < minimum_items:
+        raise _SchemaViolation("array is too short")
+    if isinstance(maximum_items, int) and len(value) > maximum_items:
+        raise _SchemaViolation("array is too long")
+
+
+def _items_unique(value: list) -> bool:
+    encoded = [_canonical_json(item) for item in value]
+    return len(encoded) == len(set(encoded))
+
+
+def _validate_array(value: list, schema: dict, root: Mapping[str, object]) -> None:
+    _require_array_length(value, schema)
+    if schema.get("uniqueItems") is True and not _items_unique(value):
+        raise _SchemaViolation("array items are not unique")
+    if "items" in schema:
+        for item in value:
+            _validate_schema_node(item, schema["items"], root)
+
+
+def _matches_pattern(value: str, pattern: object) -> bool:
+    if pattern is None:
+        return True
+    return isinstance(pattern, str) and re.search(pattern, value) is not None
+
+
+def _validate_string(value: str, schema: dict) -> None:
+    minimum_length = schema.get("minLength")
+    if isinstance(minimum_length, int) and len(value) < minimum_length:
+        raise _SchemaViolation("string is too short")
+    if not _matches_pattern(value, schema.get("pattern")):
+        raise _SchemaViolation("string does not match schema pattern")
+
+
+def _validate_number(value: object, schema: dict) -> None:
+    minimum = schema.get("minimum")
+    maximum = schema.get("maximum")
+    if _finite_number(minimum) and float(value) < float(minimum):
+        raise _SchemaViolation("number is below schema minimum")
+    if _finite_number(maximum) and float(value) > float(maximum):
+        raise _SchemaViolation("number is above schema maximum")
+
+
+def _validate_by_kind(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    if isinstance(value, dict):
+        _validate_object(value, schema, root)
+    if isinstance(value, list):
+        _validate_array(value, schema, root)
+    if isinstance(value, str):
+        _validate_string(value, schema)
+    if _finite_number(value):
+        _validate_number(value, schema)
+
+
+def _validate_one_of(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    one_of = schema.get("oneOf")
+    if one_of is None:
+        return
+    if not isinstance(one_of, list) or sum(_schema_accepts(value, candidate, root) for candidate in one_of) != 1:
+        raise _SchemaViolation("value does not match exactly one schema branch")
+
+
+def _validate_branch(value: object, branch: object, root: Mapping[str, object]) -> None:
+    if not isinstance(branch, dict):
+        raise _SchemaViolation("schema allOf branch is invalid")
+    condition = branch.get("if")
+    if condition is None:
+        _validate_schema_node(value, branch, root)
+        return
+    selected = branch.get("then", {}) if _schema_accepts(value, condition, root) else branch.get("else", {})
+    _validate_schema_node(value, selected, root)
+
+
+def _validate_all_of(value: object, schema: dict, root: Mapping[str, object]) -> None:
+    all_of = schema.get("allOf", [])
+    if not isinstance(all_of, list):
+        raise _SchemaViolation("schema allOf is invalid")
+    for branch in all_of:
+        _validate_branch(value, branch, root)
 
 
 def _validate_schema_node(
@@ -280,102 +437,13 @@ def _validate_schema_node(
         raise _SchemaViolation("schema node must be an object")
     reference = schema.get("$ref")
     if reference is not None:
-        if not isinstance(reference, str) or not reference.startswith("#/"):
-            raise _SchemaViolation("only local schema references are supported")
-        target: object = root
-        for component in reference[2:].split("/"):
-            if not isinstance(target, dict) or component not in target:
-                raise _SchemaViolation("schema reference is unresolved")
-            target = target[component]
-        _validate_schema_node(value, target, root)
+        _validate_schema_node(value, _resolve_reference(reference, root), root)
         return
-
-    expected_type = schema.get("type")
-    if expected_type is not None:
-        expected_types = [expected_type] if isinstance(expected_type, str) else expected_type
-        if not isinstance(expected_types, list) or not expected_types or not all(
-            isinstance(item, str) for item in expected_types
-        ):
-            raise _SchemaViolation("schema type is invalid")
-        if not any(_schema_type_matches(value, item) for item in expected_types):
-            raise _SchemaViolation("value has the wrong type")
-
-    if "const" in schema and not _json_equal(value, schema["const"]):
-        raise _SchemaViolation("value differs from schema const")
-    if "enum" in schema:
-        choices = schema["enum"]
-        if not isinstance(choices, list) or not any(_json_equal(value, item) for item in choices):
-            raise _SchemaViolation("value is outside schema enum")
-
-    if isinstance(value, dict):
-        required = schema.get("required", [])
-        properties = schema.get("properties", {})
-        if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
-            raise _SchemaViolation("schema required list is invalid")
-        if not isinstance(properties, dict):
-            raise _SchemaViolation("schema properties are invalid")
-        if any(key not in value for key in required):
-            raise _SchemaViolation("required property is absent")
-        if schema.get("additionalProperties") is False and any(
-            key not in properties for key in value
-        ):
-            raise _SchemaViolation("additional property is forbidden")
-        for key, child_schema in properties.items():
-            if key in value:
-                _validate_schema_node(value[key], child_schema, root)
-
-    if isinstance(value, list):
-        minimum_items = schema.get("minItems")
-        maximum_items = schema.get("maxItems")
-        if isinstance(minimum_items, int) and len(value) < minimum_items:
-            raise _SchemaViolation("array is too short")
-        if isinstance(maximum_items, int) and len(value) > maximum_items:
-            raise _SchemaViolation("array is too long")
-        if schema.get("uniqueItems") is True:
-            encoded = [_canonical_json(item) for item in value]
-            if len(encoded) != len(set(encoded)):
-                raise _SchemaViolation("array items are not unique")
-        if "items" in schema:
-            for item in value:
-                _validate_schema_node(item, schema["items"], root)
-
-    if isinstance(value, str):
-        minimum_length = schema.get("minLength")
-        if isinstance(minimum_length, int) and len(value) < minimum_length:
-            raise _SchemaViolation("string is too short")
-        pattern = schema.get("pattern")
-        if pattern is not None:
-            if not isinstance(pattern, str) or re.search(pattern, value) is None:
-                raise _SchemaViolation("string does not match schema pattern")
-
-    if _finite_number(value):
-        minimum = schema.get("minimum")
-        maximum = schema.get("maximum")
-        if _finite_number(minimum) and float(value) < float(minimum):
-            raise _SchemaViolation("number is below schema minimum")
-        if _finite_number(maximum) and float(value) > float(maximum):
-            raise _SchemaViolation("number is above schema maximum")
-
-    one_of = schema.get("oneOf")
-    if one_of is not None:
-        if not isinstance(one_of, list) or sum(
-            _schema_accepts(value, candidate, root) for candidate in one_of
-        ) != 1:
-            raise _SchemaViolation("value does not match exactly one schema branch")
-    all_of = schema.get("allOf", [])
-    if not isinstance(all_of, list):
-        raise _SchemaViolation("schema allOf is invalid")
-    for branch in all_of:
-        if not isinstance(branch, dict):
-            raise _SchemaViolation("schema allOf branch is invalid")
-        condition = branch.get("if")
-        if condition is None:
-            _validate_schema_node(value, branch, root)
-            continue
-        selected = branch.get("then", {}) if _schema_accepts(value, condition, root) else branch.get(
-            "else", {}
-        )
-        _validate_schema_node(value, selected, root)
+    _validate_type(value, schema)
+    _validate_const_enum(value, schema)
+    _validate_by_kind(value, schema, root)
+    _validate_one_of(value, schema, root)
+    _validate_all_of(value, schema, root)
 
 
 def _validate_schema(value: object, schema_path: Path, label: str) -> None:
@@ -439,60 +507,65 @@ def precision_recall_f1(
     }
 
 
+def _ordered_finite_samples(values: Sequence[float]) -> list[float]:
+    ordered = sorted(float(value) for value in values)
+    if not all(math.isfinite(value) for value in ordered):
+        raise ValueError("percentile samples must be finite")
+    return ordered
+
+
 def nearest_rank_percentile(values: Sequence[float], percentile: float) -> float | None:
     """Return the nearest-rank percentile: sorted[ceil(p*n)-1]."""
     if not 0.0 < percentile <= 1.0 or not math.isfinite(percentile):
         raise ValueError("percentile must be finite and in (0, 1]")
     if not values:
         return None
-    ordered = sorted(float(value) for value in values)
-    if not all(math.isfinite(value) for value in ordered):
-        raise ValueError("percentile samples must be finite")
+    ordered = _ordered_finite_samples(values)
     return ordered[max(0, math.ceil(percentile * len(ordered)) - 1)]
 
 
-def _performance_queries(queries: Sequence[GoldQuery]) -> tuple[GoldQuery, ...]:
-    by_capability = {
+def _queries_by_capability(queries: Sequence[GoldQuery]) -> dict[str, tuple[GoldQuery, ...]]:
+    return {
         capability: tuple(query for query in queries if query.capability == capability)
         for capability in ("definition", "references", "calls")
     }
+
+
+def _require_complete_domain(by_capability: dict[str, tuple[GoldQuery, ...]]) -> None:
     expected_counts = {
         "definition": DEFINITION_QUERIES,
         "references": REFERENCE_QUERIES,
         "calls": CALL_QUERIES,
     }
-    if any(
-        len(by_capability[capability]) != expected
-        for capability, expected in expected_counts.items()
-    ):
+    if any(len(by_capability[capability]) != expected for capability, expected in expected_counts.items()):
         raise ValueError("performance sample requires the complete gold query domain")
 
-    def spread(capability: str, count: int) -> tuple[GoldQuery, ...]:
-        candidates = by_capability[capability]
-        denominator = count - 1
-        return tuple(
-            candidates[
-                (index * (len(candidates) - 1) + denominator // 2) // denominator
-            ]
-            for index in range(count)
-        )
 
-    definitions = spread("definition", 10)
-    references = spread("references", 5)
-    calls = spread("calls", 5)
-    selected = tuple(
+def _spread(candidates: tuple[GoldQuery, ...], count: int) -> tuple[GoldQuery, ...]:
+    denominator = count - 1
+    return tuple(
+        candidates[(index * (len(candidates) - 1) + denominator // 2) // denominator]
+        for index in range(count)
+    )
+
+
+def _interleaved(definitions, references, calls) -> tuple[GoldQuery, ...]:
+    return tuple(
         query
         for index in range(5)
-        for query in (
-            definitions[index * 2],
-            references[index],
-            calls[index],
-            definitions[index * 2 + 1],
-        )
+        for query in (definitions[index * 2], references[index], calls[index], definitions[index * 2 + 1])
     )
-    if len(selected) != PERFORMANCE_SAMPLES or len({query.query_id for query in selected}) != len(
-        selected
-    ):
+
+
+def _performance_queries(queries: Sequence[GoldQuery]) -> tuple[GoldQuery, ...]:
+    by_capability = _queries_by_capability(queries)
+    _require_complete_domain(by_capability)
+    selected = _interleaved(
+        _spread(by_capability["definition"], 10),
+        _spread(by_capability["references"], 5),
+        _spread(by_capability["calls"], 5),
+    )
+    if len(selected) != PERFORMANCE_SAMPLES or len({query.query_id for query in selected}) != len(selected):
         raise AssertionError("performance query sample must contain 20 unique queries")
     return selected
 
@@ -569,6 +642,55 @@ def _fresh_cleanup_deadline(
     return monotonic() + CLEANUP_TIMEOUT_SECONDS
 
 
+def _git_timeout(deadline: float | None, monotonic: Callable[[], float]) -> float:
+    if deadline is None:
+        return 30.0
+    operation_end = _operation_deadline(deadline, monotonic=monotonic)
+    return min(30.0, max(0.001, operation_end - monotonic()))
+
+
+def _git_timeout_error(deadline: float | None, monotonic: Callable[[], float]) -> Exception:
+    if deadline is not None and monotonic() >= deadline:
+        return BenchmarkTimeoutError("benchmark run deadline exceeded")
+    return RuntimeError("deterministic qualification Git command timed out")
+
+
+def _run_git(
+    command: list[str],
+    root: Path,
+    environment: dict[str, str],
+    timeout: float,
+    capture: bool,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _git_timeout_error(deadline, monotonic) from exc
+    if result.returncode != 0:
+        raise RuntimeError("deterministic qualification Git command failed")
+    if deadline is not None:
+        _check_run_deadline(deadline, monotonic=monotonic)
+    return result
+
+
+def _git_stdout(result: subprocess.CompletedProcess, capture: bool) -> str:
+    if not capture:
+        return ""
+    return result.stdout.decode("ascii", errors="strict").strip()
+
+
 def initialize_deterministic_git(
     repository_root: Path,
     *,
@@ -627,31 +749,11 @@ def initialize_deterministic_git(
         ]
 
         def run(*arguments: str, capture: bool = False) -> str:
-            timeout = 30.0
-            if deadline is not None:
-                operation_end = _operation_deadline(deadline, monotonic=monotonic)
-                timeout = min(timeout, max(0.001, operation_end - monotonic()))
-            try:
-                result = subprocess.run(
-                    [*command_prefix, *arguments],
-                    cwd=root,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    shell=False,
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired as exc:
-                if deadline is not None and monotonic() >= deadline:
-                    raise BenchmarkTimeoutError("benchmark run deadline exceeded") from exc
-                raise RuntimeError("deterministic qualification Git command timed out") from exc
-            if result.returncode != 0:
-                raise RuntimeError("deterministic qualification Git command failed")
-            if deadline is not None:
-                _check_run_deadline(deadline, monotonic=monotonic)
-            return result.stdout.decode("ascii", errors="strict").strip() if capture else ""
+            timeout = _git_timeout(deadline, monotonic)
+            result = _run_git(
+                [*command_prefix, *arguments], root, environment, timeout, capture, deadline, monotonic
+            )
+            return _git_stdout(result, capture)
 
         run(
             "init",
@@ -675,27 +777,29 @@ def initialize_deterministic_git(
         return commit
 
 
+def _require_source_hash(repository: QualificationRepository, manifest: Mapping[str, object]) -> None:
+    current = current_source_manifest_sha256(repository.root)
+    if current != repository.source_manifest_sha256 or current != manifest.get("expected_source_manifest_sha256"):
+        raise FixtureIdentityError("generated source manifest hash does not match manifest")
+
+
+def _require_gold_hash(repository: QualificationRepository, manifest: Mapping[str, object]) -> None:
+    current = current_gold_sha256(repository)
+    if current != repository.gold_sha256 or current != manifest.get("expected_gold_sha256"):
+        raise FixtureIdentityError("generated gold hash does not match manifest")
+
+
 def verify_repository_identity(
     repository: QualificationRepository,
     manifest: Mapping[str, object],
 ) -> None:
     if repository.line_count != manifest.get("fixture_lines"):
         raise FixtureIdentityError("generated fixture line count does not match manifest")
-    current_source_hash = current_source_manifest_sha256(repository.root)
-    if (
-        current_source_hash != repository.source_manifest_sha256
-        or current_source_hash != manifest.get("expected_source_manifest_sha256")
-    ):
-        raise FixtureIdentityError("generated source manifest hash does not match manifest")
-    if (repository.root / WORKLOAD_CATALOG_PATH).read_bytes() != workload_catalog_bytes(
-        repository.workloads
-    ):
+    _require_source_hash(repository, manifest)
+    catalog = (repository.root / WORKLOAD_CATALOG_PATH).read_bytes()
+    if catalog != workload_catalog_bytes(repository.workloads):
         raise FixtureIdentityError("generated workload catalog does not match workloads")
-    current_gold_hash = current_gold_sha256(repository)
-    if current_gold_hash != repository.gold_sha256 or current_gold_hash != manifest.get(
-        "expected_gold_sha256"
-    ):
-        raise FixtureIdentityError("generated gold hash does not match manifest")
+    _require_gold_hash(repository, manifest)
 
 
 def _require_qualified_identity(identity: object, manifest: Mapping[str, object]) -> None:
@@ -771,6 +875,62 @@ def _navigation_assertion_succeeds(
     return result.status in accepted_statuses and actual == expected and citations_current
 
 
+def _expected_hashes(query: GoldQuery) -> dict[tuple[object, ...], str]:
+    return {_expected_key(location): location.source_sha256 for location in query.expected_locations}
+
+
+def _direct_location_key(
+    scope: RepositoryScope, location: object, encoding: PositionEncoding, deadline: float
+) -> tuple[tuple[object, ...], str] | None:
+    """(key, source sha256) for one provider location; None when it cannot be resolved."""
+    if time.monotonic() >= deadline or not isinstance(location, LspLocation):
+        return None
+    source = normalize_provider_uri(scope, location.uri)
+    if source is None:
+        return None
+    try:
+        content = read_repository_source_bytes(
+            scope,
+            source.relative_path,
+            max_bytes=_DIRECT_VALIDATION_MAX_SOURCE_BYTES,
+            deadline=deadline,
+        )
+        document = SourceDocument.from_bytes(source.relative_path, content)
+        range_ = document.to_byte_range(location.range, encoding)
+        line_start, _line_end = document.line_spans[location.range.start.line]
+    except Exception:
+        return None
+    key = (
+        source.relative_path,
+        location.range.start.line + 1,
+        range_.byte_start - line_start,
+        range_.byte_start,
+        range_.byte_end,
+    )
+    return key, document.source_sha256
+
+
+def _resolved_matches(resolved: tuple[tuple[object, ...], str] | None, expected_hashes: dict) -> bool:
+    return resolved is not None and resolved[1] == expected_hashes.get(resolved[0])
+
+
+def _direct_result_keys(
+    scope: RepositoryScope, result: object, encoding: PositionEncoding, expected_hashes: dict, deadline: float
+) -> set[tuple[object, ...]] | None:
+    if getattr(result, "coverage", None) != "provider_reported":
+        return None
+    locations = getattr(result, "locations", None)
+    if not isinstance(locations, tuple):
+        return None
+    actual: set[tuple[object, ...]] = set()
+    for location in locations:
+        resolved = _direct_location_key(scope, location, encoding, deadline)
+        if not _resolved_matches(resolved, expected_hashes):
+            return None
+        actual.add(resolved[0])
+    return actual
+
+
 def _direct_results_are_exact(
     runtime: object,
     repository: QualificationRepository,
@@ -784,49 +944,29 @@ def _direct_results_are_exact(
     if not isinstance(encoding, PositionEncoding):
         return False
     expected = {_expected_key(location) for location in query.expected_locations}
-    expected_hashes = {
-        _expected_key(location): location.source_sha256
-        for location in query.expected_locations
-    }
+    expected_hashes = _expected_hashes(query)
     for result in results:
-        if getattr(result, "coverage", None) != "provider_reported":
-            return False
-        locations = getattr(result, "locations", None)
-        if not isinstance(locations, tuple):
-            return False
-        actual: set[tuple[object, ...]] = set()
-        for location in locations:
-            if time.monotonic() >= deadline or not isinstance(location, LspLocation):
-                return False
-            source = normalize_provider_uri(scope, location.uri)
-            if source is None:
-                return False
-            try:
-                content = read_repository_source_bytes(
-                    scope,
-                    source.relative_path,
-                    max_bytes=_DIRECT_VALIDATION_MAX_SOURCE_BYTES,
-                    deadline=deadline,
-                )
-                document = SourceDocument.from_bytes(source.relative_path, content)
-                range_ = document.to_byte_range(location.range, encoding)
-                line = location.range.start.line + 1
-                line_start, _line_end = document.line_spans[location.range.start.line]
-            except Exception:
-                return False
-            key = (
-                source.relative_path,
-                line,
-                range_.byte_start - line_start,
-                range_.byte_start,
-                range_.byte_end,
-            )
-            if document.source_sha256 != expected_hashes.get(key):
-                return False
-            actual.add(key)
-        if actual != expected:
+        if _direct_result_keys(scope, result, encoding, expected_hashes, deadline) != expected:
             return False
     return True
+
+
+def _cited_content(repository_root: Path, relative: str) -> bytes:
+    root = repository_root.resolve(strict=True)
+    path = (root / relative).resolve(strict=True)
+    path.relative_to(root)
+    return path.read_bytes()
+
+
+def _citation_span_current(content: bytes, location: NavigationLocation) -> bool:
+    start = location.range.byte_start
+    end = location.range.byte_end
+    if not 0 <= start < end <= len(content):
+        return False
+    content[:start].decode("utf-8", errors="strict")
+    content[start:end].decode("utf-8", errors="strict")
+    line_start = content.rfind(b"\n", 0, start) + 1
+    return content.count(b"\n", 0, start) + 1 == location.line and start - line_start == location.character
 
 
 def _current_citation(
@@ -838,45 +978,29 @@ def _current_citation(
     try:
         if _HEX_SHA256.fullmatch(expected_sha256) is None:
             return False
-        root = repository_root.resolve(strict=True)
-        path = (root / location.path).resolve(strict=True)
-        path.relative_to(root)
-        content = path.read_bytes()
+        content = _cited_content(repository_root, location.path)
         if hashlib.sha256(content).hexdigest() != expected_sha256:
             return False
-        start = location.range.byte_start
-        end = location.range.byte_end
-        if not 0 <= start < end <= len(content):
-            return False
-        content[:start].decode("utf-8", errors="strict")
-        content[start:end].decode("utf-8", errors="strict")
-        line_start = content.rfind(b"\n", 0, start) + 1
-        return (
-            content.count(b"\n", 0, start) + 1 == location.line
-            and start - line_start == location.character
-        )
+        return _citation_span_current(content, location)
     except (OSError, UnicodeError, ValueError):
         return False
+
+
+def _group_location_count(group: object) -> int:
+    if isinstance(group, dict) and isinstance(group.get("locations"), list):
+        return len(group["locations"])
+    return 0
 
 
 def _rendered_item_count(payload: Mapping[str, object]) -> int:
     groups = payload.get("groups", [])
     diagnostics = payload.get("diagnostics", [])
-    locations = 0
-    if isinstance(groups, list):
-        for group in groups:
-            if isinstance(group, dict) and isinstance(group.get("locations"), list):
-                locations += len(group["locations"])
+    locations = sum(_group_location_count(group) for group in groups) if isinstance(groups, list) else 0
     return locations + (len(diagnostics) if isinstance(diagnostics, list) else 0)
 
 
-def _token_record(
-    query: GoldQuery,
-    request: NavigationRequest,
-    result: NavigationResult,
-    rendered: Mapping[str, object],
-) -> dict[str, object]:
-    request_value = {
+def _request_value(request: NavigationRequest) -> dict[str, object]:
+    return {
         "capability": request.capability.value,
         "path": request.path,
         "line": request.line,
@@ -886,35 +1010,52 @@ def _token_record(
         "limit": request.limit,
     }
 
-    def provenance_value(item: object) -> dict[str, str]:
-        return {
-            "source": item.source,
-            "provider": item.provider,
-            "version": item.version,
-            "observation": item.observation,
-        }
 
-    def location_value(location: NavigationLocation) -> dict[str, object]:
-        return {
-            "path": location.path,
-            "range": {
-                "byte_start": location.range.byte_start,
-                "byte_end": location.range.byte_end,
-            },
-            "line": location.line,
-            "character": location.character,
-            "containing_symbol": location.containing_symbol,
-            "signature": location.signature,
-            "resolution": location.resolution.value,
-            "provenance": [provenance_value(item) for item in location.provenance],
-        }
+def _provenance_value(item: object) -> dict[str, str]:
+    return {
+        "source": item.source,
+        "provider": item.provider,
+        "version": item.version,
+        "observation": item.observation,
+    }
 
-    raw_value = {
+
+def _location_value(location: NavigationLocation) -> dict[str, object]:
+    return {
+        "path": location.path,
+        "range": {"byte_start": location.range.byte_start, "byte_end": location.range.byte_end},
+        "line": location.line,
+        "character": location.character,
+        "containing_symbol": location.containing_symbol,
+        "signature": location.signature,
+        "resolution": location.resolution.value,
+        "provenance": [_provenance_value(item) for item in location.provenance],
+    }
+
+
+def _diagnostic_value(diagnostic: object) -> dict[str, object]:
+    return {
+        "path": diagnostic.path,
+        "range": {"byte_start": diagnostic.range.byte_start, "byte_end": diagnostic.range.byte_end},
+        "severity": diagnostic.severity.value,
+        "code": diagnostic.code,
+        "message": diagnostic.message,
+        "related": [_location_value(location) for location in diagnostic.related],
+        "provenance": [_provenance_value(item) for item in diagnostic.provenance],
+    }
+
+
+def _enum_value_or_none(value: object) -> object:
+    if value is None:
+        return None
+    return value.value
+
+
+def _raw_result_value(result: NavigationResult) -> dict[str, object]:
+    return {
         "status": result.status.value,
         "requested_capability": result.requested_capability.value,
-        "effective_capability": (
-            result.effective_capability.value if result.effective_capability is not None else None
-        ),
+        "effective_capability": _enum_value_or_none(result.effective_capability),
         "provider": result.provider,
         "provider_version": result.provider_version,
         "repository_id": result.repository_id,
@@ -922,40 +1063,32 @@ def _token_record(
         "workspace_revision_before": result.workspace_revision_before,
         "workspace_revision_after": result.workspace_revision_after,
         "document_version": result.document_version,
-        "position_encoding": (
-            result.position_encoding.value if result.position_encoding is not None else None
-        ),
+        "position_encoding": _enum_value_or_none(result.position_encoding),
         "readiness": result.readiness,
         "symbol": result.symbol,
         "total": result.total,
         "offset": result.offset,
         "limit": result.limit,
-        "locations": [location_value(location) for location in result.locations],
-        "diagnostics": [
-            {
-                "path": diagnostic.path,
-                "range": {
-                    "byte_start": diagnostic.range.byte_start,
-                    "byte_end": diagnostic.range.byte_end,
-                },
-                "severity": diagnostic.severity.value,
-                "code": diagnostic.code,
-                "message": diagnostic.message,
-                "related": [location_value(location) for location in diagnostic.related],
-                "provenance": [provenance_value(item) for item in diagnostic.provenance],
-            }
-            for diagnostic in result.diagnostics
-        ],
+        "locations": [_location_value(location) for location in result.locations],
+        "diagnostics": [_diagnostic_value(diagnostic) for diagnostic in result.diagnostics],
         "hover": result.hover,
         "resolution": result.resolution.value,
-        "provenance": [provenance_value(item) for item in result.provenance],
+        "provenance": [_provenance_value(item) for item in result.provenance],
         "warnings": list(result.warnings),
     }
+
+
+def _token_record(
+    query: GoldQuery,
+    request: NavigationRequest,
+    result: NavigationResult,
+    rendered: Mapping[str, object],
+) -> dict[str, object]:
     return {
         "query_id": query.query_id,
-        "uncached_input_tokens": estimate_tokens(_canonical_json(request_value)),
+        "uncached_input_tokens": estimate_tokens(_canonical_json(_request_value(request))),
         "cache_read_tokens": 0,
-        "raw_tool_tokens": estimate_tokens(_canonical_json(raw_value)),
+        "raw_tool_tokens": estimate_tokens(_canonical_json(_raw_result_value(result))),
         "output_tokens": estimate_tokens(_canonical_json(rendered)),
     }
 
