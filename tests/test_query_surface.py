@@ -395,6 +395,29 @@ def test_a_walk_from_an_unknown_symbol_says_it_resolved_nothing(indexed):
 # --------------------------------------------------------------------------
 
 
+def _dirty_evidence(repository: Path, impact: dict) -> str:
+    """What a Windows runner needs to say why `changes` came back empty."""
+    import subprocess
+
+    status = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    config = subprocess.run(
+        ["git", "-C", str(repository), "config", "--get", "core.autocrlf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (
+        f"warnings={impact.get('warnings')!r} partial={impact.get('partial')!r} "
+        f"changes={impact.get('changes')!r} git_status={status.stdout!r} "
+        f"git_status_err={status.stderr!r} autocrlf={config.stdout.strip()!r}"
+    )
+
+
 def _dirty_reach(repository: Path) -> tuple[dict, dict]:
     import impact_analysis
     from impact_symbols import affected_symbols
@@ -405,7 +428,9 @@ def _dirty_reach(repository: Path) -> tuple[dict, dict]:
 
 def test_impact_reaches_the_code_symbols_behind_a_dirty_change(indexed):
     impact, reach = _with_edited_core(indexed, _dirty_reach, indexed)
-    assert _values(impact["changed_symbols"], "name") == ["helper"], impact
+    assert _values(impact["changed_symbols"], "name") == ["helper"], _dirty_evidence(
+        indexed, impact
+    )
     assert impact["affected"] == EMPTY_AFFECTED
     rows = _pairs(reach["affected_symbols"], "qualified_name", "depth")
     assert rows == [("pkg.core.caller", 1), ("pkg.core.top", 2), ("pkg.core.Widget.frob", 3)]
