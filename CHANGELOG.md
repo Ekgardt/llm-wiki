@@ -55,6 +55,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
+
 - The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).
 - The navigation stand obeys the complexity gate: schema validation is one function per keyword, the fixture run is one object with a phase per measurement, the evidence check is a list of named predicates, the gates are one entry per field; reports, error order and gate verdicts unchanged (audit L13).
 - The comparative stand obeys the complexity gate: one check per manifest section, one finding collector per preflight probe, the paired statistics as named steps; messages, codes and RNG consumption unchanged (audit L13).
