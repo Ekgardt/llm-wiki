@@ -2448,10 +2448,12 @@ def _same_path_identity(path: Path, expected: os.stat_result) -> bool:
     return os.path.samestat(expected, current)
 
 
-def _write_fake_index(corpus: dict, cache_root: Path) -> int:
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_root = cache_root.resolve(strict=True)
-    root_identity = cache_root.stat(follow_symlinks=False)
+_DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_POSIX_TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+_NEW_OUTPUT_FLAGS = _POSIX_TEMP_FLAGS | getattr(os, "O_BINARY", 0)
+
+
+def _fake_index_bytes(corpus: dict) -> bytes:
     payload = [
         {
             "evidence_id": candidate.evidence_id,
@@ -2461,132 +2463,153 @@ def _write_fake_index(corpus: dict, cache_root: Path) -> int:
         }
         for candidate in build_candidates(corpus)
     ]
-    data = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8") + b"\n"
-    target_name = "fake-index.json"
-    if _use_posix_dir_fd():
-        directory_fd = os.open(
-            cache_root,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        temporary_name = f".fake-index-{uuid.uuid4().hex}"
-        try:
-            if not os.path.samestat(root_identity, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index build")
-            descriptor = os.open(
-                temporary_name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if not _same_path_identity(cache_root, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index build")
-            os.replace(
-                temporary_name,
-                target_name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            os.fsync(directory_fd)
-            if not _same_path_identity(cache_root, os.fstat(directory_fd)):
-                raise PermissionError("cache root changed during index publication")
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary_name, dir_fd=directory_fd)
-            os.close(directory_fd)
-        return len(data)
 
+
+def _write_and_sync(descriptor: int, data: bytes) -> None:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _require_descriptor_identity(directory_fd: int, identity: os.stat_result, message: str) -> None:
+    if not os.path.samestat(identity, os.fstat(directory_fd)):
+        raise PermissionError(message)
+
+
+def _require_path_identity(path: Path, identity: os.stat_result, message: str) -> None:
+    if not _same_path_identity(path, identity):
+        raise PermissionError(message)
+
+
+def _publish_fake_index_posix(cache_root: Path, root_identity: os.stat_result, data: bytes, target_name: str) -> None:
+    directory_fd = os.open(cache_root, _DIRECTORY_FLAGS)
+    temporary_name = f".fake-index-{uuid.uuid4().hex}"
+    try:
+        _require_descriptor_identity(directory_fd, root_identity, "cache root changed during index build")
+        descriptor = os.open(temporary_name, _POSIX_TEMP_FLAGS, 0o600, dir_fd=directory_fd)
+        _write_and_sync(descriptor, data)
+        _require_path_identity(cache_root, os.fstat(directory_fd), "cache root changed during index build")
+        os.replace(temporary_name, target_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        _require_path_identity(cache_root, os.fstat(directory_fd), "cache root changed during index publication")
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
+def _publish_fake_index_portable(
+    cache_root: Path, root_identity: os.stat_result, data: bytes, target_name: str
+) -> None:
     path = cache_root / target_name
     descriptor, temporary_name = tempfile.mkstemp(prefix=".fake-index-", dir=cache_root)
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if not _same_path_identity(cache_root, root_identity):
-            raise PermissionError("cache root changed during index build")
+        _write_and_sync(descriptor, data)
+        _require_path_identity(cache_root, root_identity, "cache root changed during index build")
         os.replace(temporary, path)
-        if not _same_path_identity(cache_root, root_identity):
-            raise PermissionError("cache root changed during index publication")
+        _require_path_identity(cache_root, root_identity, "cache root changed during index publication")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_fake_index(corpus: dict, cache_root: Path) -> int:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root = cache_root.resolve(strict=True)
+    root_identity = cache_root.stat(follow_symlinks=False)
+    data = _fake_index_bytes(corpus)
+    if _use_posix_dir_fd():
+        _publish_fake_index_posix(cache_root, root_identity, data, "fake-index.json")
+    else:
+        _publish_fake_index_portable(cache_root, root_identity, data, "fake-index.json")
     return len(data)
 
 
+def _opened_parent_descriptor(parent: Path, parent_identity: os.stat_result) -> int:
+    directory_fd = os.open(parent, _DIRECTORY_FLAGS)
+    if not os.path.samestat(parent_identity, os.fstat(directory_fd)):
+        os.close(directory_fd)
+        raise PermissionError("output parent changed before publication")
+    return directory_fd
+
+
+class _OutputTarget:
+    """One new output file, addressed through its parent descriptor on POSIX and by path elsewhere."""
+
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.parent_identity = output.parent.stat(follow_symlinks=False)
+        self.directory_fd: int | None = None
+        if _use_posix_dir_fd():
+            self.directory_fd = _opened_parent_descriptor(output.parent, self.parent_identity)
+        self.opened_identity: os.stat_result | None = None
+
+    def open_new(self) -> int:
+        if self.directory_fd is None:
+            return os.open(self.output, _NEW_OUTPUT_FLAGS, 0o600)
+        return os.open(self.output.name, _NEW_OUTPUT_FLAGS, 0o600, dir_fd=self.directory_fd)
+
+    def published_identity(self) -> os.stat_result:
+        if self.directory_fd is None:
+            return self.output.stat(follow_symlinks=False)
+        return os.stat(self.output.name, dir_fd=self.directory_fd, follow_symlinks=False)
+
+    def expected_parent(self) -> os.stat_result:
+        if self.directory_fd is None:
+            return self.parent_identity
+        return os.fstat(self.directory_fd)
+
+    def unlink(self) -> None:
+        if self.directory_fd is None:
+            self.output.unlink()
+            return
+        os.unlink(self.output.name, dir_fd=self.directory_fd)
+
+    def sync_parent(self) -> None:
+        if self.directory_fd is not None:
+            os.fsync(self.directory_fd)
+
+    def close(self) -> None:
+        if self.directory_fd is not None:
+            os.close(self.directory_fd)
+
+
+def _publish_bytes(target: _OutputTarget, data: bytes) -> os.stat_result:
+    descriptor = target.open_new()
+    with os.fdopen(descriptor, "wb") as handle:
+        target.opened_identity = os.fstat(handle.fileno())
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+        if not os.path.samestat(target.opened_identity, target.published_identity()):
+            raise PermissionError("output changed during publication")
+    if not _same_path_identity(target.output.parent, target.expected_parent()):
+        raise PermissionError("output parent changed during publication")
+    target.sync_parent()
+    return target.opened_identity
+
+
+def _discard_partial_output(target: _OutputTarget) -> None:
+    if target.opened_identity is None:
+        return
+    with contextlib.suppress(FileNotFoundError):
+        if os.path.samestat(target.opened_identity, target.published_identity()):
+            target.unlink()
+
+
 def _write_new_bytes(output: Path, data: bytes) -> os.stat_result:
-    parent_identity = output.parent.stat(follow_symlinks=False)
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
-    directory_fd = None
-    opened_identity = None
-    if _use_posix_dir_fd():
-        directory_fd = os.open(
-            output.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        if not os.path.samestat(parent_identity, os.fstat(directory_fd)):
-            os.close(directory_fd)
-            raise PermissionError("output parent changed before publication")
+    target = _OutputTarget(output)
     try:
-        descriptor = os.open(
-            output.name if directory_fd is not None else output,
-            flags,
-            0o600,
-            **({"dir_fd": directory_fd} if directory_fd is not None else {}),
-        )
-        with os.fdopen(descriptor, "wb") as handle:
-            opened_identity = os.fstat(handle.fileno())
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-            published_identity = (
-                os.stat(output.name, dir_fd=directory_fd, follow_symlinks=False)
-                if directory_fd is not None
-                else output.stat(follow_symlinks=False)
-            )
-            if not os.path.samestat(opened_identity, published_identity):
-                raise PermissionError("output changed during publication")
-        expected_parent = os.fstat(directory_fd) if directory_fd is not None else parent_identity
-        if not _same_path_identity(output.parent, expected_parent):
-            raise PermissionError("output parent changed during publication")
-        if directory_fd is not None:
-            os.fsync(directory_fd)
-        return opened_identity
+        return _publish_bytes(target, data)
     except BaseException:
-        if opened_identity is not None:
-            with contextlib.suppress(FileNotFoundError):
-                published_identity = (
-                    os.stat(output.name, dir_fd=directory_fd, follow_symlinks=False)
-                    if directory_fd is not None
-                    else output.stat(follow_symlinks=False)
-                )
-                if os.path.samestat(opened_identity, published_identity):
-                    if directory_fd is not None:
-                        os.unlink(output.name, dir_fd=directory_fd)
-                    else:
-                        output.unlink()
+        _discard_partial_output(target)
         raise
     finally:
-        if directory_fd is not None:
-            os.close(directory_fd)
+        target.close()
 
 
 def _write_new_output(output: Path, serialized: str) -> None:
@@ -2606,11 +2629,7 @@ def _canonical_report_bytes(report: dict) -> bytes:
     ).encode("utf-8")
 
 
-def _run_process_tree(
-    command: Sequence[str], *, timeout: float, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess:
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("worker deadline must be positive and finite")
+def _worker_popen_options(env: dict[str, str] | None) -> dict:
     options = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
@@ -2621,68 +2640,134 @@ def _run_process_tree(
         options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     else:
         options["start_new_session"] = True
-    process = subprocess.Popen(list(command), **options)
+    return options
+
+
+def _kill_worker_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/taskkill.exe"
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            subprocess.run(
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        process.kill()
+        process.communicate(timeout=5)
+
+
+def _run_process_tree(
+    command: Sequence[str], *, timeout: float, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("worker deadline must be positive and finite")
+    process = subprocess.Popen(list(command), **_worker_popen_options(env))
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        if os.name == "nt":
-            taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/taskkill.exe"
-            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                subprocess.run(
-                    [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-        else:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            process.kill()
-            process.communicate(timeout=5)
+        _kill_worker_tree(process)
         raise TimeoutError("real benchmark worker deadline exceeded") from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def _process_memory_counters_type(wintypes):
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    return ProcessMemoryCounters
+
+
+def _windows_peak_rss() -> tuple[int | None, str]:
+    try:
+        from ctypes import wintypes
+
+        counters = _process_memory_counters_type(wintypes)()
+        counters.cb = ctypes.sizeof(counters)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+        if ok:
+            return int(counters.PeakWorkingSetSize), "measured-windows-working-set"
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None, "unavailable"
+
+
+def _posix_peak_rss() -> tuple[int | None, str]:
+    try:
+        import resource
+
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        multiplier = 1 if sys.platform == "darwin" else 1024
+        return int(usage * multiplier), "measured-posix-ru-maxrss"
+    except (ImportError, OSError, ValueError):
+        return None, "unavailable"
+
+
 def _peak_rss() -> tuple[int | None, str]:
     if os.name == "nt":
-        try:
-            from ctypes import wintypes
+        return _windows_peak_rss()
+    return _posix_peak_rss()
 
-            class ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
 
-            counters = ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(counters)
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            ok = ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
-            if ok:
-                return int(counters.PeakWorkingSetSize), "measured-windows-working-set"
-        except (AttributeError, OSError, ValueError):
-            pass
-    else:
-        try:
-            import resource
+_MEASURED_RESOURCE_FIELDS = (
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "cold_first_query_latency_ms",
+    "warm_latency_p50_ms",
+    "warm_latency_p95_ms",
+    "build_time_ms",
+    "indexing_throughput_chunks_per_second",
+    "peak_rss_bytes",
+    "index_size_bytes",
+)
 
-            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            multiplier = 1 if sys.platform == "darwin" else 1024
-            return int(usage * multiplier), "measured-posix-ru-maxrss"
-        except (ImportError, OSError, ValueError):
-            pass
-    return None, "unavailable"
+
+def _nearest_rank_p95(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return values[max(0, math.ceil(0.95 * len(values)) - 1)]
+
+
+def _median_or_none(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return statistics.median(values)
+
+
+def _first_or_none(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return values[0]
+
+
+def _indexing_throughput(chunk_count: int, indexing_duration_ms: float) -> float | None:
+    if chunk_count > 0 and indexing_duration_ms > 0:
+        return chunk_count / (indexing_duration_ms / 1000.0)
+    return None
+
+
+def _measurement_status(value: object) -> str:
+    if value is not None:
+        return "measured"
+    return "unavailable"
 
 
 def _resource_measurements(
@@ -2697,136 +2782,89 @@ def _resource_measurements(
 ) -> dict:
     sorted_latencies = sorted(latencies_ms)
     warm_latencies = sorted(latencies_ms[1:])
-
-    def p95(values: Sequence[float]) -> float | None:
-        if not values:
-            return None
-        return values[max(0, math.ceil(0.95 * len(values)) - 1)]
-
-    indexing_duration_ms = build_time_ms if indexing_duration_ms is None else indexing_duration_ms
-    throughput = (
-        chunk_count / (indexing_duration_ms / 1000.0)
-        if chunk_count > 0 and indexing_duration_ms > 0
-        else None
-    )
+    if indexing_duration_ms is None:
+        indexing_duration_ms = build_time_ms
     measurements = {
-        "latency_p50_ms": statistics.median(sorted_latencies) if sorted_latencies else None,
-        "latency_p95_ms": p95(sorted_latencies),
-        "cold_first_query_latency_ms": latencies_ms[0] if latencies_ms else None,
-        "warm_latency_p50_ms": statistics.median(warm_latencies) if warm_latencies else None,
-        "warm_latency_p95_ms": p95(warm_latencies),
+        "latency_p50_ms": _median_or_none(sorted_latencies),
+        "latency_p95_ms": _nearest_rank_p95(sorted_latencies),
+        "cold_first_query_latency_ms": _first_or_none(latencies_ms),
+        "warm_latency_p50_ms": _median_or_none(warm_latencies),
+        "warm_latency_p95_ms": _nearest_rank_p95(warm_latencies),
         "peak_rss_bytes": peak_rss_bytes,
         "peak_rss_status": peak_rss_status,
         "build_time_ms": build_time_ms,
-        "indexing_throughput_chunks_per_second": throughput,
+        "indexing_throughput_chunks_per_second": _indexing_throughput(chunk_count, indexing_duration_ms),
         "index_size_bytes": index_size_bytes,
     }
     measurements["measurement_status"] = {
-        name: "measured" if measurements[name] is not None else "unavailable"
-        for name in (
-            "latency_p50_ms",
-            "latency_p95_ms",
-            "cold_first_query_latency_ms",
-            "warm_latency_p50_ms",
-            "warm_latency_p95_ms",
-            "build_time_ms",
-            "indexing_throughput_chunks_per_second",
-            "peak_rss_bytes",
-            "index_size_bytes",
-        )
+        name: _measurement_status(measurements[name]) for name in _MEASURED_RESOURCE_FIELDS
     }
     return measurements
 
 
+_RETRIEVAL_GATE_METRICS = ("parent_recall_at_10", "all_required_evidence_recall_at_20", "ndcg_at_10", "mrr_at_10")
+
+
+def _false_answer_gate(value: float | None) -> bool:
+    return value is not None and value <= THRESHOLDS["no_answer_false_answer_rate"]
+
+
+def _language_passes(metrics: dict) -> bool:
+    gap = THRESHOLDS["max_language_gate_gap"]
+    retrieval_passes = all(metrics[name] >= THRESHOLDS[name] - gap for name in _RETRIEVAL_GATE_METRICS)
+    return retrieval_passes and _false_answer_gate(metrics["no_answer_false_answer_rate"])
+
+
+def _orchestration_passed(metric_gates: dict, language_results: dict, qa_contract_passed: bool) -> bool:
+    return all(metric_gates.values()) and all(language_results.values()) and qa_contract_passed
+
+
 def _gate_results(overall: dict, slices: dict[str, dict], *, qa_contract_passed: bool = True) -> dict:
-    metric_gates = {
-        name: overall[name] >= threshold
-        for name, threshold in (
-            ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-            (
-                "all_required_evidence_recall_at_20",
-                THRESHOLDS["all_required_evidence_recall_at_20"],
-            ),
-            ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-            ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-        )
-    }
-    metric_gates["no_answer_false_answer_rate"] = (
-        overall["no_answer_false_answer_rate"] is not None
-        and overall["no_answer_false_answer_rate"] <= THRESHOLDS["no_answer_false_answer_rate"]
-    )
-    language_results = {}
-    for language in ("EN", "RU", "ZH"):
-        retrieval_passes = all(
-            slices[language][metric] >= threshold - THRESHOLDS["max_language_gate_gap"]
-            for metric, threshold in (
-                ("parent_recall_at_10", THRESHOLDS["parent_recall_at_10"]),
-                (
-                    "all_required_evidence_recall_at_20",
-                    THRESHOLDS["all_required_evidence_recall_at_20"],
-                ),
-                ("ndcg_at_10", THRESHOLDS["ndcg_at_10"]),
-                ("mrr_at_10", THRESHOLDS["mrr_at_10"]),
-            )
-        )
-        language_results[language] = retrieval_passes and (
-            slices[language]["no_answer_false_answer_rate"] is not None
-            and slices[language]["no_answer_false_answer_rate"]
-            <= THRESHOLDS["no_answer_false_answer_rate"]
-        )
+    metric_gates = {name: overall[name] >= THRESHOLDS[name] for name in _RETRIEVAL_GATE_METRICS}
+    metric_gates["no_answer_false_answer_rate"] = _false_answer_gate(overall["no_answer_false_answer_rate"])
+    language_results = {language: _language_passes(slices[language]) for language in ("EN", "RU", "ZH")}
     return {
         "release_evidence": False,
         "interpretation": "orchestration-only",
         "metric_results": metric_gates,
         "language_results": language_results,
         "qa_contract_passed": qa_contract_passed,
-        "passed_for_orchestration": (
-            all(metric_gates.values()) and all(language_results.values()) and qa_contract_passed
-        ),
+        "passed_for_orchestration": _orchestration_passed(metric_gates, language_results, qa_contract_passed),
     }
 
 
-def _load_transformer_embedding(
-    selection: ModelSelection,
-    *,
-    cache_root: Path,
-    local_files_only: bool,
-    trust_remote_code: bool,
-):
-    if trust_remote_code:
-        raise ValueError("remote model code is forbidden")
-    model_spec = selection.embedding
-    if model_spec["native_library"]["name"] == "sentence-transformers":
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise ValueError(
-                "model-matrix adapter requires the retrieval-benchmark extra"
-            ) from exc
-        model = SentenceTransformer(
-            model_spec["id"],
-            revision=model_spec["revision"],
-            cache_folder=str(cache_root),
-            local_files_only=local_files_only,
-            trust_remote_code=False,
-            model_kwargs={"torch_dtype": "float32"},
+def _sentence_transformer_encoder(model_spec: dict, cache_root: Path, local_files_only: bool):
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise ValueError("model-matrix adapter requires the retrieval-benchmark extra") from exc
+    model = SentenceTransformer(
+        model_spec["id"],
+        revision=model_spec["revision"],
+        cache_folder=str(cache_root),
+        local_files_only=local_files_only,
+        trust_remote_code=False,
+        model_kwargs={"torch_dtype": "float32"},
+    )
+
+    def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
+        if pooling != model_spec["inference"]["pooling"]:
+            raise ValueError(f"unsupported native pooling: {pooling}")
+        model.max_seq_length = max_length
+        model.tokenizer.padding_side = padding_side
+        model.tokenizer.truncation_side = truncation_side
+        return model.encode(
+            list(texts),
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
+            show_progress_bar=False,
         )
 
-        def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
-            if pooling != model_spec["inference"]["pooling"]:
-                raise ValueError(f"unsupported native pooling: {pooling}")
-            model.max_seq_length = max_length
-            model.tokenizer.padding_side = padding_side
-            model.tokenizer.truncation_side = truncation_side
-            return model.encode(
-                list(texts),
-                batch_size=batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=False,
-                show_progress_bar=False,
-            )
+    return encode
 
-        return encode
+
+def _transformers_model(model_spec: dict, cache_root: Path, local_files_only: bool):
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -2841,100 +2879,165 @@ def _load_transformer_embedding(
     tokenizer = AutoTokenizer.from_pretrained(model_spec["id"], **common)
     model = AutoModel.from_pretrained(model_spec["id"], torch_dtype=torch.float32, **common)
     model.eval()
-    sparse_linear = None
-    if model_spec["id"] == "BAAI/bge-m3":
-        from huggingface_hub import hf_hub_download
+    return torch, tokenizer, model
 
-        asset = Path(
-            hf_hub_download(
-                repo_id=model_spec["id"],
-                filename="sparse_linear.pt",
-                revision=model_spec["revision"],
-                cache_dir=str(cache_root),
-                local_files_only=local_files_only,
-            )
+
+def _verified_sparse_asset(model_spec: dict, cache_root: Path, local_files_only: bool) -> Path:
+    from huggingface_hub import hf_hub_download
+
+    asset = Path(
+        hf_hub_download(
+            repo_id=model_spec["id"],
+            filename="sparse_linear.pt",
+            revision=model_spec["revision"],
+            cache_dir=str(cache_root),
+            local_files_only=local_files_only,
         )
-        resolved_asset = asset.resolve(strict=True)
-        resolved_cache = cache_root.resolve(strict=True)
-        if resolved_asset != resolved_cache and resolved_cache not in resolved_asset.parents:
-            raise ValueError("BGE-M3 sparse asset escaped the model cache")
-        if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
-            raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
-        state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
-        if not isinstance(state, dict) or set(state) != {"weight", "bias"}:
-            raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
-        weight = state["weight"]
-        bias = state["bias"]
-        if (
-            tuple(weight.shape) != (1, selection.variant["dimensions"])
-            or tuple(bias.shape) != (1,)
-        ):
-            raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
-        sparse_linear = torch.nn.Linear(selection.variant["dimensions"], 1, bias=True)
-        sparse_linear.load_state_dict(state, strict=True)
-        sparse_linear.eval()
+    )
+    resolved_asset = asset.resolve(strict=True)
+    resolved_cache = cache_root.resolve(strict=True)
+    if resolved_asset != resolved_cache and resolved_cache not in resolved_asset.parents:
+        raise ValueError("BGE-M3 sparse asset escaped the model cache")
+    if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
+        raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
+    return resolved_asset
 
-    def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
+
+def _sparse_linear_state(torch, resolved_asset: Path, dimensions: int) -> dict:
+    state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
+    if not isinstance(state, dict) or set(state) != {"weight", "bias"}:
+        raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
+    if tuple(state["weight"].shape) != (1, dimensions) or tuple(state["bias"].shape) != (1,):
+        raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
+    return state
+
+
+def _bge_m3_sparse_linear(torch, selection: ModelSelection, cache_root: Path, local_files_only: bool):
+    resolved_asset = _verified_sparse_asset(selection.embedding, cache_root, local_files_only)
+    dimensions = selection.variant["dimensions"]
+    state = _sparse_linear_state(torch, resolved_asset, dimensions)
+    sparse_linear = torch.nn.Linear(dimensions, 1, bias=True)
+    sparse_linear.load_state_dict(state, strict=True)
+    sparse_linear.eval()
+    return sparse_linear
+
+
+def _cls_pooling(torch, hidden, mask):
+    del torch, mask
+    return hidden[:, 0]
+
+
+def _mean_pooling(torch, hidden, mask):
+    del torch
+    expanded = mask.unsqueeze(-1).to(hidden.dtype)
+    return (hidden * expanded).sum(1) / expanded.sum(1).clamp_min(1)
+
+
+def _last_token_pooling(torch, hidden, mask):
+    reversed_mask = torch.flip(mask, dims=[1])
+    indexes = mask.shape[1] - 1 - reversed_mask.argmax(dim=1)
+    return hidden[torch.arange(hidden.shape[0]), indexes]
+
+
+_POOLERS = {"cls": _cls_pooling, "mean": _mean_pooling, "last_token": _last_token_pooling}
+
+
+def _pooled(torch, hidden, mask, pooling: str):
+    pooler = _POOLERS.get(pooling)
+    if pooler is None:
+        raise ValueError(f"unsupported matrix pooling: {pooling}")
+    return pooler(torch, hidden, mask)
+
+
+def _unused_token_ids(tokenizer) -> set:
+    return {tokenizer.cls_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id, tokenizer.unk_token_id}
+
+
+def _sparse_row(token_ids: Sequence[int], weights: Sequence[float], unused: set) -> dict[str, float]:
+    row: dict[str, float] = {}
+    for token_id, weight in zip(token_ids, weights):
+        if token_id not in unused and weight > 0:
+            key = str(token_id)
+            row[key] = max(row.get(key, 0.0), float(weight))
+    return row
+
+
+class _TransformerEncoder:
+    """The encode callable of a transformers-backed embedding candidate."""
+
+    def __init__(self, torch, tokenizer, model, sparse_linear) -> None:
+        self.torch = torch
+        self.tokenizer = tokenizer
+        self.model = model
+        self.sparse_linear = sparse_linear
+
+    def _token_weights(self, hidden):
+        with self.torch.inference_mode():
+            return self.torch.relu(self.sparse_linear(hidden)).squeeze(-1).float().cpu()
+
+    def _sparse_rows(self, batch, hidden) -> list[dict[str, float]]:
+        token_weights = self._token_weights(hidden)
+        unused = _unused_token_ids(self.tokenizer)
+        return [
+            _sparse_row(token_ids, weights, unused)
+            for token_ids, weights in zip(batch["input_ids"].cpu().tolist(), token_weights.tolist())
+        ]
+
+    def _encode_batch(self, texts, max_length: int, pooling: str, sparse_rows: list):
+        batch = self.tokenizer(
+            list(texts), padding=True, truncation=True, max_length=max_length, return_tensors="pt"
+        )
+        with self.torch.inference_mode():
+            hidden = self.model(**batch).last_hidden_state
+        values = _pooled(self.torch, hidden, batch["attention_mask"], pooling)
+        chunk = values.float().cpu().numpy()
+        if self.sparse_linear is not None:
+            sparse_rows.extend(self._sparse_rows(batch, hidden))
+        return chunk
+
+    def __call__(self, texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
         import numpy as np
 
-        tokenizer.padding_side = padding_side
-        tokenizer.truncation_side = truncation_side
+        self.tokenizer.padding_side = padding_side
+        self.tokenizer.truncation_side = truncation_side
         chunks = []
-        sparse_rows = []
+        sparse_rows: list[dict[str, float]] = []
         for offset in range(0, len(texts), batch_size):
-            batch = tokenizer(
-                list(texts[offset : offset + batch_size]),
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            with torch.inference_mode():
-                hidden = model(**batch).last_hidden_state
-            mask = batch["attention_mask"]
-            if pooling == "cls":
-                values = hidden[:, 0]
-            elif pooling == "mean":
-                expanded = mask.unsqueeze(-1).to(hidden.dtype)
-                values = (hidden * expanded).sum(1) / expanded.sum(1).clamp_min(1)
-            elif pooling == "last_token":
-                reversed_mask = torch.flip(mask, dims=[1])
-                indexes = mask.shape[1] - 1 - reversed_mask.argmax(dim=1)
-                values = hidden[torch.arange(hidden.shape[0]), indexes]
-            else:
-                raise ValueError(f"unsupported matrix pooling: {pooling}")
-            chunks.append(values.float().cpu().numpy())
-            if sparse_linear is not None:
-                with torch.inference_mode():
-                    token_weights = torch.relu(sparse_linear(hidden)).squeeze(-1).float().cpu()
-                unused = {
-                    tokenizer.cls_token_id,
-                    tokenizer.eos_token_id,
-                    tokenizer.pad_token_id,
-                    tokenizer.unk_token_id,
-                }
-                for token_ids, weights in zip(batch["input_ids"].cpu().tolist(), token_weights.tolist()):
-                    row = {}
-                    for token_id, weight in zip(token_ids, weights):
-                        if token_id not in unused and weight > 0:
-                            key = str(token_id)
-                            row[key] = max(row.get(key, 0.0), float(weight))
-                    sparse_rows.append(row)
+            chunks.append(self._encode_batch(texts[offset : offset + batch_size], max_length, pooling, sparse_rows))
         dense = np.concatenate(chunks, axis=0)
-        if sparse_linear is not None:
+        if self.sparse_linear is not None:
             return {"dense_vecs": dense, "lexical_weights": sparse_rows}
         return dense
 
-    return encode
+
+def _load_transformer_embedding(
+    selection: ModelSelection,
+    *,
+    cache_root: Path,
+    local_files_only: bool,
+    trust_remote_code: bool,
+):
+    if trust_remote_code:
+        raise ValueError("remote model code is forbidden")
+    model_spec = selection.embedding
+    if model_spec["native_library"]["name"] == "sentence-transformers":
+        return _sentence_transformer_encoder(model_spec, cache_root, local_files_only)
+    torch, tokenizer, model = _transformers_model(model_spec, cache_root, local_files_only)
+    sparse_linear = None
+    if model_spec["id"] == "BAAI/bge-m3":
+        sparse_linear = _bge_m3_sparse_linear(torch, selection, cache_root, local_files_only)
+    return _TransformerEncoder(torch, tokenizer, model, sparse_linear)
 
 
-def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: str, max_length: int):
+def _token_ids(tokenizer, text: str) -> list[int]:
+    return list(tokenizer(text, add_special_tokens=False)["input_ids"])
+
+
+def _qwen_template_parts(formatting: dict) -> tuple[str, str, str]:
     query_marker = "__LLM_WIKI_QUERY__"
     document_marker = "__LLM_WIKI_DOCUMENT__"
     rendered = formatting["user_template"].format(
-        instruction=formatting["instruction"],
-        query=query_marker,
-        document=document_marker,
+        instruction=formatting["instruction"], query=query_marker, document=document_marker
     )
     before_query, marker, remainder = rendered.partition(query_marker)
     if not marker:
@@ -2942,29 +3045,102 @@ def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: 
     between, marker, after_document = remainder.partition(document_marker)
     if not marker:
         raise ValueError("Qwen reranker user template lacks document placeholder")
+    return before_query, between, after_document
 
-    def token_ids(text: str) -> list[int]:
-        return list(tokenizer(text, add_special_tokens=False)["input_ids"])
 
-    fixed_prefix = token_ids(formatting["system_prefix"] + before_query)
-    fixed_middle = token_ids(between)
-    fixed_suffix = token_ids(after_document + formatting["assistant_suffix"])
-    query_ids = token_ids(formatting["query_template"].format(query=query))
-    document_ids = token_ids(formatting["document_template"].format(document=document))
-    fixed_length = len(fixed_prefix) + len(fixed_middle) + len(fixed_suffix)
-    if fixed_length > max_length:
-        raise ValueError("reranker fixed prefix and suffix exceed matrix max length")
-    budget = max_length - fixed_length
+def _trim_to_budget(query_ids: list[int], document_ids: list[int], budget: int) -> None:
     while len(query_ids) + len(document_ids) > budget:
         if len(query_ids) >= len(document_ids):
             query_ids.pop()
         else:
             document_ids.pop()
+
+
+def _qwen_reranker_input_ids(tokenizer, formatting: dict, query: str, document: str, max_length: int):
+    before_query, between, after_document = _qwen_template_parts(formatting)
+    fixed_prefix = _token_ids(tokenizer, formatting["system_prefix"] + before_query)
+    fixed_middle = _token_ids(tokenizer, between)
+    fixed_suffix = _token_ids(tokenizer, after_document + formatting["assistant_suffix"])
+    query_ids = _token_ids(tokenizer, formatting["query_template"].format(query=query))
+    document_ids = _token_ids(tokenizer, formatting["document_template"].format(document=document))
+    fixed_length = len(fixed_prefix) + len(fixed_middle) + len(fixed_suffix)
+    if fixed_length > max_length:
+        raise ValueError("reranker fixed prefix and suffix exceed matrix max length")
+    _trim_to_budget(query_ids, document_ids, max_length - fixed_length)
     return {
         "input_ids": fixed_prefix + query_ids + fixed_middle + document_ids + fixed_suffix,
         "query_tokens_kept": len(query_ids),
         "document_tokens_kept": len(document_ids),
     }
+
+
+def _reranker_pad_id(tokenizer) -> int:
+    if tokenizer.pad_token_id is None:
+        return tokenizer.eos_token_id
+    return tokenizer.pad_token_id
+
+
+def _yes_no_token_ids(tokenizer, score_tokens: dict) -> tuple[int, int]:
+    no_ids = tokenizer(score_tokens["negative"], add_special_tokens=False)["input_ids"]
+    yes_ids = tokenizer(score_tokens["positive"], add_special_tokens=False)["input_ids"]
+    if len(no_ids) != 1 or len(yes_ids) != 1:
+        raise ValueError("Qwen reranker yes/no score tokens must each be one token")
+    return no_ids[0], yes_ids[0]
+
+
+def _left_padded(torch, rows: list[list[int]], pad_id: int):
+    width = max(len(row) for row in rows)
+    input_ids = torch.tensor([[pad_id] * (width - len(row)) + row for row in rows])
+    attention = torch.tensor([[0] * (width - len(row)) + [1] * len(row) for row in rows])
+    return input_ids, attention
+
+
+class _TransformerReranker:
+    """The score callable of a transformers-backed reranker candidate."""
+
+    def __init__(self, torch, tokenizer, model, formatting: dict) -> None:
+        self.torch = torch
+        self.tokenizer = tokenizer
+        self.model = model
+        self.formatting = formatting
+
+    def _pair_scores(self, chunk, max_length: int) -> list[float]:
+        queries, documents = zip(*chunk)
+        encoded = self.tokenizer(
+            list(queries),
+            list(documents),
+            padding=True,
+            truncation="longest_first",
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        with self.torch.inference_mode():
+            logits = self.model(**encoded).logits.float().reshape(-1)
+        return self.torch.sigmoid(logits).cpu().tolist()
+
+    def _qwen_scores(self, chunk, max_length: int, score_tokens: dict) -> list[float]:
+        rows = [
+            _qwen_reranker_input_ids(self.tokenizer, self.formatting, item["query"], item["document"], max_length)[
+                "input_ids"
+            ]
+            for item in chunk
+        ]
+        input_ids, attention = _left_padded(self.torch, rows, _reranker_pad_id(self.tokenizer))
+        with self.torch.inference_mode():
+            logits = self.model(input_ids=input_ids, attention_mask=attention).logits[:, -1, :].float()
+        no_id, yes_id = _yes_no_token_ids(self.tokenizer, score_tokens)
+        pair = self.torch.stack((logits[:, no_id], logits[:, yes_id]), dim=1)
+        return self.torch.softmax(pair, dim=1)[:, 1].cpu().tolist()
+
+    def __call__(self, inputs, *, batch_size, max_length, contract_type, score_tokens) -> list[float]:
+        scores: list[float] = []
+        for offset in range(0, len(inputs), batch_size):
+            chunk = inputs[offset : offset + batch_size]
+            if contract_type == "tokenizer_pair_sequence_classification":
+                scores.extend(self._pair_scores(chunk, max_length))
+                continue
+            scores.extend(self._qwen_scores(chunk, max_length, score_tokens))
+        return scores
 
 
 def _load_transformer_reranker(
@@ -2994,61 +3170,12 @@ def _load_transformer_reranker(
         "trust_remote_code": False,
     }
     tokenizer = AutoTokenizer.from_pretrained(spec["id"], **common)
-    model_class = (
-        AutoModelForSequenceClassification
-        if formatting["contract_type"] == "tokenizer_pair_sequence_classification"
-        else AutoModelForCausalLM
-    )
+    model_class = AutoModelForCausalLM
+    if formatting["contract_type"] == "tokenizer_pair_sequence_classification":
+        model_class = AutoModelForSequenceClassification
     model = model_class.from_pretrained(spec["id"], torch_dtype=torch.float32, **common)
     model.eval()
-
-    def score(inputs, *, batch_size, max_length, contract_type, score_tokens):
-        scores = []
-        for offset in range(0, len(inputs), batch_size):
-            chunk = inputs[offset : offset + batch_size]
-            if contract_type == "tokenizer_pair_sequence_classification":
-                queries, documents = zip(*chunk)
-                encoded = tokenizer(
-                    list(queries),
-                    list(documents),
-                    padding=True,
-                    truncation="longest_first",
-                    max_length=max_length,
-                    return_tensors="pt",
-                )
-                with torch.inference_mode():
-                    logits = model(**encoded).logits.float().reshape(-1)
-                scores.extend(torch.sigmoid(logits).cpu().tolist())
-                continue
-            rows = [
-                _qwen_reranker_input_ids(
-                    tokenizer,
-                    formatting,
-                    item["query"],
-                    item["document"],
-                    max_length,
-                )["input_ids"]
-                for item in chunk
-            ]
-            pad_id = tokenizer.pad_token_id
-            if pad_id is None:
-                pad_id = tokenizer.eos_token_id
-            width = max(len(row) for row in rows)
-            input_ids = torch.tensor([[pad_id] * (width - len(row)) + row for row in rows])
-            attention = torch.tensor(
-                [[0] * (width - len(row)) + [1] * len(row) for row in rows]
-            )
-            with torch.inference_mode():
-                logits = model(input_ids=input_ids, attention_mask=attention).logits[:, -1, :].float()
-            no_ids = tokenizer(score_tokens["negative"], add_special_tokens=False)["input_ids"]
-            yes_ids = tokenizer(score_tokens["positive"], add_special_tokens=False)["input_ids"]
-            if len(no_ids) != 1 or len(yes_ids) != 1:
-                raise ValueError("Qwen reranker yes/no score tokens must each be one token")
-            pair = torch.stack((logits[:, no_ids[0]], logits[:, yes_ids[0]]), dim=1)
-            scores.extend(torch.softmax(pair, dim=1)[:, 1].cpu().tolist())
-        return scores
-
-    return score
+    return _TransformerReranker(torch, tokenizer, model, formatting)
 
 
 def _fuse_rankings(
@@ -3065,19 +3192,29 @@ def _fuse_rankings(
     return [ScoredCandidate(by_id[evidence_id], score) for evidence_id, score in fused[:limit]]
 
 
+def _remove_reparse_point(path: Path) -> None:
+    if path.is_dir():
+        path.rmdir()
+        return
+    path.unlink(missing_ok=True)
+
+
+def _remove_artifact(path: Path) -> None:
+    if _is_reparse_point(path):
+        _remove_reparse_point(path)
+        return
+    if path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
 def _remove_semantic_artifacts(cache_root: Path, lexical_path: Path) -> None:
     for path in cache_root.iterdir():
         if path == lexical_path:
             continue
-        if _is_reparse_point(path):
-            if path.is_dir():
-                path.rmdir()
-            else:
-                path.unlink(missing_ok=True)
-        elif path.is_file():
-            path.unlink(missing_ok=True)
-        elif path.is_dir():
-            shutil.rmtree(path)
+        _remove_artifact(path)
 
 
 def _decorate_lexical_fallback(
@@ -3167,68 +3304,69 @@ class _RunWorkspace:
     model_cache_identity: str
 
 
-def _owner_only_directory(path: Path, label: str) -> os.stat_result:
-    if _is_reparse_point(path):
-        raise ValueError(f"{label} must not be a symlink or reparse point")
-    identity = path.stat(follow_symlinks=False)
+def _require_owner_only(identity: os.stat_result, label: str) -> None:
     if hasattr(os, "getuid") and identity.st_uid != os.getuid():
         raise PermissionError(f"{label} is not owned by the current user")
     if os.name == "posix" and stat.S_IMODE(identity.st_mode) & 0o077:
         raise PermissionError(f"{label} must be owner-controlled")
+
+
+def _owner_only_directory(path: Path, label: str) -> os.stat_result:
+    if _is_reparse_point(path):
+        raise ValueError(f"{label} must not be a symlink or reparse point")
+    identity = path.stat(follow_symlinks=False)
+    _require_owner_only(identity, label)
     return identity
 
 
-def _create_run_workspace(model_cache_root: Path) -> _RunWorkspace:
-    requested = model_cache_root.expanduser()
-    if requested.exists() and _is_reparse_point(requested):
-        raise ValueError("model cache root must not be a symlink or reparse point")
-    requested.mkdir(parents=True, exist_ok=True)
-    root = _validate_cache_root(requested).resolve(strict=True)
-    if _is_reparse_point(root):
-        raise ValueError("model cache root must not be a symlink or reparse point")
+def _owned_root_identity(root: Path) -> os.stat_result:
     root_identity = root.stat(follow_symlinks=False)
     if hasattr(os, "getuid") and root_identity.st_uid != os.getuid():
         raise PermissionError("model cache root is not owned by the current user")
+    return root_identity
+
+
+def _prepared_runs_root(root: Path) -> tuple[Path, os.stat_result]:
     runs_root = root / "runs"
     if runs_root.exists() and _is_reparse_point(runs_root):
         raise ValueError("runs directory must not be a symlink or reparse point")
     runs_root.mkdir(mode=0o700, exist_ok=True)
-    runs_identity = _owner_only_directory(runs_root, "runs directory")
-    workspace = None
+    return runs_root, _owner_only_directory(runs_root, "runs directory")
+
+
+def _allocated_workspace(runs_root: Path) -> Path:
     for _attempt in range(32):
         candidate = runs_root / secrets.token_hex(16)
         try:
             candidate.mkdir(mode=0o700)
         except FileExistsError:
             continue
-        workspace = candidate
-        break
-    if workspace is None:
-        raise FileExistsError("could not allocate a unique benchmark run workspace")
+        return candidate
+    raise FileExistsError("could not allocate a unique benchmark run workspace")
+
+
+def _create_run_workspace(model_cache_root: Path) -> _RunWorkspace:
+    root = _prepared_model_cache_root(model_cache_root)
+    root_identity = _owned_root_identity(root)
+    runs_root, runs_identity = _prepared_runs_root(root)
+    workspace = _allocated_workspace(runs_root)
     workspace_identity = _owner_only_directory(workspace, "run workspace")
     if not _same_path_identity(runs_root, runs_identity):
         shutil.rmtree(workspace)
         raise PermissionError("runs directory changed during workspace creation")
-    identity_payload = {
-        "device": int(root_identity.st_dev),
-        "inode": int(root_identity.st_ino),
-    }
-    return _RunWorkspace(
-        workspace,
-        workspace_identity,
-        runs_root,
-        runs_identity,
-        _sha256_json(identity_payload),
-    )
+    identity_payload = {"device": int(root_identity.st_dev), "inode": int(root_identity.st_ino)}
+    return _RunWorkspace(workspace, workspace_identity, runs_root, runs_identity, _sha256_json(identity_payload))
+
+
+def _require_workspace_unchanged(workspace: _RunWorkspace) -> None:
+    if not _same_path_identity(workspace.runs_root, workspace.runs_identity):
+        raise PermissionError("runs directory changed before workspace cleanup")
+    if _is_reparse_point(workspace.path) or not _same_path_identity(workspace.path, workspace.identity):
+        raise PermissionError("run workspace changed before cleanup")
 
 
 def _cleanup_run_workspace(workspace: _RunWorkspace) -> None:
-    if not _same_path_identity(workspace.runs_root, workspace.runs_identity):
-        raise PermissionError("runs directory changed before workspace cleanup")
-    if _is_reparse_point(workspace.path) or not _same_path_identity(
-        workspace.path, workspace.identity
-    ):
-        raise PermissionError("run workspace changed before cleanup")
+    _require_workspace_unchanged(workspace)
     if os.name == "posix" and not shutil.rmtree.avoids_symlink_attacks:
         raise PermissionError("platform lacks descriptor-safe workspace cleanup")
     shutil.rmtree(workspace.path)
