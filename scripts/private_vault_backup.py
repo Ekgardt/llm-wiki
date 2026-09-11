@@ -128,11 +128,7 @@ def _validate_command(command: list[str]) -> None:
 
 
 def _validate_output_limit(max_output_bytes: int) -> None:
-    if type(max_output_bytes) is not int:
-        raise ValueError("invalid bounded command")
-    if max_output_bytes < 1:
-        raise ValueError("invalid bounded command")
-    if max_output_bytes > 16 * 1024 * 1024:
+    if type(max_output_bytes) is not int or not 1 <= max_output_bytes <= 16 * 1024 * 1024:
         raise ValueError("invalid bounded command")
 
 
@@ -339,13 +335,17 @@ def _stable_symlink_entry(
 
 def _scanned_entry(path: Path, logical: str, deadline: float) -> tuple[_Entry, bool]:
     before = _metadata(path)
-    mode = before[0]
-    if stat.S_ISDIR(mode):
+    if stat.S_ISDIR(before[0]):
         return _Entry(path, logical, "directory"), True
+    return _leaf_entry(path, logical, before, deadline), False
+
+
+def _leaf_entry(path: Path, logical: str, before: tuple, deadline: float) -> _Entry:
+    mode = before[0]
     if stat.S_ISREG(mode):
-        return _stable_file_entry(path, logical, before, deadline), False
+        return _stable_file_entry(path, logical, before, deadline)
     if stat.S_ISLNK(mode):
-        return _stable_symlink_entry(path, logical, before), False
+        return _stable_symlink_entry(path, logical, before)
     raise BackupError("unsupported_source_type")
 
 
@@ -923,23 +923,15 @@ def _read_manifest(root: Path) -> tuple[bytes, dict[str, object]]:
     return raw, manifest
 
 
+_MANIFEST_FIELDS = frozenset({"schema_version", "created_at", "source_roots", "entries", "databases"})
+
+
 def _validate_manifest_envelope(raw: bytes, manifest: dict[str, object]) -> list[object]:
-    if raw != canonical_json_bytes(manifest):
+    if raw != canonical_json_bytes(manifest) or set(manifest) != _MANIFEST_FIELDS:
         raise BackupError("manifest_invalid")
-    if set(manifest) != {
-        "schema_version",
-        "created_at",
-        "source_roots",
-        "entries",
-        "databases",
-    }:
+    if manifest["schema_version"] != "private-vault-backup/v1" or not isinstance(manifest["entries"], list):
         raise BackupError("manifest_invalid")
-    if manifest["schema_version"] != "private-vault-backup/v1":
-        raise BackupError("manifest_invalid")
-    entries = manifest["entries"]
-    if not isinstance(entries, list):
-        raise BackupError("manifest_invalid")
-    return entries
+    return manifest["entries"]
 
 
 def _actual_manifest_entries(root: Path) -> list[dict[str, object]]:
@@ -1051,11 +1043,13 @@ def _repository_location(value: str, sources: set[Path]) -> None:
     if remote is not None:
         _validate_remote_repository(value, remote)
         return
-    local = Path(value)
+    _local_repository_location(Path(value), sources)
+
+
+def _local_repository_location(local: Path, sources: set[Path]) -> None:
     if not local.is_absolute():
         raise BackupError("repository_file_invalid")
-    resolved = local.resolve(strict=False)
-    if _overlaps_any(resolved, sources):
+    if _overlaps_any(local.resolve(strict=False), sources):
         raise BackupError("repository_overlaps_source")
     _require_local_repository(local)
 
@@ -1174,40 +1168,52 @@ def backup_private_vault(
         now=now,
         deadline=deadline,
     ) as image:
-        manifest_path = image / "manifest.json"
-        manifest_bytes = manifest_path.read_bytes()
-        manifest_sha256 = sha256_bytes(manifest_bytes)
-        manifest = json.loads(manifest_bytes)
-        base = [str(binary), "--repository-file", str(repository)]
-        result = _run_bounded(
-            base
-            + [
-                "backup",
-                "--json",
-                "--tag",
-                "llm-wiki-private-v1",
-                ".",
-            ],
-            cwd=image,
-            deadline=deadline,
-        )
-        if result.returncode == 3:
-            raise BackupError("restic_backup_incomplete")
-        if result.returncode != 0:
-            raise BackupError("restic_backup_failed")
-        snapshot = _snapshot_id(result.stdout)
-        validate_backup_image(image)
-        if sha256_bytes(manifest_path.read_bytes()) != manifest_sha256:
-            raise BackupError("staging_changed_during_backup")
-        checked = _run_bounded(base + ["check"], cwd=image, deadline=deadline)
-        if checked.returncode != 0:
-            raise BackupError("restic_check_failed")
-        return {
-            "schema_version": "private-vault-backup-receipt/v1",
-            "snapshot_id": snapshot,
-            "created_at": str(manifest["created_at"]),
-            "manifest_sha256": manifest_sha256,
-        }
+        return _backed_up_image(image, [str(binary), "--repository-file", str(repository)], deadline)
+
+
+def _backed_up_image(image: Path, base: list[str], deadline: float) -> dict[str, str]:
+    """Back the staged image up, prove it did not change meanwhile, and check the repository."""
+    manifest_path = image / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_sha256 = sha256_bytes(manifest_bytes)
+    manifest = json.loads(manifest_bytes)
+    snapshot = _restic_backup(base, image, deadline)
+    validate_backup_image(image)
+    if sha256_bytes(manifest_path.read_bytes()) != manifest_sha256:
+        raise BackupError("staging_changed_during_backup")
+    _restic_check(base, image, deadline)
+    return {
+        "schema_version": "private-vault-backup-receipt/v1",
+        "snapshot_id": snapshot,
+        "created_at": str(manifest["created_at"]),
+        "manifest_sha256": manifest_sha256,
+    }
+
+
+def _restic_backup(base: list[str], image: Path, deadline: float) -> str:
+    result = _run_bounded(
+        base
+        + [
+            "backup",
+            "--json",
+            "--tag",
+            "llm-wiki-private-v1",
+            ".",
+        ],
+        cwd=image,
+        deadline=deadline,
+    )
+    if result.returncode == 3:
+        raise BackupError("restic_backup_incomplete")
+    if result.returncode != 0:
+        raise BackupError("restic_backup_failed")
+    return _snapshot_id(result.stdout)
+
+
+def _restic_check(base: list[str], image: Path, deadline: float) -> None:
+    checked = _run_bounded(base + ["check"], cwd=image, deadline=deadline)
+    if checked.returncode != 0:
+        raise BackupError("restic_check_failed")
 
 
 def _restore_target(target: Path) -> Path:
@@ -1262,11 +1268,7 @@ def _validate_restore_counters(summary: dict[str, object]) -> None:
 
 
 def _require_complete_restore(summary: dict[str, object]) -> None:
-    if summary["files_skipped"] != 0:
-        raise BackupError("restic_restore_incomplete")
-    if summary["files_deleted"] != 0:
-        raise BackupError("restic_restore_incomplete")
-    if summary["bytes_skipped"] != 0:
+    if any(summary[key] != 0 for key in ("files_skipped", "files_deleted", "bytes_skipped")):
         raise BackupError("restic_restore_incomplete")
 
 
