@@ -335,33 +335,42 @@ disposable, fail-closed, bounded reads, no silent fallback).
 - Rule: R3. Verified: read. Fix: replace with the measured numbers or delete.
 
 ### L4 — `llm_client.py:641-648` docstring contains mojibake ("???") [defect]
+- Status: verified not present (the docstring holds a real em dash) 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R3. Verified: read. Fix: restore the em dash.
 
 ### L5 — `llm_client._timeout_s` (`944-955`) does `int(override)` on the environment value; a bad `MEMORY_LLM_TIMEOUT_S` crashes the caller instead of being refused by name [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4. Verified: read. Fix: validate once at startup.
 
 ### L6 — `ContextBudget(model, 32_768, 4_000, 1_024)` is written twice (`compile_memory.py:625`, `1374`) [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4 (two copies of one budget drift). Verified: read. Fix: one constant.
 
 ### L7 — `session_evidence.py:176` and `:236` render the transcript twice per write [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4. Verified: read. Fix: render once, test emptiness on the result.
 
 ### L8 — `retrieval.py:4006` aliases `GenerationSealChanged` to itself; `retrieve_via_search_memory` (3961-4250) is 290 lines with ten closures and a graph CCN of 23 [defect]
+- Status: the alias removed 2026-09-11; the 290-line function with ten closures remains open.
 - Rule: R5 in spirit (lizard scores closures separately, so the gate passes).
   Verified: ran, read. Fix: lift the closures to module functions taking a
   small context object.
 
 ### L9 — `generation_catalog.py:325-336` `close()` catches `BaseException` per descriptor and re-raises only the first error [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4. Verified: read. Fix: catch `OSError`, raise an `ExceptionGroup`
   or log the rest.
 
 ### L10 — `access_tracking.flush_access_to_frontmatter` docstring says "flush all pending"; the cursor path stops at 100 pages / 1 000 candidates (`37-38`, `227-230`), and `slugs = [slug]` (121-124) is a loop of one [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R3/R4. Verified: read. Fix: say "bounded" and drop the loop.
 
 ### L11 — `search_memory._print_index_status` (`6194`) opens the legacy SQLite file without `mode=ro` or `validate_runtime_file`, unlike every other opener in the file [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4. Verified: read. Fix: use the read-only URI opener.
 
 ### L12 — `retrieval._start_optional_worker:277` and `query_memory._detached_provider:171` catch `BaseException` in daemon threads, so `KeyboardInterrupt`/`SystemExit` become "the stage failed" [defect]
+- Status: fixed 2026-09-11 (`docs/research/2026-09-11-nine-small-findings-closed-at-once.md`).
 - Rule: R4. Verified: read. Fix: catch `Exception`; let the rest propagate.
 
 ### L13 — Other benchmark files outside the two stands also fail the gate (from the merge-time gate run) [defect]

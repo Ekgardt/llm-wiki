@@ -69,17 +69,16 @@ def test_merge_keeps_user_hooks_and_replaces_ours(tmp_path):
     assert "Bash(sed -n *)" in merged["permissions"]["allow"]
     assert "Read(./.env)" in merged["permissions"]["deny"]
 
-    ss = merged["hooks"]["SessionStart"]
-    cmds = []
-    for block in ss:
-        for h in block.get("hooks", []):
-            cmds.append(h["command"])
-    assert any("echo user-hook" in c for c in cmds)
-    assert any("$LLM_WIKI_ROOT" in c and "session_start_context" in c for c in cmds)
-    # Old relative ours removed
-    assert not any(c == "uv run python scripts/session_start_context.py" for c in cmds)
+    cmds = _commands(merged["hooks"]["SessionStart"])
+    ours = [c for c in cmds if "session_start_context" in c]
+    assert "echo user-hook" in cmds
+    assert ours == ['uv run --directory "$LLM_WIKI_ROOT" python scripts/session_start_context.py']
     # Unrelated event preserved
     assert merged["hooks"]["Notification"]
+
+
+def _commands(blocks: list) -> list[str]:
+    return [h["command"] for block in blocks for h in block.get("hooks", [])]
 
 
 def test_apply_merge_writes_backup(tmp_path):
@@ -121,6 +120,14 @@ def test_apply_merge_writes_backup(tmp_path):
     assert backups[0].read_bytes() == original
 
 
+def _backup(directory: Path, index: int, modified: float) -> Path:
+    backup = directory / f"settings.json.bak-llm-wiki-20260801-000000-{index:06d}"
+    with backup.open("wb") as handle:
+        handle.truncate(11 * 1024 * 1024)
+    os.utime(backup, (modified, modified))
+    return backup
+
+
 def test_apply_merge_enforces_backup_retention_without_deleting_unrelated_files(tmp_path):
     user_path = tmp_path / "settings.json"
     original = b'{"env":{"X":"1"}}\n'
@@ -128,22 +135,16 @@ def test_apply_merge_enforces_backup_retention_without_deleting_unrelated_files(
     template = tmp_path / "template.json"
     template.write_text('{"hooks":{}}\n', encoding="utf-8")
     now = time.time()
-    old = None
-    for index in range(11):
-        backup = tmp_path / f"settings.json.bak-llm-wiki-20260801-000000-{index:06d}"
-        with backup.open("wb") as handle:
-            handle.truncate(11 * 1024 * 1024)
-        modified = now - (91 * 24 * 60 * 60 if index == 0 else 11 - index)
-        os.utime(backup, (modified, modified))
-        if index == 0:
-            old = backup
+    ages = [91 * 24 * 60 * 60] + [11 - index for index in range(1, 11)]
+    backups_made = [_backup(tmp_path, index, now - age) for index, age in enumerate(ages)]
+    old = backups_made[0]
     unrelated = tmp_path / "settings.json.bak-user"
     unrelated.write_bytes(b"keep")
 
     mcs.apply_merge(user_path, template, "/v", "/s", dry_run=False)
 
     backups = list(tmp_path.glob("settings.json.bak-llm-wiki-*"))
-    assert old is not None and not old.exists()
+    assert not old.exists()
     assert len(backups) <= 10
     assert sum(path.stat().st_size for path in backups) <= 100 * 1024 * 1024
     assert any(path.read_bytes() == original for path in backups)

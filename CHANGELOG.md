@@ -96,6 +96,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Nine small findings closed at once.** A bad `MEMORY_LLM_TIMEOUT_S` is
+  refused by name; the compile budget is written once; the session record
+  renders its transcript once; the self-alias of `GenerationSealChanged` is
+  gone; a generation's descriptors close with `OSError` handling and one
+  named error; the flush docstring says "bounded"; `--status` opens the
+  legacy index read-only; the optional-stage worker and the detached
+  provider no longer swallow interrupts; `merge_claude_settings` is under
+  the complexity gate (audit L5–L12). Research:
+  `docs/research/2026-09-11-nine-small-findings-closed-at-once.md`.
 - **A dropped best-effort write is counted, and one bound is declared once.**
   Six best-effort writes (capture-operation state, feedback capture, the
   three MCP telemetry emitters) now count their failure in the

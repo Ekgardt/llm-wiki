@@ -171,9 +171,12 @@ def _bounded(body: str) -> str:
 
 def render_session_document(fields: Mapping[str, object], transcript: str) -> str:
     """The whole page: frontmatter, a title that names the session, the turns."""
+    return _document_from_body(fields, render_transcript(transcript).strip())
+
+
+def _document_from_body(fields: Mapping[str, object], body: str) -> str:
     session = str(fields.get("session") or "unknown session")
     title = f"# Session {session}"
-    body = render_transcript(transcript).strip()
     return _bounded(f"{_frontmatter(fields)}\n{title}\n\n{body}\n")
 
 
@@ -234,9 +237,10 @@ def write_session_evidence(
     """
     from markdown_transaction import stable_operation_id
 
-    document = render_session_document(fields, transcript)
-    if not render_transcript(transcript).strip():
+    body = render_transcript(transcript).strip()
+    if not body:
         return None
+    document = _document_from_body(fields, body)
     relative = evidence_relative_path(_capture_day(fields), str(fields.get("session") or ""))
     path = Path(vault) / relative
     encoded = document.encode("utf-8")

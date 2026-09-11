@@ -941,6 +941,17 @@ def _require_positive_seconds(seconds: object) -> None:
         raise ValueError("call ceiling must be a positive whole number of seconds")
 
 
+def _positive_seconds(name: str, raw: str) -> int:
+    """An operator override that is not a positive integer is refused by name."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer of seconds, not {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer of seconds, not {raw!r}")
+    return value
+
+
 def _timeout_s() -> int:
     """The environment, else the caller's own ceiling, else the short default.
 
@@ -949,7 +960,7 @@ def _timeout_s() -> int:
     """
     override = os.environ.get("MEMORY_LLM_TIMEOUT_S")
     if override is not None:
-        return int(override)
+        return _positive_seconds("MEMORY_LLM_TIMEOUT_S", override)
     if _CALL_CEILING_S is not None:
         return _CALL_CEILING_S
     return DEFAULT_TIMEOUT_S

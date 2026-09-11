@@ -5345,9 +5345,11 @@ def _print_index_status() -> int:
     if not INDEX_FILE.exists():
         print(f"Index: not built ({len(pages)} pages would be indexed)")
         return 0
-    conn = sqlite3.connect(str(INDEX_FILE))
-    count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-    conn.close()
+    conn = sqlite3.connect(f"{INDEX_FILE.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    finally:
+        conn.close()
     print(f"Index: {INDEX_FILE}")
     print(f"  Pages indexed: {count}")
     print(f"  Pages on disk: {len(pages)}")

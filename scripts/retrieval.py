@@ -274,7 +274,7 @@ def _start_optional_worker(
         started = time.monotonic()
         try:
             value = operation()
-        except BaseException as exc:
+        except Exception as exc:  # noqa: BLE001 - an interrupt propagates
             result.put((False, exc))
         else:
             # Only a run that produced something is a cost observation. A fast
@@ -4012,8 +4012,6 @@ def retrieve_via_search_memory(
         model_revision=generation_model_revision,
     )
 
-    _GenerationSealChanged = GenerationSealChanged
-
     analysis = analyze_query(query)
     requested = _requested_profile(profile, analysis, semantic=semantic)
     wanted_tuple = _wanted_signals(requested, semantic=semantic)
@@ -4157,7 +4155,7 @@ def retrieve_via_search_memory(
             nonlocal generation_fallback
             generation_ctx["dense_fallback"] = "generation_seal_changed"
             generation_fallback = "generation_seal_changed"
-            raise _GenerationSealChanged
+            raise GenerationSealChanged
 
         if "dense" not in wanted_tuple or generation_ctx["legacy_dense_blocked"]:
             return None
@@ -4228,13 +4226,13 @@ def retrieve_via_search_memory(
         ):
             nonlocal generation_fallback
             generation_fallback = "generation_seal_changed"
-            raise _GenerationSealChanged
+            raise GenerationSealChanged
         return outcome
 
     try:
         try:
             result = run_under_seal()
-        except _GenerationSealChanged:
+        except GenerationSealChanged:
             use_generation = False
             corpus_generation = "legacy"
             result = run_retrieval()

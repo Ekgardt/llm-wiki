@@ -50,11 +50,7 @@ def _default_user_settings() -> Path:
     return home / ".claude" / "settings.json"
 
 
-def _load_json(path: Path, *, label: str, missing_ok: bool = False) -> dict:
-    if not path.exists():
-        if missing_ok:
-            return {}
-        raise ValueError(f"{label} is missing: {path}")
+def _parsed_json_object(path: Path, label: str) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -66,32 +62,38 @@ def _load_json(path: Path, *, label: str, missing_ok: bool = False) -> dict:
     return data
 
 
+def _load_json(path: Path, *, label: str, missing_ok: bool = False) -> dict:
+    if path.exists():
+        return _parsed_json_object(path, label)
+    if missing_ok:
+        return {}
+    raise ValueError(f"{label} is missing: {path}")
+
+
 def _command_is_ours(command: str) -> bool:
     c = command or ""
     return any(m in c for m in OUR_SCRIPT_MARKERS)
 
 
+def _is_our_hook(hook: object) -> bool:
+    return isinstance(hook, dict) and _command_is_ours(str(hook.get("command") or ""))
+
+
+def _without_our_hooks(block: dict) -> dict | None:
+    """The block with our hooks removed; None when nothing else was in it."""
+    hooks = block.get("hooks")
+    if not isinstance(hooks, list):
+        return block
+    kept = [hook for hook in hooks if not _is_our_hook(hook)]
+    if not kept:
+        return None
+    return {**block, "hooks": kept}
+
+
 def _strip_our_hooks(blocks: list) -> list:
     """Remove matcher-blocks that only (or partly) contain our commands."""
-    out: list = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        hooks = block.get("hooks")
-        if not isinstance(hooks, list):
-            out.append(block)
-            continue
-        kept = [
-            h
-            for h in hooks
-            if isinstance(h, dict) and not _command_is_ours(str(h.get("command") or ""))
-        ]
-        if kept:
-            new_block = dict(block)
-            new_block["hooks"] = kept
-            out.append(new_block)
-        # If all hooks were ours, drop the whole matcher block.
-    return out
+    stripped = (_without_our_hooks(block) for block in blocks if isinstance(block, dict))
+    return [block for block in stripped if block is not None]
 
 
 def merged_permission_list(key: str, existing: list, incoming: list) -> list[str]:

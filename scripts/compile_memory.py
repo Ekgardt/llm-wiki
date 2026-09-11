@@ -622,7 +622,7 @@ def pack_compile_batches(
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
 ) -> tuple[CompileBatch, ...]:
-    budget = ContextBudget(model, 32_768, 4_000, 1_024)
+    budget = _compile_budget(model)
     measure = _batch_measure(inputs, model, token_adapters)
     daily_paths = {item.logical_path for item in inputs.dailies}
     optional_sources = tuple(
@@ -1371,7 +1371,7 @@ def _compile_prompt_fits(
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None,
 ) -> bool:
-    budget = ContextBudget(model, 32_768, 4_000, 1_024)
+    budget = _compile_budget(model)
     count = count_tokens(
         f"{system}\n{canonical_json_bytes(schema).decode()}\n{prompt}",
         model=model,
@@ -3929,6 +3929,19 @@ def _mark_started(trigger: str) -> None:
         s.pop("last_compile_error", None)
 
     update_state(_mutate)
+
+
+# One compile budget: a 32k window, 4k reserved for the answer, 1k of slack.
+# Written once, read by batching and by the schema fit check (audit L6).
+COMPILE_CONTEXT_WINDOW_TOKENS = 32_768
+COMPILE_ANSWER_RESERVE_TOKENS = 4_000
+COMPILE_SLACK_TOKENS = 1_024
+
+
+def _compile_budget(model: str | None) -> ContextBudget:
+    return ContextBudget(
+        model, COMPILE_CONTEXT_WINDOW_TOKENS, COMPILE_ANSWER_RESERVE_TOKENS, COMPILE_SLACK_TOKENS
+    )
 
 
 def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:

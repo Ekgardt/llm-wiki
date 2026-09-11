@@ -168,7 +168,7 @@ def _detached_provider(
     def invoke() -> None:
         try:
             outcome.put((True, generator(prompt, system_prompt, QA_MAX_OUTPUT_TOKENS)))
-        except BaseException as exc:  # noqa: BLE001 - preserve provider isolation
+        except Exception as exc:  # noqa: BLE001 - preserve provider isolation
             outcome.put((False, exc))
 
     threading.Thread(target=invoke, name="grounded-qa-provider", daemon=True).start()

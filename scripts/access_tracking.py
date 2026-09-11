@@ -214,7 +214,9 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
 
     With a slug, flush that page: 1 when it was rewritten, 0 when nothing was
     pending or the page could not be exported (then it is named in
-    `last_flush_failures()`). Without one, scan candidates from the cursor.
+    `last_flush_failures()`). Without one, scan candidates from the export
+    cursor — a bounded pass (`MAX_PAGES_PER_EXPORT`,
+    `MAX_CANDIDATES_SCANNED_PER_EXPORT`), never "everything pending".
     """
     if slug is None:
         return _flush_candidates_with_cursor()

@@ -325,15 +325,17 @@ class _GenerationSealCapability:
     def close(self) -> None:
         if self._closed:
             return
-        errors: list[BaseException] = []
+        errors: list[OSError] = []
         for held in self.held_files:
             try:
                 os.close(held.descriptor)
-            except BaseException as exc:
+            except OSError as exc:
                 errors.append(exc)
         self._closed = True
         if errors:
-            raise errors[0]
+            raise OSError(
+                f"{len(errors)} generation descriptor(s) failed to close: {errors[0]}"
+            ) from errors[0]
 
     def __enter__(self) -> _GenerationSealCapability:
         return self
