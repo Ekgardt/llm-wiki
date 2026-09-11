@@ -132,3 +132,25 @@ types before calling out. The second cut runs 23.8 s against 23.9 s.
 `scripts/answer_budget.py` pointed at "scripts/code_extractor.py:226" for
 the identifier form; the line had already drifted, and the comment now
 names `code_extractor._identifier` instead.
+
+## Navigation is judged against its own branches
+
+`scripts/code_navigation.py` (39 findings, one method at CCN 90) is the
+freshness-proven facade over Pyright: every answer is fenced by a workspace
+revision taken before and after it, and a moving workspace gets one retry.
+The rewrite keeps each attempt's state in a small class (`_QueryAttempts`
+and `_QueryAttempt` for queries, `_StructuralRun` for symbol resolution and
+edge verification); an attempt that has decided its result ends through one
+private exception carrying that result, and the first-attempt retry through
+another, so no phase needs a ladder of early returns. Every warning text,
+status, deadline check and publication point is kept.
+
+The facade's 272 tests pass, but a line trace showed they never reach 78
+statements — among them a type query whose two provider calls fail in
+different ways, a valid hover range, outgoing calls, the source-document
+cache replacing an entry, and most revision faults of symbol resolution and
+edge verification. Those branches were compared old against new in 46
+scenarios (every one equal, with statuses from `ok` to `stale`), and kept as
+`tests/test_code_navigation_fault_paths.py`: 40 cases that pass on the
+code before the change and after it, so they pin existing behaviour rather
+than the new code's.
