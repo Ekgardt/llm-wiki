@@ -17,7 +17,7 @@ import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote_to_bytes, urlsplit
 
 import windows_workspace
@@ -1072,6 +1072,39 @@ def _decoded_provider_uri(uri: object) -> tuple[str, str] | None:
     return authority, path
 
 
+def _windows_shares_root(provider: PureWindowsPath, root: PureWindowsPath) -> bool:
+    if len(provider.parts) < len(root.parts):
+        return False
+    if provider.parts[0].casefold() != root.parts[0].casefold():
+        return False
+    return provider.parts[1 : len(root.parts)] == root.parts[1:]
+
+
+def _windows_provider_in_root(
+    provider_path: PurePath, checkout_root: object
+) -> tuple[PurePath, PurePath] | None:
+    provider = PureWindowsPath(provider_path)
+    root = PureWindowsPath(checkout_root)
+    if provider.drive.startswith("\\") or not provider.is_absolute():
+        return None
+    if not _windows_shares_root(provider, root):
+        return None
+    return provider, root
+
+
+def _provider_path_in_root(
+    provider_path: PurePath, checkout_root: object
+) -> tuple[PurePath, PurePath] | None:
+    """(provider path, checkout root) as pure paths, or None when the path is outside."""
+    if os.name == "nt":
+        return _windows_provider_in_root(provider_path, checkout_root)
+    provider = PurePosixPath(provider_path)
+    root = PurePosixPath(checkout_root)
+    if not provider.is_absolute() or str(provider).startswith("//"):
+        return None
+    return provider, root
+
+
 def normalize_provider_uri(
     repository: RepositoryScope,
     uri: str,
@@ -1081,28 +1114,42 @@ def normalize_provider_uri(
     if _decoded_provider_uri(uri) is None:
         return None
     try:
-        provider_path = file_uri_to_path(uri, platform=os.name)
-        if os.name == "nt":
-            provider = PureWindowsPath(provider_path)
-            root = PureWindowsPath(repository.checkout_root)
-            if provider.drive.startswith("\\") or not provider.is_absolute():
-                return None
-            if (
-                len(provider.parts) < len(root.parts)
-                or provider.parts[0].casefold() != root.parts[0].casefold()
-                or provider.parts[1 : len(root.parts)] != root.parts[1:]
-            ):
-                return None
-        else:
-            provider = PurePosixPath(provider_path)
-            root = PurePosixPath(repository.checkout_root)
-            if not provider.is_absolute() or str(provider).startswith("//"):
-                return None
-        relative = provider.relative_to(root).as_posix()
-        normalized, _parts = _validate_relative_path(relative)
+        pair = _provider_path_in_root(
+            file_uri_to_path(uri, platform=os.name), repository.checkout_root
+        )
+        if pair is None:
+            return None
+        provider, root = pair
+        normalized, _parts = _validate_relative_path(provider.relative_to(root).as_posix())
         return resolve_repository_source(repository, normalized)
     except Exception:
         return None
+
+
+def _quoted_value_end(value: str, value_start: int) -> int:
+    """The index after the closing quote (or the end of the text)."""
+    quote = value[value_start]
+    value_end = value_start + 1
+    escaped = False
+    while value_end < len(value):
+        character = value[value_end]
+        value_end += 1
+        if character == quote and not escaped:
+            break
+        escaped = character == "\\" and not escaped
+    return value_end
+
+
+def _line_value_end(value: str, value_end: int) -> int:
+    while value_end < len(value) and value[value_end] not in "\r\n":
+        value_end += 1
+    return value_end
+
+
+def _assignment_value_end(value: str, value_start: int) -> int:
+    if value_start < len(value) and value[value_start] in {'"', "'"}:
+        return _quoted_value_end(value, value_start)
+    return _line_value_end(value, value_start)
 
 
 def _redact_assignments(value: str) -> str:
@@ -1112,35 +1159,56 @@ def _redact_assignments(value: str) -> str:
         if match.start() < cursor:
             continue
         pieces.append(value[cursor : match.end()])
-        value_start = match.end()
-        value_end = value_start
-        if value_start < len(value) and value[value_start] in {'"', "'"}:
-            quote = value[value_start]
-            value_end += 1
-            escaped = False
-            while value_end < len(value):
-                character = value[value_end]
-                value_end += 1
-                if character == quote and not escaped:
-                    break
-                escaped = character == "\\" and not escaped
-                if character != "\\":
-                    escaped = False
-        else:
-            while value_end < len(value) and value[value_end] not in "\r\n":
-                value_end += 1
         pieces.append("<redacted>")
-        cursor = value_end
+        cursor = _assignment_value_end(value, match.end())
     pieces.append(value[cursor:])
     return "".join(pieces)
 
 
-def _redact_url_userinfo(value: str) -> str:
-    def scheme_character(character: str) -> bool:
-        return character.isascii() and (
-            character.isalpha() or character.isdigit() or character in "+.-"
-        )
+def _scheme_character(character: str) -> bool:
+    return character.isascii() and (
+        character.isalpha() or character.isdigit() or character in "+.-"
+    )
 
+
+def _scheme_start(value: str, scheme_end: int) -> int:
+    scheme_start = scheme_end
+    while scheme_start > 0 and _scheme_character(value[scheme_start - 1]):
+        scheme_start -= 1
+    return scheme_start
+
+
+def _is_scheme(value: str, scheme_start: int, scheme_end: int) -> bool:
+    if scheme_start >= scheme_end:
+        return False
+    return value[scheme_start].isascii() and value[scheme_start].isalpha()
+
+
+def _authority_terminator(character: str) -> bool:
+    if character in "/?#" or character in _URL_AUTHORITY_TOKEN_BOUNDARIES:
+        return True
+    return character.isspace() or _is_control(character)
+
+
+def _authority_end(value: str, authority_start: int) -> int:
+    authority_end = authority_start
+    while authority_end < len(value) and not _authority_terminator(value[authority_end]):
+        authority_end += 1
+    return authority_end
+
+
+def _userinfo_span(value: str, scheme_end: int) -> tuple[int, int] | None:
+    """(authority start, index of the last `@`) of a URL with userinfo, else None."""
+    if not _is_scheme(value, _scheme_start(value, scheme_end), scheme_end):
+        return None
+    authority_start = scheme_end + 3
+    userinfo_end = value.rfind("@", authority_start, _authority_end(value, authority_start))
+    if userinfo_end < authority_start:
+        return None
+    return authority_start, userinfo_end
+
+
+def _redact_url_userinfo(value: str) -> str:
     pieces: list[str] = []
     cursor = 0
     search_start = 0
@@ -1148,35 +1216,103 @@ def _redact_url_userinfo(value: str) -> str:
         scheme_end = value.find("://", search_start)
         if scheme_end < 0:
             break
-        scheme_start = scheme_end
-        while scheme_start > 0 and scheme_character(value[scheme_start - 1]):
-            scheme_start -= 1
         search_start = scheme_end + 3
-        if not (
-            scheme_start < scheme_end
-            and value[scheme_start].isascii()
-            and value[scheme_start].isalpha()
-        ):
+        span = _userinfo_span(value, scheme_end)
+        if span is None or span[0] < cursor:
             continue
-        authority_start = search_start
-        authority_end = authority_start
-        while authority_end < len(value):
-            character = value[authority_end]
-            if (
-                character in "/?#"
-                or character in _URL_AUTHORITY_TOKEN_BOUNDARIES
-                or character.isspace()
-                or _is_control(character)
-            ):
-                break
-            authority_end += 1
-        userinfo_end = value.rfind("@", authority_start, authority_end)
-        if userinfo_end >= authority_start and authority_start >= cursor:
-            pieces.append(value[cursor:authority_start])
-            pieces.append("<redacted>@")
-            cursor = userinfo_end + 1
+        pieces.append(value[cursor : span[0]])
+        pieces.append("<redacted>@")
+        cursor = span[1] + 1
     pieces.append(value[cursor:])
     return "".join(pieces)
+
+
+def _localhost_uri_remainder(stripped: str, has_leading_separator: bool) -> str | None:
+    authority, separator, remainder = stripped.partition("\\")
+    if not has_leading_separator or not separator or authority.casefold() != "localhost":
+        return None
+    return remainder.lstrip("\\")
+
+
+def _windows_uri_candidate(candidate: str) -> str | None:
+    """The drive path a `file:` URI names, or None when it names anything else."""
+    if candidate[:5].casefold() != "file:":
+        return None
+    uri_path = candidate[5:].replace("/", "\\")
+    has_leading_separator = uri_path.startswith("\\")
+    stripped = uri_path.lstrip("\\")
+    if re.match(r"(?i)^[A-Z]:\\", stripped):
+        return stripped
+    return _localhost_uri_remainder(stripped, has_leading_separator)
+
+
+def _windows_candidate_text(value: str, file_uri: bool) -> str | None:
+    if file_uri:
+        return _windows_uri_candidate(value)
+    return value.replace("/", "\\")
+
+
+def _windows_drive_and_tail(candidate: str) -> tuple[str, str] | None:
+    if candidate.startswith("\\"):
+        return None
+    drive, tail = ntpath.splitdrive(candidate)
+    if not re.fullmatch(r"(?i)[A-Z]:", drive) or not tail.startswith("\\"):
+        return None
+    return drive, tail
+
+
+def _windows_component_is_valid(component: str) -> bool:
+    if len(component) > _MAX_COMPONENT_CHARACTERS:
+        return False
+    return not any(character in '<>:"|?*' or _is_control(character) for character in component)
+
+
+def _kept_windows_component(component: str) -> str | None:
+    """The component as kept; "" when it trims to nothing; None when it is refused."""
+    if component in {".", ".."}:
+        return component
+    component = component.rstrip(" .")
+    if not component:
+        return ""
+    if not _windows_component_is_valid(component):
+        return None
+    return component
+
+
+def _raw_windows_components(tail: str) -> tuple[str, ...]:
+    return tuple(part for part in re.split(r"\\+", tail) if part)
+
+
+def _windows_components(tail: str) -> list[str] | None:
+    components: list[str] = []
+    for component in _raw_windows_components(tail):
+        kept = _kept_windows_component(component)
+        if kept is None:
+            return None
+        if kept:
+            components.append(kept)
+    return components
+
+
+def _folded_components(tail: str) -> tuple[str, ...]:
+    return tuple(component.casefold() for component in tail.split("\\") if component)
+
+
+def _has_dot_components(components: tuple[str, ...]) -> bool:
+    return any(component in {".", ".."} for component in components)
+
+
+def _normalized_windows_token(
+    drive: str, components: list[str]
+) -> tuple[str, tuple[str, ...]] | None:
+    normalized = ntpath.normpath(drive + "\\" + "\\".join(components))
+    normalized_drive, normalized_tail = ntpath.splitdrive(normalized)
+    if not re.fullmatch(r"(?i)[A-Z]:", normalized_drive):
+        return None
+    normalized_components = _folded_components(normalized_tail)
+    if len(normalized_components) > _MAX_COMPONENTS or _has_dot_components(normalized_components):
+        return None
+    return normalized_drive.casefold(), normalized_components
 
 
 def _canonical_windows_path_token(
@@ -1184,62 +1320,33 @@ def _canonical_windows_path_token(
     *,
     file_uri: bool,
 ) -> tuple[str, tuple[str, ...]] | None:
-    candidate = value
-    if file_uri:
-        if candidate[:5].casefold() != "file:":
-            return None
-        uri_path = candidate[5:].replace("/", "\\")
-        has_leading_separator = uri_path.startswith("\\")
-        stripped = uri_path.lstrip("\\")
-        if re.match(r"(?i)^[A-Z]:\\", stripped):
-            candidate = stripped
-        else:
-            authority, separator, remainder = stripped.partition("\\")
-            if (
-                not has_leading_separator
-                or not separator
-                or authority.casefold() != "localhost"
-            ):
-                return None
-            candidate = remainder.lstrip("\\")
-    else:
-        candidate = candidate.replace("/", "\\")
+    candidate = _windows_candidate_text(value, file_uri)
+    if candidate is None:
+        return None
+    drive_tail = _windows_drive_and_tail(candidate)
+    if drive_tail is None:
+        return None
+    components = _windows_components(drive_tail[1])
+    if components is None:
+        return None
+    return _normalized_windows_token(drive_tail[0], components)
 
-    if candidate.startswith("\\"):
-        return None
-    drive, tail = ntpath.splitdrive(candidate)
-    if not re.fullmatch(r"(?i)[A-Z]:", drive) or not tail.startswith("\\"):
-        return None
-    raw_components = tuple(part for part in re.split(r"\\+", tail) if part)
-    components: list[str] = []
-    for component in raw_components:
-        if component in {".", ".."}:
-            components.append(component)
-            continue
-        component = component.rstrip(" .")
-        if not component:
-            continue
-        if (
-            len(component) > _MAX_COMPONENT_CHARACTERS
-            or any(character in '<>:"|?*' or _is_control(character) for character in component)
-        ):
-            return None
-        components.append(component)
 
-    normalized = ntpath.normpath(drive + "\\" + "\\".join(components))
-    normalized_drive, normalized_tail = ntpath.splitdrive(normalized)
-    if not re.fullmatch(r"(?i)[A-Z]:", normalized_drive):
+def _short_path_token(path: Path) -> tuple[str, tuple[str, ...]] | None:
+    try:
+        short_path = windows_workspace.get_short_path(path)
+    except (OSError, RuntimeError, ValueError):
         return None
-    normalized_components = tuple(
-        component.casefold()
-        for component in normalized_tail.split("\\")
-        if component
-    )
-    if len(normalized_components) > _MAX_COMPONENTS or any(
-        component in {".", ".."} for component in normalized_components
-    ):
-        return None
-    return normalized_drive.casefold(), normalized_components
+    return _canonical_windows_path_token(str(short_path), file_uri=False)
+
+
+def _add_short_aliases(
+    aliases: list[set[str]], drive: str, short: tuple[str, tuple[str, ...]] | None
+) -> None:
+    if short is None or short[0] != drive or len(short[1]) != len(aliases):
+        return
+    for component_aliases, short_component in zip(aliases, short[1]):
+        component_aliases.add(short_component)
 
 
 def _windows_root_component_aliases(
@@ -1250,15 +1357,7 @@ def _windows_root_component_aliases(
         return None
     drive, components = canonical
     aliases = [{component} for component in components]
-    try:
-        short_path = windows_workspace.get_short_path(path)
-    except (OSError, RuntimeError, ValueError):
-        pass
-    else:
-        short = _canonical_windows_path_token(str(short_path), file_uri=False)
-        if short is not None and short[0] == drive and len(short[1]) == len(aliases):
-            for component_aliases, short_component in zip(aliases, short[1]):
-                component_aliases.add(short_component)
+    _add_short_aliases(aliases, drive, _short_path_token(path))
     return drive, tuple(frozenset(component_aliases) for component_aliases in aliases)
 
 
@@ -1292,29 +1391,27 @@ def _windows_candidate_inspection_characters(
     )
 
 
+def _drive_spec_at(value: str, index: int) -> bool:
+    """A drive letter, a colon and a separator start at `index`."""
+    letter = value[index : index + 1]
+    if not letter.isascii() or not letter.isalpha():
+        return False
+    return value[index + 1 : index + 2] == ":" and value[index + 2 : index + 3] in {"/", "\\"}
+
+
 def _windows_candidate_starts_at(value: str, start: int) -> bool:
-    return (
-        value[start : start + 5].casefold() == "file:"
-        or _windows_extended_local_start(value, start) is not None
-        or (
-            value[start : start + 1].isascii()
-            and value[start : start + 1].isalpha()
-            and value[start + 1 : start + 2] == ":"
-            and value[start + 2 : start + 3] in {"/", "\\"}
-        )
-    )
+    if value[start : start + 5].casefold() == "file:":
+        return True
+    if _windows_extended_local_start(value, start) is not None:
+        return True
+    return _drive_spec_at(value, start)
 
 
 def _windows_extended_local_start(value: str, start: int) -> int | None:
     if value[start : start + 4] not in {"\\\\?\\", "//?/"}:
         return None
     drive_start = start + 4
-    if not (
-        value[drive_start : drive_start + 1].isascii()
-        and value[drive_start : drive_start + 1].isalpha()
-        and value[drive_start + 1 : drive_start + 2] == ":"
-        and value[drive_start + 2 : drive_start + 3] in {"/", "\\"}
-    ):
+    if not _drive_spec_at(value, drive_start):
         return None
     return drive_start
 
@@ -1428,6 +1525,66 @@ def _windows_native_root_match_end(
     return None
 
 
+def _percent_byte(value: str, index: int, limit: int) -> int | None:
+    """The byte a `%XX` at `index` encodes, or None when there is no such escape."""
+    if index + 3 > limit or value[index] != "%":
+        return None
+    if re.fullmatch(r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3]) is None:
+        return None
+    return int(value[index + 1 : index + 3], 16)
+
+
+def _utf8_sequence_length(first_byte: int) -> int | None:
+    if first_byte < 0x80:
+        return 1
+    if 0xC2 <= first_byte <= 0xDF:
+        return 2
+    if 0xE0 <= first_byte <= 0xEF:
+        return 3
+    if 0xF0 <= first_byte <= 0xF4:
+        return 4
+    return None
+
+
+def _percent_bytes(value: str, index: int, limit: int, count: int) -> tuple[bytes, int] | None:
+    raw = bytearray()
+    source_end = index
+    for _byte_index in range(count):
+        byte = _percent_byte(value, source_end, limit)
+        if byte is None:
+            return None
+        raw.append(byte)
+        source_end += 3
+    return bytes(raw), source_end
+
+
+def _decoded_single_character(raw: bytes) -> str | None:
+    try:
+        character = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if len(character) != 1:
+        return None
+    return character
+
+
+def _percent_encoded_character(value: str, index: int, limit: int) -> tuple[str, int] | None:
+    """(character, index after its escapes) for one percent-encoded code point."""
+    first_byte = _percent_byte(value, index, limit)
+    if first_byte is None:
+        return None
+    count = _utf8_sequence_length(first_byte)
+    if count is None:
+        return None
+    decoded = _percent_bytes(value, index, limit, count)
+    if decoded is None:
+        return None
+    character = _decoded_single_character(decoded[0])
+    if character is None:
+        return None
+    return character, decoded[1]
+
+
 def _uri_character(
     value: str,
     index: int,
@@ -1437,44 +1594,10 @@ def _uri_character(
         return None
     if value[index] != "%":
         return value[index], index + 1, False
-    if index + 3 > limit or re.fullmatch(
-        r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3]
-    ) is None:
+    decoded = _percent_encoded_character(value, index, limit)
+    if decoded is None:
         return None
-
-    first_byte = int(value[index + 1 : index + 3], 16)
-    if first_byte < 0x80:
-        byte_count = 1
-    elif 0xC2 <= first_byte <= 0xDF:
-        byte_count = 2
-    elif 0xE0 <= first_byte <= 0xEF:
-        byte_count = 3
-    elif 0xF0 <= first_byte <= 0xF4:
-        byte_count = 4
-    else:
-        return None
-
-    raw = bytearray()
-    source_end = index
-    for _byte_index in range(byte_count):
-        if (
-            source_end + 3 > limit
-            or value[source_end] != "%"
-            or re.fullmatch(
-                r"[0-9A-Fa-f]{2}", value[source_end + 1 : source_end + 3]
-            )
-            is None
-        ):
-            return None
-        raw.append(int(value[source_end + 1 : source_end + 3], 16))
-        source_end += 3
-    try:
-        character = bytes(raw).decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return None
-    if len(character) != 1:
-        return None
-    return character, source_end, True
+    return decoded[0], decoded[1], True
 
 
 def _skip_uri_separators(value: str, index: int, limit: int) -> tuple[int, int]:
