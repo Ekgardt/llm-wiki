@@ -1155,6 +1155,205 @@ def _mutation_query(
     )
 
 
+def _check_optional_deadline(run_deadline: float | None, monotonic: Callable[[], float]) -> None:
+    if run_deadline is not None:
+        _check_run_deadline(run_deadline, monotonic=monotonic)
+
+
+def _reset_workload(
+    repository: QualificationRepository, workload, run_deadline: float | None, monotonic: Callable[[], float]
+) -> None:
+    original = repository.root / workload.original_path
+    renamed = repository.root / workload.renamed_path
+    created = repository.root / workload.created_path
+    probe = repository.root / workload.probe_path
+    _check_optional_deadline(run_deadline, monotonic)
+    renamed.unlink(missing_ok=True)
+    created.unlink(missing_ok=True)
+    original.write_bytes(workload.original_content)
+    probe.write_bytes(workload.baseline_probe_content)
+    _check_optional_deadline(run_deadline, monotonic)
+
+
+def _mutation_steps(repository: QualificationRepository, workload) -> tuple:
+    original = repository.root / workload.original_path
+    renamed = repository.root / workload.renamed_path
+    created = repository.root / workload.created_path
+    probe = repository.root / workload.probe_path
+    return (
+        (
+            "create",
+            lambda: (
+                created.write_bytes(workload.created_content),
+                probe.write_bytes(workload.create_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-create",
+                workload.probe_path,
+                workload.create_probe_content,
+                workload.created_symbol,
+                target_path=workload.created_path,
+                target_content=workload.created_content,
+            ),
+        ),
+        (
+            "edit",
+            lambda: (
+                original.write_bytes(workload.edited_content),
+                probe.write_bytes(workload.edit_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-edit",
+                workload.probe_path,
+                workload.edit_probe_content,
+                workload.edited_symbol,
+                target_path=workload.original_path,
+                target_content=workload.edited_content,
+            ),
+        ),
+        (
+            "rename_new",
+            lambda: (
+                original.rename(renamed),
+                probe.write_bytes(workload.rename_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-rename-new",
+                workload.probe_path,
+                workload.rename_probe_content,
+                workload.edited_symbol,
+                target_path=workload.renamed_path,
+                target_content=workload.edited_content,
+            ),
+        ),
+        (
+            "rename_old",
+            lambda: probe.write_bytes(workload.rename_old_probe_content),
+            _mutation_query(
+                f"{workload.workload_id}-rename-old",
+                workload.probe_path,
+                workload.rename_old_probe_content,
+                workload.edited_symbol,
+                target_path=workload.original_path,
+                target_content=None,
+            ),
+        ),
+        (
+            "delete",
+            lambda: (
+                renamed.unlink(),
+                created.unlink(),
+                probe.write_bytes(workload.delete_probe_content),
+            ),
+            _mutation_query(
+                f"{workload.workload_id}-delete",
+                workload.probe_path,
+                workload.delete_probe_content,
+                workload.edited_symbol,
+                target_path=workload.renamed_path,
+                target_content=None,
+            ),
+        ),
+    )
+
+
+def _step_deadline(run_deadline: float | None, monotonic: Callable[[], float]) -> float:
+    if run_deadline is not None:
+        return _operation_deadline(run_deadline, monotonic=monotonic)
+    return monotonic() + QUERY_TIMEOUT_SECONDS
+
+
+class _MutationTally:
+    """What the mutation phase counts: stale answers, clean cycles, checks, latencies."""
+
+    def __init__(self) -> None:
+        self.stale = 0
+        self.cycles_measured = 0
+        self.checks_measured = 0
+        self.latencies: list[float] = []
+
+
+def _citations_current(repository_root: Path, locations, expected_hashes: dict) -> bool:
+    return all(
+        _current_citation(repository_root, location, expected_sha256=expected_hashes.get(_actual_key(location), ""))
+        for location in locations
+    )
+
+
+def _fresh_after_step(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    query: GoldQuery,
+    deadline: float,
+) -> bool:
+    result = runtime.query(_navigation_request(query, scope), deadline=deadline)
+    tally.checks_measured += 1
+    actual = {_actual_key(location) for location in result.locations}
+    expected = {_expected_key(location) for location in query.expected_locations}
+    citations = _citations_current(repository.root, result.locations, _expected_hashes(query))
+    return _navigation_assertion_succeeds(result, expected=expected, actual=actual, citations_current=citations)
+
+
+def _run_mutation_step(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    errors: list[dict[str, str]],
+    step: tuple,
+    run_deadline: float | None,
+    monotonic: Callable[[], float],
+) -> bool:
+    """One mutate-then-query step; False when it raised (the cycle is not clean)."""
+    operation, mutate, query = step
+    started = time.perf_counter()
+    try:
+        deadline = _step_deadline(run_deadline, monotonic)
+        mutate()
+        _check_optional_deadline(run_deadline, monotonic)
+        if _fresh_after_step(runtime, repository, scope, tally, query, deadline):
+            tally.latencies.append((time.perf_counter() - started) * 1000.0)
+        else:
+            tally.stale += 1
+        _check_optional_deadline(run_deadline, monotonic)
+        return True
+    except BenchmarkTimeoutError:
+        raise
+    except Exception as exc:  # benchmark evidence retains a closed code only
+        tally.stale += 1
+        errors.append({"phase": f"mutation_{operation}", "code": type(exc).__name__})
+        _check_optional_deadline(run_deadline, monotonic)
+        return False
+
+
+def _mutate_workload(
+    runtime: object,
+    repository: QualificationRepository,
+    scope: RepositoryScope,
+    tally: _MutationTally,
+    errors: list[dict[str, str]],
+    workload,
+    run_deadline: float | None,
+    monotonic: Callable[[], float],
+) -> None:
+    try:
+        _reset_workload(repository, workload, run_deadline, monotonic)
+    except BenchmarkTimeoutError:
+        raise
+    except Exception as exc:  # benchmark evidence retains a closed code only
+        tally.stale += FRESHNESS_CHECKS_PER_CYCLE
+        errors.append({"phase": "mutation_reset", "code": type(exc).__name__})
+        return
+    outcomes = [
+        _run_mutation_step(runtime, repository, scope, tally, errors, step, run_deadline, monotonic)
+        for step in _mutation_steps(repository, workload)
+    ]
+    if all(outcomes):
+        tally.cycles_measured += 1
+
+
 def _mutate_and_measure(
     runtime: object,
     repository: QualificationRepository,
@@ -1164,167 +1363,50 @@ def _mutate_and_measure(
     run_deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[int, int, int, list[float]]:
-    stale = 0
-    cycles_measured = 0
-    checks_measured = 0
-    latencies: list[float] = []
+    tally = _MutationTally()
     for workload in repository.workloads:
-        original = repository.root / workload.original_path
-        renamed = repository.root / workload.renamed_path
-        created = repository.root / workload.created_path
-        probe = repository.root / workload.probe_path
-        try:
-            if run_deadline is not None:
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-            renamed.unlink(missing_ok=True)
-            created.unlink(missing_ok=True)
-            original.write_bytes(workload.original_content)
-            probe.write_bytes(workload.baseline_probe_content)
-            if run_deadline is not None:
-                _check_run_deadline(run_deadline, monotonic=monotonic)
-        except BenchmarkTimeoutError:
-            raise
-        except Exception as exc:  # benchmark evidence retains a closed code only
-            stale += FRESHNESS_CHECKS_PER_CYCLE
-            errors.append({"phase": "mutation_reset", "code": type(exc).__name__})
-            continue
-        steps = (
-            (
-                "create",
-                lambda: (
-                    created.write_bytes(workload.created_content),
-                    probe.write_bytes(workload.create_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-create",
-                    workload.probe_path,
-                    workload.create_probe_content,
-                    workload.created_symbol,
-                    target_path=workload.created_path,
-                    target_content=workload.created_content,
-                ),
-            ),
-            (
-                "edit",
-                lambda: (
-                    original.write_bytes(workload.edited_content),
-                    probe.write_bytes(workload.edit_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-edit",
-                    workload.probe_path,
-                    workload.edit_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.original_path,
-                    target_content=workload.edited_content,
-                ),
-            ),
-            (
-                "rename_new",
-                lambda: (
-                    original.rename(renamed),
-                    probe.write_bytes(workload.rename_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-rename-new",
-                    workload.probe_path,
-                    workload.rename_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.renamed_path,
-                    target_content=workload.edited_content,
-                ),
-            ),
-            (
-                "rename_old",
-                lambda: probe.write_bytes(workload.rename_old_probe_content),
-                _mutation_query(
-                    f"{workload.workload_id}-rename-old",
-                    workload.probe_path,
-                    workload.rename_old_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.original_path,
-                    target_content=None,
-                ),
-            ),
-            (
-                "delete",
-                lambda: (
-                    renamed.unlink(),
-                    created.unlink(),
-                    probe.write_bytes(workload.delete_probe_content),
-                ),
-                _mutation_query(
-                    f"{workload.workload_id}-delete",
-                    workload.probe_path,
-                    workload.delete_probe_content,
-                    workload.edited_symbol,
-                    target_path=workload.renamed_path,
-                    target_content=None,
-                ),
-            ),
-        )
-        cycle_ok = True
-        for operation, mutate, query in steps:
-            started = time.perf_counter()
-            try:
-                deadline = (
-                    _operation_deadline(run_deadline, monotonic=monotonic)
-                    if run_deadline is not None
-                    else monotonic() + QUERY_TIMEOUT_SECONDS
-                )
-                mutate()
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-                result = runtime.query(
-                    _navigation_request(query, scope),
-                    deadline=deadline,
-                )
-                checks_measured += 1
-                actual = {_actual_key(location) for location in result.locations}
-                expected = {_expected_key(location) for location in query.expected_locations}
-                expected_hashes = {
-                    _expected_key(location): location.source_sha256
-                    for location in query.expected_locations
-                }
-                citations = all(
-                    _current_citation(
-                        repository.root,
-                        location,
-                        expected_sha256=expected_hashes.get(
-                            _actual_key(location),
-                            "",
-                        ),
-                    )
-                    for location in result.locations
-                )
-                fresh = _navigation_assertion_succeeds(
-                    result,
-                    expected=expected,
-                    actual=actual,
-                    citations_current=citations,
-                )
-                if not fresh:
-                    stale += 1
-                else:
-                    latencies.append((time.perf_counter() - started) * 1000.0)
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-            except BenchmarkTimeoutError:
-                raise
-            except Exception as exc:  # benchmark evidence retains a closed code only
-                stale += 1
-                cycle_ok = False
-                errors.append(
-                    {
-                        "phase": f"mutation_{operation}",
-                        "code": type(exc).__name__,
-                    }
-                )
-                if run_deadline is not None:
-                    _check_run_deadline(run_deadline, monotonic=monotonic)
-        if cycle_ok:
-            cycles_measured += 1
-    return stale, cycles_measured, checks_measured, latencies
+        _mutate_workload(runtime, repository, scope, tally, errors, workload, run_deadline, monotonic)
+    return tally.stale, tally.cycles_measured, tally.checks_measured, tally.latencies
+
+
+def _process_alive(popen: object) -> bool:
+    return popen is not None and popen.poll() is None
+
+
+def _coordinator_owns(coordinator: object) -> bool:
+    return coordinator is not None and _coordinator_has_ownership(coordinator)
+
+
+def _lease_exists(lease: Path | None) -> bool:
+    return lease is not None and lease.exists()
+
+
+def _process_handles(process: object) -> tuple[object, object, Path | None]:
+    """(popen, coordinator, lease path) of a live process; Nones when there is none."""
+    if process is None:
+        return None, None, None
+    return process.process, process._coordinator, process.owner_root / "lease.json"
+
+
+def _orphan_evidence_problem(orphan: object) -> str | None:
+    if isinstance(orphan, bool) or orphan not in {0, 1}:
+        return "runtime cleanup returned invalid evidence"
+    if orphan:
+        return "runtime cleanup reported retained ownership"
+    return None
+
+
+def _retry_once_after_oserror(retried: bool, deadline: float) -> bool:
+    """True once: a second OSError, or one past the deadline, propagates."""
+    if retried or time.monotonic() >= deadline:
+        raise
+    return True
+
+
+def _still_not_ready(recovered: object, deadline: float) -> bool:
+    if not isinstance(recovered, NavigationResult):
+        return False
+    return recovered.status is NavigationStatus.NOT_READY and time.monotonic() < deadline
 
 
 class _RealNavigationRuntime:
@@ -1390,16 +1472,9 @@ class _RealNavigationRuntime:
         return self._session.position_encoding
 
     def _close_and_count(self, deadline: float) -> int:
-        process = self._session._process
-        coordinator = process._coordinator if process is not None else None
-        popen = process.process if process is not None else None
-        lease = process.owner_root / "lease.json" if process is not None else None
+        popen, coordinator, lease = _process_handles(self._session._process)
         self._navigation.close(deadline=deadline)
-        return int(
-            (popen is not None and popen.poll() is None)
-            or (coordinator is not None and _coordinator_has_ownership(coordinator))
-            or (lease is not None and lease.exists())
-        )
+        return int(_process_alive(popen) or _coordinator_owns(coordinator) or _lease_exists(lease))
 
     @property
     def cleanup_failed(self) -> bool:
@@ -1413,23 +1488,22 @@ class _RealNavigationRuntime:
         if isinstance(retried, bool) or retried not in {0, 1}:
             return
 
+    def _fail_cleanup(self) -> None:
+        self._cleanup_failed = True
+        self._retry_retained_cleanup()
+
     def _reset(self, deadline: float) -> int:
         if self.cleanup_failed:
             raise _CleanupProofError("runtime cleanup is terminal")
         try:
             orphan = self._close_and_count(deadline)
         except Exception as exc:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
+            self._fail_cleanup()
             raise _CleanupProofError("runtime cleanup could not be proven") from exc
-        if isinstance(orphan, bool) or orphan not in {0, 1}:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
-            raise _CleanupProofError("runtime cleanup returned invalid evidence")
-        if orphan:
-            self._cleanup_failed = True
-            self._retry_retained_cleanup()
-            raise _CleanupProofError("runtime cleanup reported retained ownership")
+        problem = _orphan_evidence_problem(orphan)
+        if problem is not None:
+            self._fail_cleanup()
+            raise _CleanupProofError(problem)
         self._open()
         return 0
 
@@ -1461,15 +1535,9 @@ class _RealNavigationRuntime:
             try:
                 recovered = self.query(request, deadline=deadline)
             except OSError:
-                if retried_oserror or time.monotonic() >= deadline:
-                    raise
-                retried_oserror = True
+                retried_oserror = _retry_once_after_oserror(retried_oserror, deadline)
                 continue
-            if not (
-                isinstance(recovered, NavigationResult)
-                and recovered.status is NavigationStatus.NOT_READY
-                and time.monotonic() < deadline
-            ):
+            if not _still_not_ready(recovered, deadline):
                 return recovered
 
     def _prepare_process(self, deadline: float):
@@ -1651,61 +1719,60 @@ def _default_dependencies() -> BenchmarkDependencies:
     )
 
 
+def _windows_peak_rss() -> tuple[float, str]:
+    from ctypes import wintypes
+
+    class ProcessMemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    get_process_memory_info = psapi.GetProcessMemoryInfo
+    get_process_memory_info.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ProcessMemoryCounters),
+        wintypes.DWORD,
+    ]
+    get_process_memory_info.restype = wintypes.BOOL
+    handle = get_current_process()
+    if not get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
+        raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+    return counters.PeakWorkingSetSize / (1024.0 * 1024.0), "measured-windows-peak-working-set"
+
+
+def _posix_peak_rss() -> tuple[float, str]:
+    import resource
+
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    multiplier = 1 if sys.platform == "darwin" else 1024
+    return usage * multiplier / (1024.0 * 1024.0), "measured-posix-ru-maxrss"
+
+
 def _peak_rss() -> tuple[float | None, str]:
     if os.name == "nt":
-        try:
-            from ctypes import wintypes
-
-            class ProcessMemoryCounters(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wintypes.DWORD),
-                    ("PageFaultCount", wintypes.DWORD),
-                    ("PeakWorkingSetSize", ctypes.c_size_t),
-                    ("WorkingSetSize", ctypes.c_size_t),
-                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-                    ("PagefileUsage", ctypes.c_size_t),
-                    ("PeakPagefileUsage", ctypes.c_size_t),
-                ]
-
-            counters = ProcessMemoryCounters()
-            counters.cb = ctypes.sizeof(counters)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)
-            get_current_process = kernel32.GetCurrentProcess
-            get_current_process.argtypes = []
-            get_current_process.restype = wintypes.HANDLE
-            get_process_memory_info = psapi.GetProcessMemoryInfo
-            get_process_memory_info.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(ProcessMemoryCounters),
-                wintypes.DWORD,
-            ]
-            get_process_memory_info.restype = wintypes.BOOL
-            handle = get_current_process()
-            if not get_process_memory_info(handle, ctypes.byref(counters), counters.cb):
-                raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
-            return (
-                counters.PeakWorkingSetSize / (1024.0 * 1024.0),
-                "measured-windows-peak-working-set",
-            )
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
+        probe, failures = _windows_peak_rss, (AttributeError, OSError, TypeError, ValueError)
     else:
-        try:
-            import resource
-
-            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            multiplier = 1 if sys.platform == "darwin" else 1024
-            return (
-                usage * multiplier / (1024.0 * 1024.0),
-                "measured-posix-ru-maxrss",
-            )
-        except (ImportError, OSError, ValueError):
-            pass
-    return None, "unavailable"
+        probe, failures = _posix_peak_rss, (ImportError, OSError, ValueError)
+    try:
+        return probe()
+    except failures:
+        return None, "unavailable"
 
 
 def _ram_bytes() -> int | None:
@@ -1750,12 +1817,19 @@ def _ram_class() -> str:
     return "128+ GiB"
 
 
+def _first_available(*values: str) -> str:
+    for value in values:
+        if value:
+            return value
+    return "unavailable"
+
+
 def _environment() -> dict[str, object]:
     return {
         "os": platform.system() or os.name,
-        "os_version": platform.version() or platform.release() or "unavailable",
-        "architecture": platform.machine() or "unavailable",
-        "cpu_model": platform.processor() or platform.machine() or "unavailable",
+        "os_version": _first_available(platform.version(), platform.release()),
+        "architecture": _first_available(platform.machine()),
+        "cpu_model": _first_available(platform.processor(), platform.machine()),
         "cpu_core_count": max(1, os.cpu_count() or 1),
         "ram_class": _ram_class(),
     }
@@ -1779,6 +1853,11 @@ def _operator_link_or_reparse(info: object) -> bool:
     )
 
 
+def _require_plain_directory(info: object) -> None:
+    if _operator_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
+        raise PermissionError("operator source parent must be a regular directory")
+
+
 def _validate_operator_source_chain(path: Path, root: Path, deadline: float) -> None:
     try:
         path.relative_to(root)
@@ -1787,13 +1866,75 @@ def _validate_operator_source_chain(path: Path, root: Path, deadline: float) -> 
     current = root
     while True:
         _check_run_deadline(deadline)
-        info = current.stat(follow_symlinks=False)
-        if _operator_link_or_reparse(info) or not stat.S_ISDIR(info.st_mode):
-            raise PermissionError("operator source parent must be a regular directory")
+        _require_plain_directory(current.stat(follow_symlinks=False))
         if current == path.parent:
             return
-        relative = path.parent.relative_to(current)
-        current /= relative.parts[0]
+        current /= path.parent.relative_to(current).parts[0]
+
+
+def _expected_operator_state(source: Path) -> tuple[int, int, int, int, int, int]:
+    before = source.stat(follow_symlinks=False)
+    if _operator_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
+        raise PermissionError("operator source must be a regular file")
+    if before.st_size > OPERATOR_MAX_SOURCE_BYTES:
+        raise ValueError("operator source exceeds the byte limit")
+    return _operator_file_state(before)
+
+
+def _windows_source_state(handle: int) -> tuple[object, ...]:
+    return (
+        _windows_workspace.identity(handle, directory=False),
+        _windows_workspace.file_size(handle),
+        _windows_workspace.file_modified_time_ns(handle),
+    )
+
+
+def _open_operator_source(source: Path, flags: int) -> tuple[int, int | None, tuple[object, ...] | None]:
+    """(descriptor, Windows handle, Windows state); the handle and state are None on POSIX."""
+    if os.name != "nt":
+        descriptor = os.open(source, flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        return descriptor, None, None
+    import msvcrt
+
+    handle = _windows_workspace.open_exclusive_readonly_source_file(source)
+    try:
+        state = _windows_source_state(handle)
+        descriptor = msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        _windows_workspace.close_handle(handle)
+        raise
+    return descriptor, handle, state
+
+
+def _read_operator_chunks(descriptor: int, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= OPERATOR_MAX_SOURCE_BYTES:
+        _check_run_deadline(deadline)
+        chunk = os.read(descriptor, min(OPERATOR_READ_CHUNK_BYTES, OPERATOR_MAX_SOURCE_BYTES + 1 - total))
+        _check_run_deadline(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > OPERATOR_MAX_SOURCE_BYTES:
+        raise ValueError("operator source exceeds the byte limit")
+    return b"".join(chunks)
+
+
+def _require_source_unchanged(
+    descriptor: int, expected_state: tuple, windows_handle: int | None, windows_state: tuple | None
+) -> None:
+    if _operator_file_state(os.fstat(descriptor)) != expected_state:
+        raise PermissionError("operator source changed during read")
+    if windows_handle is not None and _windows_source_state(windows_handle) != windows_state:
+        raise PermissionError("operator source changed during read")
+
+
+def _require_source_not_replaced(source: Path, expected_state: tuple) -> None:
+    current = source.stat(follow_symlinks=False)
+    if _operator_link_or_reparse(current) or _operator_file_state(current) != expected_state:
+        raise PermissionError("operator source was replaced during read")
 
 
 def _read_operator_source(path: Path, operator_root: Path, *, deadline: float) -> bytes:
@@ -1801,77 +1942,46 @@ def _read_operator_source(path: Path, operator_root: Path, *, deadline: float) -
     root = Path(os.path.abspath(os.fspath(operator_root)))
     _validate_operator_source_chain(source, root, deadline)
     _check_run_deadline(deadline)
-    before = source.stat(follow_symlinks=False)
-    if _operator_link_or_reparse(before) or not stat.S_ISREG(before.st_mode):
-        raise PermissionError("operator source must be a regular file")
-    if before.st_size > OPERATOR_MAX_SOURCE_BYTES:
-        raise ValueError("operator source exceeds the byte limit")
-    expected_state = _operator_file_state(before)
+    expected_state = _expected_operator_state(source)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    windows_handle: int | None = None
-    windows_state: tuple[object, ...] | None = None
     _check_run_deadline(deadline)
-    if os.name == "nt":
-        import msvcrt
-
-        windows_handle = _windows_workspace.open_exclusive_readonly_source_file(source)
-        try:
-            windows_state = (
-                _windows_workspace.identity(windows_handle, directory=False),
-                _windows_workspace.file_size(windows_handle),
-                _windows_workspace.file_modified_time_ns(windows_handle),
-            )
-            descriptor = msvcrt.open_osfhandle(windows_handle, flags)
-        except BaseException:
-            _windows_workspace.close_handle(windows_handle)
-            raise
-    else:
-        descriptor = os.open(
-            source,
-            flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
+    descriptor, windows_handle, windows_state = _open_operator_source(source, flags)
     try:
         _check_run_deadline(deadline)
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _operator_file_state(opened) != expected_state:
             raise PermissionError("operator source changed before open")
-        chunks: list[bytes] = []
-        total = 0
-        while total <= OPERATOR_MAX_SOURCE_BYTES:
-            _check_run_deadline(deadline)
-            chunk = os.read(
-                descriptor,
-                min(
-                    OPERATOR_READ_CHUNK_BYTES,
-                    OPERATOR_MAX_SOURCE_BYTES + 1 - total,
-                ),
-            )
-            _check_run_deadline(deadline)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        if total > OPERATOR_MAX_SOURCE_BYTES:
-            raise ValueError("operator source exceeds the byte limit")
-        after = os.fstat(descriptor)
-        if _operator_file_state(after) != expected_state:
-            raise PermissionError("operator source changed during read")
-        if windows_handle is not None:
-            after_windows_state = (
-                _windows_workspace.identity(windows_handle, directory=False),
-                _windows_workspace.file_size(windows_handle),
-                _windows_workspace.file_modified_time_ns(windows_handle),
-            )
-            if after_windows_state != windows_state:
-                raise PermissionError("operator source changed during read")
+        content = _read_operator_chunks(descriptor, deadline)
+        _require_source_unchanged(descriptor, expected_state, windows_handle, windows_state)
         _check_run_deadline(deadline)
-        current = source.stat(follow_symlinks=False)
-        if _operator_link_or_reparse(current) or _operator_file_state(current) != expected_state:
-            raise PermissionError("operator source was replaced during read")
+        _require_source_not_replaced(source, expected_state)
         _validate_operator_source_chain(source, root, deadline)
-        return b"".join(chunks)
+        return content
     finally:
         os.close(descriptor)
+
+
+def _definition_token_action(token, expect_name: bool) -> str | None:
+    """`start` at def/class, `name` at the name that follows, `reset` at anything else."""
+    if _starts_definition(token):
+        return "start"
+    if not expect_name:
+        return None
+    if token.type == tokenize.NAME:
+        return "name"
+    if token.type not in {tokenize.NL, tokenize.INDENT}:
+        return "reset"
+    return None
+
+
+def _starts_definition(token) -> bool:
+    return token.type == tokenize.NAME and token.string in {"def", "class"}
+
+
+def _definition_position(content: bytes, token, path: Path, root: Path) -> tuple[str, int, int]:
+    line_bytes = content.splitlines()[token.start[0] - 1]
+    prefix = line_bytes.decode("utf-8")[: token.start[1]].encode("utf-8")
+    return path.relative_to(root).as_posix(), token.start[0], len(prefix)
 
 
 def _operator_definition(
@@ -1882,23 +1992,116 @@ def _operator_definition(
     deadline: float,
 ) -> tuple[str, int, int] | None:
     content = _read_operator_source(path, operator_root, deadline=deadline)
-    tokens = tokenize.tokenize(io.BytesIO(content).readline)
     expect_name = False
-    for token in tokens:
-        if token.type == tokenize.NAME and token.string in {"def", "class"}:
-            expect_name = True
-            continue
-        if expect_name and token.type == tokenize.NAME:
-            line_bytes = content.splitlines()[token.start[0] - 1]
-            prefix = line_bytes.decode("utf-8")[: token.start[1]].encode("utf-8")
-            return (
-                path.relative_to(root).as_posix(),
-                token.start[0],
-                len(prefix),
-            )
-        if expect_name and token.type not in {tokenize.NL, tokenize.INDENT}:
-            expect_name = False
+    for token in tokenize.tokenize(io.BytesIO(content).readline):
+        action = _definition_token_action(token, expect_name)
+        if action == "name":
+            return _definition_position(content, token, path, root)
+        if action is not None:
+            expect_name = action == "start"
     return None
+
+
+_REPARSE_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _require_operator_root(requested: Path) -> Path:
+    try:
+        metadata = requested.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator root is unavailable") from exc
+    if requested.is_symlink() or getattr(metadata, "st_file_attributes", 0) & _REPARSE_FLAG or not stat.S_ISDIR(metadata.st_mode):
+        raise _OperatorTraversalError("operator root is not a regular directory")
+    return requested.resolve(strict=True)
+
+
+class _OperatorScan:
+    """A bounded depth-first walk over an operator corpus."""
+
+    def __init__(self, root: Path, deadline: float) -> None:
+        self.root = root
+        self.deadline = deadline
+        self.files: list[Path] = []
+        self.stack: list[tuple[Path, int]] = [(root, 0)]
+        self.visited: set[tuple[int, int]] = set()
+        self.scanned_entries = 0
+
+
+def _directory_identity(current: Path) -> tuple[int, int]:
+    try:
+        metadata = current.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator directory is unavailable") from exc
+    return metadata.st_dev, metadata.st_ino
+
+
+def _scan_entries(scan: _OperatorScan, current: Path) -> list:
+    try:
+        with os.scandir(current) as iterator:
+            entries = []
+            for entry in iterator:
+                _check_run_deadline(scan.deadline)
+                scan.scanned_entries += 1
+                if scan.scanned_entries > OPERATOR_MAX_SCANNED_ENTRIES:
+                    raise _OperatorTraversalError("operator traversal exceeds the entry limit")
+                entries.append(entry)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator directory cannot be scanned") from exc
+    return entries
+
+
+def _entry_metadata(entry):
+    try:
+        return entry.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _OperatorTraversalError("operator entry cannot be inspected") from exc
+
+
+def _entry_is_link(entry, metadata) -> bool:
+    return entry.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & _REPARSE_FLAG)
+
+
+def _classify_entry(entry, metadata) -> str:
+    if _entry_is_link(entry, metadata):
+        return "skip"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    if stat.S_ISREG(metadata.st_mode) and Path(entry.path).suffix == ".py":
+        return "python"
+    return "other"
+
+
+def _child_directory(path: Path, depth: int) -> tuple[Path, int]:
+    if depth + 1 > OPERATOR_MAX_DEPTH:
+        raise _OperatorTraversalError("operator traversal exceeds the depth limit")
+    return path, depth + 1
+
+
+def _contained_python_file(path: Path, root: Path) -> Path:
+    try:
+        candidate = path.resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise _OperatorTraversalError("operator file escaped its root") from exc
+    return candidate
+
+
+def _visit_directory(scan: _OperatorScan, current: Path, depth: int) -> None:
+    entries = _scan_entries(scan, current)
+    child_directories: list[tuple[Path, int]] = []
+    for entry in sorted(entries, key=lambda item: item.name):
+        _check_run_deadline(scan.deadline)
+        kind = _classify_entry(entry, _entry_metadata(entry))
+        path = Path(entry.path)
+        if kind == "directory":
+            child_directories.append(_child_directory(path, depth))
+            continue
+        if kind != "python":
+            continue
+        scan.files.append(_contained_python_file(path, scan.root))
+        if len(scan.files) >= OPERATOR_MAX_PYTHON_FILES:
+            break
+    scan.stack.extend(reversed(child_directories))
 
 
 def _operator_python_files(
@@ -1906,76 +2109,96 @@ def _operator_python_files(
     *,
     deadline: float,
 ) -> tuple[Path, list[Path]]:
-    requested = Path(operator_root)
-    try:
-        requested_metadata = requested.stat(follow_symlinks=False)
-    except OSError as exc:
-        raise _OperatorTraversalError("operator root is unavailable") from exc
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    if (
-        requested.is_symlink()
-        or getattr(requested_metadata, "st_file_attributes", 0) & reparse_flag
-        or not stat.S_ISDIR(requested_metadata.st_mode)
-    ):
-        raise _OperatorTraversalError("operator root is not a regular directory")
-    root = requested.resolve(strict=True)
-    files: list[Path] = []
-    stack = [(root, 0)]
-    visited: set[tuple[int, int]] = set()
-    scanned_entries = 0
-    while stack and len(files) < OPERATOR_MAX_PYTHON_FILES:
+    root = _require_operator_root(Path(operator_root))
+    scan = _OperatorScan(root, deadline)
+    while scan.stack and len(scan.files) < OPERATOR_MAX_PYTHON_FILES:
         _check_run_deadline(deadline)
-        current, depth = stack.pop()
-        try:
-            current_metadata = current.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise _OperatorTraversalError("operator directory is unavailable") from exc
-        identity = (current_metadata.st_dev, current_metadata.st_ino)
-        if identity in visited:
+        current, depth = scan.stack.pop()
+        identity = _directory_identity(current)
+        if identity in scan.visited:
             continue
-        visited.add(identity)
-        try:
-            with os.scandir(current) as iterator:
-                entries = []
-                for entry in iterator:
-                    _check_run_deadline(deadline)
-                    scanned_entries += 1
-                    if scanned_entries > OPERATOR_MAX_SCANNED_ENTRIES:
-                        raise _OperatorTraversalError(
-                            "operator traversal exceeds the entry limit"
-                        )
-                    entries.append(entry)
-        except OSError as exc:
-            raise _OperatorTraversalError("operator directory cannot be scanned") from exc
+        scan.visited.add(identity)
+        _visit_directory(scan, current, depth)
+    return root, scan.files
 
-        child_directories: list[tuple[Path, int]] = []
-        for entry in sorted(entries, key=lambda item: item.name):
-            _check_run_deadline(deadline)
-            try:
-                metadata = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise _OperatorTraversalError("operator entry cannot be inspected") from exc
-            if entry.is_symlink() or getattr(metadata, "st_file_attributes", 0) & reparse_flag:
-                continue
-            path = Path(entry.path)
-            if stat.S_ISDIR(metadata.st_mode):
-                child_depth = depth + 1
-                if child_depth > OPERATOR_MAX_DEPTH:
-                    raise _OperatorTraversalError("operator traversal exceeds the depth limit")
-                child_directories.append((path, child_depth))
-                continue
-            if not stat.S_ISREG(metadata.st_mode) or path.suffix != ".py":
-                continue
-            try:
-                candidate = path.resolve(strict=True)
-                candidate.relative_to(root)
-            except (OSError, ValueError) as exc:
-                raise _OperatorTraversalError("operator file escaped its root") from exc
-            files.append(candidate)
-            if len(files) >= OPERATOR_MAX_PYTHON_FILES:
-                break
-        stack.extend(reversed(child_directories))
-    return root, files
+
+class _ProbeTally:
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.successes = 0
+        self.errors = 0
+        self.available = True
+
+    def fail(self) -> None:
+        self.errors += 1
+        self.available = False
+
+
+def _probe_one_file(
+    navigation: CodeNavigation,
+    scope: RepositoryScope,
+    checkout: Path,
+    root: Path,
+    path: Path,
+    tally: _ProbeTally,
+    deadline: float,
+) -> None:
+    query_deadline = _operation_deadline(deadline)
+    definition = _operator_definition(path, checkout, operator_root=root, deadline=query_deadline)
+    _check_run_deadline(deadline)
+    if definition is None:
+        return
+    relative, line, character = definition
+    tally.attempts += 1
+    result = navigation.query(
+        NavigationRequest(scope, Capability.DEFINITIONS, relative, line, character),
+        deadline=query_deadline,
+    )
+    if result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}:
+        tally.successes += 1
+    _check_run_deadline(deadline)
+
+
+def _probe_files(
+    navigation: CodeNavigation,
+    scope: RepositoryScope,
+    root: Path,
+    files: list[Path],
+    tally: _ProbeTally,
+    deadline: float,
+) -> None:
+    checkout = Path(scope.checkout_root)
+    for path in files:
+        try:
+            _probe_one_file(navigation, scope, checkout, root, path, tally, deadline)
+        except BenchmarkTimeoutError:
+            raise
+        except Exception:
+            tally.fail()
+            return
+
+
+def _open_operator_navigation(root: Path, state_root: Path, deadline: float) -> tuple[CodeNavigation, RepositoryScope]:
+    _check_run_deadline(deadline)
+    scope = resolve_repository_scope(root)
+    identity = discover_pyright(scope, state_root=state_root, deadline=_operation_deadline(deadline))
+    _check_run_deadline(deadline)
+    _require_qualified_identity(identity, load_manifest())
+    session = PyrightSession(scope, identity, state_root=state_root)
+    return CodeNavigation(scope, session, identity), scope
+
+
+def _close_operator_navigation(navigation: CodeNavigation | None, tally: _ProbeTally) -> None:
+    if navigation is None:
+        return
+    try:
+        navigation.close(deadline=_fresh_cleanup_deadline())
+    except Exception:
+        tally.fail()
+        try:
+            navigation.close(deadline=_fresh_cleanup_deadline())
+        except Exception:
+            tally.errors += 1
 
 
 def _probe_operator_corpus(
@@ -1984,98 +2207,42 @@ def _probe_operator_corpus(
     deadline: float,
 ) -> dict[str, object]:
     files: list[Path] = []
-    attempts = 0
-    successes = 0
-    errors = 0
-    available = True
+    tally = _ProbeTally()
     navigation: CodeNavigation | None = None
     try:
         root, files = _operator_python_files(operator_root, deadline=deadline)
-        _check_run_deadline(deadline)
-        scope = resolve_repository_scope(root)
-        discovery_deadline = _operation_deadline(deadline)
-        identity = discover_pyright(
-            scope,
-            state_root=state_root,
-            deadline=discovery_deadline,
-        )
-        _check_run_deadline(deadline)
-        _require_qualified_identity(identity, load_manifest())
-        session = PyrightSession(scope, identity, state_root=state_root)
-        navigation = CodeNavigation(scope, session, identity)
-        checkout = Path(scope.checkout_root)
-        for path in files:
-            try:
-                query_deadline = _operation_deadline(deadline)
-                definition = _operator_definition(
-                    path,
-                    checkout,
-                    operator_root=root,
-                    deadline=query_deadline,
-                )
-                _check_run_deadline(deadline)
-                if definition is None:
-                    continue
-                relative, line, character = definition
-                attempts += 1
-                result = navigation.query(
-                    NavigationRequest(
-                        scope,
-                        Capability.DEFINITIONS,
-                        relative,
-                        line,
-                        character,
-                    ),
-                    deadline=query_deadline,
-                )
-                if result.status in {NavigationStatus.OK, NavigationStatus.PARTIAL}:
-                    successes += 1
-                _check_run_deadline(deadline)
-            except BenchmarkTimeoutError:
-                raise
-            except Exception:
-                errors += 1
-                available = False
-                break
+        navigation, scope = _open_operator_navigation(root, state_root, deadline)
+        _probe_files(navigation, scope, root, files, tally, deadline)
     except BenchmarkTimeoutError:
         raise
     except Exception:
-        errors += 1
-        available = False
+        tally.fail()
     finally:
-        if navigation is not None:
-            try:
-                navigation.close(deadline=_fresh_cleanup_deadline())
-            except Exception:
-                errors += 1
-                available = False
-                try:
-                    navigation.close(deadline=_fresh_cleanup_deadline())
-                except Exception:
-                    errors += 1
+        _close_operator_navigation(navigation, tally)
     return {
-        "available": available,
+        "available": tally.available,
         "python_files": len(files),
-        "queries_attempted": attempts,
-        "queries_succeeded": successes,
-        "errors": errors,
+        "queries_attempted": tally.attempts,
+        "queries_succeeded": tally.successes,
+        "errors": tally.errors,
     }
+
+
+def _is_count(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    return value >= 0
+
+
+def _counts_valid(value: dict, keys: set[str]) -> bool:
+    return all(_is_count(value[key]) for key in keys - {"available"})
 
 
 def _operator_metrics(value: object) -> dict[str, object]:
-    keys = {
-        "available",
-        "python_files",
-        "queries_attempted",
-        "queries_succeeded",
-        "errors",
-    }
+    keys = {"available", "python_files", "queries_attempted", "queries_succeeded", "errors"}
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("operator corpus probe returned a non-aggregate result")
-    if not isinstance(value["available"], bool) or any(
-        isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0
-        for key in keys - {"available"}
-    ):
+    if not isinstance(value["available"], bool) or not _counts_valid(value, keys):
         raise ValueError("operator corpus aggregate metrics are invalid")
     return dict(value)
 
