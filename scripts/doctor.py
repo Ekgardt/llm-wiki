@@ -29,6 +29,7 @@ from typing import Any, NamedTuple
 import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
+from evidence_resolver import _daily_part_bounds
 from install_control import validate_install_state
 from reliable_memory import (
     open_readonly_operational_db,
@@ -1285,6 +1286,8 @@ def _scan_transaction_database(
     deadline: float,
     details: dict,
     states: dict[str, int],
+    *,
+    vault_root: Path | None = None,
 ) -> dict | None:
     """Fill in the counters; return a result only when the schema is incomplete."""
     with _readonly_database(path, state_root, deadline=deadline) as database:
@@ -1314,7 +1317,9 @@ def _scan_transaction_database(
             states=states,
         )
         details["quarantined_unresolved"] = _unresolved_quarantine(
-            database, transaction_columns
+            database,
+            transaction_columns,
+            _CompiledDaySupersession(vault_root, state_root),
         )
         return None
 
@@ -1453,13 +1458,126 @@ def _outcome_was_written(
     return intended <= committed_creates
 
 
+_COMPILE_RECEIPT_PREFIX = "knowledge/daily/receipts/v3-"
+_STAGED_ARTIFACT_RE = re.compile(r"after/[0-9]{6}\.bin")
+_DAILY_LOGICAL_PATH_RE = re.compile(r"knowledge/daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md")
+_RECEIPT_RECORD_RE = re.compile(rb"(?s)```json\n(.*?)\n```")
+_MAX_STAGED_PLAN_BYTES = 4 * 1024 * 1024
+_MAX_STAGED_RECEIPT_BYTES = 1024 * 1024
+_MAX_DAY_BYTES = 4 * 1024 * 1024
+
+
+def _intended_creates(database: sqlite3.Connection, identifier: str) -> set[str]:
+    return {
+        row[0]
+        for row in database.execute(
+            "SELECT path FROM operation WHERE transaction_id = ? AND kind = 'create'",
+            (identifier,),
+        )
+    }
+
+
+def _only_compile_receipts(paths: set[str]) -> bool:
+    return bool(paths) and all(path.startswith(_COMPILE_RECEIPT_PREFIX) for path in paths)
+
+
+def _mapping_field(value: object, key: str) -> object:
+    if isinstance(value, dict):
+        return value.get(key)
+    return None
+
+
+def _daily_logical_path(value: object) -> str | None:
+    if isinstance(value, str) and _DAILY_LOGICAL_PATH_RE.fullmatch(value) is not None:
+        return value
+    return None
+
+
+def _staged_receipt_day(raw: bytes) -> str | None:
+    """The day a staged compile receipt names, or None when it is not one."""
+    match = _RECEIPT_RECORD_RE.search(raw)
+    if match is None:
+        return None
+    source = _mapping_field(json.loads(match[1]), "source")
+    return _daily_logical_path(_mapping_field(source, "logical_path"))
+
+
+def _part_receipt_path(logical_path: str, part: bytes) -> str:
+    identity = hashlib.sha256(
+        reliable_memory.canonical_json_bytes([logical_path, hashlib.sha256(part).hexdigest()])
+    ).hexdigest()
+    return f"{_COMPILE_RECEIPT_PREFIX}{identity}.md"
+
+
+class _CompiledDaySupersession:
+    """The fourth proof: a refused compile of days that are compiled now.
+
+    A refused attempt that meant to create only compile receipts is history
+    when every day its staged receipts name is compiled as it stands today:
+    each part of the day's current bytes has a committed receipt. The refused
+    snapshots' own receipts can never appear, because a day is only ever
+    compiled at its current bytes (docs/research/2026-09-11-a-refused-compile-of-a-day-since-compiled-is-history.md).
+    Anything unreadable or unexpected leaves the finding in place.
+    """
+
+    def __init__(self, vault_root: Path | None, state_root: Path) -> None:
+        self.vault_root = vault_root
+        self.state_root = state_root
+
+    def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
+        intended = _intended_creates(database, identifier)
+        if self.vault_root is None or not _only_compile_receipts(intended):
+            return False
+        try:
+            return self._staged_days_compiled(identifier, intended, committed_creates)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
+        days = self._staged_days(identifier, intended)
+        return bool(days) and all(self._day_compiled(day, committed_creates) for day in days)
+
+    def _staged_days(self, identifier: str, intended: set[str]) -> set[str]:
+        directory = self.state_root / "run" / "transactions" / identifier
+        plan = json.loads(
+            read_runtime_bytes(directory / "plan.json", self.state_root, max_bytes=_MAX_STAGED_PLAN_BYTES)
+        )
+        staged = {
+            operation["path"]: operation["after"]["artifact"]
+            for operation in plan["operations"]
+            if operation["path"] in intended
+        }
+        if set(staged) != intended:
+            raise ValueError("refused attempt does not stage every receipt it names")
+        return {self._staged_day(directory, artifact) for artifact in staged.values()}
+
+    def _staged_day(self, directory: Path, artifact: str) -> str:
+        if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
+            raise ValueError("staged artifact path is not a plain after/ artifact")
+        raw = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        day = _staged_receipt_day(raw)
+        if day is None:
+            raise ValueError("staged artifact is not a compile receipt for a day")
+        return day
+
+    def _day_compiled(self, logical_path: str, committed_creates: set[str]) -> bool:
+        content = read_stable_bytes(self.vault_root / logical_path, _MAX_DAY_BYTES, label="daily source")
+        bounds = _daily_part_bounds(content)
+        return bool(bounds) and all(
+            _part_receipt_path(logical_path, content[start:end]) in committed_creates
+            for start, end in bounds
+        )
+
+
 def _resolved_by_lineage(database: sqlite3.Connection) -> set[str]:
     """Both records of the same fact: a retry of this attempt committed."""
     return _chain_resolved_ids(database) | _ordinal_resolved_ids(database)
 
 
 def _unresolved_quarantine(
-    database: sqlite3.Connection, transaction_columns: set[str]
+    database: sqlite3.Connection,
+    transaction_columns: set[str],
+    supersession: _CompiledDaySupersession | None = None,
 ) -> int:
     """Quarantined attempts whose work never happened.
 
@@ -1486,9 +1604,21 @@ def _unresolved_quarantine(
         return 0
     committed_creates = _committed_created_paths(database)
     return sum(
-        0 if _outcome_was_written(database, identifier, committed_creates) else 1
+        1
         for identifier in open_attempts
+        if not _attempt_is_history(database, identifier, committed_creates, supersession)
     )
+
+
+def _attempt_is_history(
+    database: sqlite3.Connection,
+    identifier: str,
+    committed_creates: set[str],
+    supersession: _CompiledDaySupersession | None,
+) -> bool:
+    if _outcome_was_written(database, identifier, committed_creates):
+        return True
+    return supersession is not None and supersession.resolves(database, identifier, committed_creates)
 
 
 def _quarantined_total(database: sqlite3.Connection) -> int:
@@ -1640,7 +1770,13 @@ def _unusable_transaction_database(
     return None
 
 
-def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
+def _transaction_check(
+    state_root: Path,
+    now: datetime,
+    deadline: float = float("inf"),
+    *,
+    vault_root: Path | None = None,
+) -> dict:
     path = _operational_database_path(state_root, "coordinator")
     details, states = _empty_transaction_details()
     kind, _ = _safe_kind(path, state_root)
@@ -1651,7 +1787,7 @@ def _transaction_check(state_root: Path, now: datetime, deadline: float = float(
         return unusable
     try:
         incomplete = _scan_transaction_database(
-            path, state_root, now, deadline, details, states
+            path, state_root, now, deadline, details, states, vault_root=vault_root
         )
     except (OSError, sqlite3.Error, TimeoutError, ValueError):
         return _unreadable_transactions(details, "Transaction state is unreadable.")
@@ -8714,7 +8850,7 @@ def _collect_checks(
         _environment_check(root_path, state_path),
         _runtime_check(state_path),
         _filesystem_check(state_path, deadline),
-        _transaction_check(state_path, generated_at, deadline),
+        _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
         _queue_check(state_path, generated_at, deadline),
         _archive_check(root_path, state_path, deadline),
         _claim_check(root_path, state_path, deadline),

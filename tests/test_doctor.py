@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import io
 import json
 import os
@@ -4639,6 +4640,78 @@ def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
     assert check["details"]["quarantined_unresolved"] == 1, check["details"]
     assert check["status"] == "error", check["details"]
     del home
+
+
+_REFUSED_DAY = "knowledge/daily/2026-08-25.md"
+
+
+def _day_receipt_path(logical_path: str, content: bytes) -> str:
+    from reliable_memory import canonical_json_bytes
+
+    part = hashlib.sha256(content).hexdigest()
+    identity = hashlib.sha256(canonical_json_bytes([logical_path, part])).hexdigest()
+    return f"knowledge/daily/receipts/v3-{identity}.md"
+
+
+def _stage_refused_receipts(state_root: Path, identifier: str, staged: dict[str, str]) -> None:
+    """The plan and `after` artifacts a refused compile left under run/transactions/."""
+    directory = state_root / "run" / "transactions" / identifier
+    (directory / "after").mkdir(parents=True, exist_ok=True)
+    operations = []
+    for position, (path, logical_path) in enumerate(sorted(staged.items()), start=1):
+        artifact = f"after/{position:06d}.bin"
+        record = json.dumps({"schema_version": "compile-receipt/v3", "source": {"logical_path": logical_path}})
+        (directory / artifact).write_bytes(
+            b"---\ntype: compile-receipt\n---\n\n## Record\n```json\n" + record.encode() + b"\n```\n"
+        )
+        operations.append({"path": path, "kind": "create", "before": "absent", "after": {"artifact": artifact}})
+    (directory / "plan.json").write_text(json.dumps({"operations": operations}), encoding="utf-8")
+
+
+def _refused_compile_of_a_day(tmp_path, monkeypatch, *, compiled_now: bool, staged_day: str = _REFUSED_DAY):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
+    day = b"# 2026-08-25\n\n## 10:00\nThe day as it stands now.\n"
+    (root / _REFUSED_DAY).parent.mkdir(parents=True, exist_ok=True)
+    (root / _REFUSED_DAY).write_bytes(day)
+    refused_receipts = ["knowledge/daily/receipts/v3-" + "1" * 64 + ".md", "knowledge/daily/receipts/v3-" + "2" * 64 + ".md"]
+    committed = [_day_receipt_path(_REFUSED_DAY, day)] if compiled_now else []
+    _transaction_database(
+        state_root,
+        [("a" * 32, "quarantined", None), ("b" * 32, "committed", None)],
+        creates={"a" * 32: refused_receipts, "b" * 32: committed},
+    )
+    _stage_refused_receipts(state_root, "a" * 32, {path: staged_day for path in refused_receipts})
+    return _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
+
+
+def test_a_refused_compile_of_a_day_that_is_compiled_now_is_history(tmp_path, monkeypatch):
+    """2026-08-25: a DLP refusal staged receipts for eight snapshots of one day.
+
+    Those snapshots are gone and their receipts can never be written, but every
+    part of the day as it stands now has a committed receipt: the work happened.
+    """
+    check = _refused_compile_of_a_day(tmp_path, monkeypatch, compiled_now=True)
+
+    assert check["details"]["quarantined_unresolved"] == 0, check["details"]
+    assert check["status"] == "ok", check["details"]
+
+
+def test_a_refused_compile_of_a_day_still_uncompiled_needs_attention(tmp_path, monkeypatch):
+    check = _refused_compile_of_a_day(tmp_path, monkeypatch, compiled_now=False)
+
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
+    assert check["status"] == "error", check["details"]
+
+
+def test_a_refused_attempt_staging_a_receipt_outside_the_days_needs_attention(tmp_path, monkeypatch):
+    check = _refused_compile_of_a_day(
+        tmp_path, monkeypatch, compiled_now=True, staged_day="knowledge/notes/not-a-day.md"
+    )
+
+    assert check["details"]["quarantined_unresolved"] == 1, check["details"]
 
 
 def test_a_quarantined_attempt_with_no_successor_still_needs_attention(

@@ -120,6 +120,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A refused compile of a day that is compiled now no longer keeps health red.** Since 2026-08-25 the doctor reported one refused attempt "whose work never happened": a DLP refusal had staged receipts for eight snapshots of one day, snapshots that no longer exist and whose receipts can never be written. A refused attempt that meant to create only compile receipts is now history when every day its staged receipts name has a committed receipt for every part of its current bytes. Anything unreadable or unexpected keeps the finding. On the live vault the transaction check reads `ok` with this rule.
+
 - **A claim that is already quarantined is not written again.** The nightly compile of 2026-09-11 failed with `FileExistsError`: a pending quarantined daily was planned again, the model proposed the same claim over the same evidence, and the candidate create met the file written on 2026-09-07. A candidate file that embeds the same claim id, fingerprint and evidence now counts as present; a retry of the same attempt returns its commit, and a new attempt reports "batch still quarantined" instead of failing the run. A foreign file at the path still refuses the write.
 
 - The scale stand's exact cell no longer grades itself: it reports no recall, with the reason, instead of 1.0 by construction (audit M11).
