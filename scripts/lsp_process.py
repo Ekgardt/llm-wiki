@@ -275,17 +275,19 @@ class _OwnerDirectory:
             self._pending_temp_names.remove(name)
 
     def _retry_pending_child_handles(self) -> None:
-        first_error: BaseException | None = None
-        for handle in tuple(self._pending_child_handles):
-            try:
-                _windows_workspace.close_handle(handle)
-            except BaseException as error:
-                if first_error is None:
-                    first_error = error
-            else:
-                self._pending_child_handles.remove(handle)
-        if first_error is not None:
-            raise first_error
+        """Try every pending handle; raise the first failure after all were tried."""
+        attempts = [self._close_pending_child(handle) for handle in tuple(self._pending_child_handles)]
+        errors = [error for error in attempts if error is not None]
+        if errors:
+            raise errors[0]
+
+    def _close_pending_child(self, handle: int) -> BaseException | None:
+        try:
+            _windows_workspace.close_handle(handle)
+        except BaseException as error:
+            return error
+        self._pending_child_handles.remove(handle)
+        return None
 
     def _retry_posix_temp_name(self, name: str) -> None:
         """Remove one leftover; an absent file is already the outcome we want."""
@@ -381,6 +383,12 @@ class _OwnerDirectory:
         self._close_temporary_handle(handle, cleanup_error, operation_error)
         if delete_marked:
             self._forget_temp_name(name)
+        self._raise_temporary_errors(cleanup_error, operation_error)
+
+    @staticmethod
+    def _raise_temporary_errors(
+        cleanup_error: BaseException | None, operation_error: BaseException | None
+    ) -> None:
         if cleanup_error is not None:
             raise cleanup_error from operation_error
         if operation_error is not None:
@@ -787,6 +795,10 @@ class _OwnerDirectory:
         handle = self.owner_handle
         if handle is None:
             raise RuntimeError("LSP owner directory is closed")
+        self._sync_directory_handle(handle)
+
+    @staticmethod
+    def _sync_directory_handle(handle: int) -> None:
         if os.name == "posix":
             os.fsync(handle)
             return
@@ -1242,13 +1254,16 @@ class _CleanupResult:
         if step not in _CLEANUP_STEPS:
             raise ValueError("unknown LSP cleanup step")
         setattr(self, step, "failed")
-        self.errors[:] = [item for item in self.errors if item.step != step]
+        self._drop_step_errors(step)
         self.errors.append(_sanitized_cleanup_error(step, error))
 
     def succeeded(self, step: str, status: str = "success") -> None:
         if step not in _CLEANUP_STEPS or status not in {"success", "not_applicable"}:
             raise ValueError("invalid LSP cleanup resolution")
         setattr(self, step, status)
+        self._drop_step_errors(step)
+
+    def _drop_step_errors(self, step: str) -> None:
         self.errors[:] = [item for item in self.errors if item.step != step]
 
 
@@ -1723,12 +1738,19 @@ def _commit_generation_failure(
     with generation.failure_lock:
         if exit_observed:
             generation._exit_observed = True
-        if generation.expected_exit.is_set() or generation.failure_queued:
-            return False
-        intent = _FailureIntent(generation.nonce, reason, False, time.monotonic())
-        if not _enqueue_failure_intent(coordinator, intent):
-            return False
-        generation.failure_queued = True
+        return _queue_first_failure_locked(coordinator, generation, reason)
+
+
+def _queue_first_failure_locked(
+    coordinator: _LifecycleCoordinator, generation: _Generation, reason: str
+) -> bool:
+    """Queue the generation's first unexpected failure; the caller holds its failure lock."""
+    if generation.expected_exit.is_set() or generation.failure_queued:
+        return False
+    intent = _FailureIntent(generation.nonce, reason, False, time.monotonic())
+    if not _enqueue_failure_intent(coordinator, intent):
+        return False
+    generation.failure_queued = True
     return True
 
 
@@ -1974,6 +1996,10 @@ def _monitor_generation_exit(
     except BaseException as error:
         _queue_generation_failure(coordinator, generation, str(error))
         return
+    _fail_on_unexpected_exit(coordinator, generation)
+
+
+def _fail_on_unexpected_exit(coordinator: _LifecycleCoordinator, generation: _Generation) -> None:
     if not _commit_generation_failure(
         coordinator,
         generation,
@@ -2289,6 +2315,15 @@ def _fail_startup(
     pending = _coordinator_has_ownership(coordinator)
     if pending:
         _register_startup_cleanup(coordinator)
+    _raise_startup_failure(coordinator, startup_error, cleanup_errors, pending)
+
+
+def _raise_startup_failure(
+    coordinator: _LifecycleCoordinator,
+    startup_error: BaseException,
+    cleanup_errors: list[BaseException],
+    pending: bool,
+) -> None:
     if _interrupted_startup(startup_error, cleanup_errors):
         _raise_cleanup_failures(cleanup_errors, prior_error=startup_error)
     if pending:
@@ -2742,7 +2777,14 @@ def _schedule_autonomous_recovery(instance: LspProcess) -> None:
         return
     if _wake_serving_recovery(coordinator):
         return
-    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    _start_replacement_recovery(
+        instance, coordinator, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    )
+
+
+def _start_replacement_recovery(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> None:
     if _wake_serving_recovery_locked(coordinator, deadline):
         return
     _stop_previous_recovery(coordinator, deadline)
@@ -3046,6 +3088,14 @@ def _recovery_pass(
         return False
     if _retry_terminal_cleanup(instance, state):
         return True
+    return _recovery_request_pass(instance, coordinator, state)
+
+
+def _recovery_request_pass(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    state: _RecoveryState,
+) -> bool:
     if coordinator.recovery_stop.is_set():
         return False
     _serve_recovery_request(coordinator, instance, state)
@@ -3131,6 +3181,12 @@ def _recovery_plan_locked(
         return False, None
     if coordinator.terminal_outcome is not None:
         return _terminal_recovery_outcome_locked(coordinator)
+    return _owned_recovery_plan_locked(coordinator, requested_nonce)
+
+
+def _owned_recovery_plan_locked(
+    coordinator: _LifecycleCoordinator, requested_nonce: str
+) -> tuple[bool, str | None] | None:
     if not _requested_generation_owned_locked(coordinator, requested_nonce):
         _clear_recovery_request_locked(coordinator)
         return False, None
@@ -3434,10 +3490,19 @@ def _claim_failure_intent_locked(
     if not coordinator.startup_complete:
         _requeue_intent(coordinator, intent)
         return None, False
-    if _intent_is_stale_locked(coordinator, intent):
-        coordinator.seen_failures.add(key)
-        return None, True
+    return _decide_unseen_intent_locked(instance, coordinator, intent, key)
+
+
+def _decide_unseen_intent_locked(
+    instance: LspProcess,
+    coordinator: _LifecycleCoordinator,
+    intent: _FailureIntent,
+    key: tuple[str, bool],
+) -> tuple[_IntentDecision | None, bool]:
+    stale = _intent_is_stale_locked(coordinator, intent)
     coordinator.seen_failures.add(key)
+    if stale:
+        return None, True
     decision = _decide_failure_intent_locked(instance, coordinator, intent)
     _notify_lifecycle_locked(coordinator)
     return decision, True
@@ -3466,6 +3531,16 @@ def _terminal_cleanup_code(
     instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
 ) -> str | None:
     """The code to report when terminal cleanup left ownership pending."""
+    _drive_terminal_cleanup(instance, coordinator, deadline)
+    if coordinator.cleanup_result.ownership_pending:
+        return coordinator.terminal_code or _PROCESS_EXITED
+    return None
+
+
+def _drive_terminal_cleanup(
+    instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
+) -> None:
+    """Drive terminal cleanup, remembering the first error it raised or reported."""
     try:
         errors = _drive_cleanup(
             instance,
@@ -3475,12 +3550,9 @@ def _terminal_cleanup_code(
         )
     except BaseException as cleanup_error:
         _remember_background_cleanup_error(coordinator, cleanup_error)
-    else:
-        if errors:
-            _remember_background_cleanup_error(coordinator, errors[0])
-    if coordinator.cleanup_result.ownership_pending:
-        return coordinator.terminal_code or _PROCESS_EXITED
-    return None
+        return
+    if errors:
+        _remember_background_cleanup_error(coordinator, errors[0])
 
 
 def _process_failure_intent_owned(
@@ -3742,6 +3814,12 @@ def _generation_change_outcome_locked(
     """Whether the generation changed, or None while it is still the same one."""
     if _lifecycle_finished(coordinator):
         return False, coordinator.terminal_code
+    return _running_generation_change(coordinator, generation_nonce)
+
+
+def _running_generation_change(
+    coordinator: _LifecycleCoordinator, generation_nonce: str
+) -> tuple[bool, str | None] | None:
     active = coordinator.active
     if coordinator.phase is not _LifecyclePhase.RUNNING or active is None:
         return None
@@ -3960,9 +4038,7 @@ def _generation_still_current(
     generation: object,
     generation_nonce: str,
 ) -> bool:
-    if coordinator.phase is not _LifecyclePhase.RUNNING:
-        return False
-    if coordinator.terminal_outcome is not None:
+    if coordinator.phase is not _LifecyclePhase.RUNNING or coordinator.terminal_outcome is not None:
         return False
     if coordinator.active is not generation:
         return False
@@ -4082,9 +4158,16 @@ def _settle_notify_outcome(
         _queue_generation_failure(coordinator, generation, outcome.queue_reason)
     if outcome.protocol_error is None:
         return outcome.sent
+    _raise_protocol_violation(coordinator, generation, outcome.protocol_error)
+    return False
+
+
+def _raise_protocol_violation(
+    coordinator: _LifecycleCoordinator, generation: _Generation, protocol_error: BaseException
+) -> None:
     if _generation_died_after_violation(generation):
         _queue_generation_failure(coordinator, generation, _PROCESS_EXITED)
-    raise outcome.protocol_error
+    raise protocol_error
 
 
 def _failure_generation(
@@ -4175,14 +4258,21 @@ def _select_terminal_failure_locked(
     if coordinator.success_committed:
         return False
     coordinator.terminal_outcome = "failure"
+    _fill_failure_identity_locked(instance, coordinator, code)
+    _degrade_unfailed_instance(instance)
+    return True
+
+
+def _fill_failure_identity_locked(
+    instance: LspProcess | None, coordinator: _LifecycleCoordinator, code: str
+) -> None:
+    """The first failure's code and evidence identity win; later ones keep them."""
     if coordinator.terminal_code is None:
         coordinator.terminal_code = code
     if coordinator.failure_evidence_identity is None:
         coordinator.failure_evidence_identity = _failure_identity(
             instance, coordinator, coordinator.terminal_code
         )
-    _degrade_unfailed_instance(instance)
-    return True
 
 
 def _degrade_unfailed_instance(instance: LspProcess | None) -> None:
@@ -4458,6 +4548,10 @@ def _check_commit_preconditions_locked(
         raise RuntimeError("LSP process became terminal during restart")
     if coordinator.candidate is not candidate:
         raise RuntimeError("LSP restart candidate lost lifecycle ownership")
+    _require_unfailed_candidate(candidate)
+
+
+def _require_unfailed_candidate(candidate: _Generation) -> None:
     if candidate.process.poll() is not None or candidate.protocol.fatal:
         raise RuntimeError("LSP restart candidate failed before commit")
 
@@ -4770,11 +4864,15 @@ def _await_stream_owner(owner: threading.Thread | None, deadline: float) -> None
     """Wait out one stream owner; our own thread is already accounted for."""
     if owner is None or owner is threading.current_thread():
         return
-    remaining = deadline - time.monotonic()
-    if remaining > 0:
-        owner.join(remaining)
+    _join_until(owner, deadline)
     if owner.is_alive():
         raise TimeoutError("LSP process streams did not drain before deadline")
+
+
+def _join_until(thread: threading.Thread, deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        thread.join(remaining)
 
 
 def _wait_for_lsp_exit(instance: LspProcess, deadline: float) -> int:
@@ -4811,11 +4909,13 @@ def _join_owned_thread(thread: threading.Thread | None, deadline: float) -> bool
         return True
     if thread is threading.current_thread():
         return False
+    return _joined(thread, deadline)
+
+
+def _joined(thread: threading.Thread, deadline: float) -> bool:
     if _thread_never_started(thread):
         return True
-    remaining = deadline - time.monotonic()
-    if remaining > 0:
-        thread.join(remaining)
+    _join_until(thread, deadline)
     return not thread.is_alive()
 
 
@@ -5466,6 +5566,10 @@ def _release_owner_directory(run: _CleanupRun, owner: _OwnerDirectory) -> None:
     _remove_owner_lease(run, owner)
     if run.result.lease_removal != "success":
         return
+    _release_scratch_then_handles(run, owner)
+
+
+def _release_scratch_then_handles(run: _CleanupRun, owner: _OwnerDirectory) -> None:
     _remove_success_scratch(run, owner)
     if run.result.scratch_removal not in {"success", "not_applicable"}:
         return
@@ -6016,6 +6120,11 @@ def _drive_cleanup_owned(
     start = _open_cleanup(run)
     if start is None:
         return run.errors
+    _drive_opened_cleanup(run, start, renew_deadline_after_evidence)
+    return run.errors
+
+
+def _drive_opened_cleanup(run: _CleanupRun, start, renew_deadline_after_evidence: bool) -> None:
     _record_initial_evidence(run, start)
     if renew_deadline_after_evidence:
         run.deadline = _fresh_cleanup_deadline()
@@ -6023,7 +6132,6 @@ def _drive_cleanup_owned(
     outcome_ready = _settle_terminal_cleanup(run, start)
     if _close_cleanup(run, outcome_ready=outcome_ready):
         _finish_cleanup_registration(run)
-    return run.errors
 
 
 def _any_worker_alive(coordinator: _LifecycleCoordinator) -> bool:
@@ -6094,6 +6202,10 @@ def _generation_launch(
 ) -> tuple[tuple[str, ...], tuple[int, ...]]:
     if launch is None:
         return tuple(command), ()
+    return _launch_arguments(command, launch, cwd), _launch_pass_fds(launch)
+
+
+def _launch_arguments(command: Sequence[str], launch: GenerationLaunch, cwd: Path) -> tuple[str, ...]:
     if not isinstance(launch.command, tuple):
         raise TypeError("generation launch command must be a tuple")
     arguments = tuple(_validated_command(launch.command, cwd))
@@ -6102,7 +6214,7 @@ def _generation_launch(
         raise ValueError(
             "generation launch cannot replace the configured executable"
         )
-    return arguments, _launch_pass_fds(launch)
+    return arguments
 
 
 def _check_argument_strings(arguments: Sequence[object]) -> None:
@@ -6119,7 +6231,10 @@ def _validated_arguments(command: Sequence[str]) -> list[str]:
         raise TypeError("command must be a sequence of strings")
     if not command:
         raise ValueError("command must not be empty")
-    arguments = list(command)
+    return _checked_arguments(list(command))
+
+
+def _checked_arguments(arguments: list[str]) -> list[str]:
     _check_argument_strings(arguments)
     if not arguments[0]:
         raise ValueError("command executable must not be empty")
@@ -6133,6 +6248,10 @@ def _resolved_executable(name: str, cwd: Path) -> Path:
         return executable.resolve()
     if executable.parent != Path("."):
         return (cwd / executable).resolve()
+    return _executable_on_path(name)
+
+
+def _executable_on_path(name: str) -> Path:
     found = shutil.which(name, path=lsp_environment().get("PATH"))
     if found is None:
         raise FileNotFoundError(name)
@@ -6266,11 +6385,15 @@ def _validated_owner_root(owner_root: Path) -> str:
         raise ValueError(
             "owner_root basename must be 32 lowercase hexadecimal characters"
         )
+    _require_fresh_owner_root(owner_root)
+    return owner_nonce
+
+
+def _require_fresh_owner_root(owner_root: Path) -> None:
     if os.path.lexists(owner_root):
         raise FileExistsError(owner_root)
     if not owner_root.parent.exists() or not owner_root.parent.is_dir():
         raise FileNotFoundError(owner_root.parent)
-    return owner_nonce
 
 
 def _object_identity(path: Path) -> _ObjectIdentity:

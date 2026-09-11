@@ -216,6 +216,12 @@ class ProcessTree:
             raise TimeoutError("LSP process-tree spawn deadline expired")
         inherited_descriptors = _validated_pass_fds(pass_fds)
         options = _spawn_options(cwd, env)
+        return cls._spawn_for_platform(command, options, inherited_descriptors, deadline)
+
+    @classmethod
+    def _spawn_for_platform(
+        cls, command: Sequence[str], options: object, inherited_descriptors: tuple[int, ...], deadline: float
+    ) -> ProcessTree:
         if os.name == "posix":
             return cls._spawn_posix(command, options, inherited_descriptors)
         if os.name != "nt":
@@ -296,6 +302,9 @@ class ProcessTree:
             raise RuntimeError("direct LSP process is still live")
         if os.name == "nt":
             return _bounded_job_active_processes(self._owned_job()) != 0
+        return self._posix_descendants_live()
+
+    def _posix_descendants_live(self) -> bool:
         direct_reaped, group_absent = _observe_posix_tree(
             self.process, self._owned_group()
         )
@@ -335,10 +344,7 @@ class ProcessTree:
         if not complete:
             _signal_group(group, signal.SIGKILL, errors)
             complete = _wait_posix_tree(self.process, group, deadline)
-        if errors:
-            raise errors[0]
-        if not complete:
-            raise TimeoutError("LSP process group did not exit before deadline")
+        _raise_unfinished(errors, complete, "LSP process group did not exit before deadline")
 
     def _terminate_windows(self, deadline: float) -> None:
         job = self._owned_job()
@@ -350,10 +356,7 @@ class ProcessTree:
         complete = self._await_windows_tree(job, deadline, tracked_pids, errors)
         if not complete:
             errors[:0] = snapshot_errors
-        if errors:
-            raise errors[0]
-        if not complete:
-            raise TimeoutError("LSP Windows process tree did not exit before deadline")
+        _raise_unfinished(errors, complete, "LSP Windows process tree did not exit before deadline")
 
     def _kill_direct_windows_process(
         self, deadline: float, errors: list[BaseException]
@@ -398,10 +401,7 @@ class ProcessTree:
         errors: list[BaseException] = []
         direct_reaped = _reaped_or_recorded(self.process, errors)
         active = _job_active_or_recorded(job, errors)
-        if errors:
-            raise errors[0]
-        if not direct_reaped or active != 0:
-            raise RuntimeError("Windows LSP process tree is still live")
+        _require_windows_tree_gone(errors, direct_reaped, active)
         _close_windows_process_handle(self.process)
         if job is not None:
             _close_windows_handle(job)
@@ -490,6 +490,10 @@ def _pass_fds_sequence(pass_fds: Sequence[int]) -> tuple[int, ...]:
 def _require_bounded_descriptor_set(descriptors: tuple[int, ...]) -> None:
     if any(not _is_descriptor(descriptor) for descriptor in descriptors):
         raise ValueError("pass_fds must contain nonnegative integers")
+    _require_unique_bounded(descriptors)
+
+
+def _require_unique_bounded(descriptors: tuple[int, ...]) -> None:
     if len(set(descriptors)) != len(descriptors):
         raise ValueError("pass_fds must not contain duplicates")
     if len(descriptors) > _MAX_PASS_FDS:
@@ -605,6 +609,10 @@ def _proc_entry_keeps_group(entry_path: str, group: int) -> bool | None:
         return None
     if not payload:
         return False
+    return _payload_keeps_group(payload, group)
+
+
+def _payload_keeps_group(payload: bytes, group: int) -> bool | None:
     fields = _proc_stat_fields(payload)
     if fields is None:
         return None
@@ -613,17 +621,18 @@ def _proc_entry_keeps_group(entry_path: str, group: int) -> bool | None:
 
 def _scan_proc_entries(entries, group: int) -> bool | None:
     """True when nothing in /proc keeps the group alive; None when unreadable."""
-    scanned = 0
-    for entry in entries:
-        if not entry.name.isdecimal():
-            continue
-        scanned += 1
+    for scanned, entry in enumerate(_numeric_entries(entries), 1):
         if scanned > _LINUX_PROC_SCAN_LIMIT:
             return None
         verdict = _proc_entry_verdict(entry.path, group)
         if verdict is not None:
             return verdict
     return True
+
+
+def _numeric_entries(entries):
+    """The /proc entries that name processes, lazily, in directory order."""
+    return (entry for entry in entries if entry.name.isdecimal())
 
 
 def _proc_entry_verdict(entry_path: str, group: int) -> bool | None:
@@ -738,9 +747,28 @@ def _windows_wait_result_alive(result: int) -> bool:
         return False
     if result == _WAIT_TIMEOUT:
         return True
+    raise _windows_wait_failure(result)
+
+
+def _windows_wait_failure(result: int) -> OSError:
     if result == _WAIT_FAILED:
-        raise ctypes.WinError(ctypes.get_last_error())
-    raise OSError(f"unexpected Windows process wait result: {result}")
+        return ctypes.WinError(ctypes.get_last_error())
+    return OSError(f"unexpected Windows process wait result: {result}")
+
+
+def _raise_unfinished(errors: list[BaseException], complete: bool, message: str) -> None:
+    """The first recorded error wins; with none, an unfinished tree times out."""
+    if errors:
+        raise errors[0]
+    if not complete:
+        raise TimeoutError(message)
+
+
+def _require_windows_tree_gone(errors: list[BaseException], direct_reaped: bool, active: int) -> None:
+    if errors:
+        raise errors[0]
+    if not direct_reaped or active != 0:
+        raise RuntimeError("Windows LSP process tree is still live")
 
 
 def _windows_pid_alive(pid: int) -> bool:

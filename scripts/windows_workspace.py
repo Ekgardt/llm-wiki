@@ -300,71 +300,106 @@ def require_capability() -> None:
         raise RuntimeError(reason or "Windows native workspace APIs are unavailable")
 
 
+_UNBOUNDED_PATH = "Windows short path must be a bounded local absolute path"
+
+
 def _bounded_local_absolute_path(path: Path) -> tuple[str, PureWindowsPath]:
     if not isinstance(path, Path):
         raise TypeError("Windows short path must be a Path")
     value = str(path)
     pure = PureWindowsPath(value)
-    try:
-        characters = len(value.encode("utf-16-le")) // 2
-    except UnicodeEncodeError as exc:
-        raise ValueError(
-            "Windows short path must be a bounded local absolute path"
-        ) from exc
-    if (
-        not pure.drive
-        or pure.root != "\\"
-        or value.startswith("\\\\")
-        or "\x00" in value
-        or characters > _MAX_LOCAL_PATH_CHARACTERS
-    ):
-        raise ValueError("Windows short path must be a bounded local absolute path")
+    characters = _utf16_characters(value)
+    if not _local_absolute(value, pure) or characters > _MAX_LOCAL_PATH_CHARACTERS:
+        raise ValueError(_UNBOUNDED_PATH)
     return str(pure), pure
+
+
+def _utf16_characters(value: str) -> int:
+    try:
+        return len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise ValueError(_UNBOUNDED_PATH) from exc
+
+
+def _local_absolute(value: str, pure: PureWindowsPath) -> bool:
+    """A drive-rooted local path: no UNC prefix, no NUL."""
+    if not pure.drive or pure.root != "\\":
+        return False
+    return not value.startswith("\\\\") and "\x00" not in value
+
+
+_SHORT_PATH_RANGE = "Windows short path result exceeded the bounded path range"
 
 
 def get_short_path(path: Path) -> Path:
     """Return the bounded 8.3 form of one existing local absolute path."""
     require_capability()
     value, pure = _bounded_local_absolute_path(path)
-    required = int(_API.get_short_path(value, None, 0))
-    if required == 0:
-        raise ctypes.WinError(ctypes.get_last_error())
-    if required > _MAX_LOCAL_PATH_CHARACTERS + 1:
-        raise ValueError("Windows short path result exceeded the bounded path range")
-    buffer = ctypes.create_unicode_buffer(required)
-    written = int(_API.get_short_path(value, buffer, required))
-    if written == 0:
-        raise ctypes.WinError(ctypes.get_last_error())
-    if written >= required or written > _MAX_LOCAL_PATH_CHARACTERS:
-        raise ValueError("Windows short path result exceeded the bounded path range")
-    result, result_pure = _bounded_local_absolute_path(Path(buffer.value))
+    required = _short_path_length(value)
+    result, result_pure = _bounded_local_absolute_path(Path(_short_path_text(value, required)))
     if result_pure.drive.casefold() != pure.drive.casefold():
         raise OSError("Windows short path changed the local drive")
     return Path(result)
 
 
+def _short_path_length(value: str) -> int:
+    required = int(_API.get_short_path(value, None, 0))
+    if required == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if required > _MAX_LOCAL_PATH_CHARACTERS + 1:
+        raise ValueError(_SHORT_PATH_RANGE)
+    return required
+
+
+def _short_path_text(value: str, required: int) -> str:
+    buffer = ctypes.create_unicode_buffer(required)
+    written = int(_API.get_short_path(value, buffer, required))
+    if written == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if written >= required or written > _MAX_LOCAL_PATH_CHARACTERS:
+        raise ValueError(_SHORT_PATH_RANGE)
+    return buffer.value
+
+
+_INVALID_COMPONENT = "Windows relative name must be one normalized path component"
+
+
 def _component(name: str) -> str:
-    try:
-        encoded = name.encode("utf-16-le") if isinstance(name, str) else b""
-    except UnicodeEncodeError as exc:
-        raise ValueError(
-            "Windows relative name must be one normalized path component"
-        ) from exc
-    if (
-        not isinstance(name, str)
-        or not name
-        or name in {".", ".."}
-        or "/" in name
-        or "\\" in name
-        or "\x00" in name
-        or any(character in '<>:"|?*' or ord(character) < 32 for character in name)
-        or name[-1] in {".", " "}
-        or name.split(".", 1)[0].casefold() in _WINDOWS_RESERVED
-        or len(encoded) > 65534
-        or unicodedata.normalize("NFC", name) != name
-    ):
-        raise ValueError("Windows relative name must be one normalized path component")
+    encoded = _utf16_component(name)
+    if not isinstance(name, str) or _invalid_component(name, encoded):
+        raise ValueError(_INVALID_COMPONENT)
     return name
+
+
+def _utf16_component(name: object) -> bytes:
+    if not isinstance(name, str):
+        return b""
+    try:
+        return name.encode("utf-16-le")
+    except UnicodeEncodeError as exc:
+        raise ValueError(_INVALID_COMPONENT) from exc
+
+
+def _invalid_component(name: str, encoded: bytes) -> bool:
+    if not name or name in {".", ".."}:
+        return True
+    return _forbidden_component_characters(name) or _unportable_component(name, encoded)
+
+
+def _forbidden_component_characters(name: str) -> bool:
+    if "/" in name or "\\" in name or "\x00" in name:
+        return True
+    return any(_reserved_or_control(character) for character in name)
+
+
+def _reserved_or_control(character: str) -> bool:
+    return character in '<>:"|?*' or ord(character) < 32
+
+
+def _unportable_component(name: str, encoded: bytes) -> bool:
+    if name[-1] in {".", " "} or name.split(".", 1)[0].casefold() in _WINDOWS_RESERVED:
+        return True
+    return len(encoded) > 65534 or unicodedata.normalize("NFC", name) != name
 
 
 def close_handle(handle: int) -> None:
@@ -382,12 +417,7 @@ def _attributes(handle: int) -> int:
 
 def identity(handle: int, *, directory: bool | None = None) -> tuple[int, bytes, bool]:
     require_capability()
-    attributes = _attributes(handle)
-    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        raise PermissionError("Windows workspace component is a reparse point")
-    actual_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
-    if directory is not None and actual_directory != directory:
-        raise PermissionError("Windows workspace component has the wrong kind")
+    actual_directory = _checked_kind(_attributes(handle), directory)
     information = _FileIdInfo()
     if not _API.get_information(
         handle, 18, ctypes.byref(information), ctypes.sizeof(information)
@@ -397,6 +427,16 @@ def identity(handle: int, *, directory: bool | None = None) -> tuple[int, bytes,
     if not any(file_id):
         raise OSError("Windows stable FILE_ID_INFO identity is unavailable")
     return int(information.volume_serial_number), file_id, actual_directory
+
+
+def _checked_kind(attributes: int, directory: bool | None) -> bool:
+    """Whether the object is a directory, refusing reparse points and the wrong kind."""
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PermissionError("Windows workspace component is a reparse point")
+    actual_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+    if directory is not None and actual_directory != directory:
+        raise PermissionError("Windows workspace component has the wrong kind")
+    return actual_directory
 
 
 def _object_attributes(parent: int, name: str):
@@ -433,29 +473,59 @@ def _relative_handle(
     name_buffer, unicode_name, attributes = _object_attributes(parent, name)
     handle = wintypes.HANDLE()
     io_status = _IoStatusBlock()
-    desired = _SYNCHRONIZE | _FILE_READ_ATTRIBUTES
-    if (create and not directory) or deletable:
-        desired |= _DELETE
-    if directory:
-        desired |= _FILE_LIST_DIRECTORY
-    else:
-        desired |= _FILE_READ_DATA
-    if create or writable:
-        desired |= _FILE_WRITE_ATTRIBUTES
-    if writable:
-        desired |= _FILE_WRITE_DATA
-    options = (
-        _FILE_OPEN_REPARSE_POINT
-        | _FILE_SYNCHRONOUS_IO_NONALERT
-        | (_FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE)
+    desired = (
+        _SYNCHRONIZE
+        | _FILE_READ_ATTRIBUTES
+        | _delete_access(directory, create, deletable)
+        | _read_access(directory)
+        | _write_access(create, writable)
     )
-    if share_access is None:
-        share = 0 if not directory else _FILE_SHARE_READ | _FILE_SHARE_WRITE
-    else:
-        share = share_access
+    share = _share_mode(directory, share_access)
+    status = _open_or_create(
+        handle, desired, attributes, io_status, share, _open_options(directory), create=create
+    )
+    if status < 0:
+        raise _open_failure(int(_API.status_to_error(status)), name, create)
+    return _checked_handle(int(handle.value), directory)
+
+
+def _delete_access(directory: bool, create: bool, deletable: bool) -> int:
+    if (create and not directory) or deletable:
+        return _DELETE
+    return 0
+
+
+def _read_access(directory: bool) -> int:
+    if directory:
+        return _FILE_LIST_DIRECTORY
+    return _FILE_READ_DATA
+
+
+def _write_access(create: bool, writable: bool) -> int:
+    if writable:
+        return _FILE_WRITE_ATTRIBUTES | _FILE_WRITE_DATA
+    if create:
+        return _FILE_WRITE_ATTRIBUTES
+    return 0
+
+
+def _open_options(directory: bool) -> int:
+    kind = _FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE
+    return _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT | kind
+
+
+def _share_mode(directory: bool, share_access: int | None) -> int:
+    if share_access is not None:
+        return share_access
+    if directory:
+        return _FILE_SHARE_READ | _FILE_SHARE_WRITE
+    return 0
+
+
+def _open_or_create(handle, desired: int, attributes, io_status, share: int, options: int, *, create: bool) -> int:
     if create:
         allocation = ctypes.c_longlong(0)
-        status = _API.nt_create_file(
+        return _API.nt_create_file(
             ctypes.byref(handle),
             desired,
             ctypes.byref(attributes),
@@ -468,27 +538,26 @@ def _relative_handle(
             None,
             0,
         )
-    else:
-        status = _API.nt_open_file(
-            ctypes.byref(handle),
-            desired,
-            ctypes.byref(attributes),
-            ctypes.byref(io_status),
-            share,
-            options,
-        )
-    if status < 0:
-        error = int(_API.status_to_error(status))
-        if error in {80, 183}:  # ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS
-            raise FileExistsError(
-                error, f"cannot {'create' if create else 'open'} Windows component: {name}"
-            )
-        if error in {2, 3}:  # ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND
-            raise FileNotFoundError(
-                error, f"cannot {'create' if create else 'open'} Windows component: {name}"
-            )
-        raise OSError(error, f"cannot {'create' if create else 'open'} Windows component: {name}")
-    value = int(handle.value)
+    return _API.nt_open_file(
+        ctypes.byref(handle),
+        desired,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        share,
+        options,
+    )
+
+
+def _open_failure(error: int, name: str, create: bool) -> OSError:
+    message = f"cannot {'create' if create else 'open'} Windows component: {name}"
+    if error in {80, 183}:  # ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS
+        return FileExistsError(error, message)
+    if error in {2, 3}:  # ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND
+        return FileNotFoundError(error, message)
+    return OSError(error, message)
+
+
+def _checked_handle(value: int, directory: bool) -> int:
     try:
         identity(value, directory=directory)
     except BaseException:
@@ -588,12 +657,21 @@ def _open_directory_path(path: Path, *, writable_leaf: bool) -> int:
     require_capability()
     _value, pure = _bounded_local_absolute_path(path)
     parts = pure.parts[1:]
-    root_path = f"\\\\?\\{pure.drive}\\"
+    chain = _DirectoryChain(_open_volume_root(pure, writable=writable_leaf and not parts))
+    try:
+        chain.descend_all(parts, writable_leaf)
+    except BaseException:
+        chain.abandon()
+        raise
+    return chain.current_handle()
+
+
+def _open_volume_root(pure: PureWindowsPath, *, writable: bool) -> int:
     desired = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES
-    if writable_leaf and not parts:
+    if writable:
         desired |= _FILE_WRITE_ATTRIBUTES | _FILE_WRITE_DATA | _SYNCHRONIZE
     root = _API.create_file(
-        root_path,
+        f"\\\\?\\{pure.drive}\\",
         desired,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE,
         None,
@@ -603,34 +681,52 @@ def _open_directory_path(path: Path, *, writable_leaf: bool) -> int:
     )
     if root == _INVALID_HANDLE_VALUE:
         raise ctypes.WinError(ctypes.get_last_error())
-    current: int | None = int(root)
+    return int(root)
+
+
+def _close_quietly(handle: int) -> None:
     try:
-        identity(current, directory=True)
-        for index, part in enumerate(parts):
-            child = _relative_handle(
-                current,
-                part,
-                directory=True,
-                create=False,
-                writable=writable_leaf and index == len(parts) - 1,
-            )
-            try:
-                close_handle(current)
-            except BaseException:
-                current = None
-                try:
-                    close_handle(child)
-                except BaseException:
-                    pass
-                raise
-            current = child
-        if current is None:
-            raise OSError("Windows absolute directory ownership was lost")
-        return current
+        close_handle(handle)
     except BaseException:
-        if current is not None:
-            close_handle(current)
-        raise
+        pass
+
+
+class _DirectoryChain:
+    """One open directory handle, moved down a path one no-follow component at a time."""
+
+    def __init__(self, root: int) -> None:
+        self.current: int | None = root
+
+    def descend_all(self, parts: tuple[str, ...], writable_leaf: bool) -> None:
+        identity(self.current, directory=True)
+        last = len(parts) - 1
+        for index, part in enumerate(parts):
+            self._descend(part, writable=writable_leaf and index == last)
+
+    def _descend(self, part: str, *, writable: bool) -> None:
+        child = _relative_handle(
+            self.current,
+            part,
+            directory=True,
+            create=False,
+            writable=writable,
+        )
+        try:
+            close_handle(self.current)
+        except BaseException:
+            self.current = None
+            _close_quietly(child)
+            raise
+        self.current = child
+
+    def abandon(self) -> None:
+        if self.current is not None:
+            close_handle(self.current)
+
+    def current_handle(self) -> int:
+        if self.current is None:
+            raise OSError("Windows absolute directory ownership was lost")
+        return self.current
 
 
 def open_directory_path(path: Path) -> int:
@@ -643,76 +739,112 @@ def open_writable_directory_path(path: Path) -> int:
     return _open_directory_path(path, writable_leaf=True)
 
 
+_DIRECTORY_BUFFER_BYTES = 64 * 1024
+
+
 def list_directory(handle: int, *, max_entries: int) -> list[WindowsEntry]:
     require_capability()
     if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 0:
         raise ValueError("max_entries must be a non-negative integer")
+    entries = _enumerated_entries(handle, max_entries)
+    _require_normalized_names(entries)
+    return sorted(entries, key=lambda item: item.name)
+
+
+def _enumerated_entries(handle: int, max_entries: int) -> list[WindowsEntry]:
     entries: list[WindowsEntry] = []
     restart = True
-    buffer_size = 64 * 1024
-    name_offset = _FileIdExtdDirInfo.file_name.offset
     while True:
-        buffer = ctypes.create_string_buffer(buffer_size)
-        information_class = 20 if restart else 19
-        if not _API.get_information(
-            handle, information_class, ctypes.byref(buffer), buffer_size
-        ):
-            error = ctypes.get_last_error()
-            if error in {18, 38}:  # ERROR_NO_MORE_FILES | ERROR_HANDLE_EOF
-                break
-            raise ctypes.WinError(error)
-        offset = 0
-        while True:
-            information = _FileIdExtdDirInfo.from_buffer(buffer, offset)
-            name_length = int(information.file_name_length)
-            if (
-                name_length <= 0
-                or name_length % 2
-                or offset + name_offset + name_length > buffer_size
-            ):
-                raise OSError("Windows directory enumeration returned invalid data")
-            name = ctypes.wstring_at(
-                ctypes.addressof(buffer) + offset + name_offset,
-                name_length // 2,
-            )
-            if name not in {".", ".."}:
-                attributes = int(information.file_attributes)
-                size = int(information.end_of_file)
-                if size < 0:
-                    raise OSError("Windows directory enumeration returned a negative size")
-                if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-                    kind = "link"
-                elif attributes & _FILE_ATTRIBUTE_DIRECTORY:
-                    kind = "directory"
-                else:
-                    kind = "file"
-                entries.append(
-                    WindowsEntry(
-                        name,
-                        kind,
-                        bytes(information.file_id.identifier),
-                        size,
-                    )
-                )
-                if len(entries) > max_entries:
-                    raise ValueError("sealed workspace entry range exceeded")
-            next_offset = int(information.next_entry_offset)
-            if next_offset == 0:
-                break
-            if next_offset < name_offset or offset + next_offset >= buffer_size:
-                raise OSError("Windows directory enumeration returned invalid offsets")
-            offset += next_offset
+        buffer = _directory_batch(handle, restart)
+        if buffer is None:
+            return entries
+        _append_batch_entries(buffer, entries, max_entries)
         restart = False
+
+
+def _directory_batch(handle: int, restart: bool):
+    """The next buffer of directory records; None once enumeration is exhausted."""
+    buffer = ctypes.create_string_buffer(_DIRECTORY_BUFFER_BYTES)
+    information_class = 20 if restart else 19
+    if _API.get_information(handle, information_class, ctypes.byref(buffer), _DIRECTORY_BUFFER_BYTES):
+        return buffer
+    error = ctypes.get_last_error()
+    if error in {18, 38}:  # ERROR_NO_MORE_FILES | ERROR_HANDLE_EOF
+        return None
+    raise ctypes.WinError(error)
+
+
+def _append_batch_entries(buffer, entries: list[WindowsEntry], max_entries: int) -> None:
+    offset = 0
+    while True:
+        information = _FileIdExtdDirInfo.from_buffer(buffer, offset)
+        _append_directory_entry(buffer, offset, information, entries, max_entries)
+        next_offset = _next_record_offset(information, offset)
+        if next_offset is None:
+            return
+        offset = next_offset
+
+
+def _append_directory_entry(buffer, offset: int, information, entries: list[WindowsEntry], max_entries: int) -> None:
+    name = _record_name(buffer, offset, information)
+    if name in {".", ".."}:
+        return
+    entries.append(_windows_entry(name, information))
+    if len(entries) > max_entries:
+        raise ValueError("sealed workspace entry range exceeded")
+
+
+def _record_name(buffer, offset: int, information) -> str:
+    name_offset = _FileIdExtdDirInfo.file_name.offset
+    name_length = int(information.file_name_length)
+    if name_length <= 0 or name_length % 2 or offset + name_offset + name_length > _DIRECTORY_BUFFER_BYTES:
+        raise OSError("Windows directory enumeration returned invalid data")
+    return ctypes.wstring_at(
+        ctypes.addressof(buffer) + offset + name_offset,
+        name_length // 2,
+    )
+
+
+def _windows_entry(name: str, information) -> WindowsEntry:
+    attributes = int(information.file_attributes)
+    size = int(information.end_of_file)
+    if size < 0:
+        raise OSError("Windows directory enumeration returned a negative size")
+    return WindowsEntry(name, _attribute_kind(attributes), bytes(information.file_id.identifier), size)
+
+
+def _attribute_kind(attributes: int) -> str:
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return "link"
+    if attributes & _FILE_ATTRIBUTE_DIRECTORY:
+        return "directory"
+    return "file"
+
+
+def _next_record_offset(information, offset: int) -> int | None:
+    """The next record's offset in the buffer; None after the last record."""
+    next_offset = int(information.next_entry_offset)
+    if next_offset == 0:
+        return None
+    if next_offset < _FileIdExtdDirInfo.file_name.offset or offset + next_offset >= _DIRECTORY_BUFFER_BYTES:
+        raise OSError("Windows directory enumeration returned invalid offsets")
+    return offset + next_offset
+
+
+def _require_normalized_names(entries: list[WindowsEntry]) -> None:
     normalized: dict[str, str] = {}
     for entry in entries:
-        if unicodedata.normalize("NFC", entry.name) != entry.name:
-            raise PermissionError("Windows workspace contains a non-normalized name")
-        folded = entry.name.casefold()
-        previous = normalized.get(folded)
-        if previous is not None and previous != entry.name:
-            raise PermissionError("Windows workspace contains a case-fold collision")
-        normalized[folded] = entry.name
-    return sorted(entries, key=lambda item: item.name)
+        _claim_normalized_name(entry.name, normalized)
+
+
+def _claim_normalized_name(name: str, normalized: dict[str, str]) -> None:
+    if unicodedata.normalize("NFC", name) != name:
+        raise PermissionError("Windows workspace contains a non-normalized name")
+    folded = name.casefold()
+    previous = normalized.get(folded)
+    if previous is not None and previous != name:
+        raise PermissionError("Windows workspace contains a case-fold collision")
+    normalized[folded] = name
 
 
 def write_all(handle: int, content: bytes, *, chunk_bytes: int) -> None:
@@ -735,21 +867,25 @@ def write_all(handle: int, content: bytes, *, chunk_bytes: int) -> None:
 def read_chunks(handle: int, *, chunk_bytes: int, max_bytes: int):
     total = 0
     while True:
-        buffer = ctypes.create_string_buffer(chunk_bytes)
-        read = wintypes.DWORD()
-        if not _API.read_file(
-            handle, buffer, chunk_bytes, ctypes.byref(read), None
-        ):
-            error = ctypes.get_last_error()
-            if error == 38:  # ERROR_HANDLE_EOF
-                break
-            raise ctypes.WinError(error)
-        if read.value == 0:
-            break
-        total += int(read.value)
+        chunk = _read_chunk(handle, chunk_bytes)
+        if not chunk:
+            return
+        total += len(chunk)
         if total > max_bytes:
             raise ValueError("sealed workspace file exceeded captured range")
-        yield buffer.raw[: read.value]
+        yield chunk
+
+
+def _read_chunk(handle: int, chunk_bytes: int) -> bytes:
+    """The next chunk of the file; empty at its end."""
+    buffer = ctypes.create_string_buffer(chunk_bytes)
+    read = wintypes.DWORD()
+    if _API.read_file(handle, buffer, chunk_bytes, ctypes.byref(read), None):
+        return buffer.raw[: read.value]
+    error = ctypes.get_last_error()
+    if error == 38:  # ERROR_HANDLE_EOF
+        return b""
+    raise ctypes.WinError(error)
 
 
 def seek_start(handle: int) -> None:
@@ -837,19 +973,20 @@ def move_file_write_through(
     require_capability()
     source_value, _source_pure = _bounded_local_absolute_path(source)
     destination_value, _destination_pure = _bounded_local_absolute_path(destination)
-    flags = _MOVEFILE_WRITE_THROUGH
-    if replace:
-        flags |= _MOVEFILE_REPLACE_EXISTING
+    flags = _MOVEFILE_WRITE_THROUGH | (_MOVEFILE_REPLACE_EXISTING if replace else 0)
     if _API.move_file_ex(
         f"\\\\?\\{source_value}",
         f"\\\\?\\{destination_value}",
         flags,
     ):
         return
-    error = ctypes.get_last_error()
+    raise _move_failure(ctypes.get_last_error(), replace)
+
+
+def _move_failure(error: int, replace: bool) -> OSError:
     if not replace and error in {80, 183}:
-        raise FileExistsError(error, "Windows publication destination already exists")
-    raise ctypes.WinError(error)
+        return FileExistsError(error, "Windows publication destination already exists")
+    return ctypes.WinError(error)
 
 
 def _rename_file(handle: int, parent: int, name: str, *, replace: bool) -> None:
