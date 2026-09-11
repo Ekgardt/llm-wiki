@@ -54,6 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
 - The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).
 - Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
 - **A `recall` row carries its page, not the trace.** Through MCP each row

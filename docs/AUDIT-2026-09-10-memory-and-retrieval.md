@@ -363,7 +363,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
 - Rule: R4. Verified: read. Fix: render once, test emptiness on the result.
 
 ### L8 — `retrieval.py:4006` aliases `GenerationSealChanged` to itself; `retrieve_via_search_memory` (3961-4250) is 290 lines with ten closures and a graph CCN of 23 [defect]
-- Status: the alias removed 2026-09-11; the 290-line function with ten closures remains open.
+- Status: closed 2026-09-11. The closures are methods of a private `_SearchRun` dataclass that holds the call's arguments and the four pieces of state they shared; `retrieve_via_search_memory` is a 60-line pipeline with the same signature and trace (`docs/research/2026-09-11-one-search-run-is-an-object-not-ten-closures.md`).
 - Rule: R5 in spirit (lizard scores closures separately, so the gate passes).
   Verified: ran, read. Fix: lift the closures to module functions taking a
   small context object.
