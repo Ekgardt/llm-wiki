@@ -3046,21 +3046,30 @@ class _ApplyPlan:
         """A quarantined batch publishes candidates only, and no pages."""
         changes: list[MarkdownChange] = []
         paths: list[str] = []
+        present: list[str] = []
         for pipeline, assessments in self.claim_groups:
-            policy_changes, _preconditions, candidate_paths = pipeline.plan_changes(
-                _forced_quarantine(assessments)
+            policy_changes, _preconditions, candidate_paths, present_paths = (
+                pipeline.plan_candidate_changes(_forced_quarantine(assessments))
             )
             changes.extend(policy_changes)
             paths.extend(candidate_paths)
+            present.extend(present_paths)
         if not changes:
-            raise ValueError("quarantined compile batch produced no candidates")
+            return self._already_quarantined(present)
         self.claim_groups[0][0].ensure_candidate_parent()
         return self._commit_quarantine_changes(changes, paths)
 
-    def _commit_quarantine_changes(
-        self, changes: list[MarkdownChange], paths: list[str]
-    ) -> CompileApplyResult:
-        operation_id = "compile-quarantine:" + sha256_bytes(
+    def _already_quarantined(self, present: list[str]) -> CompileApplyResult:
+        """Nothing new to write: this attempt's own commit, or the candidates of an earlier one."""
+        if not present:
+            raise ValueError("quarantined compile batch produced no candidates")
+        operation_id = self._quarantine_operation_id(present)
+        if self.coordinator.committed_attempt(operation_id) is None:
+            raise CandidatesAlreadyQuarantined(present)
+        return self._quarantine_result(operation_id, present)
+
+    def _quarantine_operation_id(self, paths: list[str]) -> str:
+        return "compile-quarantine:" + sha256_bytes(
             canonical_json_bytes(
                 {
                     "action_key": self.action_key,
@@ -3069,6 +3078,23 @@ class _ApplyPlan:
                 }
             )
         )
+
+    def _quarantine_result(self, operation_id: str, paths: list[str]) -> CompileApplyResult:
+        committed, sequence = _transaction_authority(self.coordinator, operation_id)
+        return CompileApplyResult(
+            committed.id,
+            operation_id,
+            committed.state,
+            tuple(sorted(paths)),
+            sequence,
+            committed.updated_at,
+            self.action_key,
+        )
+
+    def _commit_quarantine_changes(
+        self, changes: list[MarkdownChange], paths: list[str]
+    ) -> CompileApplyResult:
+        operation_id = self._quarantine_operation_id(paths)
         transaction = self.coordinator.prepare(
             sorted(changes, key=lambda item: item.path),
             operation_id=operation_id,
@@ -3083,16 +3109,7 @@ class _ApplyPlan:
         self.coordinator.apply(
             transaction.id, deadline=self.deadline, cancelled=self.cancelled
         )
-        committed, sequence = _transaction_authority(self.coordinator, operation_id)
-        return CompileApplyResult(
-            committed.id,
-            operation_id,
-            committed.state,
-            tuple(sorted(paths)),
-            sequence,
-            committed.updated_at,
-            self.action_key,
-        )
+        return self._quarantine_result(operation_id, paths)
 
     # -- the pages themselves ------------------------------------------------
 
@@ -3432,6 +3449,14 @@ def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, s
     if len(ids) != 1 or len(keys) != 1:
         raise ValueError("compile receipts disagree about transaction authority")
     return ids.pop(), keys.pop()
+
+
+class CandidatesAlreadyQuarantined(Exception):
+    """Every candidate of a quarantined batch already awaits review; nothing new to write."""
+
+    def __init__(self, paths: Sequence[str]) -> None:
+        super().__init__(f"{len(paths)} candidate(s) already await review")
+        self.paths = tuple(paths)
 
 
 def _forced_quarantine(assessments: Sequence[object]) -> tuple[object, ...]:
@@ -4241,6 +4266,8 @@ def _apply_batch(
         )
     except TimeoutError:
         raise
+    except CandidatesAlreadyQuarantined as already:
+        return _still_quarantined_outcome(already)
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         return BatchOutcome(
             _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
@@ -4248,6 +4275,16 @@ def _apply_batch(
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
     return _committed_outcome(result)
+
+
+def _still_quarantined_outcome(already: CandidatesAlreadyQuarantined) -> BatchOutcome:
+    """The same claims were quarantined by an earlier attempt: no commit, the daily stays pending."""
+    print(
+        f"compile_memory: batch still quarantined: {len(already.paths)} candidate(s) under "
+        "knowledge/inbox/claims/ already await review, no page published; the daily "
+        "stays pending until the candidate is reviewed."
+    )
+    return BatchOutcome(0, "quarantined", 0)
 
 
 def _transactional_owner(

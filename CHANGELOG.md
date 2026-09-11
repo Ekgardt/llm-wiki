@@ -120,6 +120,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A claim that is already quarantined is not written again.** The nightly compile of 2026-09-11 failed with `FileExistsError`: a pending quarantined daily was planned again, the model proposed the same claim over the same evidence, and the candidate create met the file written on 2026-09-07. A candidate file that embeds the same claim id, fingerprint and evidence now counts as present; a retry of the same attempt returns its commit, and a new attempt reports "batch still quarantined" instead of failing the run. A foreign file at the path still refuses the write.
+
 - The scale stand's exact cell no longer grades itself: it reports no recall, with the reason, instead of 1.0 by construction (audit M11).
 - A queue heartbeat thread that does not stop within twice its heartbeat is refused by name (`heartbeat_stop_timeout`) instead of joined forever (audit OPS-18).
 - Impact analysis no longer names the symbol after a grown line as changed: a hunk is matched against the generation's occurrences by its old byte range, the coordinate system the generation indexed (audit M13).

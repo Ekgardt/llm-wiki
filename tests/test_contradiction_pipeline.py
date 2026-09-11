@@ -275,10 +275,17 @@ def test_provider_semantic_evaluation_falls_through_and_records_bounded_failure_
 
     assert len(result.evaluations) == 2, result.canonical()
     assert result.recommendation == "keep-both"
-    failures = [item for item in result.evaluation_lineage if item["failure"]]
-    assert any(item["stage"] == "primary.probe" for item in failures)
-    assert any(item["failure"] == "output_too_large" for item in failures)
-    assert all("provider" in item["descriptor"] for item in result.evaluation_lineage)
+    _assert_bounded_failure_lineage(result.evaluation_lineage)
+
+
+def _failure_fields(lineage, field: str) -> set:
+    return {item[field] for item in lineage if item["failure"]}
+
+
+def _assert_bounded_failure_lineage(lineage) -> None:
+    assert "primary.probe" in _failure_fields(lineage, "stage")
+    assert "output_too_large" in _failure_fields(lineage, "failure")
+    assert all("provider" in item["descriptor"] for item in lineage)
 
 
 def test_page_superseded_only_when_all_substantive_claims_are_superseded():
@@ -386,6 +393,55 @@ def test_candidate_commit_is_idempotent_and_rejects_non_directory_parent(tmp_pat
     )
     with pytest.raises((PermissionError, NotADirectoryError)):
         blocked.assess(new, candidates=[old])
+
+
+def _candidate_pipeline(tmp_path, source_page="knowledge/notes/source.md"):
+    from contradiction_pipeline import ContradictionPipeline
+    from markdown_transaction import MarkdownCoordinator
+
+    vault = tmp_path / "vault"
+    state = tmp_path / "state"
+    (vault / "knowledge").mkdir(parents=True, exist_ok=True)
+    state.mkdir(exist_ok=True)
+    return vault, ContradictionPipeline(
+        vault=vault,
+        coordinator=MarkdownCoordinator(vault, state),
+        source_page=source_page,
+    )
+
+
+def test_a_claim_already_quarantined_from_another_page_is_not_written_again(tmp_path):
+    """A recompile names the same claim over the same evidence from a new page slug:
+    the review item exists, so nothing is created and nothing is refused."""
+    vault, first_pipeline = _candidate_pipeline(tmp_path)
+    new = claim("red", authority="inferred")
+    old = indexed("blue", authority="user")
+    first = first_pipeline.assess(new, candidates=[old])
+    before = (vault / first.candidate_path).read_bytes()
+
+    _vault, second_pipeline = _candidate_pipeline(tmp_path, "knowledge/notes/renamed.md")
+    second = second_pipeline.assess(new, candidates=[old])
+
+    assert second.candidate_path == first.candidate_path
+    assert (vault / first.candidate_path).read_bytes() == before
+    assert len(list((vault / "knowledge/inbox/claims").glob("*.md"))) == 1
+
+
+def test_a_foreign_file_at_the_candidate_path_still_refuses_the_write(tmp_path):
+    """Only the same claim identity counts as present; anything else fails closed."""
+    vault, pipeline = _candidate_pipeline(tmp_path)
+    new = claim("red", authority="inferred")
+    old = indexed("blue", authority="user")
+    _changes, _preconditions, created = pipeline.plan_changes(
+        (pipeline.assess(new, candidates=[old], commit=False),)
+    )
+    target = vault / created[0]
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"---\ntype: claim-candidate\n---\n# Someone else\n")
+
+    with pytest.raises(FileExistsError):
+        pipeline.assess(new, candidates=[old])
+    assert target.read_bytes() == b"---\ntype: claim-candidate\n---\n# Someone else\n"
 
 
 def test_all_compatible_supersession_mutations_are_sorted_and_conflicts_quarantine():
