@@ -156,4 +156,14 @@ Files: `scripts/code_hints.py` (new), `scripts/graph_hint.py` (new),
 `CHANGELOG.md`, `benchmark/code-parity-v2.json` (new),
 `benchmark/code-parity-v1.json`, `benchmark/run_code_parity.py`,
 `benchmark/README.md`, `tests/test_code_parity_stand.py`,
-`tests/test_install_smoke.py`, `scripts/generation_catalog.py`.
+`tests/test_install_smoke.py`, `scripts/generation_catalog.py`,
+`scripts/doctor.py`, `scripts/codex_hook_identity.py` (new),
+`tests/test_codex_rendered_hooks.py`.
+
+Addendum, same day: the doctor verifies Codex's runtime hook list against the
+template and recognised only `codex_memory.py … hook` as ours, so the two new
+Codex handlers made every installed Codex report `runtime_hooks_mismatch`
+(caught by `tests/test_codex_rendered_hooks.py` in the clean full run). The
+ownership rule now lives once, in `scripts/codex_hook_identity.py`, used by
+both the installer merge and the doctor; the doctor's rendered-command
+recognition and event aliases cover the two new handlers.

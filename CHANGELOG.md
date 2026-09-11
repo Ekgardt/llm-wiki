@@ -23,7 +23,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   / 58 ms p95 for a hit or a miss, 33 ms for a literal, plus ~9 ms for
   `uv run`. Silent on anything else and on every error; never blocks a tool
   call; the text is labelled as repository data. Codex ownership recognises the
-  new handlers; the OpenCode plugin was rewritten under the complexity gate
+  new handlers through one rule (`scripts/codex_hook_identity.py`) shared by the
+  installer merge and the doctor's runtime-hook check, which would otherwise
+  have called every installed Codex `runtime_hooks_mismatch`; the OpenCode plugin was rewritten under the complexity gate
   with unchanged lifecycle behaviour. Tool names stay `mcp__llm-wiki__*` (C3).
 - **Repository indexes follow worktrees, and are retired (#24, D1).** The
   nightly `refresh-all` indexes up to eight new worktrees of every registered

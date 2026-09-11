@@ -6027,10 +6027,10 @@ def _codex_hook_list(entry: dict) -> list | None:
 
 
 def _codex_owned_hook(hook: dict) -> bool:
-    command = hook.get("command")
-    if not isinstance(command, str) or "codex_memory.py" not in command:
-        return False
-    return command.rstrip().endswith(" hook")
+    """The installer's own ownership rule, not a second one (#24, C2)."""
+    from codex_hook_identity import is_our_codex_command
+
+    return is_our_codex_command(hook.get("command"))
 
 
 def _codex_owned_hooks(hooks: list) -> list:
@@ -6058,9 +6058,17 @@ def _rendered_codex_hook_command(root: Path, command: str) -> str:
     ])
     rendered = command.removeprefix("uv ")
     rendered = rendered.replace('"$LLM_WIKI_ROOT"', shlex.quote(str(root)))
-    script = root / "scripts" / "codex_memory.py"
-    rendered = rendered.replace('"$LLM_WIKI_ROOT/scripts/codex_memory.py"', shlex.quote(str(script)))
-    return f"{prefix} {rendered}"
+    return f"{prefix} {_rendered_script_paths(rendered, root)}"
+
+
+def _rendered_script_paths(rendered: str, root: Path) -> str:
+    """Each of our scripts as the installer spells it: its quoted absolute path."""
+    from codex_hook_identity import OUR_CODEX_SCRIPTS
+
+    for name in OUR_CODEX_SCRIPTS:
+        script = shlex.quote(str(root / "scripts" / name))
+        rendered = rendered.replace(f'"$LLM_WIKI_ROOT/scripts/{name}"', script)
+    return rendered
 
 
 def _codex_hook_commands(root: Path, command: str) -> set[str]:
@@ -6071,7 +6079,8 @@ def _codex_hook_commands(root: Path, command: str) -> set[str]:
 
 def _canonical_codex_event(event: object) -> object:
     return {"sessionStart": "SessionStart", "preCompact": "PreCompact",
-            "postCompact": "PostCompact", "stop": "Stop"}.get(str(event), event)
+            "postCompact": "PostCompact", "stop": "Stop",
+            "postToolUse": "PostToolUse", "subagentStart": "SubagentStart"}.get(str(event), event)
 
 
 def _codex_hook_matches(wanted: dict, hook: dict, root: Path) -> bool:

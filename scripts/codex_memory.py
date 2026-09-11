@@ -369,23 +369,14 @@ def command_hook(args: argparse.Namespace) -> int:
     return 0
 
 
-# (script, the argument tail that ends our command): the lifecycle hook, and
-# the graph hint and reminder of issue #24 C2.
-_OUR_CODEX_COMMANDS = (("codex_memory.py", " hook"), ("graph_hint.py", " --source codex"))
-
-
-def _is_our_codex_command(command: object) -> bool:
-    if not isinstance(command, str):
-        return False
-    tail = command.rstrip()
-    return any(script in tail and tail.endswith(ending) for script, ending in _OUR_CODEX_COMMANDS)
-
-
 def _is_llm_wiki_hook(handler: object) -> bool:
+    """Ours when either platform's command is one of ours (`codex_hook_identity`)."""
+    from codex_hook_identity import is_our_codex_command
+
     if not isinstance(handler, dict):
         return False
     commands = (handler.get("command"), handler.get("commandWindows"))
-    return any(_is_our_codex_command(command) for command in commands)
+    return any(is_our_codex_command(command) for command in commands)
 
 
 def _invalid_hooks_config() -> ValueError:
