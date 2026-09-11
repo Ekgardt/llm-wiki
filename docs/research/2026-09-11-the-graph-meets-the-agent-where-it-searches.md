@@ -135,8 +135,10 @@ from that list, checked by a test.
 
 - D2 cross-repository routes: the graph has no route or channel nodes
   (named in #24 B), so there is nothing to match across repositories.
-- Section E runs: the task set is extended, nothing is run without the
-  owner's permission.
+- Section E: not started. The task set was not extended (correction of
+  2026-09-11: an earlier version of this note said it was and listed a
+  `benchmark/code-parity-v2.json` that was never written), and nothing is run
+  without the owner's permission.
 
 Files: `scripts/code_hints.py` (new), `scripts/graph_hint.py` (new),
 `scripts/repository_worktrees.py` (new), `scripts/repository_retention.py`
@@ -153,10 +155,7 @@ Files: `scripts/code_hints.py` (new), `scripts/graph_hint.py` (new),
 `tests/test_scheduled_nightly.py`, `tests/test_repository_index.py`,
 `tests/test_mcp_server.py`, `tests/test_integration_injection.py`,
 `docs/CODE-NAVIGATION.md`, `docs/USER-GUIDE.md`, `docs/STRUCTURE.md`,
-`CHANGELOG.md`, `benchmark/code-parity-v2.json` (new),
-`benchmark/code-parity-v1.json`, `benchmark/run_code_parity.py`,
-`benchmark/README.md`, `tests/test_code_parity_stand.py`,
-`tests/test_install_smoke.py`, `scripts/generation_catalog.py`,
+`CHANGELOG.md`, `scripts/generation_catalog.py`,
 `scripts/doctor.py`, `scripts/codex_hook_identity.py` (new),
 `tests/test_codex_rendered_hooks.py`.
 
