@@ -255,6 +255,10 @@ jobs:
             platform: linux
           - os: windows-2025
             platform: windows
+          # The LaunchAgent path (install_control.py) had no CI evidence
+          # (audit OPS-14, 2026-09-11); a regression there merged green.
+          - os: macos-15
+            platform: macos
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:

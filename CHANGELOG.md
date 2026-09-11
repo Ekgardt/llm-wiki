@@ -53,6 +53,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The installer job runs on macOS too.** The LaunchAgent path had no CI
+  evidence (audit OPS-14); `macos-15` joins the installer matrix. Research:
+  `docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`.
 - **The shipped Claude Code allowlist grants only read-only forms.** `Bash(sed *)`,
   `Bash(xargs *)`, `Bash(sort *)` and `Bash(uv run --directory *)` let an
   agent rewrite files or run any Python without a prompt under a
