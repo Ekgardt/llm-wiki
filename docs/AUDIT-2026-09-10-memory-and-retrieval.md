@@ -131,6 +131,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
 ## Medium
 
 ### M1 — Under any deadline the legacy dense leg is disabled and the trace blames the model [defect]
+- Status: checked 2026-09-11 — not a defect on the product path: `retrieve_via_search_memory` passes no deadline to optional stages (`_optional_value`), so the legacy leg runs under MCP and is bounded by `_call_dense`; the guard reaches only direct callers (`docs/research/2026-09-10-a-deferred-dense-leg-says-deferred.md`).
 - Rule: R3 (truthful trace).
 - Evidence: `scripts/search_memory.py:4962`
   (`if deadline is not None or not _dense_backend_ready(query): return None`);

@@ -4770,7 +4770,15 @@ def _legacy_dense_hits(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
-    """Independent dense backend used by retrieve() — returns None if unavailable."""
+    """Independent dense backend used by retrieve() — returns None if unavailable.
+
+    With an explicit `deadline` the leg is deferred before the model is
+    probed: it encodes on the caller's thread with no admission record. The
+    product path never passes one here — `retrieve_via_search_memory` runs
+    every optional stage without a deadline and bounds it in `_call_dense`
+    instead — so this guard reaches only direct callers
+    (docs/research/2026-09-10-a-deferred-dense-leg-says-deferred.md).
+    """
     _check_legacy_stop(deadline, cancelled)
     if deadline is not None or not _dense_backend_ready(query):
         return None

@@ -2897,3 +2897,4 @@ class TestASilentFallbackNamesItsCause:
         assert search_memory.degradation_reasons()["generation_manifest"].startswith(
             "ValueError: catalog.sqlite3"
         )
+
