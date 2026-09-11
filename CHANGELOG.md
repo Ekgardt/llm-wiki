@@ -55,6 +55,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The scale stand obeys the complexity gate: the three optional adapter cells share one cell shape, the crash matrix is one outcome per point with named steps; reports and adoption reasons unchanged (audit L13).
 - The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
 - `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
 - `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
