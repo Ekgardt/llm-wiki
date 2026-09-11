@@ -3346,6 +3346,22 @@ def _search_row(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
+# The first span of each page member, the form `node_locations` uses: grouped
+# over the page, never asked per node (NEW-125).
+_SYMBOL_LOCATIONS = (
+    "loc AS (SELECT o.node_id, MIN(o.line_start) AS line_start, s.relative_path "
+    "FROM occurrence o JOIN m ON m.node_id = o.node_id JOIN source s USING(source_id) "
+    "GROUP BY o.node_id)"
+)
+
+
+def _symbol_page_row(row: sqlite3.Row) -> dict[str, object]:
+    located = _search_row(row)
+    located["relative_path"] = row["relative_path"]
+    located["line"] = row["line_start"]
+    return located
+
+
 def _edge_filter(edge_values: tuple[str, ...], parameters: list[object]) -> str:
     if not edge_values:
         return ""
@@ -4593,6 +4609,42 @@ ORDER BY depth, assertion_ids LIMIT ?
             "rows": [_search_row(row) for row in rows],
             "total": total,
             "truncated": truncated,
+        }
+
+    def symbol_page(
+        self,
+        kinds: Sequence[str],
+        *,
+        after_node_id: str = "",
+        max_rows: int = MAX_ROWS,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        """One keyset page of symbols with degree and first location (#24, C1).
+
+        The hook-time hint table is exported from here, once per build, so the
+        degree definition stays `_SEARCH_DEGREES` - the one `search_nodes`
+        ranks by - and the location is `node_locations`' first span. Pages are
+        ordered by `node_id` and continue after `after_node_id`.
+        """
+        clauses = ["node_id > ?"]
+        parameters: list[object] = [str(after_node_id)]
+        _kind_clause(kinds, clauses, parameters)
+        limit = _bound(max_rows, "max_rows", MAX_ROWS)
+        rows = self._fetch(
+            "WITH m AS (SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
+            f"FROM node WHERE {' AND '.join(clauses)} ORDER BY node_id LIMIT ?), "
+            f"{_SEARCH_DEGREES}, {_SYMBOL_LOCATIONS} "
+            "SELECT m.node_id, m.kind, m.identity_scheme, m.identity_key, m.metadata_json, "
+            "0 AS rank, COALESCE(ind.c, 0) AS in_degree, COALESCE(outd.c, 0) AS out_degree, "
+            "loc.line_start, loc.relative_path FROM m LEFT JOIN ind USING(node_id) "
+            "LEFT JOIN outd USING(node_id) LEFT JOIN loc USING(node_id) ORDER BY m.node_id",
+            parameters,
+            limit=limit,
+            deadline=deadline,
+        )
+        return {
+            "rows": [_symbol_page_row(row) for row in rows[:limit]],
+            "truncated": len(rows) > limit,
         }
 
     def _search_total(self, where: str, parameters: list[object], deadline) -> int:

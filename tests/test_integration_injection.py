@@ -1965,21 +1965,44 @@ def test_codex_official_hook_template_matches_supported_contract():
         (ROOT / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
     )
     hooks = template["hooks"]
-    assert set(hooks) == {"SessionStart", "PreCompact", "PostCompact", "Stop"}
-    assert hooks["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
-    assert hooks["PreCompact"][0]["matcher"] == "manual|auto"
-    assert hooks["PostCompact"][0]["matcher"] == "manual|auto"
-    assert "matcher" not in hooks["Stop"][0]
-    for groups in hooks.values():
-        for group in groups:
-            assert len(group["hooks"]) == 1
-            command = group["hooks"][0]
-            assert command["type"] == "command"
-            assert "codex_memory.py" in command["command"]
-            assert command["command"].endswith(" hook")
-            assert "codex_memory.py" in command["commandWindows"]
-            assert command["commandWindows"].endswith(" hook")
-            assert 0 < command["timeout"] <= 15
+    lifecycle = {"SessionStart", "PreCompact", "PostCompact", "Stop"}
+    # Issue #24, C2: the graph hint after a shell search, and the reminder.
+    graph = {"PostToolUse", "SubagentStart"}
+    assert _first_matchers(hooks) == {
+        "SessionStart": "startup|resume|clear|compact",
+        "PreCompact": "manual|auto",
+        "PostCompact": "manual|auto",
+        "Stop": None,
+        "PostToolUse": "Bash",
+        "SubagentStart": None,
+    }
+    _assert_codex_groups(hooks, lifecycle, "codex_memory.py", " hook")
+    _assert_codex_groups(hooks, graph, "graph_hint.py", " --source codex")
+
+
+def _first_matchers(hooks: dict) -> dict:
+    return {event: groups[0].get("matcher") for event, groups in hooks.items()}
+
+
+def _codex_groups(hooks: dict, events: set[str]) -> list[dict]:
+    return [group for event in sorted(events) for group in hooks[event]]
+
+
+def _command_texts_end_with(command: dict, script: str, ending: str) -> bool:
+    texts = (command["command"], command["commandWindows"])
+    return all(script in text and text.endswith(ending) for text in texts)
+
+
+def _assert_codex_group(group: dict, script: str, ending: str) -> None:
+    (command,) = group["hooks"]
+    assert command["type"] == "command"
+    assert _command_texts_end_with(command, script, ending)
+    assert 0 < command["timeout"] <= 15
+
+
+def _assert_codex_groups(hooks: dict, events: set[str], script: str, ending: str) -> None:
+    for group in _codex_groups(hooks, events):
+        _assert_codex_group(group, script, ending)
 
 
 def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):

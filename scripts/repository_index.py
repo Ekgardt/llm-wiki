@@ -664,19 +664,34 @@ def index_repository(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Build and register one generation for a repository that is not the vault."""
+    """Build and register one generation for a repository that is not the vault.
+
+    A checkout whose branch or repository turned indexing off is refused by
+    name; after the build the hook-time hint table is exported (#24, C1), and
+    a failed export is reported in the receipt, never raised.
+    """
+    from repository_worktrees import require_indexing_wanted
+
     started = time.monotonic()
     admission = admit_repository(
         directory, state_root=state_root, deadline=deadline, cancelled=cancelled
     )
+    require_indexing_wanted(admission.root)
     selected = selected_code_roots(admission.root, roots)
     snapshot = _collect(admission.root, selected.selected, deadline)
     catalog = _open_catalog(state_root_path(state_root), read_only=False)
     parent_id, _parent = _newest_generation_for(catalog, admission.scope, deadline)
     built = _build(catalog, admission, snapshot, parent_id, deadline, cancelled)
-    return _index_receipt(
+    receipt = _index_receipt(
         admission, built, snapshot, selected, parent_id, time.monotonic() - started
     )
+    return {**receipt, "hints": _exported_hints(catalog, admission.scope, state_root, deadline)}
+
+
+def _exported_hints(catalog, scope, state_root: Path | None, deadline: float | None) -> dict:
+    from code_hints import export_hints_quietly
+
+    return export_hints_quietly(catalog, scope, state_root_path(state_root), deadline=deadline)
 
 
 # --------------------------------------------------------------------------
@@ -912,7 +927,16 @@ def _detected(catalog, admission: Admission, generation_id, manifest, deadline):
 REFRESH_ROLE = "doctor"
 REFRESH_ALL_BUDGET_SECONDS = 15 * 60
 _CLI_OK_STATUSES = frozenset(
-    {"ok", "indexed", "fresh", "refreshed", "refresh_owned_elsewhere"}
+    {
+        "ok",
+        "indexed",
+        "fresh",
+        "refreshed",
+        "refresh_owned_elsewhere",
+        "followed",
+        "already_indexed",
+        "planned",
+    }
 )
 
 
@@ -1005,25 +1029,55 @@ def _rebuilt(admission, catalog, generation_id, manifest, root, deadline, cancel
     return {**receipt, "status": "refreshed", "previous_generation_id": generation_id}
 
 
-def _fenced_rebuild(
-    admission, catalog, generation_id, manifest, root, staleness, deadline, cancelled
+FENCE_REFUSED = "fence_refused"
+
+
+def run_fenced(
+    repository_id: str,
+    root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    work: Callable[[float, Callable[[], bool]], dict],
 ) -> dict:
+    """`work(bound, stop)` under the per-repository lease, or a named refusal.
+
+    One fence for every writer of a repository's generations: the refresh,
+    the worktree follower and the retention pass (#24, D1). A refusal carries
+    `FENCE_REFUSED` and the status to report.
+    """
     import doctor
 
     coordinator, registry = _refresh_fence(root)
     if registry is None:
-        unavailable = {**staleness, "reason": "coordinator_v3_required"}
-        return _refresh_answer(admission, generation_id, "refresh_unavailable", unavailable)
-    owner = _held_lease(registry, admission.scope.repository_id)
+        return {FENCE_REFUSED: True, "status": "refresh_unavailable", "reason": "coordinator_v3_required"}
+    owner = _held_lease(registry, repository_id)
     if owner is None:
-        return _refresh_answer(admission, generation_id, "refresh_owned_elsewhere", staleness)
+        return {FENCE_REFUSED: True, "status": "refresh_owned_elsewhere"}
     # The doctor's own heartbeat: it renews through the registry the lease came
     # from, tolerates a busy database, and releases the owner on exit.
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
     bound = _bounded_deadline(deadline)
     with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
-        stop = _either_cancelled(beat.cancelled, cancelled)
+        return work(bound, _either_cancelled(beat.cancelled, cancelled))
+
+
+def _refused_staleness(outcome: dict, staleness) -> dict:
+    if "reason" not in outcome:
+        return staleness
+    return {**staleness, "reason": outcome["reason"]}
+
+
+def _fenced_rebuild(
+    admission, catalog, generation_id, manifest, root, staleness, deadline, cancelled
+) -> dict:
+    def work(bound: float, stop: Callable[[], bool]) -> dict:
         return _rebuilt(admission, catalog, generation_id, manifest, root, bound, stop)
+
+    outcome = run_fenced(admission.scope.repository_id, root, deadline, cancelled, work)
+    if not outcome.get(FENCE_REFUSED):
+        return outcome
+    refused = _refused_staleness(outcome, staleness)
+    return _refresh_answer(admission, generation_id, outcome["status"], refused)
 
 
 def _newest_registered(catalog, scope, deadline):
@@ -1039,10 +1093,18 @@ def refresh_repository(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
-    """Rebuild only what an edit made stale, under a per-repository fence."""
+    """Rebuild only what an edit made stale, under a per-repository fence.
+
+    A fresh generation still gets its hint table when the table is missing or
+    names another generation: an export that ran out of the build's budget,
+    or an index built before the table existed, is repaired here (#24, C1).
+    """
+    from repository_worktrees import require_indexing_wanted
+
     admission = admit_repository(
         directory, state_root=state_root, deadline=deadline, cancelled=cancelled
     )
+    require_indexing_wanted(admission.root)
     root = state_root_path(state_root)
     catalog = _open_catalog(root, read_only=True)
     generation_id, manifest = _newest_registered(catalog, admission.scope, deadline)
@@ -1050,10 +1112,20 @@ def refresh_repository(
         return _not_indexed(admission)
     staleness = _staleness(catalog, admission, generation_id, manifest, deadline)
     if not staleness["stale"]:
-        return _refresh_answer(admission, generation_id, "fresh", staleness)
+        fresh = _refresh_answer(admission, generation_id, "fresh", staleness)
+        return {**fresh, "hints": _current_hints(catalog, admission.scope, root, generation_id, deadline)}
     return _fenced_rebuild(
         admission, catalog, generation_id, manifest, root, staleness, deadline, cancelled
     )
+
+
+def _current_hints(catalog, scope, root: Path, generation_id: str, deadline) -> dict:
+    from code_hints import hints_path, read_meta
+
+    meta = read_meta(hints_path(root, scope.checkout_id))
+    if meta is not None and meta.get("generation_id") == generation_id:
+        return {"status": "current", "generation_id": generation_id}
+    return _exported_hints(catalog, scope, root, deadline)
 
 
 def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict:
@@ -1071,15 +1143,25 @@ def refresh_all_repositories(
     state_root: Path | None = None,
     budget_seconds: float = REFRESH_ALL_BUDGET_SECONDS,
 ) -> dict[str, object]:
-    """The timer's pass: every registered repository whose checkout still exists.
+    """The timer's pass: new worktrees first, then every registered checkout.
 
-    A checkout that is gone is named, not deleted: retiring its generations is
-    section D of #24 and its own decision.
+    Worktrees of a registered repository that have no generation yet are
+    indexed (`repository_worktrees.follow_worktrees`, #24 D1), then every
+    registered checkout that still exists is refreshed. A checkout that is
+    gone is named here, not deleted: `retire` removes its generations.
     """
+    from repository_worktrees import follow_worktrees
+
     deadline = time.monotonic() + budget_seconds
     rows = list_repositories(state_root=state_root, deadline=deadline)["repositories"]
+    followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
     outcomes = [_refresh_row(row, state_root, deadline) for row in rows]
-    return {"schema_version": SCHEMA_VERSION, "status": "ok", "repositories": outcomes}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "ok",
+        "followed": followed,
+        "repositories": outcomes,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1119,14 +1201,33 @@ def _cli_refresh_all(args) -> dict:
     )
 
 
+def _cli_follow(args) -> dict:
+    from repository_worktrees import follow_worktree
+
+    return follow_worktree(
+        args.directory, roots=args.roots, state_root=args.state_root, deadline=_cli_deadline(args)
+    )
+
+
+def _cli_retire(args) -> dict:
+    from repository_retention import failed_discards, retire_repositories
+
+    answer = retire_repositories(state_root=args.state_root, apply=not args.dry_run)
+    if failed_discards(answer):
+        return {**answer, "status": "retire_failed"}
+    return answer
+
+
 _VERBS = {
     "index": _cli_index,
     "list": _cli_list,
     "detect": _cli_detect,
     "refresh": _cli_refresh,
     "refresh-all": _cli_refresh_all,
+    "follow": _cli_follow,
+    "retire": _cli_retire,
 }
-_DIRECTORY_VERBS = frozenset({"index", "detect", "refresh"})
+_DIRECTORY_VERBS = frozenset({"index", "detect", "refresh", "follow"})
 
 
 def _parser():
@@ -1141,6 +1242,9 @@ def _parser():
     parser.add_argument("--roots", nargs="*", default=None, help="Explicit code roots.")
     parser.add_argument(
         "--budget-seconds", type=float, default=REFRESH_ALL_BUDGET_SECONDS
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="retire: report the plan, remove nothing."
     )
     return parser
 

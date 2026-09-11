@@ -38,6 +38,8 @@ OUR_SCRIPT_MARKERS = (
     "post_tool_capture.py",
     "session_start_project_state.py",
     "session_end_project_tag.py",
+    # Issue #24, C1: the Grep/Glob hint and the SubagentStart reminder.
+    "graph_hint.py",
 )
 
 
@@ -178,23 +180,29 @@ def apply_merge(
     dry_run: bool = False,
 ) -> dict:
     user = _load_json(user_settings, label="user settings", missing_ok=True)
-    tmpl = _load_json(template, label="template")
-    if not tmpl:
-        raise ValueError(f"template is empty: {template}")
-
-    merged = merge_settings(user, tmpl, vault_root, state_root)
+    merged = merge_settings(user, _required_template(template), vault_root, state_root)
     text = json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
 
     if dry_run:
         print(text)
         return merged
+    _publish_reporting(user_settings, text)
+    return merged
 
+
+def _required_template(template: Path) -> dict:
+    tmpl = _load_json(template, label="template")
+    if not tmpl:
+        raise ValueError(f"template is empty: {template}")
+    return tmpl
+
+
+def _publish_reporting(user_settings: Path, text: str) -> None:
     changed, bak = publish_configuration(user_settings, text.encode("utf-8"))
     if bak is not None:
         print(f"merge_claude_settings: backup → {bak}")
     if changed:
         print(f"merge_claude_settings: wrote {user_settings}")
-    return merged
 
 
 def parse_args() -> argparse.Namespace:

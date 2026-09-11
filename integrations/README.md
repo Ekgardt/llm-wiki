@@ -35,6 +35,7 @@ Claude Code is visible to OpenCode in its next session.
 | **Session classification** | FLUSH MAJOR/MINOR/OK at idle |
 | **Nightly compile** | Native scheduler (Task Scheduler, LaunchAgent, or user systemd); cron is explicit fallback |
 | **Context injection** | SessionStart hook injects bounded context |
+| **Code graph hints** | `scripts/graph_hint.py`: Claude `PreToolUse Grep\|Glob` + `SubagentStart`, Codex `PostToolUse Bash` + `SubagentStart`, OpenCode `tool.execute.after` for `grep`/`glob` (issue #24 C) |
 | **LLM backend** | `llm_client.py` handles memory compilation |
 
 Managed configurations use bounded verified sibling preimages. Malformed JSON,

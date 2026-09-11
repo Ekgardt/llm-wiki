@@ -147,6 +147,15 @@ successful cutover and do not remove v2 state manually.
 | **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
 | **Obsidian** | Optional Markdown viewer only: open the vault directly. No Obsidian UI is required. |
 
+The same managed hooks also put the code graph where agents search (issue #24):
+a `Grep`/`Glob` in Claude Code, or an `rg`/`grep` in Codex, whose pattern names a
+symbol of an indexed repository gets a three-line hint naming its definitions and
+`mcp__llm-wiki__get_architecture`; a subagent start and a session start get one
+line naming the code tools. The OpenCode plugin appends the hint to its
+`grep`/`glob` output. Nothing is added for unindexed checkouts, literals or file
+globs, and a hook never blocks or fails a tool call. See
+[Code Navigation](CODE-NAVIGATION.md#graph-context-where-the-agent-searches-issue-24-section-c).
+
 Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
 Malformed configuration, ownership conflicts, or drift fail closed instead of being
 overwritten. `doctor` reports active, absent, or conflicting structural ownership and
@@ -180,6 +189,27 @@ output is used when the installed SDK supports it. The envelope still derives it
 top-level index timestamp from legacy `cache/index.sqlite`; per-component generation
 freshness in that envelope is **evidence pending**. Treat row-level generation and
 fallback fields as the current retrieval truth.
+
+## Repository indexes follow your worktrees
+
+Index a repository once (`get_architecture mode=index`, or
+`uv run python scripts/repository_index.py index <checkout>`). From then on its
+other worktrees are indexed without you: the nightly pass indexes up to eight
+new ones, and the first `get_architecture` answer in a new worktree starts its
+index in the background. The nightly pass also retires what nobody reads: every
+generation of a worktree whose directory is gone, and all but the newest two of
+a live one (`repository_index.py retire --dry-run` shows the plan).
+
+To keep a one-off branch or worktree out of the index, mark it in Git:
+
+```bash
+git config branch.my-one-off.llmwikiIndex false   # one branch
+git config llmwiki.index false                    # the whole repository
+```
+
+A marked checkout is refused by name and its existing generations are retired on
+the next nightly pass. Details:
+[Code Navigation](CODE-NAVIGATION.md#worktrees-and-retention-issue-24-section-d1).
 
 ## Read-only Python code navigation
 

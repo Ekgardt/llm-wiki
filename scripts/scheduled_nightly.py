@@ -51,6 +51,7 @@ from operational_ownership import (  # noqa: E402
     release_marker_owner,
 )
 from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
+from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
 
 # How long the nightly pass will spend rebuilding the evidence generation.
@@ -304,6 +305,17 @@ def _post_compile_steps() -> list[_Step]:
             _script("repository_index.py")
             + ["refresh-all", "--budget-seconds", str(REFRESH_ALL_BUDGET_SECONDS)],
             REFRESH_ALL_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
+        ),
+        _Step(
+            # Issue #24, section D1: a foreign generation is never activated,
+            # so the pruner below reports it pending and keeps it forever.
+            # This retires, per checkout, every generation of a checkout that
+            # is gone or marked not indexed and all but the newest two of the
+            # rest, each repository under its own fence.
+            "Step 3c': retiring repository generations no checkout reads...",
+            "repository_retention",
+            _script("repository_index.py") + ["retire"],
+            RETIRE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
         ),
         _Step(
             # Every refresh publishes a new immutable generation and nothing
