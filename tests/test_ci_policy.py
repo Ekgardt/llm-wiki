@@ -235,7 +235,8 @@ def test_clean_profiles_are_isolated_and_never_auto_sync() -> None:
     assert "scripts/code_graph.py tests/fixtures/code_kernel/python" in code_graph
 
 
-def test_native_installer_matrix_covers_linux_and_windows() -> None:
+def test_native_installer_matrix_covers_every_platform_the_contract_names() -> None:
+    """Task Scheduler, a LaunchAgent and a systemd timer: all three get a runner (audit OPS-14)."""
     job = _workflow()["jobs"]["installer"]
     assert job["runs-on"] == "${{ matrix.os }}"
     assert job["timeout-minutes"] == 20
@@ -243,6 +244,7 @@ def test_native_installer_matrix_covers_linux_and_windows() -> None:
     assert job["strategy"]["matrix"]["include"] == [
         {"os": "ubuntu-24.04", "platform": "linux"},
         {"os": "windows-2025", "platform": "windows"},
+        {"os": "macos-15", "platform": "macos"},
     ]
     commands = _commands(job)
     for path in (
