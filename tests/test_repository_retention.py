@@ -79,8 +79,8 @@ def test_a_removed_worktree_loses_its_generations_and_its_hint_table(adopted_vau
 
     answer = repository_retention.retire_repositories(state_root=state)
 
-    verdicts = {entry["checkout_root"]: entry["verdict"] for entry in answer["checkouts"]}
-    assert (verdicts, _generation_ids(state)) == ({str(topic): "checkout_missing"}, {kept})
+    verdicts = {Path(entry["checkout_root"]): entry["verdict"] for entry in answer["checkouts"]}
+    assert (verdicts, _generation_ids(state)) == ({topic.resolve(): "checkout_missing"}, {kept})
     assert (code_hints.hints_path(state, checkout_id).exists(), gone in _generation_ids(state)) == (False, False)
 
 

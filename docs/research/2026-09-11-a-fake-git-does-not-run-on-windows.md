@@ -35,3 +35,24 @@ every platform, and needs no platform skip. Other tests that write a
 only this one changes.
 
 Files: `tests/test_impact_analysis.py`.
+
+## Two more after the #24 merge
+
+The first Windows run of the merge (34635168087) failed two more tests, both
+comparing a path as text:
+
+- `tests/test_repository_worktrees.py::test_the_porcelain_listing_is_read_record_by_record`
+  compares `str(item.path)` with `"/repo"`; on Windows `str(Path("/repo"))`
+  is `\repo`. The parser is right (it keeps Git's path in a `Path`); the
+  test now compares `Path` values.
+- `tests/test_repository_retention.py::test_a_removed_worktree_loses_its_generations_and_its_hint_table`
+  compares the recorded `checkout_root` text with `str(topic)`. The record
+  keeps Git's own spelling (`C:/Users/...` on Windows), which is correct and
+  is how every other test reads it (`tests/test_repository_index.py`
+  compares `Path(row["checkout_root"]) == repository.resolve()`). The test
+  now does the same.
+
+Neither is a product defect; both are the same class as the fake git (a test
+that assumes POSIX), and these three are all the Windows failures of that run.
+
+Files: `tests/test_repository_worktrees.py`, `tests/test_repository_retention.py`.

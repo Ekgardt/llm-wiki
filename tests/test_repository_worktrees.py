@@ -32,13 +32,13 @@ def test_the_porcelain_listing_is_read_record_by_record():
     from repository_worktrees import parse_worktrees
 
     parsed = parse_worktrees(LISTING)
-    summary = [(str(item.path), item.branch, item.bare, item.prunable) for item in parsed]
+    summary = [(item.path, item.branch, item.bare, item.prunable) for item in parsed]
     assert summary == [
-        ("/repo", "main", False, False),
-        ("/repo-topic", "topic", False, False),
-        ("/repo-detached", None, False, False),
-        ("/bare.git", None, True, False),
-        ("/gone", None, False, True),
+        (Path("/repo"), "main", False, False),
+        (Path("/repo-topic"), "topic", False, False),
+        (Path("/repo-detached"), None, False, False),
+        (Path("/bare.git"), None, True, False),
+        (Path("/gone"), None, False, True),
     ]
 
 
