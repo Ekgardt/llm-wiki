@@ -55,6 +55,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
 - Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
 
 - The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).

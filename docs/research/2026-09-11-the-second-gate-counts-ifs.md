@@ -48,3 +48,19 @@ Files: `scripts/sync_memory.py`, `scripts/lsp_positions.py`,
 `benchmark/run_retrieval_v2.py`, `benchmark/run_code_navigation.py`,
 `benchmark/run_comparative.py`, `benchmark/run_scale_matrix.py`,
 `CHANGELOG.md`.
+
+## Result
+
+All 157 findings are closed, file by file, each batch verified by the
+analysis (0), `lizard -C 5`, the ccn gate and ruff, and by the test files of
+the touched module. The last three files: `scripts/lsp_security.py` 30 → 0
+(1367 lsp/navigation tests pass), `benchmark/run_retrieval_v2.py` 28 → 0
+(178 pass), `scripts/impact_analysis.py` 25 → 0 (918 pass in a clean
+checkout). In impact analysis a per-group seen-set was removed: every node
+is reached through exactly one dict key, so it could never hit.
+
+One observation, not a defect of the change: the same 16 test files abort
+at interpreter exit ("terminate called without an active exception") when
+run from the edit worktree with its warm state root, and exit 0 from a
+clean checkout both before and after the change — the clean checkout is the
+one that decides.
