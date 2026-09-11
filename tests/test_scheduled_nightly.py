@@ -329,3 +329,65 @@ def test_the_repository_refresh_step_hands_its_budget_to_the_child_and_waits_lon
         repository_index.REFRESH_ALL_BUDGET_SECONDS + scheduled_nightly.STEP_START_MARGIN_SECONDS
     )
     assert scheduled_nightly.STEP_START_MARGIN_SECONDS > 0
+
+
+def _redirected_night(tmp_path, monkeypatch) -> Path:
+    """State, reports and artifacts under tmp_path; returns the state file."""
+    import maintenance_helpers
+    import memory_state
+    import scheduled_nightly
+
+    state_dir = tmp_path / "run"
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
+    monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
+    monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
+    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", tmp_path / "logs" / "maintenance")
+    return state_dir / "state.json"
+
+
+def _stub_checkout_steps(monkeypatch) -> None:
+    """The steps that act on the checkout itself are not subprocess steps."""
+    import scheduled_nightly
+
+    monkeypatch.setattr(
+        scheduled_nightly, "_generation_result", lambda: {"status": "current", "generation_id": "g1"}
+    )
+    monkeypatch.setattr(scheduled_nightly, "_write_health_report", lambda log: log("  health: (stub)"))
+    monkeypatch.setattr(scheduled_nightly, "_compact_telemetry", lambda log: None)
+    monkeypatch.setattr(scheduled_nightly, "_update_code", lambda log: None)
+
+
+FAILING_STEP_SCRIPT = """\
+import sys
+if sys.argv[1] == "lint_memory.py":
+    sys.stderr.write("lint: 3 pages without frontmatter\\n")
+    sys.exit(3)
+print("ok", sys.argv[1])
+"""
+
+
+def test_a_night_with_one_failing_step_names_it_and_records_the_failure(tmp_path, monkeypatch):
+    """Audit OPS-17: the pass runs its real step runner against real children."""
+    import scheduled_nightly
+
+    state_file = _redirected_night(tmp_path, monkeypatch)
+    _stub_checkout_steps(monkeypatch)
+    fake = tmp_path / "step.py"
+    fake.write_text(FAILING_STEP_SCRIPT, encoding="utf-8")
+    monkeypatch.setattr(scheduled_nightly, "_script", lambda name: [sys.executable, str(fake), name])
+
+    assert scheduled_nightly._run_nightly_body(ownership=None) == 1
+
+    report = next((tmp_path / "logs").glob("nightly-*.md")).read_text(encoding="utf-8")
+    assert "  lint: lint: 3 pages without frontmatter" in report
+    assert "  lint: full output → logs/maintenance/" in report
+    assert "  search: ok search_memory.py" in report
+    assert "=== Nightly pass complete (failures=1) ===" in report
+    artifact = next((tmp_path / "logs" / "maintenance").glob("*-lint-*.err.log"))
+    assert artifact.read_text(encoding="utf-8") == "lint: 3 pages without frontmatter\n"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["last_nightly_status"] == "failed"
+    assert state["last_nightly_failure"]["failures"] == 1

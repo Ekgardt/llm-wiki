@@ -8,6 +8,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
 - **The query surface answers the whole graph (#24, B).** `get_architecture`
   gains `mode=search` — ranked qualified names with in/out degree, exact
   `total` and `has_more`, globs, a path prefix — and `depth` (1–8) on

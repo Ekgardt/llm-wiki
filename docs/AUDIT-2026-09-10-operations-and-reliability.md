@@ -379,7 +379,7 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-17 — Two tests assert the defect rather than the intent
 
-- Status: the maybe_compile assertion retargeted with OPS-01, the health-line assertion with OPS-09 (2026-09-10); the end-to-end nightly test with a failing subprocess step remains open.
+- Status: closed 2026-09-11. The two assertions were retargeted with OPS-01 and OPS-09 (2026-09-10); `test_a_night_with_one_failing_step_names_it_and_records_the_failure` runs `_run_nightly_body` with the real step runner against real children, one of which fails (`docs/research/2026-09-11-one-night-runs-end-to-end-with-a-step-that-fails.md`).
 
 - Rule: L4 (tests that do not test what their name claims).
 - Evidence: `tests/test_maybe_compile.py:165-174` (alive PID plus old
