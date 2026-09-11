@@ -169,3 +169,17 @@ oversized text, reordered, duplicated or truncated collections). Each case
 compares construction, native verification, closed-world answers for every
 capability and thirteen batch mints: no case differs, across 405 distinct
 outcomes.
+
+## The installer only had one kind of debt
+
+`scripts/install_control.py` (24 findings) had no function above CCN 5;
+every finding was a third `if` at one level. Where the three checks raise
+the same error they become one condition (same order, same short-circuit);
+where they do not, the last two move into a named helper; the two fixed
+state ladders (`_native_scheduler_backend`, `_active_v2_base_health_state`)
+become tables. Filesystem calls keep their order (`is_symlink`, `exists`,
+`is_file`, `stat`, read). Old and new pure helpers agree on 40,042 inputs,
+among them 40,000 random crontabs built from the ownership markers (all
+four outcomes: no block, a block, refused ownership, bad marker order);
+224 installer, ownership, hook-config, bootstrap and deletion-contract tests
+pass.
