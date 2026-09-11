@@ -558,8 +558,8 @@ def test_freshness_reader_never_observes_mixed_index_manifest_pair(
         with search_memory._index_swap_lock():
             manifest.unlink()
             freshness = pool.submit(search_memory._needs_rebuild, [page])
-            time.sleep(0.1)
-            assert not freshness.done()
+            # No "still blocked" sleep: the False below is possible only if
+            # the probe read the manifest written after the lock was released.
             manifest.write_text(
                 json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
             )

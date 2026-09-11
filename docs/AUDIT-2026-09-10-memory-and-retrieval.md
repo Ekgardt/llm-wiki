@@ -260,7 +260,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
   bound lives (`docs/research/2026-09-11-a-ceiling-says-which-kind-of-ceiling-it-is.md`).
 
 ### M9 — Tests that assert on the clock [defect]
-- Status: open — the two `claims` cases observe a worker blocked inside the product's lock and have no event to wait on without a product hook; recorded as the negative-wait class in `docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.
+- Status: fixed 2026-09-11. The three sleep-and-assert-blocked pairs are gone; each test's outcome assertion after the release is possible only if the worker was blocked, so it carries the proof (`docs/research/2026-09-11-a-join-has-a-bound-and-a-benchmark-does-not-grade-itself.md`).
 - Rule: R4 (test reliability).
 - Evidence: `tests/test_search_ranking.py:624-625` (`time.sleep(0.1);
   assert not freshness.done()`), `tests/test_claims.py:393-394, 435-436`
@@ -295,6 +295,7 @@ disposable, fail-closed, bounded reads, no silent fallback).
 - Verified: read (gate output and file).
 - Fix direction: delete the discarded call; take truth from a different
   backend or drop the recall columns for the exact cell.
+- Status: fixed 2026-09-11. The exact cell reports `recall_at_10/50 = None` with provenance reason `ground_truth_backend`; the discarded truth call, the overwritten adoption gate and the numpy import that fed `_ = np` are gone; `_run_exact_cell` and `run_smoke` are under CCN 5 (`docs/research/2026-09-11-a-join-has-a-bound-and-a-benchmark-does-not-grade-itself.md`).
 
 ### M12 — Test helpers over the gate [defect]
 - Status: closed 2026-09-11. `_damage_v3` is a table of damage → SQL plus three named multi-statement damages and one `eof-` prefix rule; the six other functions are split into named helpers. lizard reports no function over 5 in the seven files the finding named (`docs/research/2026-09-11-test-helpers-obey-the-same-gate.md`).

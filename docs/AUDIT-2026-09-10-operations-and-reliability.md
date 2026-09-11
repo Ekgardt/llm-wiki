@@ -395,6 +395,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
 
 ### OPS-18 — Two queue heartbeat threads are joined without a timeout
 
+- Status: fixed 2026-09-11. Both `stop()` methods join with `max(2 × heartbeat, 10 s)` and raise `QueueOperationError("heartbeat_stop_timeout")` if the thread is still alive (`docs/research/2026-09-11-a-join-has-a-bound-and-a-benchmark-does-not-grade-itself.md`).
+
 - Rule: C (bounded).
 - Evidence: `scripts/memory_queue.py:13903-13905, 13961-13963`
   (`self._thread.join()`); the thread may be inside SQLite bounded by
@@ -407,6 +409,8 @@ bounded, one canonical fence, `run/` deletion contract, Markdown authority).
   `operational_ownership` does.
 
 ### OPS-19 — The state-lock stale bound and the 10 s hook budget can steal a slow writer's lock
+
+- Status: covered by OPS-07 and OPS-08, re-read 2026-09-11: an owner that is alive or unknown is waited for whatever the lock's age; only a dead owner's lock is retired, through `retire_stale_lock` with judged bytes (`docs/research/2026-09-11-a-join-has-a-bound-and-a-benchmark-does-not-grade-itself.md`).
 
 - Rule: C (at most one writer).
 - Evidence: `scripts/memory_state.py:90` (`_STALE_LOCK_SECONDS = 30`), `:222-229`

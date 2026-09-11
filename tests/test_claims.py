@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import threading
-import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -390,8 +389,8 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
     stale_thread.start()
     assert entered.wait(LONG_TIMEOUT)
     fresh_thread.start()
-    time.sleep(0.2)
-    assert fresh_thread.is_alive()
+    # No "still blocked" sleep: the fresh candidates below survive only if
+    # the stale rebuild wrote first (audit M9).
     release.set()
     stale_thread.join(LONG_TIMEOUT)
     fresh_thread.join(LONG_TIMEOUT)
@@ -432,9 +431,8 @@ def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
     with _exclusive_file_lock(index.lock_path):
         worker = threading.Thread(target=rebuild)
         worker.start()
-        time.sleep(0.2)
-        assert worker.is_alive()
-        assert not provider_called.is_set()
+        # No "still blocked" sleep: the provider sees new.md below only if
+        # it ran after this write (audit M9).
         newer = json.loads(json.dumps(normalized.record))
         newer["id"] = "claim:newer:0"
         new_page.write_bytes(ledger_page(newer))

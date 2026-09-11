@@ -54,6 +54,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
 - The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
 - The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).
 - Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
@@ -109,6 +110,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The scale stand's exact cell no longer grades itself: it reports no recall, with the reason, instead of 1.0 by construction (audit M11).
+- A queue heartbeat thread that does not stop within twice its heartbeat is refused by name (`heartbeat_stop_timeout`) instead of joined forever (audit OPS-18).
 - Impact analysis no longer names the symbol after a grown line as changed: a hunk is matched against the generation's occurrences by its old byte range, the coordinate system the generation indexed (audit M13).
 - **Git warnings are not diff records.** `impact_analysis` read Git's
   stderr together with the `-z` record stream, so on a checkout with

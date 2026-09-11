@@ -374,6 +374,12 @@ def evaluate_adoption_gate(
     }
 
 
+_EXACT_RECALL_UNAVAILABLE = {
+    "recall_at_10": "ground_truth_backend",
+    "recall_at_50": "ground_truth_backend",
+}
+
+
 def _metric_provenance(
     metrics: dict[str, int | float | None],
     *,
@@ -455,6 +461,77 @@ def _time_search(
     return samples, last
 
 
+def _timed_pass(queries: Any, one_query: Any, *, repeats: int) -> list[float]:
+    """One pass over the queries; every sample of every query, in order."""
+    samples: list[float] = []
+    for q in queries:
+        taken, _result = _time_search(lambda qq=q: one_query(qq), repeats=repeats)
+        samples.extend(taken)
+    return samples
+
+
+def _concurrent_reader_samples(matrix: Any, queries: Any, k: int, mask: Any, ids: Any) -> list[float]:
+    """Two readers over the immutable matrix at once; their per-query latencies."""
+
+    def reader_job():
+        local = []
+        for q in queries:
+            t0 = time.perf_counter()
+            exact_numpy_search(matrix, q, k=min(5, k), mask=mask, ids=ids)
+            local.append((time.perf_counter() - t0) * 1000.0)
+        return local
+
+    samples: list[float] = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for future in [pool.submit(reader_job) for _ in range(2)]:
+            samples.extend(future.result())
+    return samples
+
+
+def _batch_qps(warm_samples: list[float]) -> float | None:
+    if not warm_samples:
+        return None
+    return len(warm_samples) / (sum(warm_samples) / 1000.0)
+
+
+def _latency_profile(samples: list[float]) -> dict[str, float | None]:
+    return {
+        "p50_ms": _percentile(samples, 0.50),
+        "p95_ms": _percentile(samples, 0.95),
+        "p99_ms": _percentile(samples, 0.99),
+    }
+
+
+def _exact_metrics(
+    *, build_ms: float, warm_samples: list[float], concurrent_samples: list[float]
+) -> dict[str, Any]:
+    return {
+        "latency_ms": _percentile(warm_samples, 0.5),
+        "rss_bytes": _rss_bytes(),
+        "disk_bytes": None,
+        "build_ms": build_ms,
+        "update_ms": None,
+        "delete_ms": None,
+        "startup_ms": None,
+        "concurrent_reader_p95_ms": _percentile(concurrent_samples, 0.95),
+        # The exact backend is the ground truth the other cells are graded
+        # against; graded against itself it read 1.0 by construction (audit
+        # M11), so it reports no recall and says why.
+        "recall_at_10": None,
+        "recall_at_50": None,
+        "batch_throughput_qps": _batch_qps(warm_samples),
+    }
+
+
+# Exact backend is always the default; adoption of itself is N/A as ANN.
+_EXACT_ADOPTION = {
+    "adopt": False,
+    "becomes_default": False,
+    "requires_measurement": True,
+    "reasons": ["exact-numpy is the default ground-truth backend"],
+}
+
+
 def _run_exact_cell(
     *,
     corpus: ScaleCorpus,
@@ -473,55 +550,12 @@ def _run_exact_cell(
     def one_query(q):
         return exact_numpy_search(matrix, q, k=k, mask=mask, ids=corpus.chunk_ids)
 
-    # Cold: first pass.
-    cold_samples: list[float] = []
-    warm_samples: list[float] = []
-    retrieved_sets: list[tuple[str, ...]] = []
-    truth_sets: list[tuple[str, ...]] = []
-    for q in queries:
-        samples, result = _time_search(lambda qq=q: one_query(qq), repeats=1)
-        cold_samples.extend(samples)
-        retrieved_sets.append(result.ids)
-        truth = exact_numpy_search(matrix, q, k=k, mask=mask, ids=corpus.chunk_ids)
-        truth_sets.append(truth.ids)
-    # Warm: repeat.
-    for q in queries:
-        samples, _result = _time_search(lambda qq=q: one_query(qq), repeats=3)
-        warm_samples.extend(samples)
-
-    # Concurrent readers against immutable matrix.
-    def reader_job():
-        local = []
-        for q in queries:
-            t0 = time.perf_counter()
-            exact_numpy_search(matrix, q, k=min(5, k), mask=mask, ids=corpus.chunk_ids)
-            local.append((time.perf_counter() - t0) * 1000.0)
-        return local
-
-    concurrent_samples: list[float] = []
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(reader_job) for _ in range(2)]
-        for fut in futures:
-            concurrent_samples.extend(fut.result())
-
-    recalls10 = [recall_at_k(ret, truth, 10) for ret, truth in zip(retrieved_sets, truth_sets)]
-    recalls50 = [recall_at_k(ret, truth, 50) for ret, truth in zip(retrieved_sets, truth_sets)]
-    warm_p95 = _percentile(warm_samples, 0.95) or 0.0
-    batch_qps = (len(warm_samples) / (sum(warm_samples) / 1000.0)) if warm_samples else None
-    adoption = evaluate_adoption_gate(
-        recall_at_10=1.0,
-        recall_at_50=1.0,
-        exact_p95_ms=max(warm_p95, 1e-9),
-        candidate_p95_ms=max(warm_p95, 1e-9),
+    cold_samples = _timed_pass(queries, one_query, repeats=1)
+    warm_samples = _timed_pass(queries, one_query, repeats=3)
+    concurrent_samples = _concurrent_reader_samples(matrix, queries, k, mask, corpus.chunk_ids)
+    metrics = _exact_metrics(
+        build_ms=build_ms, warm_samples=warm_samples, concurrent_samples=concurrent_samples
     )
-    # Exact backend is always the default; adoption of itself is N/A as ANN.
-    adoption = {
-        "adopt": False,
-        "becomes_default": False,
-        "requires_measurement": True,
-        "reasons": ["exact-numpy is the default ground-truth backend"],
-    }
-
     return _finalize_cell(
         {
             "adapter": "exact-numpy",
@@ -529,33 +563,16 @@ def _run_exact_cell(
             "selectivity": selectivity,
             "status": "ok",
             "reason": None,
-            "metrics": {
-                "latency_ms": _percentile(warm_samples, 0.5),
-                "rss_bytes": _rss_bytes(),
-                "disk_bytes": None,
-                "build_ms": build_ms,
-                "update_ms": None,
-                "delete_ms": None,
-                "startup_ms": None,
-                "concurrent_reader_p95_ms": _percentile(concurrent_samples, 0.95),
-                "recall_at_10": float(sum(recalls10) / len(recalls10)) if recalls10 else None,
-                "recall_at_50": float(sum(recalls50) / len(recalls50)) if recalls50 else None,
-                "batch_throughput_qps": batch_qps,
-            },
+            "metrics": metrics,
+            "metric_provenance": _metric_provenance(
+                metrics, source="exact-numpy", unavailable=_EXACT_RECALL_UNAVAILABLE
+            ),
             "latency_profiles": {
-                "cold": {
-                    "p50_ms": _percentile(cold_samples, 0.50),
-                    "p95_ms": _percentile(cold_samples, 0.95),
-                    "p99_ms": _percentile(cold_samples, 0.99),
-                },
-                "warm": {
-                    "p50_ms": _percentile(warm_samples, 0.50),
-                    "p95_ms": _percentile(warm_samples, 0.95),
-                    "p99_ms": _percentile(warm_samples, 0.99),
-                },
+                "cold": _latency_profile(cold_samples),
+                "warm": _latency_profile(warm_samples),
             },
-            "adoption": adoption,
-            "_exact_p95_ms": warm_p95,
+            "adoption": dict(_EXACT_ADOPTION, reasons=list(_EXACT_ADOPTION["reasons"])),
+            "_exact_p95_ms": _percentile(warm_samples, 0.95) or 0.0,
         },
         corpus=corpus,
         mask=mask,
@@ -1301,6 +1318,14 @@ def plan_matrix(
     }
 
 
+def _exact_p95_of(exact_cell: dict[str, Any]) -> float:
+    """The warm p95 the ANN cells are measured against, from the exact cell."""
+    measured = exact_cell.get("_exact_p95_ms")
+    if measured:
+        return float(measured)
+    return float(exact_cell["latency_profiles"]["warm"]["p95_ms"] or 0.0)
+
+
 def run_smoke(
     *,
     corpus_size: int = 32,
@@ -1310,8 +1335,6 @@ def run_smoke(
     adapters: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Deterministic offline smoke matrix (exact + optional adapters)."""
-    import numpy as np
-
     _require_positive_int("corpus_size", corpus_size)
     _require_positive_int("dimensions", dimensions)
     _require_positive_int("queries", queries)
@@ -1333,11 +1356,8 @@ def run_smoke(
         mask=mask,
         selectivity=1.0,
     )
-    exact_p95 = float(
-        exact_cell.get("_exact_p95_ms") or exact_cell["latency_profiles"]["warm"]["p95_ms"] or 0.0
-    )
+    exact_p95 = _exact_p95_of(exact_cell)
     cells.append(_public_cell(exact_cell))
-
     for adapter_id in chosen_adapters:
         if adapter_id == "exact-numpy":
             continue
@@ -1368,8 +1388,6 @@ def run_smoke(
         cells=cells,
         crash_matrix=crash,
     )
-    # Keep numpy out of unused warning in constrained environments.
-    _ = np
     return report
 
 
