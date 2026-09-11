@@ -66,13 +66,29 @@ def _typed_contention(error: BaseException) -> bool:
     )
 
 
+# A queue owner that lost its intent fence lost authority, not data: the intent
+# is durable before any worker runs, a lapsed worker fence leaves a lease to be
+# recovered, and a capture fence lost before the task exists leaves a ready
+# intent for adoption (docs/research/2026-09-11-a-lost-fence-is-not-a-lost-capture.md).
+CONTENTION_QUEUE_CODES = frozenset({"intent_fence_lost"})
+
+
+def _queue_contention(error: BaseException) -> bool:
+    """Read the loaded queue module only: an error of its type cannot exist without it."""
+    queue_module = sys.modules.get("memory_queue")
+    error_type = getattr(queue_module, "QueueOperationError", None)
+    if error_type is None or not isinstance(error, error_type):
+        return False
+    return error.code in CONTENTION_QUEUE_CODES
+
+
 def is_contention(error: BaseException) -> bool:
     """Whether a failure is a writer race rather than a loss."""
     from operational_ownership import OperationalOwnershipError
 
     if isinstance(error, OperationalOwnershipError):
         return error.code in CONTENTION_OWNERSHIP_CODES
-    return _typed_contention(error) or _sqlite_contention(error)
+    return _typed_contention(error) or _sqlite_contention(error) or _queue_contention(error)
 
 
 def _outcome_of(error: BaseException | None) -> str:
