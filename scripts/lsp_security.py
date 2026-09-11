@@ -92,14 +92,24 @@ class _OwnedHandles:
         self._values.append(value)
         return value
 
-    def __exit__(self, exception_type, _exception, _traceback) -> bool:
+    def _close_quietly(self, value: int) -> BaseException | None:
+        try:
+            self._close(value)
+        except BaseException as exc:  # close every owned descriptor or handle
+            return exc
+        return None
+
+    def _close_all(self) -> BaseException | None:
+        """Close in reverse order; the first error is the one reported."""
         close_error: BaseException | None = None
         for value in reversed(self._values):
-            try:
-                self._close(value)
-            except BaseException as exc:  # close every owned descriptor or handle
-                if close_error is None:
-                    close_error = exc
+            error = self._close_quietly(value)
+            if close_error is None:
+                close_error = error
+        return close_error
+
+    def __exit__(self, exception_type, _exception, _traceback) -> bool:
+        close_error = self._close_all()
         if close_error is not None and exception_type is None:
             raise close_error
         return False
@@ -118,20 +128,26 @@ def _is_control(character: str) -> bool:
     )
 
 
+def _utf8_width(codepoint: int) -> int:
+    """UTF-8 bytes of one code point; 0 for a lone surrogate, which has none."""
+    if codepoint < 0x80:
+        return 1
+    if codepoint < 0x800:
+        return 2
+    if 0xD800 <= codepoint <= 0xDFFF:
+        return 0
+    if codepoint < 0x10000:
+        return 3
+    return 4
+
+
 def _fits_utf8_redaction_ceiling(value: str) -> bool:
     byte_count = 0
     for character in value:
-        codepoint = ord(character)
-        if codepoint < 0x80:
-            byte_count += 1
-        elif codepoint < 0x800:
-            byte_count += 2
-        elif 0xD800 <= codepoint <= 0xDFFF:
+        width = _utf8_width(ord(character))
+        if width == 0:
             return False
-        elif codepoint < 0x10000:
-            byte_count += 3
-        else:
-            byte_count += 4
+        byte_count += width
         if byte_count > _MAX_REDACTION_RAW_BYTES:
             return False
     return True
@@ -282,29 +298,123 @@ def _open_posix_checkout(
     return current, filesystem_root_identity, tuple(steps)
 
 
+def _require_posix_root(descriptor: int, filesystem_root_identity: tuple[object, ...]) -> None:
+    root_info = os.fstat(descriptor)
+    if not stat.S_ISDIR(root_info.st_mode) or _posix_identity(root_info) != filesystem_root_identity:
+        raise PathContainmentError("filesystem root changed during traversal")
+
+
+def _reopen_posix_step(owned: _OwnedHandles, current: int, step: _TraversalStep) -> int:
+    flags = _posix_directory_flags() if step.directory else _posix_file_flags()
+    opened = owned.own(os.open(step.name, flags, dir_fd=current))
+    info = os.fstat(opened)
+    expected_kind = stat.S_ISDIR if step.directory else stat.S_ISREG
+    if not expected_kind(info.st_mode) or _posix_identity(info) != step.identity:
+        raise PathContainmentError("repository source changed during traversal")
+    return opened
+
+
 def _revalidate_posix(
     filesystem_root_identity: tuple[object, ...],
     root_steps: tuple[_TraversalStep, ...],
     source_steps: tuple[_TraversalStep, ...],
 ) -> None:
-    directory_flags = _posix_directory_flags()
-    file_flags = _posix_file_flags()
     with _OwnedHandles(os.close) as owned:
-        current = owned.own(os.open("/", directory_flags))
-        root_info = os.fstat(current)
-        if (
-            not stat.S_ISDIR(root_info.st_mode)
-            or _posix_identity(root_info) != filesystem_root_identity
-        ):
-            raise PathContainmentError("filesystem root changed during traversal")
+        current = owned.own(os.open("/", _posix_directory_flags()))
+        _require_posix_root(current, filesystem_root_identity)
         for step in (*root_steps, *source_steps):
-            flags = directory_flags if step.directory else file_flags
-            opened = owned.own(os.open(step.name, flags, dir_fd=current))
-            info = os.fstat(opened)
-            expected_kind = stat.S_ISDIR if step.directory else stat.S_ISREG
-            if not expected_kind(info.st_mode) or _posix_identity(info) != step.identity:
-                raise PathContainmentError("repository source changed during traversal")
-            current = opened
+            current = _reopen_posix_step(owned, current, step)
+
+
+class _PosixWalk:
+    """The state one no-follow walk threads through its components."""
+
+    def __init__(self, owned: _OwnedHandles, root_descriptor: int, must_exist: bool) -> None:
+        self.owned = owned
+        self.current = root_descriptor
+        self.must_exist = must_exist
+        self.steps: list[_TraversalStep] = []
+        self.missing: tuple[str, ...] = ()
+        self.final_descriptor: int | None = None
+
+    def walk(self, parts: tuple[str, ...]) -> None:
+        for index, component in enumerate(parts):
+            if index == len(parts) - 1:
+                if not self._open_final(component):
+                    self.missing = parts[index:]
+                return
+            if not self._open_parent(component):
+                self.missing = parts[index:]
+                return
+
+    def _require_absence_allowed(self, message: str) -> None:
+        if self.must_exist:
+            raise PathContainmentError(message) from None
+
+    def _open_final(self, component: str) -> bool:
+        """Open the last component as a regular file; False when it is absent."""
+        try:
+            named = os.stat(component, dir_fd=self.current, follow_symlinks=False)
+        except FileNotFoundError:
+            self._require_absence_allowed("repository source does not exist")
+            return False
+        if not stat.S_ISREG(named.st_mode):
+            raise PathContainmentError("repository source is not a regular file")
+        opened = self.owned.own(os.open(component, _posix_file_flags(), dir_fd=self.current))
+        info = os.fstat(opened)
+        identity = _posix_identity(info)
+        if not stat.S_ISREG(info.st_mode) or identity != _posix_identity(named):
+            raise PathContainmentError("repository source changed before open")
+        self.steps.append(_TraversalStep(component, identity, False))
+        self.final_descriptor = opened
+        return True
+
+    def _open_parent(self, component: str) -> bool:
+        """Open one directory component; False when it is absent."""
+        try:
+            opened = self.owned.own(
+                os.open(component, _posix_directory_flags(), dir_fd=self.current)
+            )
+        except FileNotFoundError:
+            self._require_absence_allowed("repository source parent does not exist")
+            return False
+        info = os.fstat(opened)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PathContainmentError("repository source parent is not a directory")
+        self.steps.append(_TraversalStep(component, _posix_identity(info), True))
+        self.current = opened
+        return True
+
+
+def _require_posix_still_missing(walk: _PosixWalk) -> None:
+    if not walk.missing:
+        return
+    try:
+        os.stat(walk.missing[0], dir_fd=walk.current, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise PathContainmentError("repository source appeared during traversal")
+
+
+def _read_posix_content(walk: _PosixWalk, reader: Callable[[int], bytes]) -> bytes:
+    if walk.final_descriptor is None or walk.missing:
+        raise PathContainmentError("repository source does not exist")
+    content = reader(walk.final_descriptor)
+    if _posix_identity(os.fstat(walk.final_descriptor)) != walk.steps[-1].identity:
+        raise PathContainmentError("repository source changed during read")
+    return content
+
+
+def _repository_source(
+    repository: RepositoryScope, relative_path: str, absolute_path: Path
+) -> RepositorySource:
+    return RepositorySource(
+        repository.repository_id,
+        repository.checkout_id,
+        relative_path,
+        absolute_path,
+        path_to_file_uri(absolute_path),
+    )
 
 
 def _access_posix(
@@ -318,84 +428,24 @@ def _access_posix(
     root = Path(repository.checkout_root)
     if not root.is_absolute():
         raise PathContainmentError("repository checkout root is not local and absolute")
-    directory_flags = _posix_directory_flags()
-    file_flags = _posix_file_flags()
-
     with _OwnedHandles(os.close) as owned:
         root_descriptor, filesystem_root_identity, root_steps = _open_posix_checkout(
             root, owned
         )
-        root_info = os.fstat(root_descriptor)
-        if not stat.S_ISDIR(root_info.st_mode):
+        if not stat.S_ISDIR(os.fstat(root_descriptor).st_mode):
             raise PathContainmentError("repository checkout root is not a directory")
-
-        current = root_descriptor
-        steps: list[_TraversalStep] = []
-        missing: tuple[str, ...] = ()
-        final_descriptor: int | None = None
-        for index, component in enumerate(parts):
-            final = index == len(parts) - 1
-            if final:
-                try:
-                    named = os.stat(component, dir_fd=current, follow_symlinks=False)
-                except FileNotFoundError:
-                    if must_exist:
-                        raise PathContainmentError("repository source does not exist") from None
-                    missing = parts[index:]
-                    break
-                if not stat.S_ISREG(named.st_mode):
-                    raise PathContainmentError("repository source is not a regular file")
-                opened = owned.own(os.open(component, file_flags, dir_fd=current))
-                info = os.fstat(opened)
-                identity = _posix_identity(info)
-                if not stat.S_ISREG(info.st_mode) or identity != _posix_identity(named):
-                    raise PathContainmentError("repository source changed before open")
-                steps.append(_TraversalStep(component, identity, False))
-                final_descriptor = opened
-                continue
-
-            try:
-                opened = owned.own(os.open(component, directory_flags, dir_fd=current))
-            except FileNotFoundError:
-                if must_exist:
-                    raise PathContainmentError("repository source parent does not exist") from None
-                missing = parts[index:]
-                break
-            info = os.fstat(opened)
-            if not stat.S_ISDIR(info.st_mode):
-                raise PathContainmentError("repository source parent is not a directory")
-            steps.append(_TraversalStep(component, _posix_identity(info), True))
-            current = opened
+        walk = _PosixWalk(owned, root_descriptor, must_exist)
+        walk.walk(parts)
 
         _resolution_barrier()
-        step_tuple = tuple(steps)
+        step_tuple = tuple(walk.steps)
         _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
-
-        if missing:
-            try:
-                os.stat(missing[0], dir_fd=current, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise PathContainmentError("repository source appeared during traversal")
-        absolute_path = root.joinpath(*parts)
+        _require_posix_still_missing(walk)
         content = None
         if reader is not None:
-            if final_descriptor is None or missing:
-                raise PathContainmentError("repository source does not exist")
-            content = reader(final_descriptor)
-            if _posix_identity(os.fstat(final_descriptor)) != steps[-1].identity:
-                raise PathContainmentError("repository source changed during read")
+            content = _read_posix_content(walk, reader)
             _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
-
-        source = RepositorySource(
-            repository.repository_id,
-            repository.checkout_id,
-            relative_path,
-            absolute_path,
-            path_to_file_uri(absolute_path),
-        )
-        return source, content
+        return _repository_source(repository, relative_path, root.joinpath(*parts)), content
 
 
 def _resolve_posix(
@@ -414,18 +464,22 @@ def _resolve_posix(
     )[0]
 
 
+def _require_valid_windows_entry(entry: object) -> None:
+    if (
+        not isinstance(entry, windows_workspace.WindowsEntry)
+        or unicodedata.normalize("NFC", entry.name) != entry.name
+        or entry.kind not in {"directory", "file", "link"}
+    ):
+        raise PathContainmentError("Windows repository enumeration is invalid")
+
+
 def _windows_entries(handle: int) -> dict[str, windows_workspace.WindowsEntry]:
     entries = windows_workspace.list_directory(
         handle, max_entries=_MAX_DIRECTORY_ENTRIES
     )
     by_folded_name: dict[str, windows_workspace.WindowsEntry] = {}
     for entry in entries:
-        if (
-            not isinstance(entry, windows_workspace.WindowsEntry)
-            or unicodedata.normalize("NFC", entry.name) != entry.name
-            or entry.kind not in {"directory", "file", "link"}
-        ):
-            raise PathContainmentError("Windows repository enumeration is invalid")
+        _require_valid_windows_entry(entry)
         folded = entry.name.casefold()
         previous = by_folded_name.get(folded)
         if previous is not None and previous.name != entry.name:
@@ -443,11 +497,10 @@ def _windows_entry(
     return entry
 
 
-def _prove_windows_component_missing(
-    parent: int,
-    component: str,
-    owned: _OwnedHandles,
-) -> None:
+def _probe_windows_absence(
+    parent: int, component: str, owned: _OwnedHandles
+) -> tuple[bool, list[OSError], int]:
+    """(opened by some opener, the other errors, how many openers found nothing)."""
     opened = False
     failures: list[OSError] = []
     missing = 0
@@ -463,6 +516,15 @@ def _prove_windows_component_missing(
             failures.append(exc)
         else:
             opened = True
+    return opened, failures, missing
+
+
+def _prove_windows_component_missing(
+    parent: int,
+    component: str,
+    owned: _OwnedHandles,
+) -> None:
+    opened, failures, missing = _probe_windows_absence(parent, component, owned)
     if opened:
         raise PathContainmentError("Windows repository source uses an unenumerated alias")
     if failures or missing != 2:
@@ -503,6 +565,27 @@ def _open_windows_step(
     return opened, identity
 
 
+def _require_windows_file_step(entry: windows_workspace.WindowsEntry, step: _TraversalStep) -> None:
+    if entry.kind != "file" or entry.file_id != step.identity[1]:
+        raise PathContainmentError("Windows repository source changed during traversal")
+
+
+def _revalidate_windows_step(current: int, step: _TraversalStep, owned: _OwnedHandles) -> int:
+    """Re-check one recorded step; the directory handle to continue from."""
+    entry = _windows_entry(current, step.name)
+    if entry is None:
+        raise PathContainmentError("Windows repository source changed during traversal")
+    if not step.directory:
+        _require_windows_file_step(entry, step)
+        return current
+    opened, identity = _open_windows_step(
+        current, entry, step.name, directory=True, owned=owned
+    )
+    if identity != step.identity:
+        raise PathContainmentError("Windows repository source changed during traversal")
+    return opened
+
+
 def _revalidate_windows(
     root: Path,
     root_identity: tuple[object, ...],
@@ -513,25 +596,146 @@ def _revalidate_windows(
     if _windows_identity(current, directory=True) != root_identity:
         raise PathContainmentError("repository checkout changed during traversal")
     for step in steps:
-        entry = _windows_entry(current, step.name)
-        if entry is None:
-            raise PathContainmentError("Windows repository source changed during traversal")
-        if not step.directory:
-            if entry.kind != "file" or entry.file_id != step.identity[1]:
-                raise PathContainmentError(
-                    "Windows repository source changed during traversal"
-                )
-            continue
+        current = _revalidate_windows_step(current, step, owned)
+
+
+class _WindowsWalk:
+    """The state one no-follow walk threads through its components."""
+
+    def __init__(self, owned: _OwnedHandles, root_handle: int, must_exist: bool) -> None:
+        self.owned = owned
+        self.current = root_handle
+        self.must_exist = must_exist
+        self.steps: list[_TraversalStep] = []
+        self.missing: tuple[str, ...] = ()
+        self.final_handle: int | None = None
+
+    def walk(self, parts: tuple[str, ...]) -> None:
+        for index, component in enumerate(parts):
+            final = index == len(parts) - 1
+            entry = _windows_entry(self.current, component)
+            if entry is None:
+                self._note_missing(parts, index, component)
+                return
+            self._open(entry, component, final)
+
+    def _note_missing(self, parts: tuple[str, ...], index: int, component: str) -> None:
+        if self.must_exist:
+            raise PathContainmentError("repository source does not exist")
+        _prove_windows_component_missing(self.current, component, self.owned)
+        self.missing = parts[index:]
+
+    def _open(self, entry: windows_workspace.WindowsEntry, component: str, final: bool) -> None:
         opened, identity = _open_windows_step(
-            current,
-            entry,
-            step.name,
-            directory=step.directory,
-            owned=owned,
+            self.current, entry, component, directory=not final, owned=self.owned
         )
-        if identity != step.identity:
-            raise PathContainmentError("Windows repository source changed during traversal")
-        current = opened
+        self.steps.append(_TraversalStep(component, identity, not final))
+        if final:
+            self.final_handle = opened
+            return
+        self.current = opened
+
+
+def _existing_directory_steps(steps: list[_TraversalStep]) -> tuple[_TraversalStep, ...]:
+    return tuple(step for step in steps if step.directory)
+
+
+def _expected_parent_identity(
+    existing: tuple[_TraversalStep, ...], root_identity: tuple[object, ...]
+) -> tuple[object, ...]:
+    if existing:
+        return existing[-1].identity
+    return root_identity
+
+
+def _windows_parent_probe(
+    canonical_root: Path,
+    root_identity: tuple[object, ...],
+    steps: list[_TraversalStep],
+    owned: _OwnedHandles,
+) -> tuple[Path, int]:
+    """(canonical path, handle) of the nearest directory the walk proved exists."""
+    existing = _existing_directory_steps(steps)
+    nearest_path = canonical_root.joinpath(*(step.name for step in existing))
+    canonical_parent = nearest_path.resolve(strict=True)
+    _assert_ancestry(canonical_root, canonical_parent)
+    parent_probe = owned.own(windows_workspace.open_directory_path(canonical_parent))
+    expected_parent = _expected_parent_identity(existing, root_identity)
+    if _windows_identity(parent_probe, directory=True) != expected_parent:
+        raise PathContainmentError("repository source parent changed")
+    return canonical_parent, parent_probe
+
+
+def _windows_missing_path(
+    parent_probe: int, canonical_parent: Path, missing: tuple[str, ...], owned: _OwnedHandles
+) -> Path:
+    if _windows_entry(parent_probe, missing[0]) is not None:
+        raise PathContainmentError("repository source appeared during traversal")
+    _prove_windows_component_missing(parent_probe, missing[0], owned)
+    return canonical_parent.joinpath(*missing)
+
+
+def _windows_final_matches(
+    walk: _WindowsWalk, final_entry: windows_workspace.WindowsEntry | None
+) -> bool:
+    if walk.final_handle is None or final_entry is None:
+        return False
+    if final_entry.kind != "file" or final_entry.file_id != walk.steps[-1].identity[1]:
+        return False
+    return _windows_identity(walk.final_handle, directory=False) == walk.steps[-1].identity
+
+
+def _windows_existing_path(
+    canonical_root: Path, parts: tuple[str, ...], walk: _WindowsWalk, owned: _OwnedHandles
+) -> Path:
+    absolute_path = canonical_root.joinpath(*parts).resolve(strict=True)
+    _assert_ancestry(canonical_root, absolute_path)
+    final_parent = owned.own(windows_workspace.open_directory_path(absolute_path.parent))
+    final_entry = _windows_entry(final_parent, absolute_path.name)
+    if not _windows_final_matches(walk, final_entry):
+        raise PathContainmentError("repository source changed")
+    return absolute_path
+
+
+def _read_windows_content(walk: _WindowsWalk, reader: Callable[[int], bytes]) -> bytes:
+    if walk.final_handle is None or walk.missing:
+        raise PathContainmentError("repository source does not exist")
+    content = reader(walk.final_handle)
+    if _windows_identity(walk.final_handle, directory=False) != walk.steps[-1].identity:
+        raise PathContainmentError("repository source changed during read")
+    return content
+
+
+def _require_windows_local_root(checkout_root: object) -> None:
+    pure_root = PureWindowsPath(checkout_root)
+    if not pure_root.drive or not pure_root.root or pure_root.drive.startswith("\\"):
+        raise PathContainmentError("repository checkout root is not a local drive path")
+
+
+def _open_windows_checkout(
+    root: Path, owned: _OwnedHandles
+) -> tuple[int, tuple[object, ...], Path]:
+    """(root handle, its identity, the canonical root) after both open the same directory."""
+    root_handle = owned.own(windows_workspace.open_directory_path(root))
+    root_identity = _windows_identity(root_handle, directory=True)
+    canonical_root = root.resolve(strict=True)
+    canonical_handle = owned.own(windows_workspace.open_directory_path(canonical_root))
+    if _windows_identity(canonical_handle, directory=True) != root_identity:
+        raise PathContainmentError("repository checkout root changed")
+    return root_handle, root_identity, canonical_root
+
+
+def _windows_absolute_path(
+    canonical_root: Path,
+    parts: tuple[str, ...],
+    walk: _WindowsWalk,
+    canonical_parent: Path,
+    parent_probe: int,
+    owned: _OwnedHandles,
+) -> Path:
+    if walk.missing:
+        return _windows_missing_path(parent_probe, canonical_parent, walk.missing, owned)
+    return _windows_existing_path(canonical_root, parts, walk, owned)
 
 
 def _access_windows(
@@ -543,107 +747,26 @@ def _access_windows(
     reader: Callable[[int], bytes] | None,
 ) -> tuple[RepositorySource, bytes | None]:
     root = Path(repository.checkout_root)
-    pure_root = PureWindowsPath(repository.checkout_root)
-    if not pure_root.drive or not pure_root.root or pure_root.drive.startswith("\\"):
-        raise PathContainmentError("repository checkout root is not a local drive path")
-
+    _require_windows_local_root(repository.checkout_root)
     with _OwnedHandles(windows_workspace.close_handle) as owned:
-        root_handle = owned.own(windows_workspace.open_directory_path(root))
-        root_identity = _windows_identity(root_handle, directory=True)
-        canonical_root = root.resolve(strict=True)
-        canonical_handle = owned.own(
-            windows_workspace.open_directory_path(canonical_root)
-        )
-        if _windows_identity(canonical_handle, directory=True) != root_identity:
-            raise PathContainmentError("repository checkout root changed")
-
-        current = root_handle
-        steps: list[_TraversalStep] = []
-        missing: tuple[str, ...] = ()
-        final_handle: int | None = None
-        for index, component in enumerate(parts):
-            final = index == len(parts) - 1
-            entry = _windows_entry(current, component)
-            if entry is None:
-                if must_exist:
-                    raise PathContainmentError("repository source does not exist")
-                _prove_windows_component_missing(current, component, owned)
-                missing = parts[index:]
-                break
-            opened, identity = _open_windows_step(
-                current,
-                entry,
-                component,
-                directory=not final,
-                owned=owned,
-            )
-            steps.append(_TraversalStep(component, identity, not final))
-            if final:
-                final_handle = opened
-            else:
-                current = opened
+        root_handle, root_identity, canonical_root = _open_windows_checkout(root, owned)
+        walk = _WindowsWalk(owned, root_handle, must_exist)
+        walk.walk(parts)
 
         _resolution_barrier()
-        step_tuple = tuple(steps)
+        step_tuple = tuple(walk.steps)
         _revalidate_windows(canonical_root, root_identity, step_tuple, owned)
-
-        existing_directory_steps = tuple(step for step in steps if step.directory)
-        nearest_path = canonical_root.joinpath(
-            *(step.name for step in existing_directory_steps)
+        canonical_parent, parent_probe = _windows_parent_probe(
+            canonical_root, root_identity, walk.steps, owned
         )
-        canonical_parent = nearest_path.resolve(strict=True)
-        _assert_ancestry(canonical_root, canonical_parent)
-        parent_probe = owned.own(
-            windows_workspace.open_directory_path(canonical_parent)
+        absolute_path = _windows_absolute_path(
+            canonical_root, parts, walk, canonical_parent, parent_probe, owned
         )
-        expected_parent = (
-            existing_directory_steps[-1].identity
-            if existing_directory_steps
-            else root_identity
-        )
-        if _windows_identity(parent_probe, directory=True) != expected_parent:
-            raise PathContainmentError("repository source parent changed")
-
-        if missing:
-            if _windows_entry(parent_probe, missing[0]) is not None:
-                raise PathContainmentError("repository source appeared during traversal")
-            _prove_windows_component_missing(parent_probe, missing[0], owned)
-            absolute_path = canonical_parent.joinpath(*missing)
-        else:
-            candidate = canonical_root.joinpath(*parts)
-            absolute_path = candidate.resolve(strict=True)
-            _assert_ancestry(canonical_root, absolute_path)
-            final_parent = owned.own(
-                windows_workspace.open_directory_path(absolute_path.parent)
-            )
-            final_entry = _windows_entry(final_parent, absolute_path.name)
-            if (
-                final_handle is None
-                or final_entry is None
-                or final_entry.kind != "file"
-                or final_entry.file_id != steps[-1].identity[1]
-                or _windows_identity(final_handle, directory=False)
-                != steps[-1].identity
-            ):
-                raise PathContainmentError("repository source changed")
-
         content = None
         if reader is not None:
-            if final_handle is None or missing:
-                raise PathContainmentError("repository source does not exist")
-            content = reader(final_handle)
-            if _windows_identity(final_handle, directory=False) != steps[-1].identity:
-                raise PathContainmentError("repository source changed during read")
+            content = _read_windows_content(walk, reader)
             _revalidate_windows(canonical_root, root_identity, step_tuple, owned)
-
-        source = RepositorySource(
-            repository.repository_id,
-            repository.checkout_id,
-            relative_path,
-            absolute_path,
-            path_to_file_uri(absolute_path),
-        )
-        return source, content
+        return _repository_source(repository, relative_path, absolute_path), content
 
 
 def _resolve_windows(
@@ -662,6 +785,31 @@ def _resolve_windows(
     )[0]
 
 
+def _platform_access(
+    repository: RepositoryScope,
+    normalized: str,
+    parts: tuple[str, ...],
+    *,
+    must_exist: bool,
+    reader: Callable[[int], bytes] | None,
+) -> tuple[RepositorySource, bytes | None]:
+    if os.name == "posix":
+        return _access_posix(repository, normalized, parts, must_exist=must_exist, reader=reader)
+    if os.name == "nt":
+        return _access_windows(repository, normalized, parts, must_exist=must_exist, reader=reader)
+    raise PathContainmentError("no-follow repository traversal is unavailable")
+
+
+def _contained(action: Callable[[], object], *, passthrough: tuple[type[BaseException], ...]):
+    """Run one containment action; every other failure becomes a containment error."""
+    try:
+        return action()
+    except passthrough:
+        raise
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        raise PathContainmentError("repository source containment failed") from exc
+
+
 def resolve_repository_source(
     repository: RepositoryScope,
     relative_path: str,
@@ -673,20 +821,12 @@ def resolve_repository_source(
     if not isinstance(must_exist, bool):
         raise TypeError("must_exist must be a boolean")
     normalized, parts = _validate_relative_path(relative_path)
-    try:
-        if os.name == "posix":
-            return _resolve_posix(
-                repository, normalized, parts, must_exist=must_exist
-            )
-        if os.name == "nt":
-            return _resolve_windows(
-                repository, normalized, parts, must_exist=must_exist
-            )
-        raise PathContainmentError("no-follow repository traversal is unavailable")
-    except PathContainmentError:
-        raise
-    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
-        raise PathContainmentError("repository source containment failed") from exc
+    return _contained(
+        lambda: _platform_access(
+            repository, normalized, parts, must_exist=must_exist, reader=None
+        )[0],
+        passthrough=(PathContainmentError,),
+    )
 
 
 def _validated_source_read_deadline(deadline: float | None) -> float | None:
@@ -704,6 +844,27 @@ def _check_source_read_deadline(deadline: float | None) -> None:
         raise TimeoutError("repository source read deadline expired")
 
 
+def _posix_read_identity(info: os.stat_result) -> tuple[object, ...]:
+    return (_posix_identity(info), info.st_size, info.st_mtime_ns)
+
+
+def _read_bounded_chunks(descriptor: int, max_bytes: int, deadline: float | None) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_bytes:
+        _check_source_read_deadline(deadline)
+        chunk = os.read(descriptor, min(_SOURCE_READ_CHUNK_BYTES, max_bytes + 1 - total))
+        _check_source_read_deadline(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    content = b"".join(chunks)
+    if len(content) > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+    return content
+
+
 def _read_posix_source_handle(
     descriptor: int,
     *,
@@ -716,26 +877,32 @@ def _read_posix_source_handle(
         raise PathContainmentError("repository source is not a regular file")
     if before.st_size > max_bytes:
         raise PathContainmentError("repository source exceeds its byte ceiling")
-    identity = (_posix_identity(before), before.st_size, before.st_mtime_ns)
-    chunks: list[bytes] = []
-    total = 0
-    while total <= max_bytes:
+    content = _read_bounded_chunks(descriptor, max_bytes, deadline)
+    if _posix_read_identity(before) != _posix_read_identity(os.fstat(descriptor)):
+        raise PathContainmentError("repository source changed during read")
+    return content
+
+
+def _windows_read_identity(handle: int) -> tuple[object, ...]:
+    return (
+        _windows_identity(handle, directory=False),
+        windows_workspace.file_size(handle),
+        windows_workspace.file_modified_time_ns(handle),
+    )
+
+
+def _read_windows_chunks(handle: int, max_bytes: int, deadline: float | None) -> bytes:
+    windows_workspace.seek_start(handle)
+    chunks = []
+    for chunk in windows_workspace.read_chunks(
+        handle, chunk_bytes=_SOURCE_READ_CHUNK_BYTES, max_bytes=max_bytes
+    ):
         _check_source_read_deadline(deadline)
-        chunk = os.read(
-            descriptor,
-            min(_SOURCE_READ_CHUNK_BYTES, max_bytes + 1 - total),
-        )
-        _check_source_read_deadline(deadline)
-        if not chunk:
-            break
         chunks.append(chunk)
-        total += len(chunk)
+    _check_source_read_deadline(deadline)
     content = b"".join(chunks)
     if len(content) > max_bytes:
         raise PathContainmentError("repository source exceeds its byte ceiling")
-    after = os.fstat(descriptor)
-    if identity != (_posix_identity(after), after.st_size, after.st_mtime_ns):
-        raise PathContainmentError("repository source changed during read")
     return content
 
 
@@ -746,31 +913,28 @@ def _read_windows_source_handle(
     deadline: float | None,
 ) -> bytes:
     _check_source_read_deadline(deadline)
-    identity = _windows_identity(handle, directory=False)
-    size = windows_workspace.file_size(handle)
-    modified = windows_workspace.file_modified_time_ns(handle)
-    if size > max_bytes:
+    before = _windows_read_identity(handle)
+    if before[1] > max_bytes:
         raise PathContainmentError("repository source exceeds its byte ceiling")
-    windows_workspace.seek_start(handle)
-    chunks = []
-    for chunk in windows_workspace.read_chunks(
-        handle,
-        chunk_bytes=_SOURCE_READ_CHUNK_BYTES,
-        max_bytes=max_bytes,
-    ):
-        _check_source_read_deadline(deadline)
-        chunks.append(chunk)
-    _check_source_read_deadline(deadline)
-    content = b"".join(chunks)
-    if len(content) > max_bytes:
-        raise PathContainmentError("repository source exceeds its byte ceiling")
-    if (
-        _windows_identity(handle, directory=False) != identity
-        or windows_workspace.file_size(handle) != size
-        or windows_workspace.file_modified_time_ns(handle) != modified
-    ):
+    content = _read_windows_chunks(handle, max_bytes, deadline)
+    if _windows_read_identity(handle) != before:
         raise PathContainmentError("repository source changed during read")
     return content
+
+
+def _require_byte_ceiling(max_bytes: object) -> None:
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+
+
+def _bounded_source_reader(max_bytes: int, deadline: float | None) -> Callable[[int], bytes]:
+    if os.name == "nt":
+        return lambda handle: _read_windows_source_handle(
+            handle, max_bytes=max_bytes, deadline=deadline
+        )
+    return lambda descriptor: _read_posix_source_handle(
+        descriptor, max_bytes=max_bytes, deadline=deadline
+    )
 
 
 def read_repository_source_bytes(
@@ -782,44 +946,15 @@ def read_repository_source_bytes(
 ) -> bytes:
     """Read one bounded source through the final retained containment handle."""
     repository = _require_repository(repository)
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
-        raise ValueError("max_bytes must be a non-negative integer")
+    _require_byte_ceiling(max_bytes)
     deadline = _validated_source_read_deadline(deadline)
     normalized, parts = _validate_relative_path(relative_path)
     _check_source_read_deadline(deadline)
-    try:
-        if os.name == "posix":
-            _source, content = _access_posix(
-                repository,
-                normalized,
-                parts,
-                must_exist=True,
-                reader=lambda descriptor: _read_posix_source_handle(
-                    descriptor,
-                    max_bytes=max_bytes,
-                    deadline=deadline,
-                ),
-            )
-        elif os.name == "nt":
-            _source, content = _access_windows(
-                repository,
-                normalized,
-                parts,
-                must_exist=True,
-                reader=lambda handle: _read_windows_source_handle(
-                    handle,
-                    max_bytes=max_bytes,
-                    deadline=deadline,
-                ),
-            )
-        else:
-            raise PathContainmentError("no-follow repository traversal is unavailable")
-    except TimeoutError:
-        raise
-    except PathContainmentError:
-        raise
-    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
-        raise PathContainmentError("repository source containment failed") from exc
+    reader = _bounded_source_reader(max_bytes, deadline)
+    _source, content = _contained(
+        lambda: _platform_access(repository, normalized, parts, must_exist=True, reader=reader),
+        passthrough=(TimeoutError, PathContainmentError),
+    )
     _check_source_read_deadline(deadline)
     if content is None:
         raise PathContainmentError("repository source read did not complete")
