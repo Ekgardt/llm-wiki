@@ -128,17 +128,13 @@ def _is_control(character: str) -> bool:
     )
 
 
+# (upper bound, UTF-8 bytes) in ascending order; lone surrogates have none.
+_UTF8_WIDTHS = ((0x80, 1), (0x800, 2), (0xD800, 3), (0xE000, 0), (0x10000, 3))
+
+
 def _utf8_width(codepoint: int) -> int:
     """UTF-8 bytes of one code point; 0 for a lone surrogate, which has none."""
-    if codepoint < 0x80:
-        return 1
-    if codepoint < 0x800:
-        return 2
-    if 0xD800 <= codepoint <= 0xDFFF:
-        return 0
-    if codepoint < 0x10000:
-        return 3
-    return 4
+    return next((width for bound, width in _UTF8_WIDTHS if codepoint < bound), 4)
 
 
 def _fits_utf8_redaction_ceiling(value: str) -> bool:
@@ -198,6 +194,10 @@ def _oversized_component(component: str) -> bool:
 def _unsafe_path_component(component: str) -> bool:
     if _oversized_component(component):
         return True
+    return _unportable_component_text(component)
+
+
+def _unportable_component_text(component: str) -> bool:
     if component[-1] in {".", " "}:
         return True
     if any(character in '<>:"|?*' for character in component):
@@ -213,13 +213,17 @@ def _require_safe_components(parts: tuple[str, ...]) -> None:
             )
 
 
-def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
-    if not isinstance(value, str):
-        raise TypeError("relative_path must be a string")
+def _require_canonical_bounded_text(value: str) -> None:
     if _uncanonical_path_text(value):
         raise PathContainmentError("repository source path is not canonical")
     if len(_encoded_relative_path(value)) > _MAX_RELATIVE_PATH:
         raise PathContainmentError("repository source path exceeds its byte ceiling")
+
+
+def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(value, str):
+        raise TypeError("relative_path must be a string")
+    _require_canonical_bounded_text(value)
     parts = tuple(value.split("/"))
     if _uncanonical_path_shape(value, parts):
         raise PathContainmentError("repository source path is not canonical")
@@ -579,6 +583,12 @@ def _revalidate_windows_step(current: int, step: _TraversalStep, owned: _OwnedHa
     if not step.directory:
         _require_windows_file_step(entry, step)
         return current
+    return _reopened_windows_directory(current, entry, step, owned)
+
+
+def _reopened_windows_directory(
+    current: int, entry: object, step: _TraversalStep, owned: _OwnedHandles
+) -> int:
     opened, identity = _open_windows_step(
         current, entry, step.name, directory=True, owned=owned
     )
@@ -833,6 +843,10 @@ def resolve_repository_source(
 def _validated_source_read_deadline(deadline: float | None) -> float | None:
     if deadline is None:
         return None
+    return _finite_source_read_deadline(deadline)
+
+
+def _finite_source_read_deadline(deadline: object) -> float:
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         raise TypeError("deadline must be a monotonic timestamp or None")
     if not math.isfinite(deadline):
@@ -866,6 +880,13 @@ def _read_bounded_chunks(descriptor: int, max_bytes: int, deadline: float | None
     return content
 
 
+def _require_bounded_regular_source(before: os.stat_result, max_bytes: int) -> None:
+    if not stat.S_ISREG(before.st_mode):
+        raise PathContainmentError("repository source is not a regular file")
+    if before.st_size > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+
+
 def _read_posix_source_handle(
     descriptor: int,
     *,
@@ -874,10 +895,7 @@ def _read_posix_source_handle(
 ) -> bytes:
     _check_source_read_deadline(deadline)
     before = os.fstat(descriptor)
-    if not stat.S_ISREG(before.st_mode):
-        raise PathContainmentError("repository source is not a regular file")
-    if before.st_size > max_bytes:
-        raise PathContainmentError("repository source exceeds its byte ceiling")
+    _require_bounded_regular_source(before, max_bytes)
     content = _read_bounded_chunks(descriptor, max_bytes, deadline)
     if _posix_read_identity(before) != _posix_read_identity(os.fstat(descriptor)):
         raise PathContainmentError("repository source changed during read")
@@ -1053,7 +1071,10 @@ def _traversing_components(components: list[str]) -> bool:
 def _validated_provider_parts(uri: object) -> tuple[str, str] | None:
     if _unsafe_provider_uri_text(uri):
         return None
-    split = _split_provider_uri(uri)
+    return _safe_provider_parts(_split_provider_uri(uri))
+
+
+def _safe_provider_parts(split: tuple | None) -> tuple[str, str] | None:
     if split is None:
         return None
     parsed, authority, path = split
@@ -1272,7 +1293,11 @@ def _kept_windows_component(component: str) -> str | None:
     """The component as kept; "" when it trims to nothing; None when it is refused."""
     if component in {".", ".."}:
         return component
-    component = component.rstrip(" .")
+    return _trimmed_windows_component(component.rstrip(" ."))
+
+
+def _trimmed_windows_component(component: str) -> str | None:
+    """A component already stripped of trailing dots and spaces, as kept."""
     if not component:
         return ""
     if not _windows_component_is_valid(component):
@@ -1324,6 +1349,10 @@ def _canonical_windows_path_token(
     candidate = _windows_candidate_text(value, file_uri)
     if candidate is None:
         return None
+    return _windows_candidate_token(candidate)
+
+
+def _windows_candidate_token(candidate: str) -> tuple[str, tuple[str, ...]] | None:
     drive_tail = _windows_drive_and_tail(candidate)
     if drive_tail is None:
         return None
@@ -1540,17 +1569,39 @@ def _native_final_end(value: str, component_end: int, quoted: bool) -> int | Non
 def _match_native_components(
     value: str, index: int, root_component_aliases: tuple[frozenset[str], ...], quoted: bool
 ) -> int | None:
-    last = len(root_component_aliases) - 1
-    for component_index, aliases in enumerate(root_component_aliases):
-        component_end = _native_component_end(value, index, aliases)
-        if component_end is None:
-            return None
-        if component_index == last:
-            return _native_final_end(value, component_end, quoted)
-        index = _next_native_component_start(value, component_end)
+    if not root_component_aliases:
+        return index
+    index = _native_leading_components_end(value, index, root_component_aliases[:-1])
+    if index is None:
+        return None
+    return _native_last_component_end(value, index, root_component_aliases[-1], quoted)
+
+
+def _native_leading_components_end(
+    value: str, index: int, leading: tuple[frozenset[str], ...]
+) -> int | None:
+    """Where the last root component starts, after every leading one matched."""
+    for aliases in leading:
+        index = _native_next_component_start(value, index, aliases)
         if index is None:
             return None
-    return None
+    return index
+
+
+def _native_next_component_start(value: str, index: int, aliases: frozenset[str]) -> int | None:
+    component_end = _native_component_end(value, index, aliases)
+    if component_end is None:
+        return None
+    return _next_native_component_start(value, component_end)
+
+
+def _native_last_component_end(
+    value: str, index: int, aliases: frozenset[str], quoted: bool
+) -> int | None:
+    component_end = _native_component_end(value, index, aliases)
+    if component_end is None:
+        return None
+    return _native_final_end(value, component_end, quoted)
 
 
 def _windows_native_root_match_end(
@@ -1567,8 +1618,6 @@ def _windows_native_root_match_end(
     if value[index : index + 1] not in {"/", "\\"}:
         return None
     index = _skip_native_separators(value, index)
-    if not root_component_aliases:
-        return index
     return _match_native_components(value, index, root_component_aliases, quoted)
 
 
@@ -1581,16 +1630,17 @@ def _percent_byte(value: str, index: int, limit: int) -> int | None:
     return int(value[index + 1 : index + 3], 16)
 
 
+# (lowest, highest, sequence length) for each well-formed multi-byte lead byte.
+_UTF8_MULTIBYTE_LEADS = ((0xC2, 0xDF, 2), (0xE0, 0xEF, 3), (0xF0, 0xF4, 4))
+
+
 def _utf8_sequence_length(first_byte: int) -> int | None:
     if first_byte < 0x80:
         return 1
-    if 0xC2 <= first_byte <= 0xDF:
-        return 2
-    if 0xE0 <= first_byte <= 0xEF:
-        return 3
-    if 0xF0 <= first_byte <= 0xF4:
-        return 4
-    return None
+    return next(
+        (length for low, high, length in _UTF8_MULTIBYTE_LEADS if low <= first_byte <= high),
+        None,
+    )
 
 
 def _percent_bytes(value: str, index: int, limit: int, count: int) -> tuple[bytes, int] | None:
@@ -1620,10 +1670,19 @@ def _percent_encoded_character(value: str, index: int, limit: int) -> tuple[str,
     first_byte = _percent_byte(value, index, limit)
     if first_byte is None:
         return None
+    return _percent_sequence_character(value, index, limit, first_byte)
+
+
+def _percent_sequence_character(
+    value: str, index: int, limit: int, first_byte: int
+) -> tuple[str, int] | None:
     count = _utf8_sequence_length(first_byte)
     if count is None:
         return None
-    decoded = _percent_bytes(value, index, limit, count)
+    return _single_percent_character(_percent_bytes(value, index, limit, count))
+
+
+def _single_percent_character(decoded: tuple | None) -> tuple[str, int] | None:
     if decoded is None:
         return None
     character = _decoded_single_character(decoded[0])
@@ -1641,6 +1700,10 @@ def _uri_character(
         return None
     if value[index] != "%":
         return value[index], index + 1, False
+    return _encoded_uri_character(value, index, limit)
+
+
+def _encoded_uri_character(value: str, index: int, limit: int) -> tuple[str, int, bool] | None:
     decoded = _percent_encoded_character(value, index, limit)
     if decoded is None:
         return None
@@ -1687,16 +1750,30 @@ def _read_authority(value: str, index: int, limit: int) -> tuple[list[str], int]
     """(authority characters, index after them) up to the first separator."""
     authority: list[str] = []
     while index < limit:
-        decoded = _uri_character(value, index, limit)
-        if decoded is None:
+        step = _authority_step(value, index, limit)
+        if step is None:
             return None
-        character, index, _encoded = decoded
-        if character in {"/", "\\"}:
+        character, index = step
+        if character is None:
             return authority, index
-        if _authority_character_is_invalid(character):
-            return None
         authority.append(character)
     return authority, index
+
+
+def _authority_step(value: str, index: int, limit: int) -> tuple[str | None, int] | None:
+    """(character, index after it); the character is None at a separator; None if refused."""
+    decoded = _uri_character(value, index, limit)
+    if decoded is None:
+        return None
+    return _authority_character_step(decoded[0], decoded[1])
+
+
+def _authority_character_step(character: str, index: int) -> tuple[str | None, int] | None:
+    if character in {"/", "\\"}:
+        return None, index
+    if _authority_character_is_invalid(character):
+        return None
+    return character, index
 
 
 def _uri_authority_end(value: str, index: int, limit: int) -> int | None:
@@ -1732,6 +1809,10 @@ def _windows_uri_drive_start(
         return pair
     if not leading_separators:
         return None
+    return _uri_drive_pair_after_authority(value, index, limit)
+
+
+def _uri_drive_pair_after_authority(value: str, index: int, limit: int) -> tuple | None:
     authority_end = _uri_authority_end(value, index, limit)
     if authority_end is None:
         return None
@@ -1748,6 +1829,10 @@ def _windows_semantic_prefix(
 ) -> tuple[str, int] | None:
     if not file_uri:
         return _native_windows_prefix(value, start, limit)
+    return _uri_windows_prefix(value, start, limit)
+
+
+def _uri_windows_prefix(value: str, start: int, limit: int) -> tuple[str, int] | None:
     pair = _windows_uri_drive_start(value, start, limit)
     if not _names_windows_drive(pair):
         return None
@@ -1762,12 +1847,7 @@ def _windows_semantic_component_text(raw_component: str) -> str | None:
     """The component to add: "" when nothing is added, None when it is refused."""
     if raw_component == ".":
         return ""
-    component = raw_component.rstrip(" .")
-    if not component:
-        return ""
-    if not _windows_component_is_valid(component):
-        return None
-    return component
+    return _trimmed_windows_component(raw_component.rstrip(" ."))
 
 
 def _windows_add_semantic_component(
@@ -1776,16 +1856,25 @@ def _windows_add_semantic_component(
     root: tuple[str, tuple[frozenset[str], ...]],
     drive: str,
 ) -> tuple[bool, bool]:
-    if raw_component == "..":
-        if components:
-            components.pop()
-        return True, _windows_components_reach_root(drive, components, root)
-    component = _windows_semantic_component_text(raw_component)
-    if component is None:
+    if not _windows_apply_semantic_component(raw_component, components):
         return False, False
+    return True, _windows_components_reach_root(drive, components, root)
+
+
+def _windows_apply_semantic_component(raw_component: str, components: list[str]) -> bool:
+    """Apply one raw component to the stack; False when it is refused."""
+    if raw_component == "..":
+        del components[-1:]
+        return True
+    return _windows_push_component(_windows_semantic_component_text(raw_component), components)
+
+
+def _windows_push_component(component: str | None, components: list[str]) -> bool:
+    if component is None:
+        return False
     if component:
         components.append(component.casefold())
-    return True, _windows_components_reach_root(drive, components, root)
+    return True
 
 
 def _windows_component_accepts_space(
@@ -1860,9 +1949,9 @@ def _windows_terminator(
         return True
     if _windows_uri_terminator(character, encoded, file_uri):
         return True
-    if _windows_quote_terminator(character, encoded, quoted):
-        return True
-    return unquoted_space and not space_allowed
+    return _windows_quote_terminator(character, encoded, quoted) or (
+        unquoted_space and not space_allowed
+    )
 
 
 def _windows_structural_terminator(character: str) -> bool:
@@ -1953,6 +2042,9 @@ class _WindowsRootScanner:
             return None
         if matched:
             return self.component_source_end
+        return self._open_next_component(source_end, terminator)
+
+    def _open_next_component(self, source_end: int, terminator: bool) -> object:
         self.component.clear()
         self.disposable_component = None
         if terminator:
@@ -2277,9 +2369,7 @@ def _decoded_posix_boundary(
         return True
     if encoded:
         return False
-    if _posix_hard_boundary(character, quoted):
-        return True
-    return _posix_punctuation_boundary(value, index)
+    return _posix_hard_boundary(character, quoted) or _posix_punctuation_boundary(value, index)
 
 
 def _posix_root_boundary(
@@ -2333,17 +2423,32 @@ def _collected_authority(
 ) -> tuple[str, int] | None:
     authority: list[str] = []
     while index < limit:
-        decoded = _uri_character(value, index, limit)
-        if decoded is None:
+        step = _collected_authority_step(value, index, limit)
+        if step is None:
             return None
-        character, source_end, encoded = decoded
-        if character == "/":
-            return "".join(authority), source_end
-        if _unsafe_authority_character(character, encoded):
-            return None
+        character, index = step
+        if character is None:
+            return "".join(authority), index
         authority.append(character)
-        index = source_end
     return None
+
+
+def _collected_authority_step(value: str, index: int, limit: int) -> tuple[str | None, int] | None:
+    """(character, index after it); the character is None at "/"; None if refused."""
+    decoded = _uri_character(value, index, limit)
+    if decoded is None:
+        return None
+    return _collected_authority_character(*decoded)
+
+
+def _collected_authority_character(
+    character: str, source_end: int, encoded: bool
+) -> tuple[str | None, int] | None:
+    if character == "/":
+        return None, source_end
+    if _unsafe_authority_character(character, encoded):
+        return None
+    return character, source_end
 
 
 def _posix_authority_end(value: str, index: int, limit: int) -> int | None:
@@ -2460,16 +2565,26 @@ def _posix_add_semantic_component(
     components: list[str],
     root: tuple[str, tuple[str, ...]],
 ) -> tuple[bool, bool]:
-    if raw_component == "..":
-        if components:
-            components.pop()
-        return True, _posix_components_reach_root(components, root)
-    if raw_component in {"", "."}:
-        return True, _posix_components_reach_root(components, root)
-    if not _posix_component_is_valid(raw_component):
+    if not _posix_apply_semantic_component(raw_component, components):
         return False, False
-    components.append(raw_component)
     return True, _posix_components_reach_root(components, root)
+
+
+def _posix_apply_semantic_component(raw_component: str, components: list[str]) -> bool:
+    """Apply one raw component to the stack; False when it is refused."""
+    if raw_component == "..":
+        del components[-1:]
+        return True
+    return _posix_push_component(raw_component, components)
+
+
+def _posix_push_component(raw_component: str, components: list[str]) -> bool:
+    if raw_component in {"", "."}:
+        return True
+    if not _posix_component_is_valid(raw_component):
+        return False
+    components.append(raw_component)
+    return True
 
 
 def _posix_component_accepts_log_character(
@@ -2546,9 +2661,9 @@ def _posix_terminator(
         return True
     if _posix_uri_terminator(character, encoded, file_uri):
         return True
-    if _posix_quote_terminator(character, encoded, quoted):
-        return True
-    return unquoted_boundary and not boundary_allowed
+    return _posix_quote_terminator(character, encoded, quoted) or (
+        unquoted_boundary and not boundary_allowed
+    )
 
 
 class _PosixRootScanner:
@@ -2636,6 +2751,9 @@ class _PosixRootScanner:
             return None, self.index
         if matched or _posix_components_end_at_root(self.components, self.root):
             return self._root_result(source_end)
+        return self._open_next_component(source_end, terminator)
+
+    def _open_next_component(self, source_end: int, terminator: bool) -> tuple | None:
         self.component.clear()
         self.disposable_component = None
         if terminator:
@@ -2860,16 +2978,20 @@ class _LogScanner:
 
     def _step(self) -> None:
         character = self.value[self.index]
-        if self._string_terminated(character):
-            return
-        if self._interrupted_by_introducer(character):
-            return
-        if self._inside_sequence(character):
-            return
-        if self._introduces_sequence(character):
+        if self._consumed_by_sequence(character):
             return
         self._emit(character)
         self.index += 1
+
+    def _consumed_by_sequence(self, character: str) -> bool:
+        """The first handler, in order, that takes the character; the rest never run."""
+        handlers = (
+            self._string_terminated,
+            self._interrupted_by_introducer,
+            self._inside_sequence,
+            self._introduces_sequence,
+        )
+        return any(handler(character) for handler in handlers)
 
     def _escape_terminator_follows(self, character: str) -> bool:
         return character == "\x1b" and self.value[self.index + 1 : self.index + 2] == "\\"
@@ -2879,6 +3001,9 @@ class _LogScanner:
             return 1
         if self._escape_terminator_follows(character):
             return 2
+        return self._bell_terminator_length(character)
+
+    def _bell_terminator_length(self, character: str) -> int:
         if self.osc and character == "\x07":
             return 1
         return 0
@@ -2911,19 +3036,19 @@ class _LogScanner:
         return "escape"
 
     def _inside_sequence(self, character: str) -> bool:
+        if self.state == "ground":
+            return False
+        self.index += 1
+        self.state = self._state_after(character)
+        return True
+
+    def _state_after(self, character: str) -> str:
+        """The state after one character inside an escape, CSI or string sequence."""
         if self.state == "escape":
-            self.index += 1
-            self.state = self._escape_next_state(character)
-            return True
-        if self.state == "csi":
-            self.index += 1
-            if "@" <= character <= "~":
-                self.state = "ground"
-            return True
-        if self.state == "string":
-            self.index += 1
-            return True
-        return False
+            return self._escape_next_state(character)
+        if self.state == "csi" and "@" <= character <= "~":
+            return "ground"
+        return self.state
 
     def _skip_known_escape(self, following: str) -> None:
         if " " <= following <= "/":
@@ -2961,6 +3086,9 @@ class _LogScanner:
         if character == "\x1b":
             self._escape_introducer()
             return True
+        return self._introduces_c1_sequence(character)
+
+    def _introduces_c1_sequence(self, character: str) -> bool:
         if character == "\x9b":
             self.state = "csi"
             self.index += 1
