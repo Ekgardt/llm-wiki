@@ -62,12 +62,36 @@ Six changes, each measured before it was written and after:
 Only the third adds a capability. The rest were waste: two wrong answers and
 four repeats of work already done.
 
+## The same set, on the installed vault
+
+The decision of
+`docs/research/2026-09-12-the-vault-is-a-repository-too.md` made this
+measurement possible the same evening: the vault now holds a code generation of
+its own, so the stand can ask it about its own code. Three runs,
+`--directory /home/user/llm-wiki`:
+
+| side | correct (of 16) | tokens | p95 per task | confident-wrong |
+|---|---|---|---|---|
+| `llm_wiki` | 16, 16, 16 | 8 108 | 6.55 / 6.58 / 6.61 s | 0 |
+| `llm_wiki_best` | 16, 16, 16 | 6 196 | 9.42 / 9.56 / 9.57 s | 0 |
+| `cbm` | 14, 14, 14 | 10 863 | 2.62 / 2.64 / 2.63 s | 2 |
+
+On the vault the margin is wider on three conditions and narrower on one:
+**16 correct against 14**, **zero confident-wrong against two**, and tokens
+**0.75×** — we are the cheaper side here, because their constant answer costs
+7 481 tokens on this repository against our 241. The fourth condition fails:
+p95 **2.50×** against the 2× ceiling. It is one answer — the architecture
+summary at 6.6 s and the two-hop walk at ~9.8 s — and the cause is the same cold
+generation validation, paid on a 240 MB generation instead of the worktree's.
+
+So: the rule is satisfied as measured on the worktree, and three of its four
+conditions are satisfied on the installed vault, with the one gap named and
+measured rather than averaged away.
+
 ## What this measurement is not
 
-- It is **not the installed vault.** `/home/user/llm-wiki` still holds no code
-  generation of its own — the decision in
-  `docs/research/2026-09-12-the-parity-run-found-the-stand-first.md` is still
-  open — so both sides answered about the worktree checkout at `6d64e1f`.
+- The four-condition pass is the **worktree** measurement, at `6d64e1f`. The
+  vault's own numbers are the section above: three conditions, not four.
 - The stand starts a fresh process per call, so every figure includes a cold
   start. Inside a warm MCP session our answer is 0.29 s.
 - `tokens` is `len(answer)//4`, not a tokenizer, and grading is word-boundary
@@ -77,7 +101,8 @@ four repeats of work already done.
   three runs and got three identical ones; it did not ask for, and does not have,
   a confidence interval.
 
-Sources: `benchmark/code-parity-v2-2026-09-12-final-run{1,2,3}.json`, the
+Sources: `benchmark/code-parity-v2-2026-09-12-final-run{1,2,3}.json`,
+`benchmark/code-parity-v2-2026-09-12-vault-run{1,2,3}.json`, the
 `…-after-run{1,2,3}` and `…-run{1,2,3}` files from the two earlier states today,
 and `docs/research/2026-09-12-sixteen-of-sixteen.md`.
 
