@@ -105,4 +105,5 @@ What would close it, in the order the numbers point:
 `docs/research/2026-09-12-when-we-would-drop-the-other-tool.md`,
 `docs/research/2026-09-12-the-parity-run-found-the-stand-first.md`.
 
-Files: `benchmark/run_code_parity.py`, `benchmark/code-parity-v2.json`.
+Files: `benchmark/run_code_parity.py`, `benchmark/code-parity-v2.json`,
+`docs/REPORT-2026-09-12-what-works-now.md`.
