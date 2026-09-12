@@ -1969,6 +1969,9 @@ class GenerationCatalog:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self._candidate_issuer = object()
+        # One validation per generation per process, re-checked by its cheap
+        # entry seal. See `_validate` below for what that trades away.
+        self._validated: dict[str, tuple[tuple[_EntrySeal, ...], tuple]] = {}
         self._read_only = False
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
@@ -2010,6 +2013,7 @@ class GenerationCatalog:
         catalog.generations_path = catalog.catalog_path.parent / "generations"
         catalog._clock = clock or (lambda: datetime.now(timezone.utc))
         catalog._candidate_issuer = object()
+        catalog._validated = {}
         catalog._read_only = True
         check_stop()
         with closing(catalog._readonly()):
@@ -2102,14 +2106,13 @@ class GenerationCatalog:
             """
         )
 
-    def _validate(
+    def _validated_generation(
         self,
-        generation_id: str,
+        identifier: str,
         *,
-        deadline: float | None = None,
-        cancelled: Callable[[], bool] | None = None,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
-        identifier = _generation_id(generation_id)
         manifest, seal = _validate_generation(
             self.generations_path / identifier,
             state_root=self.state_root,
@@ -2118,6 +2121,58 @@ class GenerationCatalog:
             cancelled=cancelled,
         )
         return manifest, canonical_json_bytes(manifest), seal
+
+    def _validate(
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
+        """Validate one generation, at most once per process while it holds still.
+
+        One answer opened the same generation three times and hashed its 295 MB
+        of artifacts three times for it — 3.3 s of a 4.2 s cold call, measured
+        2026-09-12. A generation is immutable after activation, so the repeat
+        asks a question whose answer cannot have changed unless the directory
+        moved; the cheap entry scan — device, inode, mode, size, mtime — says
+        whether it moved, and only then is the hash paid again.
+
+        What this gives up, stated plainly: a swap that leaves every entry's
+        size, mtime and inode identical is no longer caught by *this* check
+        inside one process. The manifest equality against the catalog row, the
+        seal re-check at the end of an open, and the database validation still
+        stand. Approved by the owner on 2026-09-12 with that trade named; the
+        same memoisation already existed one level down, in
+        `_validate_databases_once`. Research:
+        `docs/research/2026-09-12-three-changes-to-pass-them.md`.
+        """
+        identifier = _generation_id(generation_id)
+        seal, _files = _scan_generation(
+            self.generations_path / identifier,
+            deadline=deadline,
+            monotonic=self._monotonic,
+            cancelled=cancelled,
+        )
+        remembered = self._remembered_validation(identifier, seal)
+        if remembered is not None:
+            return remembered
+        validated = self._validated_generation(
+            identifier, deadline=deadline, cancelled=cancelled
+        )
+        self._validated[identifier] = (seal, validated)
+        return validated
+
+    def _remembered_validation(
+        self, identifier: str, seal: tuple[_EntrySeal, ...]
+    ) -> tuple | None:
+        """The stored result, when the directory has not moved since it was taken."""
+        stored = self._validated.get(identifier)
+        if stored is None:
+            return None
+        if stored[0] != seal:
+            return None
+        return stored[1]
 
     def _catalog_identity(self) -> _EntrySeal:
         validate_runtime_file(

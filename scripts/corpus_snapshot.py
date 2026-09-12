@@ -9,6 +9,7 @@ import re
 import stat
 import time
 import unicodedata
+from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -2090,6 +2091,26 @@ def canonical_retrieval_spans(
     )
 
 
+# One walk per source instead of two per chunk. `content.count(b"\n", 0, start)`
+# rescans from byte zero for every chunk of every source, which on the installed
+# vault was 11 124 scans and 1.16 s of a single 3.2 s code answer — the largest
+# single cost left in it (measured 2026-09-12). The newline offsets are a fact
+# about the source; taken once, each chunk's line is a binary search. The
+# numbers produced are identical, which the existing chunk tests hold.
+def _newline_offsets(content: bytes) -> tuple[int, ...]:
+    offsets: list[int] = []
+    position = content.find(b"\n")
+    while position >= 0:
+        offsets.append(position)
+        position = content.find(b"\n", position + 1)
+    return tuple(offsets)
+
+
+def _line_at(offsets: tuple[int, ...], index: int) -> int:
+    """The 1-based line the byte at `index` starts on."""
+    return bisect_left(offsets, index) + 1
+
+
 def _chunks(
     source: SourceRecord,
     metadata: SourceMetadata,
@@ -2102,6 +2123,7 @@ def _chunks(
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[RetrievalChunk, ...]:
     result = []
+    offsets = _newline_offsets(content)
     spans = _retrieval_spans(
         content,
         searchable_start,
@@ -2131,8 +2153,8 @@ def _chunks(
                 heading_ancestry=heading_ancestry,
                 byte_start=start,
                 byte_end=end,
-                line_start=content.count(b"\n", 0, start) + 1,
-                line_end=content.count(b"\n", 0, end) + 1,
+                line_start=_line_at(offsets, start),
+                line_end=_line_at(offsets, end),
                 text=text,
                 source_sha256=source.sha256,
                 span_sha256=span_hash,
