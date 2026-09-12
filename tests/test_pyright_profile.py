@@ -1938,6 +1938,53 @@ def test_pyproject_toml_extends_json_relative_to_pyproject(
     )
 
 
+def _extends_cycle(root: Path, base: Path, repository: Path) -> None:
+    root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+    base.write_bytes(canonical_json_bytes({"extends": "pyrightconfig.json"}))
+
+
+def _extends_outside(root: Path, base: Path, repository: Path) -> None:
+    outside = repository.parent / "outside.json"
+    outside.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+    root.write_bytes(canonical_json_bytes({"extends": "../outside.json"}))
+
+
+def _extends_absolute(root: Path, base: Path, repository: Path) -> None:
+    base.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+    root.write_bytes(canonical_json_bytes({"extends": str(base)}))
+
+
+def _extends_missing(root: Path, base: Path, repository: Path) -> None:
+    root.write_bytes(canonical_json_bytes({"extends": "missing.json"}))
+
+
+def _extends_malformed(root: Path, base: Path, repository: Path) -> None:
+    root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+    base.write_bytes(b"{")
+
+
+def _extends_oversized(root: Path, base: Path, repository: Path) -> None:
+    root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+    base.write_bytes(b"x" * (256 * 1024 + 1))
+
+
+def _extends_yaml(root: Path, base: Path, repository: Path) -> None:
+    root.write_bytes(canonical_json_bytes({"extends": "base.yaml"}))
+    (repository / "base.yaml").write_text(
+        "typeCheckingMode: strict\n", encoding="utf-8"
+    )
+
+
+_EXTENDS_SETUPS = {
+    "cycle": _extends_cycle,
+    "outside": _extends_outside,
+    "absolute": _extends_absolute,
+    "missing": _extends_missing,
+    "malformed": _extends_malformed,
+    "oversized": _extends_oversized,
+}
+
+
 @pytest.mark.parametrize(
     ("setup", "expected_code"),
     [
@@ -1962,27 +2009,7 @@ def test_invalid_repository_config_extends_degrades_stably(
     server = create_pyright_fixture(repository)
     root = repository / "pyrightconfig.json"
     base = repository / "base.json"
-    if setup == "cycle":
-        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
-        base.write_bytes(canonical_json_bytes({"extends": "pyrightconfig.json"}))
-    elif setup == "outside":
-        outside = repository.parent / "outside.json"
-        outside.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
-        root.write_bytes(canonical_json_bytes({"extends": "../outside.json"}))
-    elif setup == "absolute":
-        base.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
-        root.write_bytes(canonical_json_bytes({"extends": str(base)}))
-    elif setup == "missing":
-        root.write_bytes(canonical_json_bytes({"extends": "missing.json"}))
-    elif setup == "malformed":
-        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
-        base.write_bytes(b"{")
-    elif setup == "oversized":
-        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
-        base.write_bytes(b"x" * (256 * 1024 + 1))
-    else:
-        root.write_bytes(canonical_json_bytes({"extends": "base.yaml"}))
-        (repository / "base.yaml").write_text("typeCheckingMode: strict\n", encoding="utf-8")
+    _EXTENDS_SETUPS.get(setup, _extends_yaml)(root, base, repository)
     _install_node_probe(monkeypatch, tmp_path)
 
     result = discover_pyright(
@@ -2633,6 +2660,54 @@ def test_node_probe_contains_descendant_inheriting_output_before_read(
         _terminate_if_alive(descendant_pid)
 
 
+def _tree_unowned(tree) -> bool:
+    if tree.process_group is not None:
+        return False
+    return tree.windows_job is None
+
+
+def _trees_are_disowned(trees) -> bool:
+    """Either no tree still owns its group, or every tree is queued for cleanup."""
+    if all(_tree_unowned(tree) for tree in trees):
+        return True
+    pending = pyright_profile._pending_node_probe_cleanup_snapshot()
+    return all(tree in pending for tree in trees)
+
+
+def _probe_stream_facts(processes, trees) -> set:
+    """Every probe exited, and every stream behind it is closed."""
+    return {
+        (
+            process.returncode,
+            tree.closed,
+            process.stdin.closed,
+            process.stdout.closed,
+            process.stderr.closed,
+        )
+        for process, tree in zip(processes, trees)
+    }
+
+
+def _reaped_facts(processes, trees) -> set:
+    """Every probe process has exited, and no tree still owns its group."""
+    return {
+        (process.poll() is not None, _tree_unowned(tree))
+        for process, tree in zip(processes, trees)
+    }
+
+
+def _kill_if_running(process) -> None:
+    if process.poll() is not None:
+        return
+    process.kill()
+    process.wait(timeout=SHORT_TIMEOUT)
+
+
+def _clear_persistent_timeouts(processes) -> None:
+    for process in processes:
+        process._persistent_timeout = False
+
+
 def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2659,18 +2734,9 @@ def test_node_probe_huge_output_kills_inheriting_descendant_within_bound(
         assert result[2] is None
         assert result[3] & {"pyright_node_probe_timeout", "pyright_node_probe_failed"}
         assert _pid_exits_within(descendant_pid)
-        assert all(
-            tree.process_group is None and tree.windows_job is None for tree in trees
-        ) or all(
-            tree in pyright_profile._pending_node_probe_cleanup_snapshot()
-            for tree in trees
-        )
+        assert _trees_are_disowned(trees)
     finally:
-        if _pid_alive(descendant_pid):
-            try:
-                os.kill(descendant_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _terminate_if_alive(descendant_pid)
 
 
 def test_node_probe_wall_bound_includes_only_one_cleanup_allowance(
@@ -3083,6 +3149,32 @@ def test_node_probe_never_constructs_a_reader_thread(
     assert "pyright-node-version-reader" not in created_names
 
 
+def _install_fake_node(monkeypatch, tmp_path: Path, make_process) -> tuple[list, list]:
+    """A synthetic node binary whose every spawned process and tree is recorded."""
+    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"synthetic node executable\n")
+    processes: list = []
+    trees: list = []
+
+    def spawn_tree(*args: object, **kwargs: object) -> _FakeNodeTree:
+        process = make_process()
+        tree = _FakeNodeTree(process)
+        process.tree = tree
+        processes.append(process)
+        trees.append(tree)
+        return tree
+
+    monkeypatch.setattr(
+        pyright_profile.shutil, "which", lambda *args, **kwargs: str(node)
+    )
+    monkeypatch.setattr(
+        pyright_profile,
+        "ProcessTree",
+        SimpleNamespace(spawn_with_deadline=spawn_tree),
+    )
+    return processes, trees
+
+
 def test_repeated_node_probes_reap_processes_and_close_output(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -3091,24 +3183,8 @@ def test_repeated_node_probes_reap_processes_and_close_output(
 ) -> None:
     scope = _scope(repository)
     server = create_pyright_fixture(repository)
-    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
-    node.write_bytes(b"synthetic node executable\n")
-    processes: list[_FakeNodeProcess] = []
-    trees: list[_FakeNodeTree] = []
-
-    def spawn_tree(*args: object, **kwargs: object) -> _FakeNodeTree:
-        process = _FakeNodeProcess(b"v22.23.1\n")
-        tree = _FakeNodeTree(process)
-        process.tree = tree
-        processes.append(process)
-        trees.append(tree)
-        return tree
-
-    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: str(node))
-    monkeypatch.setattr(
-        pyright_profile,
-        "ProcessTree",
-        SimpleNamespace(spawn_with_deadline=spawn_tree),
+    processes, trees = _install_fake_node(
+        monkeypatch, tmp_path, lambda: _FakeNodeProcess(b"v22.23.1\n")
     )
 
     results = [
@@ -3120,13 +3196,9 @@ def test_repeated_node_probes_reap_processes_and_close_output(
         for _index in range(3)
     ]
 
-    assert all(result.status == "qualified" for result in results)
+    assert {result.status for result in results} == {"qualified"}
     assert len(processes) == 3
-    assert all(process.returncode == 0 for process in processes)
-    assert all(tree.closed for tree in trees)
-    assert all(process.stdin.closed for process in processes)
-    assert all(process.stdout.closed for process in processes)
-    assert all(process.stderr.closed for process in processes)
+    assert _probe_stream_facts(processes, trees) == {(0, True, True, True, True)}
 
 
 def test_repeated_timed_out_real_node_probes_are_reaped_before_return(
@@ -3144,14 +3216,13 @@ def test_repeated_timed_out_real_node_probes_are_reaped_before_return(
         results = [pyright_profile._probe_node(None) for _index in range(3)]
     finally:
         for process in processes:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=SHORT_TIMEOUT)
+            _kill_if_running(process)
 
     assert len(processes) == 3
-    assert all(process.poll() is not None for process in processes)
-    assert all(tree.process_group is None and tree.windows_job is None for tree in trees)
-    assert all(result[3] == {"pyright_node_probe_timeout"} for result in results)
+    assert _reaped_facts(processes, trees) == {(True, True)}
+    assert [result[3] for result in results] == [
+        {"pyright_node_probe_timeout"}
+    ] * 3
 
 
 def test_node_probe_cleanup_ownership_is_bounded_before_spawn(
@@ -3162,24 +3233,10 @@ def test_node_probe_cleanup_ownership_is_bounded_before_spawn(
 ) -> None:
     scope = _scope(repository)
     server = create_pyright_fixture(repository)
-    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
-    node.write_bytes(b"synthetic node executable\n")
-    processes: list[_FakeNodeProcess] = []
-    trees: list[_FakeNodeTree] = []
-
-    def spawn_tree(*args: object, **kwargs: object) -> _FakeNodeTree:
-        process = _FakeNodeProcess(b"", times_out=True, persistent_timeout=True)
-        tree = _FakeNodeTree(process)
-        process.tree = tree
-        processes.append(process)
-        trees.append(tree)
-        return tree
-
-    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: str(node))
-    monkeypatch.setattr(
-        pyright_profile,
-        "ProcessTree",
-        SimpleNamespace(spawn_with_deadline=spawn_tree),
+    processes, trees = _install_fake_node(
+        monkeypatch,
+        tmp_path,
+        lambda: _FakeNodeProcess(b"", times_out=True, persistent_timeout=True),
     )
 
     try:
@@ -3194,13 +3251,15 @@ def test_node_probe_cleanup_ownership_is_bounded_before_spawn(
 
         assert len(processes) == pyright_profile._MAX_NODE_PROBE_OWNERS
         assert pyright_profile._pending_node_probe_cleanup_snapshot() == tuple(trees)
-        assert all("pyright_node_probe_failed" in result.degradation_codes for result in results)
+        assert {
+            "pyright_node_probe_failed" in result.degradation_codes
+            for result in results
+        } == {True}
     finally:
-        for process in processes:
-            process._persistent_timeout = False
+        _clear_persistent_timeouts(processes)
         pyright_profile._retry_node_probe_cleanups()
 
-    assert all(process.returncode == -9 for process in processes)
+    assert {process.returncode for process in processes} == {-9}
     assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
 
 

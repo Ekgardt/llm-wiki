@@ -30,43 +30,51 @@ METRICS = {
     "uncached_output_tokens": None,
 }
 
+_TRANSIENT_FAILURE_REQUEST = ("fixture-task-a", 1729, 1)
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        return 2
-    adapter_id = sys.argv[1]
-    if adapter_id == "probe-model":
-        print("fixture/model@v1")
-        return 0
-    if adapter_id not in ADAPTER_OFFSETS:
-        return 2
-    request = json.load(sys.stdin)
-    if (
-        adapter_id == "graphify-pinned"
-        and request["task_id"] == "fixture-task-a"
-        and request["seed"] == 1729
-        and request["attempt"] == 1
-    ):
-        print(json.dumps({
-            "failure": {
-                "category": "backend",
-                "code": "fixture-transient-failure",
-                "message": "deterministic retry fixture",
-                "phase": "query",
-                "retryable": True,
-            },
-            "metrics": {**METRICS, "cache_tokens": 0, "uncached_input_tokens": 10,
-                        "uncached_output_tokens": 0},
-            "outcome": "failure",
-        }, sort_keys=True))
-        return 0
+
+def _is_transient_failure(adapter_id: str, request: dict) -> bool:
+    """One adapter fails once: for one task, one seed and the first attempt."""
+    if adapter_id != "graphify-pinned":
+        return False
+    asked = (request["task_id"], request["seed"], request["attempt"])
+    return asked == _TRANSIENT_FAILURE_REQUEST
+
+
+def _failure_payload() -> dict:
+    return {
+        "failure": {
+            "category": "backend",
+            "code": "fixture-transient-failure",
+            "message": "deterministic retry fixture",
+            "phase": "query",
+            "retryable": True,
+        },
+        "metrics": {
+            **METRICS,
+            "cache_tokens": 0,
+            "uncached_input_tokens": 10,
+            "uncached_output_tokens": 0,
+        },
+        "outcome": "failure",
+    }
+
+
+def _graph_metric(adapter_id: str, value: float) -> float | None:
+    """Only the graph adapters report edge precision and recall."""
+    if "graph" not in adapter_id:
+        return None
+    return value
+
+
+def _success_payload(adapter_id: str) -> dict:
     quality, tokens = ADAPTER_OFFSETS[adapter_id]
     metrics = {
         **METRICS,
         "blinded_factual_correctness": quality,
         "cache_tokens": 0,
-        "edge_precision": 0.8 if "graph" in adapter_id else None,
-        "edge_recall": 0.75 if "graph" in adapter_id else None,
+        "edge_precision": _graph_metric(adapter_id, 0.8),
+        "edge_recall": _graph_metric(adapter_id, 0.75),
         "freshness": 1.0,
         "index_size_bytes": 1024,
         "indexing_time_ms": 10.0,
@@ -76,7 +84,33 @@ def main() -> int:
         "uncached_input_tokens": tokens,
         "uncached_output_tokens": 10,
     }
-    print(json.dumps({"failure": None, "metrics": metrics, "outcome": "success"}, sort_keys=True))
+    return {"failure": None, "metrics": metrics, "outcome": "success"}
+
+
+def _response(adapter_id: str, request: dict) -> dict:
+    if _is_transient_failure(adapter_id, request):
+        return _failure_payload()
+    return _success_payload(adapter_id)
+
+
+def _probe_or_unknown(adapter_id: str) -> int | None:
+    """The probe prints its model name; an unknown adapter is an error."""
+    if adapter_id == "probe-model":
+        print("fixture/model@v1")
+        return 0
+    if adapter_id not in ADAPTER_OFFSETS:
+        return 2
+    return None
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        return 2
+    adapter_id = sys.argv[1]
+    early = _probe_or_unknown(adapter_id)
+    if early is not None:
+        return early
+    print(json.dumps(_response(adapter_id, json.load(sys.stdin)), sort_keys=True))
     return 0
 
 

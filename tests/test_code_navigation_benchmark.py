@@ -1674,6 +1674,15 @@ class BehavioralNavigationRuntime:
         content = path.read_bytes()
         lines = content.splitlines(keepends=True)
         symbol = _symbol_at(lines[request.line - 1], request.character)
+        return self._imported_definition_query(request, content, symbol)
+
+    def _imported_definition_query(
+        self,
+        request: object,
+        content: bytes,
+        symbol: str,
+    ) -> GoldQuery | None:
+        """The symbol must be imported, and its module must define it."""
         module = _imported_module(content, symbol)
         if not module:
             return None
@@ -1900,6 +1909,23 @@ def test_ownership_interruption_dispatches_before_terminal_and_then_cleans_up(
     terminal = threading.Event()
     events: list[str] = []
 
+    def probe(deadline: float, cancellation):
+        """The probe is interrupted before dispatch, or after it."""
+        if _interruption_pending(deadline, cancellation):
+            terminal.set()
+            raise _interruption(scenario, "rejected before dispatch")
+        sent.set()
+        events.append("sent")
+        if scenario == "cancellation":
+            _await_cancellation(cancellation, deadline)
+            terminal.set()
+            events.append("terminal")
+            raise benchmark_runner.RequestCancelled("cancelled after dispatch")
+        _await_deadline(deadline)
+        terminal.set()
+        events.append("terminal")
+        raise TimeoutError("timed out after dispatch")
+
     class Protocol:
         @staticmethod
         def _sent_request_evidence() -> tuple[int, str | None]:
@@ -1922,20 +1948,7 @@ def test_ownership_interruption_dispatches_before_terminal_and_then_cleans_up(
                 events.append("empty-completed")
                 return []
             assert params == {"query": "__llm_wiki_ownership_probe_no_match__"}
-            if _interruption_pending(deadline, cancellation):
-                terminal.set()
-                raise _interruption(scenario, "rejected before dispatch")
-            sent.set()
-            events.append("sent")
-            if scenario == "cancellation":
-                _await_cancellation(cancellation, deadline)
-                terminal.set()
-                events.append("terminal")
-                raise benchmark_runner.RequestCancelled("cancelled after dispatch")
-            _await_deadline(deadline)
-            terminal.set()
-            events.append("terminal")
-            raise TimeoutError("timed out after dispatch")
+            return probe(deadline, cancellation)
 
     class Runtime(_RealNavigationRuntime):
         def __init__(self) -> None:
@@ -3376,6 +3389,9 @@ def test_performance_samples_require_successful_direct_and_exact_facade_results(
                     partial=False,
                     locations=(),
                 )
+            return self._wrong_or_real(result, query)
+
+        def _wrong_or_real(self, result: object, query: GoldQuery) -> object:
             if _answers_wrong(failure_mode, self.direct_calls):
                 return self._direct_result_for_query(self._other_query(query))
             return result

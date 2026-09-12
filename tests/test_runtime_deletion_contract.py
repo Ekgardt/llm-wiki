@@ -550,6 +550,54 @@ def test_live_blackboard_claim_blocks_adopted_runtime_deletion(
     assert result["permit"] is False
 
 
+_DELETE_FUNCTIONS = {
+    "os": frozenset({"remove", "rmdir", "unlink"}),
+    "shutil": frozenset({"rmtree"}),
+}
+
+_PATH_DELETE_METHODS = frozenset({"rmdir", "unlink"})
+
+_PATH_CONSTRUCTOR_NAMES = frozenset({"Path", "PurePath"})
+
+
+def _is_attribute_named(node: ast.AST, name: str) -> bool:
+    if not isinstance(node, ast.Attribute):
+        return False
+    return node.attr == name
+
+
+def _is_attribute_in(node: ast.AST, names: frozenset) -> bool:
+    if not isinstance(node, ast.Attribute):
+        return False
+    return node.attr in names
+
+
+def _concat_parts(left, right):
+    """Two known path heads join; anything unknown stays unknown."""
+    if left is None or right is None:
+        return None
+    return left + right
+
+
+def _module_delete_api(module: str | None, attribute: str) -> str | None:
+    if attribute not in _DELETE_FUNCTIONS.get(module, frozenset()):
+        return None
+    return f"{module}.{attribute}"
+
+
+def _target_keywords(api: str) -> frozenset:
+    """`Path.unlink` names its own receiver `self`; the os functions do not."""
+    if api.startswith("pathlib."):
+        return frozenset({"path", "self"})
+    return frozenset({"path"})
+
+
+def _keyword_target(keywords, names: frozenset):
+    return next(
+        (keyword.value for keyword in keywords if keyword.arg in names), None
+    )
+
+
 def _python_direct_runtime_root_deletions(source: str) -> list[int]:
     """Find direct runtime-root deletes in explicitly supported AST forms.
 
@@ -596,86 +644,137 @@ def _python_direct_runtime_root_deletions(source: str) -> list[int]:
                     self.modules[-1][name.asname or name.name] = name.name
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-            if node.module in {"os", "shutil"}:
-                for name in node.names:
-                    if name.name in {"remove", "rmdir", "rmtree", "unlink"}:
-                        alias = name.asname or name.name
-                        self.functions[-1][alias] = f"{node.module}.{name.name}"
-            if node.module == "pathlib":
-                for name in node.names:
-                    if name.name in {"Path", "PurePath"}:
-                        self.path_constructors[-1].add(name.asname or name.name)
+            self._record_delete_imports(node)
+            self._record_path_imports(node)
+
+        def _record_delete_imports(self, node: ast.ImportFrom) -> None:
+            if node.module not in {"os", "shutil"}:
+                return
+            for name in node.names:
+                if name.name in {"remove", "rmdir", "rmtree", "unlink"}:
+                    alias = name.asname or name.name
+                    self.functions[-1][alias] = f"{node.module}.{name.name}"
+
+        def _record_path_imports(self, node: ast.ImportFrom) -> None:
+            if node.module != "pathlib":
+                return
+            for name in node.names:
+                if name.name in _PATH_CONSTRUCTOR_NAMES:
+                    self.path_constructors[-1].add(name.asname or name.name)
 
         def _is_path_type(self, node: ast.AST) -> bool:
-            return (
-                isinstance(node, ast.Name)
-                and node.id in self.path_constructors[-1]
-            ) or (
-                isinstance(node, ast.Attribute)
-                and node.attr in {"Path", "PurePath"}
-                and isinstance(node.value, ast.Name)
-                and self.modules[-1].get(node.value.id) == "pathlib"
-            )
+            """`Path`, or `pathlib.Path` through whatever name pathlib was bound to."""
+            if isinstance(node, ast.Name):
+                return node.id in self.path_constructors[-1]
+            return self._is_pathlib_attribute(node)
+
+        def _is_pathlib_attribute(self, node: ast.AST) -> bool:
+            if not _is_attribute_in(node, _PATH_CONSTRUCTOR_NAMES):
+                return False
+            if not isinstance(node.value, ast.Name):
+                return False
+            return self.modules[-1].get(node.value.id) == "pathlib"
+
+        def _pathlib_delete_api(self, node: ast.Attribute) -> str | None:
+            if node.attr not in _PATH_DELETE_METHODS:
+                return None
+            if not self._is_path_type(node.value):
+                return None
+            return f"pathlib.{node.attr}"
 
         def _delete_api(self, node: ast.AST) -> str | None:
             if isinstance(node, ast.Name):
                 return self.functions[-1].get(node.id)
             if not isinstance(node, ast.Attribute):
                 return None
-            if self._is_path_type(node.value) and node.attr in {"rmdir", "unlink"}:
-                return f"pathlib.{node.attr}"
-            if isinstance(node.value, ast.Name):
-                module = self.modules[-1].get(node.value.id)
-                if module == "os" and node.attr in {"remove", "rmdir", "unlink"}:
-                    return f"os.{node.attr}"
-                if module == "shutil" and node.attr == "rmtree":
-                    return "shutil.rmtree"
+            return self._attribute_delete_api(node)
+
+        def _attribute_delete_api(self, node: ast.Attribute) -> str | None:
+            pathlib_api = self._pathlib_delete_api(node)
+            if pathlib_api is not None:
+                return pathlib_api
+            if not isinstance(node.value, ast.Name):
+                return None
+            return _module_delete_api(self.modules[-1].get(node.value.id), node.attr)
+
+        def _name_parts(self, node: ast.Name) -> tuple[str, ...]:
+            return self.paths[-1].get(node.id, (node.id.casefold(),))
+
+        @staticmethod
+        def _constant_parts(node: ast.Constant) -> tuple[str, ...] | None:
+            if not isinstance(node.value, str):
+                return None
+            return tuple(
+                part.casefold()
+                for part in node.value.replace("\\", "/").split("/")
+                if part and part != "."
+            )
+
+        def _divided_parts(self, node: ast.BinOp) -> tuple[str, ...] | None:
+            if not isinstance(node.op, ast.Div):
+                return None
+            return _concat_parts(
+                self._path_parts(node.left), self._path_parts(node.right)
+            )
+
+        def _parent_parts(self, node: ast.Attribute) -> tuple[str, ...] | None:
+            if node.attr != "parent":
+                return None
+            value = self._path_parts(node.value)
+            if not value:
+                return None
+            return value[:-1]
+
+        def _extended_parts(self, result, arguments) -> tuple[str, ...] | None:
+            for argument in arguments:
+                result = _concat_parts(result, self._path_parts(argument))
+            return result
+
+        def _is_os_path(self, value: ast.AST) -> bool:
+            if not _is_attribute_named(value, "path"):
+                return False
+            if not isinstance(value.value, ast.Name):
+                return False
+            return self.modules[-1].get(value.value.id) == "os"
+
+        def _is_os_path_join(self, func: ast.AST) -> bool:
+            if not _is_attribute_named(func, "join"):
+                return False
+            return self._is_os_path(func.value)
+
+        def _constructor_parts(self, node: ast.Call) -> tuple[str, ...] | None:
+            if not node.args:
+                return None
+            return self._path_parts(node.args[0])
+
+        def _call_parts(self, node: ast.Call) -> tuple[str, ...] | None:
+            """`a.joinpath(b)`, `os.path.join(a, b)` and `Path(a)` all name a path."""
+            if _is_attribute_named(node.func, "joinpath"):
+                return self._extended_parts(
+                    self._path_parts(node.func.value), node.args
+                )
+            return self._joined_or_constructed(node)
+
+        def _joined_or_constructed(self, node: ast.Call) -> tuple[str, ...] | None:
+            if self._is_os_path_join(node.func):
+                return self._extended_parts((), node.args)
+            if self._is_path_type(node.func):
+                return self._constructor_parts(node)
             return None
 
         def _path_parts(self, node: ast.AST) -> tuple[str, ...] | None:
-            if isinstance(node, ast.Name):
-                return self.paths[-1].get(node.id, (node.id.casefold(),))
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                return tuple(
-                    part.casefold()
-                    for part in node.value.replace("\\", "/").split("/")
-                    if part and part != "."
-                )
-            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-                left = self._path_parts(node.left)
-                right = self._path_parts(node.right)
-                return None if left is None or right is None else left + right
-            if isinstance(node, ast.Attribute) and node.attr == "parent":
-                value = self._path_parts(node.value)
-                return value[:-1] if value else None
-            if not isinstance(node, ast.Call):
+            """The path a node denotes, in casefolded parts, or None when unknown."""
+            handlers = {
+                ast.Name: self._name_parts,
+                ast.Constant: self._constant_parts,
+                ast.BinOp: self._divided_parts,
+                ast.Attribute: self._parent_parts,
+                ast.Call: self._call_parts,
+            }
+            handler = handlers.get(type(node))
+            if handler is None:
                 return None
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
-                result = self._path_parts(node.func.value)
-                for argument in node.args:
-                    addition = self._path_parts(argument)
-                    if result is None or addition is None:
-                        return None
-                    result += addition
-                return result
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "join"
-                and isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "path"
-                and isinstance(node.func.value.value, ast.Name)
-                and self.modules[-1].get(node.func.value.value.id) == "os"
-            ):
-                result: tuple[str, ...] = ()
-                for argument in node.args:
-                    addition = self._path_parts(argument)
-                    if addition is None:
-                        return None
-                    result += addition
-                return result
-            if self._is_path_type(node.func) and node.args:
-                return self._path_parts(node.args[0])
-            return None
+            return handler(node)
 
         def _bind(self, target: ast.AST, value: ast.AST) -> None:
             if not isinstance(target, ast.Name):
@@ -707,27 +806,24 @@ def _python_direct_runtime_root_deletions(source: str) -> list[int]:
                 return False
             return parts[-1:] == ("run",) or parts[-2:] == ("run", "lsp")
 
-        def visit_Call(self, node: ast.Call) -> None:
-            target: ast.AST | None = None
+        @staticmethod
+        def _method_deletion_target(func: ast.AST):
+            """`something.unlink()` deletes whatever `something` is."""
+            if not _is_attribute_in(func, _PATH_DELETE_METHODS):
+                return None
+            return func.value
+
+        def _deletion_target(self, node: ast.Call):
+            """What this call would delete, if it deletes anything at all."""
             api = self._delete_api(node.func)
-            if api is not None:
-                if node.args:
-                    target = node.args[0]
-                else:
-                    keyword_names = {"path", "self"} if api.startswith("pathlib.") else {"path"}
-                    target = next(
-                        (
-                            keyword.value
-                            for keyword in node.keywords
-                            if keyword.arg in keyword_names
-                        ),
-                        None,
-                    )
-            elif isinstance(node.func, ast.Attribute) and node.func.attr in {
-                "rmdir",
-                "unlink",
-            }:
-                target = node.func.value
+            if api is None:
+                return self._method_deletion_target(node.func)
+            if node.args:
+                return node.args[0]
+            return _keyword_target(node.keywords, _target_keywords(api))
+
+        def visit_Call(self, node: ast.Call) -> None:
+            target = self._deletion_target(node)
             if target is not None and self._is_runtime_root(self._path_parts(target)):
                 self.lines.append(node.lineno)
             self.generic_visit(node)
@@ -737,58 +833,76 @@ def _python_direct_runtime_root_deletions(source: str) -> list[int]:
     return sorted(set(visitor.lines))
 
 
-def _installer_direct_runtime_root_deletions(source: str) -> list[int]:
-    """Find direct installer deletes in a deliberately small source subset.
+_VARIABLE_REFERENCE = re.compile(
+    r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
+    r"(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+)
 
-    The guard joins ``\\``/backtick continuations and resolves simple assignments
-    in source order. It does not evaluate scopes, branches, command substitutions,
-    quoting semantics, or arbitrary shell/PowerShell execution.
-    """
-    variable_reference = re.compile(
-        r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
-        r"(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
-    )
-    shell_assignment = re.compile(
-        r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
-    )
-    powershell_assignment = re.compile(
-        r"^\s*\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
-    )
-    delete_command = re.compile(
-        r"^\s*(?:&\s*)?(?:(?:sudo|command)\s+)?"
-        r"(?P<command>remove-item|rm|rmdir|del)\b(?P<arguments>.*)$",
-        re.IGNORECASE,
-    )
-    variables: dict[str, str] = {}
+_SHELL_ASSIGNMENT = re.compile(
+    r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
+)
 
-    def expand_variables(value: str) -> str:
-        def replace(match: re.Match[str]) -> str:
-            name = match.group("braced") or match.group("plain")
-            return variables.get(name.casefold(), match.group(0))
+_POWERSHELL_ASSIGNMENT = re.compile(
+    r"^\s*\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
+)
 
-        return variable_reference.sub(replace, value)
+_DELETE_COMMAND = re.compile(
+    r"^\s*(?:&\s*)?(?:(?:sudo|command)\s+)?"
+    r"(?P<command>remove-item|rm|rmdir|del)\b(?P<arguments>.*)$",
+    re.IGNORECASE,
+)
 
-    def normalize_expression(value: str) -> str:
-        expanded = expand_variables(value)
-        expanded = re.sub(r"\bjoin-path\b", " ", expanded, flags=re.IGNORECASE)
-        expanded = expanded.translate(
-            str.maketrans(
-                {"\\": "/", '"': " ", "'": " ", "(": " ", ")": " ", ",": " "}
-            )
-        )
-        pieces = [
-            piece.strip("/;")
-            for piece in expanded.split()
-            if piece and not piece.startswith("-")
-        ]
-        return re.sub(r"/+", "/", "/".join(piece for piece in pieces if piece))
+_EXPRESSION_SEPARATORS = str.maketrans(
+    {"\\": "/", '"': " ", "'": " ", "(": " ", ")": " ", ",": " "}
+)
 
-    def is_runtime_root(value: str) -> bool:
-        normalized = value.strip(" \t\"'();,").replace("\\", "/").rstrip("/")
-        parts = tuple(part.casefold() for part in normalized.split("/") if part)
-        return parts[-1:] == ("run",) or parts[-2:] == ("run", "lsp")
 
-    logical_lines: list[tuple[int, str]] = []
+def _expand_variables(value: str, variables: dict[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("braced") or match.group("plain")
+        return variables.get(name.casefold(), match.group(0))
+
+    return _VARIABLE_REFERENCE.sub(replace, value)
+
+
+def _expression_pieces(expanded: str) -> list[str]:
+    return [
+        piece.strip("/;")
+        for piece in expanded.split()
+        if piece and not piece.startswith("-")
+    ]
+
+
+def _normalize_expression(value: str, variables: dict[str, str]) -> str:
+    """One path-like string out of a shell or PowerShell expression."""
+    expanded = _expand_variables(value, variables)
+    expanded = re.sub(r"\bjoin-path\b", " ", expanded, flags=re.IGNORECASE)
+    expanded = expanded.translate(_EXPRESSION_SEPARATORS)
+    pieces = _expression_pieces(expanded)
+    return re.sub(r"/+", "/", "/".join(piece for piece in pieces if piece))
+
+
+def _is_shell_runtime_root(value: str) -> bool:
+    normalized = value.strip(" \t\"'();,").replace("\\", "/").rstrip("/")
+    parts = tuple(part.casefold() for part in normalized.split("/") if part)
+    return parts[-1:] == ("run",) or parts[-2:] == ("run", "lsp")
+
+
+def _fragment(line: str, continued: bool) -> str:
+    if continued:
+        return line[:-1].strip()
+    return line.strip()
+
+
+def _with_trailing(logical: list, start_line: int, fragments: list) -> list:
+    if not fragments:
+        return logical
+    return [*logical, (start_line, " ".join(fragments))]
+
+
+def _logical_lines(source: str) -> list[tuple[int, str]]:
+    r"""Join `\` and backtick continuations, keeping the first line's number."""
+    logical: list[tuple[int, str]] = []
     fragments: list[str] = []
     start_line = 1
     for line_number, physical_line in enumerate(source.splitlines(), start=1):
@@ -796,32 +910,67 @@ def _installer_direct_runtime_root_deletions(source: str) -> list[int]:
         if not fragments:
             start_line = line_number
         continued = line.endswith(("\\", "`"))
-        fragments.append((line[:-1] if continued else line).strip())
+        fragments.append(_fragment(line, continued))
         if continued:
             continue
-        logical_lines.append((start_line, " ".join(fragments)))
+        logical.append((start_line, " ".join(fragments)))
         fragments = []
-    if fragments:
-        logical_lines.append((start_line, " ".join(fragments)))
+    return _with_trailing(logical, start_line, fragments)
 
-    findings: list[int] = []
-    for line_number, line in logical_lines:
-        if not line or line.lstrip().startswith("#"):
-            continue
-        assignment = powershell_assignment.match(line) or shell_assignment.match(line)
-        if assignment is not None:
-            variables[assignment.group("name").casefold()] = normalize_expression(
-                assignment.group("value")
-            )
-            continue
-        command = delete_command.match(line)
-        if command is None:
-            continue
-        arguments = expand_variables(command.group("arguments"))
-        candidates = [arguments, normalize_expression(arguments), *arguments.split()]
-        if any(is_runtime_root(candidate) for candidate in candidates):
-            findings.append(line_number)
-    return findings
+
+def _is_blank_or_comment(line: str) -> bool:
+    if not line:
+        return True
+    return line.lstrip().startswith("#")
+
+
+def _remember_assignment(assignment: re.Match[str], variables: dict[str, str]) -> None:
+    variables[assignment.group("name").casefold()] = _normalize_expression(
+        assignment.group("value"), variables
+    )
+
+
+def _command_deletes_root(command: re.Match[str], variables: dict[str, str]) -> bool:
+    arguments = _expand_variables(command.group("arguments"), variables)
+    candidates = [
+        arguments,
+        _normalize_expression(arguments, variables),
+        *arguments.split(),
+    ]
+    return any(_is_shell_runtime_root(candidate) for candidate in candidates)
+
+
+def _deletes_runtime_root(line: str, variables: dict[str, str]) -> bool:
+    """A comment, an assignment this guard remembers, or a delete of the root."""
+    if _is_blank_or_comment(line):
+        return False
+    assignment = _POWERSHELL_ASSIGNMENT.match(line) or _SHELL_ASSIGNMENT.match(line)
+    if assignment is not None:
+        _remember_assignment(assignment, variables)
+        return False
+    return _deletes_root_line(line, variables)
+
+
+def _deletes_root_line(line: str, variables: dict[str, str]) -> bool:
+    command = _DELETE_COMMAND.match(line)
+    if command is None:
+        return False
+    return _command_deletes_root(command, variables)
+
+
+def _installer_direct_runtime_root_deletions(source: str) -> list[int]:
+    """Find direct installer deletes in a deliberately small source subset.
+
+    The guard joins ``\\``/backtick continuations and resolves simple assignments
+    in source order. It does not evaluate scopes, branches, command substitutions,
+    quoting semantics, or arbitrary shell/PowerShell execution.
+    """
+    variables: dict[str, str] = {}
+    return [
+        line_number
+        for line_number, line in _logical_lines(source)
+        if _deletes_runtime_root(line, variables)
+    ]
 
 
 @pytest.mark.parametrize(

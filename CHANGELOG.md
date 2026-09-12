@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The test tree comes under the complexity law.** `lizard -C 5` reported 88
+  functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
+  in the navigation tests become tables of runners and builders, the
+  121-line AST walk over the benchmark fixture becomes one function per module
+  and per block, the fake LSP server's two 300-line loops become
+  `_SemanticServer` and `_LifecycleServer` with one method per protocol
+  request, and the runtime-deletion guard resolves paths through a dispatch on
+  node type. No test lost an assertion: each file was run before and after.
+
 ### Fixed
 
 - **A replay over a committed transaction is a duplicate, not a quarantine.**
