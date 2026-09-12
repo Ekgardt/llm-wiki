@@ -489,3 +489,24 @@ def test_a_long_table_states_its_header_once_and_loses_nothing():
     assert answer_budget.estimate_tokens(shaped) < answer_budget.estimate_tokens(
         {"callers": rows}
     )
+
+
+def test_one_shared_path_prefix_is_stated_once_not_once_per_row():
+    """Lossless: the prefix is still in the answer, exactly once."""
+    rows = [
+        {"file": f"/home/user/llm-wiki-tasks/benchmark/module_{index}.py", "line": index}
+        for index in range(12)
+    ]
+    shaped = answer_budget.shape_code_answer({"entry_points": list(rows)})
+
+    assert shaped["entry_points_row_prefixes"] == {
+        "file": "/home/user/llm-wiki-tasks/benchmark/"
+    }
+    restored = [
+        {**row, "file": shaped["entry_points_row_prefixes"]["file"] + row["file"]}
+        for row in _table(shaped, "entry_points")
+    ]
+    assert restored == rows
+    assert answer_budget.estimate_tokens(shaped) < answer_budget.estimate_tokens(
+        {"entry_points": rows}
+    )

@@ -35,6 +35,7 @@ Research: `docs/research/2026-08-28-token-budgeted-answers.md`.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 # The client ceiling Anthropic documents for tool responses; a budget above it
@@ -401,6 +402,62 @@ def _payable_row_constants(key: str, value) -> dict:
 # Research: `docs/research/2026-09-12-three-changes-to-pass-them.md`.
 
 
+# The third columnar move, 2026-09-12: a string column can hold one prefix on
+# every row. The architecture summary lists 110 entry points, and each row spelt
+# `/home/user/llm-wiki-tasks/` again — 2 156 of that answer's tokens, a quarter
+# of them one prefix said 110 times, in an answer whose top level already names
+# the directory. Stated once under `<key>_row_prefixes`, the value is still in
+# the answer and the rows carry what differs. Chosen by measuring both shapes,
+# like every compaction above it.
+_MIN_PREFIX_LENGTH = 8
+
+
+def _common_prefix(values: list[str]) -> str:
+    """The longest prefix every value shares, cut at the last path separator."""
+    shared = os.path.commonprefix(values)
+    return shared[: shared.rfind("/") + 1]
+
+
+def _prefixable_column(rows: list, key: str) -> str:
+    values = [row[key] for row in rows]
+    if not all(isinstance(value, str) for value in values):
+        return ""
+    prefix = _common_prefix(values)
+    return prefix if len(prefix) >= _MIN_PREFIX_LENGTH else ""
+
+
+def _row_prefixes(rows: list) -> dict[str, str]:
+    """Every column whose values share one long prefix, and that prefix."""
+    found = {}
+    for key in sorted(rows[0]):
+        prefix = _prefixable_column(rows, key)
+        if prefix:
+            found[key] = prefix
+    return found
+
+
+def _without_prefixes(rows: list, prefixes: dict[str, str]) -> list[dict]:
+    return [
+        {
+            key: value[len(prefixes[key]):] if key in prefixes else value
+            for key, value in row.items()
+        }
+        for row in rows
+    ]
+
+
+def _prefixes_if_cheaper(key: str, rows: list) -> dict:
+    if not _is_uniform_table(rows):
+        return {}
+    prefixes = _row_prefixes(rows)
+    if not prefixes:
+        return {}
+    compacted = {key: _without_prefixes(rows, prefixes), f"{key}_row_prefixes": prefixes}
+    if estimate_tokens(compacted) >= estimate_tokens({key: rows}):
+        return {}
+    return compacted
+
+
 def _is_uniform_table(rows: list) -> bool:
     """Every row carries exactly the same keys, so a header cannot lose one."""
     if not _is_constant_table(rows):
@@ -439,11 +496,21 @@ def _compacted_entry(key, value, depth: int) -> dict:
     }
 
 
+def _shortened_rows(key, value, depth: int) -> dict:
+    """The value with its shared path prefixes hoisted out, when that is cheaper."""
+    descended = _as_columnar(value, depth + 1)
+    prefixes = _prefixes_if_cheaper(key, descended)
+    if prefixes:
+        return prefixes
+    return {key: descended}
+
+
 def _columnar_entry(key, value, depth: int) -> dict:
-    columnar = _columnar_if_cheaper(key, _as_columnar(value, depth + 1))
+    shortened = _shortened_rows(key, value, depth)
+    columnar = _columnar_if_cheaper(key, shortened[key])
     if columnar:
-        return columnar
-    return {key: _as_columnar(value, depth + 1)}
+        return {**shortened, **columnar}
+    return shortened
 
 
 def _columnar_dict(mapping: dict, depth: int) -> dict:
