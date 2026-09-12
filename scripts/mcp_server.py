@@ -675,6 +675,8 @@ TOOL_INPUT_SCHEMAS = {
                     "type",
                     "diagnostics",
                     "query",
+                    "data_flow",
+                    "cross_service",
                     "provenance",
                     "snippet",
                     "coverage",
@@ -3877,6 +3879,17 @@ _ARCHITECTURE_CONTRACTS = {
         {"directory", "mode", "query"},
         {"directory", "mode", "query"},
     ),
+    # Issue #24, B3: argument bindings hop by hop, never data-flow analysis
+    # (docs/research/2026-09-11-argument-bindings-and-route-calls.md).
+    "data_flow": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "depth"},
+    ),
+    # Issue #24, B3: calls plus the HTTP boundary, same bounds as `data_flow`.
+    "cross_service": (
+        {"directory", "mode", "symbol"},
+        {"directory", "mode", "symbol", "depth"},
+    ),
     "impact": (
         {"directory", "mode"},
         {"directory", "mode", "comparison", "base", "target", "branch"},
@@ -5319,6 +5332,34 @@ def _search_architecture_call(arguments: dict, deadline: float):
     )
 
 
+def _data_flow_architecture_call(arguments: dict, deadline: float):
+    """Issue #24, B3: which argument binds which parameter, hop by hop."""
+    del deadline
+    from code_graph import find_argument_flows
+
+    directory = Path(arguments["directory"]).resolve()
+    answer = find_argument_flows(
+        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+    )
+    if answer is None:
+        return {"flows": [], "mode": "index", "reason": "no_active_generation"}
+    return answer
+
+
+def _cross_service_architecture_call(arguments: dict, deadline: float):
+    """Issue #24, B3: follow a request across the route it reaches."""
+    del deadline
+    from code_graph import find_service_paths
+
+    directory = Path(arguments["directory"]).resolve()
+    answer = find_service_paths(
+        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+    )
+    if answer is None:
+        return {"hops": [], "mode": "index", "reason": "no_active_generation"}
+    return answer
+
+
 def _query_architecture_call(arguments: dict, deadline: float):
     """CODE-01: bounded multi-hop JSON pipeline over the active generation."""
     from graph_query import run_graph_query
@@ -5408,6 +5449,8 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "coverage": _coverage_architecture_call,
         "search": _search_architecture_call,
         "query": _query_architecture_call,
+        "data_flow": _data_flow_architecture_call,
+        "cross_service": _cross_service_architecture_call,
         "index": _index_architecture_call,
         "repositories": _repositories_architecture_call,
         "changes": _changes_architecture_call,

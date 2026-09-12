@@ -248,6 +248,24 @@ def test_status_reads_all_streams_from_one_coherent_snapshot(
     assert status["tasks"] == [task]
 
 
+def _status_race_batches(vault: Path, state_root: Path, writers: int, per_writer: int):
+    """Four writers and two readers over one blackboard; the batches they wrote."""
+    with concurrent.futures.ProcessPoolExecutor(max_workers=6) as executor:
+        readers = [
+            executor.submit(_read_blackboard_status, str(vault), str(state_root), 80)
+            for _ in range(2)
+        ]
+        writes = [
+            executor.submit(
+                _write_blackboard_batch, str(vault), str(state_root), worker, per_writer
+            )
+            for worker in range(writers)
+        ]
+        batches = [future.result(timeout=LONG_TIMEOUT) for future in writes]
+        reads = [future.result(timeout=LONG_TIMEOUT) for future in readers]
+    return batches, reads
+
+
 def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
@@ -255,31 +273,35 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
     writers = 4
     tasks_per_writer = 6
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=6) as executor:
-        readers = [
-            executor.submit(
-                _read_blackboard_status, str(vault), str(state_root), 80
-            )
-            for _ in range(2)
-        ]
-        writes = [
-            executor.submit(
-                _write_blackboard_batch,
-                str(vault),
-                str(state_root),
-                worker,
-                tasks_per_writer,
-            )
-            for worker in range(writers)
-        ]
-        assert [future.result(timeout=LONG_TIMEOUT) for future in writes] == [
-            tasks_per_writer
-        ] * writers
-        assert all(future.result(timeout=300) >= 0 for future in readers)
+    batches, reads = _status_race_batches(vault, state_root, writers, tasks_per_writer)
 
     status = blackboard.get_status("demo")
-    assert status["active_tasks"] == 0
+    assert (batches, min(reads) >= 0) == ([tasks_per_writer] * writers, True)
     assert status["completed_tasks"] == writers * tasks_per_writer
+    assert _released_leftovers(status) == []
+
+
+def _held_resources(claim_id: str) -> list[str]:
+    coordinator = blackboard._coordinator()
+    with coordinator._connect() as database:
+        rows = blackboard._claim_rows(database, "demo", claim_id)
+    return [str(row["resource"]) for row in rows]
+
+
+def _released_leftovers(status: dict) -> list[tuple[str, list[str]]]:
+    """Active tasks that still hold resources — the one thing that is incoherent.
+
+    An active task with no rows behind it is the documented cost of
+    `_settle_unannounced_claim`: an append that commits and then raises over an
+    unreadable stream releases the claim, and the activation stays visible with
+    nothing to complete it. That is the product keeping its promise under
+    contention, and it is what the Windows job of run 34668597688 measured. A
+    leftover that still holds its resources is the failure worth naming, because
+    nothing will ever release it. Research:
+    `docs/research/2026-09-12-an-activation-that-nothing-completes.md`.
+    """
+    held = [(str(task["claim_id"]), _held_resources(str(task["claim_id"]))) for task in status["tasks"]]
+    return [item for item in held if item[1]]
 
 
 def test_multiprocess_same_resource_claim_has_one_fenced_winner(

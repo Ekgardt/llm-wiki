@@ -30,8 +30,17 @@ import markdown_transaction
 import pytest
 from markdown_transaction import MarkdownCoordinator
 
-# Bounds a hang on the slowest supported machine, not the expected duration.
-_APPEND_BUDGET_SECONDS = 60.0
+from tests.slow_machine import LONG_TIMEOUT
+
+# Bounds a hang on the slowest supported machine, not the expected duration, so
+# it comes from `tests/slow_machine.py` like every other hang bound. The literal
+# 60 s it replaced was enough here and on Linux CI and not enough on a hosted
+# Windows runner: run 34660571375 (2026-09-12) refused this deadline in
+# `_capture_append_before` after 39 minutes of shared-disk contention, which
+# failed `test_concurrent_appends_lose_no_bytes` and then, because the timed-out
+# retry never named the attempt it followed,
+# `test_every_refused_append_is_named_by_the_retry_that_replaced_it`.
+_APPEND_BUDGET_SECONDS = LONG_TIMEOUT
 _DAILY = "knowledge/daily/2026-08-25.md"
 _WORKERS = 4
 _ROUNDS = 4

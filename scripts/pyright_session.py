@@ -1565,11 +1565,13 @@ class _LaunchServerGuard:
         deadline: float,
         degradation_prefix: str = "pyright",
         package_launch: object | None = None,
+        native: bool = False,
     ) -> None:
         if not isinstance(owner_root, Path):
             raise TypeError("owner_root must be a Path")
         self._degradation_prefix = degradation_prefix
         self._package_launch = package_launch
+        self._native = native
         self._launch_tree: object | None = None
         self._path = path
         self._expected_sha256 = expected_sha256
@@ -1613,6 +1615,16 @@ class _LaunchServerGuard:
             raise self._digest_mismatch()
         self._state = state
 
+    def _make_executable(self, path: Path | None) -> None:
+        """A native server has to stay executable in its verified copy.
+
+        `mkstemp` creates the copy at mode 600, which is right for a file Node
+        will read and wrong for a file the kernel has to execute.
+        """
+        if not self._native or path is None:
+            return
+        path.chmod(path.stat().st_mode | 0o500)
+
     def _open_snapshot(self) -> BinaryIO:
         """A private copy of the server, under our own owner root."""
         snapshot_descriptor, snapshot_name = tempfile.mkstemp(
@@ -1651,9 +1663,28 @@ class _LaunchServerGuard:
         """Copy the server aside, verify it, and launch from the copy."""
         snapshot = self._open_snapshot()
         self._verify_digest(self._copy_snapshot(snapshot))
+        self._make_executable(self._snapshot_path)
+        if self._native:
+            return self._native_path_launch(snapshot)
         if self._package_launch is not None:
             return self._package_launch_from(snapshot)
         return self._descriptor_launch(snapshot, before)
+
+    def _native_path_launch(self, snapshot: BinaryIO) -> GenerationLaunch:
+        """Launch the verified copy by its path, inside our own owner root.
+
+        A native server reads its own executable while it runs -- gopls hashes
+        it for its index and re-executes it for telemetry -- so the copy has to
+        keep a name. The owner root is created for this process tree alone, and
+        the digest was verified on the bytes that were written there. Research:
+        `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+        """
+        path = self._snapshot_path
+        if path is None:
+            raise RuntimeError("native launch has no verified copy")
+        snapshot.close()
+        self._snapshot = None
+        return GenerationLaunch((str(path), *self._command[1:]), ())
 
     def _package_launch_from(self, snapshot: BinaryIO) -> GenerationLaunch:
         """Seal the verified copy into a package root and launch that path.
@@ -1735,6 +1766,8 @@ class _LaunchServerGuard:
         raise RuntimeError("POSIX inherited descriptor paths are unavailable")
 
     def _posix_launch_command(self, descriptor: int) -> tuple[str, ...]:
+        if self._native:
+            return self._native_launch_command(descriptor)
         if self._path.suffix.casefold() == ".js":
             return (
                 self._command[0],
@@ -1750,6 +1783,18 @@ class _LaunchServerGuard:
             self._descriptor_path(descriptor),
             *self._command[2:],
         )
+
+    def _native_launch_command(self, descriptor: int) -> tuple[str, ...]:
+        """A native server is executed *as* the verified descriptor.
+
+        Handing the descriptor path as an argument is what an interpreter
+        wants; a native executable reads it as its own first argument --
+        `gopls /proc/self/fd/7` is an unknown subcommand, and the process
+        exits before the handshake. The descriptor is the program here, so it
+        takes argv[0]'s place and the profile's own flags follow. Research:
+        `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+        """
+        return (self._descriptor_path(descriptor), *self._command[1:])
 
     def _copy_snapshot(self, snapshot: BinaryIO) -> str:
         descriptor = self._descriptor
@@ -2835,17 +2880,27 @@ class LanguageServerSession:
     def _validated_qualified_paths(self, *, deadline: float) -> tuple[Path, Path]:
         identity = self._identity
         _check_qualified_identity(identity, self._profile)
-        node = _validated_local_file(
-            identity.node_executable,
-            "node_executable",
-            deadline=deadline,
-        )
         server = _validated_local_file(
             identity.server_executable,
             "server_executable",
             deadline=deadline,
         )
-        return node, server
+        return (self._validated_interpreter(server, deadline), server)
+
+    def _validated_interpreter(self, server: Path, deadline: float) -> Path:
+        """The Node that runs the server, or the server itself when it is native.
+
+        gopls is an executable; there is no interpreter to validate and none to
+        launch it with. Research:
+        `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+        """
+        if self._profile.native:
+            return server
+        return _validated_local_file(
+            self._identity.node_executable,
+            "node_executable",
+            deadline=deadline,
+        )
 
     def _reset_readiness_locked(self) -> None:
         """Forget what a running server told us about itself."""
@@ -3063,6 +3118,7 @@ class LanguageServerSession:
             cwd=Path(self._repository.checkout_root),
             owner_root=owner,
             deadline=startup_deadline,
+            environment_overrides=self._profile.launch_environment(self._state_root),
             server_request_handlers=self._server_request_handlers(),
             server_notification_handlers=self._server_notification_handlers(),
             generation_bootstrap=(
@@ -3101,6 +3157,8 @@ class LanguageServerSession:
         change made for a second language.
         """
         launch = self._profile.package_launch
+        if self._profile.native:
+            return {"native": True}
         if launch is None:
             return {}
         return {"package_launch": launch}

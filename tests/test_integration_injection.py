@@ -72,6 +72,15 @@ def _ensure_scripts_on_path() -> None:
         sys.path.insert(0, scripts)
 
 
+def _unmet_substrings(checks) -> list[tuple[int, str, bool]]:
+    """(index, needle, should_be_present) for every check the text does not meet."""
+    return [
+        (index, needle, present)
+        for index, (needle, text, present) in enumerate(checks)
+        if (needle in text) is not present
+    ]
+
+
 def _hook_handlers(merged: dict) -> list[dict]:
     return [
         handler
@@ -100,27 +109,34 @@ def opencode_plugin_url(tmp_path: Path) -> str:
 
 def test_opencode_plugin_is_lifecycle_only():
     plugin = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").read_text(encoding="utf-8")
-    assert "integration_adapter.py" in plugin
-    assert "event: async" in plugin
-    assert '"session.created"' in plugin
-    assert '"tool.execute.after"' in plugin
-    assert '"session.idle"' in plugin
-    assert '"experimental.session.compacting"' in plugin
-    assert '"session.created": async' not in plugin
-    assert '"session.idle": async' not in plugin
-    assert '"memory.context"' not in plugin
-    assert '"memory.recall"' not in plugin
-    assert "Classify this transcript" not in plugin
-    assert "FLUSH_MAJOR" not in plugin
-    assert "memory-ephemeral" not in plugin
-    assert "client.session.create" not in plugin
-    assert "client.session.prompt" not in plugin
-    assert "memory_queue.py" not in plugin
-    assert "maybe_compile.py" not in plugin
-    assert "computeSlug" not in plugin
-    assert "state-path" not in plugin
-    assert 'directory: typeof directory === "string" ? directory : null' in plugin
-    assert "project" not in plugin
+    assert (
+        _unmet_substrings(
+            (
+                ("integration_adapter.py", plugin, True),
+                ("event: async", plugin, True),
+                ('"session.created"', plugin, True),
+                ('"tool.execute.after"', plugin, True),
+                ('"session.idle"', plugin, True),
+                ('"experimental.session.compacting"', plugin, True),
+                ('"session.created": async', plugin, False),
+                ('"session.idle": async', plugin, False),
+                ('"memory.context"', plugin, False),
+                ('"memory.recall"', plugin, False),
+                ("Classify this transcript", plugin, False),
+                ("FLUSH_MAJOR", plugin, False),
+                ("memory-ephemeral", plugin, False),
+                ("client.session.create", plugin, False),
+                ("client.session.prompt", plugin, False),
+                ("memory_queue.py", plugin, False),
+                ("maybe_compile.py", plugin, False),
+                ("computeSlug", plugin, False),
+                ("state-path", plugin, False),
+                ('directory: typeof directory === "string" ? directory : null', plugin, True),
+                ("project", plugin, False),
+            )
+        )
+        == []
+    )
 
 
 def test_opencode_roleless_user_message_is_forwarded_once(opencode_plugin_url: str):
@@ -251,9 +267,7 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
 
 
 def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     calls = []
@@ -295,11 +309,8 @@ def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     from integration_adapter import normalize_event
 
     supplied = normalize_event(
@@ -324,22 +335,34 @@ def test_normalization_preserves_only_available_checkpoint_signals():
         {"session_id": "session-2", "cwd": "C:/project", "reason": "done"},
     )
 
-    assert supplied.payload["dirty"] is True
-    assert supplied.payload["changed"] is True
-    assert supplied.payload["public_contract_changed"] is True
-    assert supplied.payload["token_percent"] == 70
-    assert supplied.payload["compaction_confirmed"] is True
-    assert "token_percent" not in unavailable.payload
-    assert "compaction_confirmed" not in unavailable.payload
-    assert "host_progress_signals" not in unavailable.payload
+    assert (
+        supplied.payload["dirty"] is True,
+        supplied.payload["changed"] is True,
+        supplied.payload["public_contract_changed"] is True,
+        supplied.payload["token_percent"],
+        supplied.payload["compaction_confirmed"] is True,
+    ) == (
+        True,
+        True,
+        True,
+        70,
+        True,
+    )
+    assert (
+        _unmet_substrings(
+            (
+                ("token_percent", unavailable.payload, False),
+                ("compaction_confirmed", unavailable.payload, False),
+                ("host_progress_signals", unavailable.payload, False),
+            )
+        )
+        == []
+    )
 
 
 def test_malformed_project_delta_is_rejected_before_durable_enqueue():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
@@ -360,11 +383,8 @@ def test_malformed_project_delta_is_rejected_before_durable_enqueue():
 
 
 def test_significant_file_tool_normalizes_to_file_change_observation():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     from integration_adapter import _checkpoint_observation, normalize_event
 
     write = normalize_event(
@@ -395,11 +415,8 @@ def test_significant_file_tool_normalizes_to_file_change_observation():
 
 
 def test_host_tool_call_id_separates_repeated_mutations():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     from integration_adapter import normalize_event
 
     raw = {
@@ -415,15 +432,11 @@ def test_host_tool_call_id_separates_repeated_mutations():
     assert first.event_id != second.event_id
 
 
-def test_adapter_observes_same_envelope_once_before_durable_capture(
-    monkeypatch, tmp_path
-):
+def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch, tmp_path):
     import io
     import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     calls = []
@@ -474,11 +487,8 @@ def test_adapter_observes_same_envelope_once_before_durable_capture(
 def test_repeated_unidentified_lifecycle_occurrences_checkpoint_separately(
     monkeypatch, event_type, raw, reason
 ):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     state = {}
@@ -505,9 +515,15 @@ def test_repeated_unidentified_lifecycle_occurrences_checkpoint_separately(
     integration_adapter._observe_project_checkpoint(first)
     integration_adapter._observe_project_checkpoint(second)
 
-    assert first.event_id != second.event_id
-    assert first.source_event_id == first.payload["occurrence_id"]
-    assert second.source_event_id == second.payload["occurrence_id"]
+    assert (
+        first.event_id != second.event_id,
+        first.source_event_id,
+        second.source_event_id,
+    ) == (
+        True,
+        first.payload["occurrence_id"],
+        second.payload["occurrence_id"],
+    )
     uuid.UUID(first.payload["occurrence_id"])
     uuid.UUID(second.payload["occurrence_id"])
     assert [checkpoint["reason"] for checkpoint in checkpoints] == [reason, reason]
@@ -521,11 +537,8 @@ def test_repeated_unidentified_lifecycle_occurrences_checkpoint_separately(
 
 
 def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     state = {}
@@ -560,15 +573,11 @@ def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
     )
 
 
-def test_durable_capture_runs_when_checkpoint_observation_fails(
-    monkeypatch, capsys, tmp_path
-):
+def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, capsys, tmp_path):
     import io
     import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     calls = []
@@ -577,16 +586,17 @@ def test_durable_capture_runs_when_checkpoint_observation_fails(
         "_observe_project_checkpoint",
         lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000)),
     )
+
+    def publish(*_args):
+        calls.append("capture")
+        return "1" * 64
+
     monkeypatch.setattr(
         integration_adapter,
         "_run_delegate",
-        lambda *args, **kwargs: calls.append(args[0]) or None,
+        lambda *args, **kwargs: calls.append(args[0]),
     )
-    monkeypatch.setattr(
-        integration_adapter,
-        "_publish_durable_capture_intent",
-        lambda *_args: calls.append("capture") or "1" * 64,
-    )
+    monkeypatch.setattr(integration_adapter, "_publish_durable_capture_intent", publish)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda _args: 123)
     monkeypatch.setattr(
         integration_adapter,
@@ -611,19 +621,18 @@ def test_durable_capture_runs_when_checkpoint_observation_fails(
     assert (
         integration_adapter.main(
             ["--source", "codex", "--event", "session_end", "--delegate", "session_end_capture.py"]
-        )
-        == 0
+        ),
+        calls,
+    ) == (
+        0,
+        [("logged", 2000), "capture", "session_end_project_tag.py"],
     )
-    assert calls == [("logged", 2000), "capture", "session_end_project_tag.py"]
     assert "capture skipped" not in capsys.readouterr().err
 
 
 def test_checkpoint_error_text_is_single_line_redacted_and_bounded():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
@@ -637,11 +646,8 @@ def test_checkpoint_error_text_is_single_line_redacted_and_bounded():
 
 
 def test_adapter_observes_before_direct_ingestion(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     envelope = integration_adapter.normalize_event(
@@ -665,11 +671,8 @@ def test_adapter_observes_before_direct_ingestion(monkeypatch):
 
 
 def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     envelope = integration_adapter.normalize_event(
@@ -700,11 +703,8 @@ def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatc
 
 
 def test_claude_stop_is_dirty_checkpoint_only_and_never_dispatches_session_end(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     calls = []
@@ -726,23 +726,24 @@ def test_claude_stop_is_dirty_checkpoint_only_and_never_dispatches_session_end(m
 
     result = integration_adapter.ingest_event(envelope)
 
-    assert envelope.event_type == "stop"
-    assert integration_adapter._checkpoint_observation(envelope) == {
-        "type": "stop",
-        "event_id": envelope.event_id,
-        "dirty": True,
-    }
-    assert calls == [("observe", "stop")]
-    assert result["daily_log_written"] is False
-    assert result["flush_spawned"] is False
+    assert (
+        envelope.event_type,
+        integration_adapter._checkpoint_observation(envelope),
+        calls,
+        result["daily_log_written"] is False,
+        result["flush_spawned"] is False,
+    ) == (
+        "stop",
+        {"type": "stop", "event_id": envelope.event_id, "dirty": True},
+        [("observe", "stop")],
+        True,
+        True,
+    )
 
 
 def test_failed_checkpoint_does_not_persist_event_dedupe_and_retry_succeeds(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     state = {}
@@ -839,11 +840,8 @@ def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch,
 
 
 def test_project_lease_busy_event_remains_pending_until_next_observation(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import ProjectLeaseBusy
 
@@ -890,11 +888,8 @@ def test_project_lease_busy_event_remains_pending_until_next_observation(monkeyp
 
 
 def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     state = {}
@@ -937,11 +932,8 @@ def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
 
 
 def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import CheckpointReducer
 
@@ -1000,24 +992,26 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     integration_adapter._observe_project_checkpoint(ordinary)
 
     reducer_state = state["project_checkpoint_reducers"]["demo:s1"]
-    assert reducer_state["last_checkpoint_at"] == ordinary_event_at.isoformat().replace(
-        "+00:00", "Z"
+    assert (
+        reducer_state["last_checkpoint_at"],
+        state["project_checkpoint_pending"]["demo"],
+        len(checkpoints),
+        checkpoints[0]["occurrence_id"],
+        checkpoints[0]["delta"]["current_task"],
+        checkpoints[0]["delta"]["current_task_operations"],
+    ) == (
+        ordinary_event_at.isoformat().replace("+00:00", "Z"),
+        [],
+        1,
+        integration_adapter._batch_occurrence_id([ordinary.event_id]),
+        delta["current_task"],
+        [delta["current_task"]],
     )
-    assert state["project_checkpoint_pending"]["demo"] == []
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["occurrence_id"] == integration_adapter._batch_occurrence_id(
-        [ordinary.event_id]
-    )
-    assert checkpoints[0]["delta"]["current_task"] == delta["current_task"]
-    assert checkpoints[0]["delta"]["current_task_operations"] == [delta["current_task"]]
 
 
 def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import CheckpointReducer
 
@@ -1046,22 +1040,12 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
         return value
 
     def event(event_id, seconds, checkpoint_type=None, project_delta=None):
-        raw = {
-            "session_id": "s1",
-            "cwd": "C:/project",
-            "event_id": event_id,
-            "tool_name": "Read",
-            "tool_input": {"file_path": "src/app.py"},
-        }
-        if checkpoint_type:
-            raw["checkpoint_type"] = checkpoint_type
-        if project_delta:
-            raw["project_delta"] = project_delta
-        return integration_adapter.normalize_event(
-            "claude",
-            "post_tool_use",
-            raw,
-            occurred_at=start + timedelta(seconds=seconds),
+        return _read_tool_event(
+            integration_adapter,
+            start + timedelta(seconds=seconds),
+            event_id,
+            checkpoint_type=checkpoint_type,
+            project_delta=project_delta,
         )
 
     monkeypatch.setattr(integration_adapter, "update_state", update)
@@ -1091,14 +1075,13 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
     )
     timer = event("timer-1", 31)
 
-    for envelope in (correction, blocker, file_change):
-        integration_adapter._observe_project_checkpoint(envelope)
-    assert checkpoints == []
-    assert [item["event_id"] for item in state["project_checkpoint_pending"]["demo"]] == [
-        correction.event_id,
-        blocker.event_id,
-        file_change.event_id,
-    ]
+    integration_adapter._observe_project_checkpoint(correction)
+    integration_adapter._observe_project_checkpoint(blocker)
+    integration_adapter._observe_project_checkpoint(file_change)
+    assert (checkpoints, _pending_event_ids(state)) == (
+        [],
+        [correction.event_id, blocker.event_id, file_change.event_id],
+    )
 
     state = json.loads(json.dumps(state))
     integration_adapter._observe_project_checkpoint(timer)
@@ -1109,23 +1092,21 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
     # it. So the newest current task is what the timer saw, not the last
     # narrated value — while the order of everything narrated before it, and
     # the exactly-once flush this test exists for, are unchanged.
-    assert merged["delta"]["current_task"]["value"].startswith("Read src/app.py")
-    assert [
-        operation["value"] for operation in merged["delta"]["current_task_operations"]
-    ][:2] == ["First", "Latest"]
-    assert merged["delta"]["blockers"] == [
-        {"id": "blocker-1", "action": "close", "value": "Resolved"}
-    ]
-    assert merged["delta"]["changed_files"] == [
-        {"id": "src/app.py", "action": "upsert", "value": "src/app.py"}
-    ]
-    assert merged["evidence_event_ids"] == [
-        correction.event_id,
-        blocker.event_id,
-        file_change.event_id,
-        timer.event_id,
-    ]
-    assert state["project_checkpoint_pending"]["demo"] == []
+    assert (
+        merged["delta"]["current_task"]["value"].startswith("Read src/app.py"),
+        [operation["value"] for operation in merged["delta"]["current_task_operations"]][:2],
+        merged["delta"]["blockers"],
+        merged["delta"]["changed_files"],
+        merged["evidence_event_ids"],
+        state["project_checkpoint_pending"]["demo"],
+    ) == (
+        True,
+        ["First", "Latest"],
+        [{"id": "blocker-1", "action": "close", "value": "Resolved"}],
+        [{"id": "src/app.py", "action": "upsert", "value": "src/app.py"}],
+        [correction.event_id, blocker.event_id, file_change.event_id, timer.event_id],
+        [],
+    )
 
     state = json.loads(json.dumps(state))
     integration_adapter._observe_project_checkpoint(timer)
@@ -1133,11 +1114,8 @@ def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monke
 
 
 def test_bypass_event_immediately_flushes_debounced_delta_once_after_restart(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import CheckpointReducer
 
@@ -1200,15 +1178,21 @@ def test_bypass_event_immediately_flushes_debounced_delta_once_after_restart(mon
     assert checkpoints == []
     integration_adapter._observe_project_checkpoint(decision)
 
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["reason"] == "decision"
-    assert checkpoints[0]["delta"]["current_task"]["value"] == "Keep me"
-    assert checkpoints[0]["delta"]["decisions"][0]["value"] == "Flush now"
-    assert checkpoints[0]["evidence_event_ids"] == [
-        correction.event_id,
-        decision.event_id,
-    ]
-    assert state["project_checkpoint_pending"]["demo"] == []
+    assert (
+        len(checkpoints),
+        checkpoints[0]["reason"],
+        checkpoints[0]["delta"]["current_task"]["value"],
+        checkpoints[0]["delta"]["decisions"][0]["value"],
+        checkpoints[0]["evidence_event_ids"],
+        state["project_checkpoint_pending"]["demo"],
+    ) == (
+        1,
+        "decision",
+        "Keep me",
+        "Flush now",
+        [correction.event_id, decision.event_id],
+        [],
+    )
 
     state = json.loads(json.dumps(state))
     integration_adapter._observe_project_checkpoint(decision)
@@ -1317,18 +1301,32 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
 
     with pytest.raises(RuntimeError, match="second batch interrupted"):
         integration_adapter._drain_project_checkpoints("demo", "demo")
-    assert len(checkpoints) == 1
-    assert len(checkpoints[0]["evidence_event_ids"]) == 100
-    assert len(state["project_checkpoint_pending"]["demo"]) == 105
+    assert (
+        len(checkpoints),
+        len(checkpoints[0]["evidence_event_ids"]),
+        len(state["project_checkpoint_pending"]["demo"]),
+    ) == (
+        1,
+        100,
+        105,
+    )
 
     state = json.loads(json.dumps(state))
     integration_adapter._drain_project_checkpoints("demo", "demo")
 
-    assert _evidence_lengths(checkpoints) == [100, 100, 5]
-    assert _task_operation_lengths(checkpoints) == [100, 100, 5]
-    assert max(_decision_lengths(checkpoints)) <= 100
-    assert _flat_evidence_ids(checkpoints) == event_ids
-    assert state["project_checkpoint_pending"]["demo"] == []
+    assert (
+        _evidence_lengths(checkpoints),
+        _task_operation_lengths(checkpoints),
+        max(_decision_lengths(checkpoints)) <= 100,
+        _flat_evidence_ids(checkpoints),
+        state["project_checkpoint_pending"]["demo"],
+    ) == (
+        [100, 100, 5],
+        [100, 100, 5],
+        True,
+        event_ids,
+        [],
+    )
 
     state = json.loads(json.dumps(state))
     integration_adapter._drain_project_checkpoints("demo", "demo")
@@ -1336,11 +1334,8 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
 
 
 def test_single_oversized_valid_delta_splits_before_enqueue(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     state = {}
@@ -1390,9 +1385,7 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
     import io
     import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import session_start_project_state
     from project_journal import ProjectProjection
 
@@ -1441,11 +1434,8 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
 def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exists(
     monkeypatch, tmp_path, capsys
 ):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import session_start_project_state
     from project_journal import ProjectProjection
 
@@ -1478,8 +1468,13 @@ def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exis
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
     monkeypatch.setattr(session_start_project_state, "_compute_slug", lambda *args: "demo")
     monkeypatch.setattr(session_start_project_state, "ProjectStore", Store)
-    assert not (project_state / "journal.md").exists()
-    assert session_start_project_state.main() == 0
+    assert (
+        not (project_state / "journal.md").exists(),
+        session_start_project_state.main(),
+    ) == (
+        True,
+        0,
+    )
     output = json.loads(capsys.readouterr().out)
     assert calls == [
         "transactions",
@@ -1487,16 +1482,20 @@ def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exis
         ("projection", "demo"),
     ]
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert "project:demo" in context
-    assert "sequence:1" in context
+    assert (
+        _unmet_substrings(
+            (
+                ("project:demo", context, True),
+                ("sequence:1", context, True),
+            )
+        )
+        == []
+    )
 
 
 def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import ProjectProjection
 
@@ -1551,11 +1550,8 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
 def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     monkeypatch, tmp_path, opencode_plugin_url: str
 ):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import ProjectStore, recover_project_handoff
 
@@ -1588,14 +1584,27 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     elapsed = time.perf_counter() - started
     shared = recover_project_handoff(ProjectStore(vault, state_root), slug, project_root=project)
 
-    assert elapsed < SESSION_START_BUDGET_SECONDS
-    assert result["context"] == shared.context
-    assert len(result["context"]) <= 2400
-    assert "Preserve older handoff" in result["context"]
-    assert "Preserve older open thread" in result["context"]
-    assert f"project:{slug}" in result["context"]
-    assert not (project_state / "journal.md").exists()
-
+    assert (
+        elapsed < SESSION_START_BUDGET_SECONDS,
+        result["context"],
+        len(result["context"]) <= 2400,
+        (project_state / "journal.md").exists(),
+    ) == (
+        True,
+        shared.context,
+        True,
+        False,
+    )
+    assert (
+        _unmet_substrings(
+            (
+                ("Preserve older handoff", result["context"], True),
+                ("Preserve older open thread", result["context"], True),
+                (f"project:{slug}", result["context"], True),
+            )
+        )
+        == []
+    )
     plugin_url = opencode_plugin_url
     script = textwrap.dedent(
         f"""
@@ -1641,11 +1650,8 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
 
 
 def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     class Store:
@@ -1679,11 +1685,8 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
 
 
 def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkeypatch, tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import ProjectStore
 
@@ -1727,21 +1730,24 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
         holder.result(timeout=WRITER_HOLD_SECONDS)
 
     assert elapsed < SESSION_START_BUDGET_SECONDS
-    assert "# General memory" in result["context"]
-    assert "Degraded" in result["context"]
-    assert "project:demo" in result["context"]
-    assert "recovery:project:demo" in result["context"]
+    assert (
+        _unmet_substrings(
+            (
+                ("# General memory", result["context"], True),
+                ("Degraded", result["context"], True),
+                ("project:demo", result["context"], True),
+                ("recovery:project:demo", result["context"], True),
+            )
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("host", ["claude", "codex"])
 def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host, tmp_path):
     import os
-    import shutil
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
     from project_journal import ProjectStore
 
@@ -1783,17 +1789,7 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
     env["LLM_WIKI_ROOT"] = str(vault)
     env["LLM_WIKI_STATE_ROOT"] = str(state_root)
     env["CLAUDE_PROJECT_DIR"] = str(project_dir)
-    command = [sys.executable, str(ROOT / "scripts/session_start_project_state.py")]
-    if host == "codex":
-        shutil.copytree(ROOT / "scripts", vault / "scripts")
-        command = [
-            sys.executable,
-            str(ROOT / "scripts/codex_memory.py"),
-            "project-state",
-            "--cwd",
-            str(project_dir),
-            "--json",
-        ]
+    command = _project_state_command(host, vault, project_dir)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         holder = pool.submit(hold_writer)
@@ -1816,16 +1812,55 @@ def test_claude_and_codex_project_state_are_bounded_under_writer_contention(host
         holder.result(timeout=SHORT_TIMEOUT)
 
     assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
+    context = _project_state_context(host, json.loads(result.stdout))
+    unmet = _unmet_substrings(
+        (
+            ("project:demo", context, True),
+            ("sequence:1", context, True),
+            ("Degraded", context, True),
+            ("recovery:project:demo", context, True),
+        )
+    )
+    assert (len(context) <= 2400, unmet) == (True, [])
+
+
+def _pending_event_ids(state: dict) -> list[str]:
+    return [item["event_id"] for item in state["project_checkpoint_pending"]["demo"]]
+
+
+def _read_tool_event(adapter, occurred_at, event_id, *, checkpoint_type=None, project_delta=None):
+    """A Claude `Read` observation, carrying only the signals the test names."""
+    raw = {
+        "session_id": "s1",
+        "cwd": "C:/project",
+        "event_id": event_id,
+        "tool_name": "Read",
+        "tool_input": {"file_path": "src/app.py"},
+    }
+    optional = {"checkpoint_type": checkpoint_type, "project_delta": project_delta}
+    raw.update({key: value for key, value in optional.items() if value})
+    return adapter.normalize_event("claude", "post_tool_use", raw, occurred_at=occurred_at)
+
+
+def _project_state_command(host: str, vault: Path, project_dir: Path) -> list[str]:
+    """The host's project-state entry point; Codex runs it from a vault copy."""
+    if host != "codex":
+        return [sys.executable, str(ROOT / "scripts/session_start_project_state.py")]
+    shutil.copytree(ROOT / "scripts", vault / "scripts")
+    return [
+        sys.executable,
+        str(ROOT / "scripts/codex_memory.py"),
+        "project-state",
+        "--cwd",
+        str(project_dir),
+        "--json",
+    ]
+
+
+def _project_state_context(host: str, payload: dict) -> str:
     if host == "claude":
-        context = payload["hookSpecificOutput"]["additionalContext"]
-    else:
-        context = payload["additional_context"]
-    assert len(context) <= 2400
-    assert "project:demo" in context
-    assert "sequence:1" in context
-    assert "Degraded" in context
-    assert "recovery:project:demo" in context
+        return payload["hookSpecificOutput"]["additionalContext"]
+    return payload["additional_context"]
 
 
 def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
@@ -1843,10 +1878,17 @@ def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
     } <= set(hooks)
     stop_command = hooks["Stop"][0]["hooks"][0]["command"]
     failure_command = hooks["PostToolUseFailure"][0]["hooks"][0]["command"]
-    assert "--event stop" in stop_command
-    assert "--event session_end" not in stop_command
-    assert "--delegate" not in stop_command
-    assert "--checkpoint-type significant_failure" in failure_command
+    assert (
+        _unmet_substrings(
+            (
+                ("--event stop", stop_command, True),
+                ("--event session_end", stop_command, False),
+                ("--delegate", stop_command, False),
+                ("--checkpoint-type significant_failure", failure_command, True),
+            )
+        )
+        == []
+    )
 
 
 def test_claude_session_start_uses_one_outer_adapter_budget():
@@ -1890,9 +1932,7 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
     import io
     import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import integration_adapter
 
     settings = json.loads(
@@ -1900,8 +1940,15 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
     )
     hooks = settings["hooks"]["SessionEnd"][0]["hooks"]
     assert len(hooks) == 1
-    assert "--event session_end" in hooks[0]["command"]
-    assert "--delegate" not in hooks[0]["command"]
+    assert (
+        _unmet_substrings(
+            (
+                ("--event session_end", hooks[0]["command"], True),
+                ("--delegate", hooks[0]["command"], False),
+            )
+        )
+        == []
+    )
 
     calls = []
 
@@ -1946,11 +1993,19 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
         ),
     )
 
-    assert integration_adapter.main(["--source", "claude", "--event", "session_end"]) == 0
-    assert calls[0][0] == "observe"
-    assert calls[1] == ("capture", calls[0][1])
-    assert calls[2] == ("delegate", "session_end_project_tag.py")
-    assert calls[3][0] == "wake"
+    assert (
+        integration_adapter.main(["--source", "claude", "--event", "session_end"]),
+        calls[0][0],
+        calls[1],
+        calls[2],
+        calls[3][0],
+    ) == (
+        0,
+        "observe",
+        ("capture", calls[0][1]),
+        ("delegate", "session_end_project_tag.py"),
+        "wake",
+    )
 
 
 def test_codex_wrapper_recovers_project_state_before_launch():
@@ -1960,32 +2015,47 @@ def test_codex_wrapper_recovers_project_state_before_launch():
     assert recovery < launch
 
 
+# (event, group) -> (matcher, script, argument tail). Lifecycle: codex_memory;
+# #24 C2: the graph hint after a shell search and the reminder; 2026-09-11:
+# prompt and edit capture (docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md).
+_LIFECYCLE = ("codex_memory.py", " hook")
+_GRAPH = ("graph_hint.py", " --source codex")
+_CODEX_CONTRACT = {
+    ("SessionStart", 0): ("startup|resume|clear|compact", *_LIFECYCLE),
+    ("PreCompact", 0): ("manual|auto", *_LIFECYCLE),
+    ("PostCompact", 0): ("manual|auto", *_LIFECYCLE),
+    ("UserPromptSubmit", 0): (
+        None,
+        "integration_adapter.py",
+        " --source codex --event user_prompt",
+    ),
+    ("PostToolUse", 0): ("Bash", *_GRAPH),
+    ("PostToolUse", 1): (
+        "^(apply_patch|Bash)$",
+        "integration_adapter.py",
+        " --source codex --event post_tool_use",
+    ),
+    ("SubagentStart", 0): (None, *_GRAPH),
+    ("Stop", 0): (None, *_LIFECYCLE),
+}
+
+
 def test_codex_official_hook_template_matches_supported_contract():
     template = json.loads(
         (ROOT / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
     )
-    hooks = template["hooks"]
-    lifecycle = {"SessionStart", "PreCompact", "PostCompact", "Stop"}
-    # Issue #24, C2: the graph hint after a shell search, and the reminder.
-    graph = {"PostToolUse", "SubagentStart"}
-    assert _first_matchers(hooks) == {
-        "SessionStart": "startup|resume|clear|compact",
-        "PreCompact": "manual|auto",
-        "PostCompact": "manual|auto",
-        "Stop": None,
-        "PostToolUse": "Bash",
-        "SubagentStart": None,
+    groups = _codex_template_groups(template["hooks"])
+
+    assert set(groups) == set(_CODEX_CONTRACT)
+    assert [key for key, group in groups.items() if not _group_keeps_contract(key, group)] == []
+
+
+def _codex_template_groups(hooks: dict) -> dict:
+    return {
+        (event, index): group
+        for event, event_groups in hooks.items()
+        for index, group in enumerate(event_groups)
     }
-    _assert_codex_groups(hooks, lifecycle, "codex_memory.py", " hook")
-    _assert_codex_groups(hooks, graph, "graph_hint.py", " --source codex")
-
-
-def _first_matchers(hooks: dict) -> dict:
-    return {event: groups[0].get("matcher") for event, groups in hooks.items()}
-
-
-def _codex_groups(hooks: dict, events: set[str]) -> list[dict]:
-    return [group for event in sorted(events) for group in hooks[event]]
 
 
 def _command_texts_end_with(command: dict, script: str, ending: str) -> bool:
@@ -1993,16 +2063,15 @@ def _command_texts_end_with(command: dict, script: str, ending: str) -> bool:
     return all(script in text and text.endswith(ending) for text in texts)
 
 
-def _assert_codex_group(group: dict, script: str, ending: str) -> None:
+def _group_keeps_contract(key: tuple[str, int], group: dict) -> bool:
+    matcher, script, ending = _CODEX_CONTRACT[key]
     (command,) = group["hooks"]
-    assert command["type"] == "command"
-    assert _command_texts_end_with(command, script, ending)
-    assert 0 < command["timeout"] <= 15
-
-
-def _assert_codex_groups(hooks: dict, events: set[str], script: str, ending: str) -> None:
-    for group in _codex_groups(hooks, events):
-        _assert_codex_group(group, script, ending)
+    return (
+        group.get("matcher") == matcher
+        and command["type"] == "command"
+        and _command_texts_end_with(command, script, ending)
+        and 0 < command["timeout"] <= 15
+    )
 
 
 def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
@@ -2037,14 +2106,25 @@ def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
     codex_memory.merge_codex_hooks(source, destination)
     first = destination.read_bytes()
     backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
-    assert len(backups) == 1
-    assert backups[0].read_bytes() == original.encode("utf-8")
+    assert (
+        len(backups),
+        backups[0].read_bytes(),
+    ) == (
+        1,
+        original.encode("utf-8"),
+    )
     codex_memory.merge_codex_hooks(source, destination)
     merged = json.loads(destination.read_text(encoding="utf-8"))
 
-    assert destination.read_bytes() == first
-    assert list(tmp_path.glob("hooks.json.bak-llm-wiki-*")) == backups
-    assert merged["custom"] == {"preserved": True}
+    assert (
+        destination.read_bytes(),
+        list(tmp_path.glob("hooks.json.bak-llm-wiki-*")),
+        merged["custom"],
+    ) == (
+        first,
+        backups,
+        {"preserved": True},
+    )
     assert "echo user" in _stop_hook_commands(merged)
     assert len(_codex_memory_handlers(merged)) == 4
 
@@ -2094,12 +2174,18 @@ def _codex_inline_hooks_toml(*, include_stop: bool = True) -> str:
     for event_name, groups in template.items():
         if event_name == "Stop" and not include_stop:
             continue
-        group = groups[0]
-        blocks.append(f"[[hooks.{event_name}]]")
-        if "matcher" in group:
-            blocks.append(f"matcher = {json.dumps(group['matcher'])}")
-        handler = group["hooks"][0]
-        blocks.extend(
+        for group in groups:
+            blocks.extend(_codex_inline_group_toml(event_name, group))
+    return "\n".join(blocks)
+
+
+def _codex_inline_group_toml(event_name: str, group: dict) -> list[str]:
+    """One template group as Codex's inline TOML: an event may hold several (#24, 2026-09-11)."""
+    lines = [f"[[hooks.{event_name}]]"]
+    if "matcher" in group:
+        lines.append(f"matcher = {json.dumps(group['matcher'])}")
+    for handler in group["hooks"]:
+        lines.extend(
             [
                 "",
                 f"[[hooks.{event_name}.hooks]]",
@@ -2110,15 +2196,12 @@ def _codex_inline_hooks_toml(*, include_stop: bool = True) -> str:
                 "",
             ]
         )
-    return "\n".join(blocks)
+    return lines
 
 
 def test_codex_hook_merge_skips_equivalent_inline_hooks(tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2139,11 +2222,8 @@ def test_codex_hook_merge_skips_equivalent_inline_hooks(tmp_path):
 
 def test_codex_hook_command_reports_equivalent_inline_without_creating_json(tmp_path, capsys):
     import argparse
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2161,11 +2241,8 @@ def test_codex_hook_command_reports_equivalent_inline_without_creating_json(tmp_
 
 
 def test_codex_hook_merge_preserves_json_when_inline_is_equivalent(tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2184,11 +2261,8 @@ def test_codex_hook_merge_preserves_json_when_inline_is_equivalent(tmp_path):
 
 
 def test_codex_hook_merge_rejects_unrelated_inline_hooks_without_creating_json(tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2206,11 +2280,8 @@ def test_codex_hook_merge_rejects_unrelated_inline_hooks_without_creating_json(t
 
 
 def test_codex_hook_merge_rejects_partial_inline_hooks_without_writing(tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2246,11 +2317,8 @@ def test_codex_hook_merge_rejects_partial_inline_hooks_without_writing(tmp_path)
     ],
 )
 def test_codex_hooks_feature_state_obeys_canonical_precedence(tmp_path, features, expected):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     config = tmp_path / "config.toml"
@@ -2262,11 +2330,8 @@ def test_codex_hooks_feature_state_obeys_canonical_precedence(tmp_path, features
 
 def test_codex_hook_command_reports_disabled_without_writing(tmp_path, capsys):
     import argparse
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     source = ROOT / "integrations" / "codex" / "hooks.json"
@@ -2285,11 +2350,8 @@ def test_codex_hook_command_reports_disabled_without_writing(tmp_path, capsys):
 
 @pytest.mark.parametrize("quoted", [False, True], ids=["dotted", "quoted"])
 def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     config = tmp_path / "config.toml"
@@ -2321,11 +2383,8 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
     ],
 )
 def test_codex_mcp_config_state_distinguishes_absent_and_conflicting(tmp_path, body, expected):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     config = tmp_path / "config.toml"
@@ -2338,14 +2397,24 @@ def test_codex_installers_use_official_hooks_and_request_trust_review():
     shell = (ROOT / "install.sh").read_text(encoding="utf-8")
     powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
 
-    for installer in (shell, powershell):
-        assert "integrations/codex/hooks.json" in installer.replace("\\", "/")
-        assert "codex_memory.py" in installer
-        assert "hooks-state" in installer
-        assert "--config" in installer
-        assert "/hooks" in installer
-        assert "trust" in installer.casefold()
-    assert "not installed automatically" in powershell.casefold()
+    assert (
+        _unmet_codex_installer_checks(shell),
+        _unmet_codex_installer_checks(powershell),
+        "not installed automatically" in powershell.casefold(),
+    ) == ([], [], True)
+
+
+def _unmet_codex_installer_checks(installer: str) -> list[tuple[str, bool]]:
+    return _unmet_substrings(
+        (
+            ("integrations/codex/hooks.json", installer.replace("\\", "/"), True),
+            ("codex_memory.py", installer, True),
+            ("hooks-state", installer, True),
+            ("--config", installer, True),
+            ("/hooks", installer, True),
+            ("trust", installer.casefold(), True),
+        )
+    )
 
 
 def _shell_function(source: str, name: str) -> str:
@@ -2411,6 +2480,11 @@ def windows_fake_uv(tmp_path_factory):
         "}\n",
         encoding="utf-8",
     )
+    return _compiled_fake_uv(compiler, source, executable)
+
+
+def _compiled_fake_uv(compiler: str, source: Path, executable: Path) -> Path:
+    """Compile the C# fake `uv`, or skip where the compiler cannot."""
     try:
         compiled = subprocess.run(
             [
@@ -2525,9 +2599,7 @@ def _bash_search_paths() -> list[str | None]:
 
 def _bash_runs(bash: str) -> bool:
     try:
-        result = subprocess.run(
-            [bash, "--version"], capture_output=True, timeout=5, check=False
-        )
+        result = subprocess.run([bash, "--version"], capture_output=True, timeout=5, check=False)
     except OSError:
         return False
     return result.returncode == 0
@@ -2538,6 +2610,18 @@ def _working_bash_at(search_path: str | None) -> str | None:
     if bash is None or not _bash_runs(bash):
         return None
     return bash
+
+
+def _require_bash() -> str:
+    """A working bash, or skip the test that needs one."""
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    return bash
+
+
+def _shell_functions(source: str, *names: str) -> str:
+    return "\n".join(_shell_function(source, name) for name in names)
 
 
 def _find_working_bash() -> str | None:
@@ -2558,9 +2642,7 @@ def _find_working_bash() -> str | None:
 def test_unix_installer_trusts_smoke_exit_status(
     tmp_path, fake_exit, fake_output, expected_exit, expected_marker
 ):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2603,9 +2685,7 @@ def test_unix_installer_trusts_smoke_exit_status(
 
 
 def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2648,9 +2728,6 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     elapsed = time.monotonic() - started
 
     assert result.returncode == 1, result.stderr
-    assert (tmp_path / "failed.message").read_text() == (
-        f"Production smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s; installation aborted"
-    )
     # The child must be gone because the installer killed it, not because it
     # ran out of work of its own. Those two look identical in the marker alone,
     # and the clock tells them apart: a run that lasts as long as the fake `uv`
@@ -2663,8 +2740,15 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
         f"against a {_FAKE_UV_SLEEP_SECONDS}s child; {_child_state(tmp_path)}; "
         f"stderr={result.stderr[-400:]!r}"
     )
-    assert not (tmp_path / "passed.marker").exists()
-    assert not (tmp_path / "continued.marker").exists()
+    assert (
+        (tmp_path / "failed.message").read_text(),
+        (tmp_path / "passed.marker").exists(),
+        (tmp_path / "continued.marker").exists(),
+    ) == (
+        f"Production smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s; installation aborted",
+        False,
+        False,
+    )
     # Named last and with its evidence: this is the assertion that fails when a
     # loaded machine keeps the child off the CPU for the whole half-second the
     # installer waits before escalating to KILL. Without the evidence the
@@ -2677,9 +2761,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     [("HUP", 129), ("INT", 130), ("TERM", 143)],
 )
 def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, expected_exit):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2753,17 +2835,23 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
     )
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "installer.status").read_text() == str(expected_exit)
-    assert (tmp_path / "child.stopped").exists()
-    assert not (tmp_path / "child.completed").exists()
-    assert not (tmp_path / "child.alive").exists()
-    assert not continued.exists()
+    assert (
+        (tmp_path / "installer.status").read_text(),
+        (tmp_path / "child.stopped").exists(),
+        not (tmp_path / "child.completed").exists(),
+        not (tmp_path / "child.alive").exists(),
+        not continued.exists(),
+    ) == (
+        str(expected_exit),
+        True,
+        True,
+        True,
+        True,
+    )
 
 
 def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2838,9 +2926,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
 
 
 def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -2916,19 +3002,26 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "installer.status").read_text() == "1"
-    assert (tmp_path / "survivors").read_text() == ""
-    assert (tmp_path / "failed.marker").exists()
-    assert not (tmp_path / "passed.marker").exists()
-    assert (tmp_path / "monitor-restored.marker").exists()
-    assert not (tmp_path / "continued.marker").exists()
+    assert (
+        (tmp_path / "installer.status").read_text(),
+        (tmp_path / "survivors").read_text(),
+        (tmp_path / "failed.marker").exists(),
+        not (tmp_path / "passed.marker").exists(),
+        (tmp_path / "monitor-restored.marker").exists(),
+        not (tmp_path / "continued.marker").exists(),
+    ) == (
+        "1",
+        "",
+        True,
+        True,
+        True,
+        True,
+    )
 
 
 @pytest.mark.parametrize("stop_signal", ["STOP", "TTIN"])
 def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, stop_signal):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -3022,32 +3115,41 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (tmp_path / "hung.marker").exists()
-    assert (tmp_path / "installer.status").read_text() == "1"
-    assert (tmp_path / "survivors").read_text() == ""
-    assert (tmp_path / "failed.marker").exists()
-    assert not (tmp_path / "passed.marker").exists()
-    assert (tmp_path / "monitor-restored.marker").exists()
-    assert not (tmp_path / "monitor-wrong.marker").exists()
-    assert not (tmp_path / "continued.marker").exists()
-    assert result.stdout == ""
-    assert result.stderr == ""
+    assert (
+        not (tmp_path / "hung.marker").exists(),
+        (tmp_path / "installer.status").read_text(),
+        (tmp_path / "survivors").read_text(),
+        (tmp_path / "failed.marker").exists(),
+        not (tmp_path / "passed.marker").exists(),
+        (tmp_path / "monitor-restored.marker").exists(),
+        not (tmp_path / "monitor-wrong.marker").exists(),
+        not (tmp_path / "continued.marker").exists(),
+        result.stdout,
+        result.stderr,
+    ) == (
+        True,
+        "1",
+        "",
+        True,
+        True,
+        True,
+        True,
+        True,
+        "",
+        "",
+    )
 
 
 def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = "\n".join(
-        _shell_function(source, name)
-        for name in (
-            "restore_test_monitor_mode",
-            "test_tree_alive",
-            "stop_test_child",
-            "stop_test_timer",
-            "wait_test_child",
-        )
+    functions = _shell_functions(
+        source,
+        "restore_test_monitor_mode",
+        "test_tree_alive",
+        "stop_test_child",
+        "stop_test_timer",
+        "wait_test_child",
     )
     runner = tmp_path / "exercise-stopped-wait.sh"
     runner.write_text(
@@ -3100,31 +3202,41 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stderr == ""
-    assert (tmp_path / "status").read_text() == "149"
-    assert (tmp_path / "state").read_text() == ":"
-    assert (tmp_path / "monitor-restored").exists()
+    assert (
+        result.stderr,
+        (tmp_path / "status").read_text(),
+        (tmp_path / "state").read_text(),
+        (tmp_path / "monitor-restored").exists(),
+    ) == (
+        "",
+        "149",
+        ":",
+        True,
+    )
     calls = (tmp_path / "calls").read_text().splitlines()
     assert calls.count("wait 4242") == 2
-    assert "kill -s TERM -- -4242" in calls
-    assert "kill -s CONT -- -4242" in calls
-    assert "kill -s KILL -- -4242" in calls
+    assert (
+        _unmet_substrings(
+            (
+                ("kill -s TERM -- -4242", calls, True),
+                ("kill -s CONT -- -4242", calls, True),
+                ("kill -s KILL -- -4242", calls, True),
+            )
+        )
+        == []
+    )
 
 
 def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = "\n".join(
-        _shell_function(source, name)
-        for name in (
-            "restore_test_monitor_mode",
-            "test_tree_alive",
-            "stop_test_child",
-            "stop_test_timer",
-            "handle_test_signal",
-        )
+    functions = _shell_functions(
+        source,
+        "restore_test_monitor_mode",
+        "test_tree_alive",
+        "stop_test_child",
+        "stop_test_timer",
+        "handle_test_signal",
     )
     runner = tmp_path / "exercise-signal-mode-restore.sh"
     runner.write_text(
@@ -3162,20 +3274,23 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stderr == ""
-    assert (tmp_path / "status").read_text() == "143"
-    assert (tmp_path / "monitor-restored").exists()
-    assert not (tmp_path / "monitor-wrong").exists()
+    assert (
+        result.stderr,
+        (tmp_path / "status").read_text(),
+        (tmp_path / "monitor-restored").exists(),
+        not (tmp_path / "monitor-wrong").exists(),
+    ) == (
+        "",
+        "143",
+        True,
+        True,
+    )
 
 
 def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
-    bash = _find_working_bash()
-    if bash is None:
-        pytest.skip("bash unavailable")
+    bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    functions = "\n".join(
-        _shell_function(source, name) for name in ("test_tree_alive", "stop_test_child")
-    )
+    functions = _shell_functions(source, "test_tree_alive", "stop_test_child")
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
         textwrap.dedent(
@@ -3211,11 +3326,24 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls").read_text().splitlines()
-    assert "kill -s TERM -- -4242" in calls
-    assert "kill -s KILL -- -4242" in calls
-    assert calls.index("kill -s TERM -- -4242") < calls.index("kill -s KILL -- -4242")
-    assert calls.count("sleep 0.1") == 5
-    assert calls[-1] == "wait 4242"
+    assert (
+        _unmet_substrings(
+            (
+                ("kill -s TERM -- -4242", calls, True),
+                ("kill -s KILL -- -4242", calls, True),
+            )
+        )
+        == []
+    )
+    assert (
+        calls.index("kill -s TERM -- -4242") < calls.index("kill -s KILL -- -4242"),
+        calls.count("sleep 0.1"),
+        calls[-1],
+    ) == (
+        True,
+        5,
+        "wait 4242",
+    )
 
 
 @pytest.mark.parametrize(
@@ -3277,8 +3405,15 @@ def test_windows_installer_trusts_smoke_exit_status(
     )
 
     assert result.returncode == expected_exit, result.stderr
-    assert expected_marker in result.stdout
-    assert fake_output in result.stdout
+    assert (
+        _unmet_substrings(
+            (
+                (expected_marker, result.stdout, True),
+                (fake_output, result.stdout, True),
+            )
+        )
+        == []
+    )
 
 
 def _windows_process_survived(pid_file: Path) -> bool:
@@ -3381,14 +3516,25 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
             check=False,
         )
 
-    assert result.returncode != 0
-    assert b"injected installer interruption" in error_log.read_bytes()
-    assert started.exists()
-    assert python_started.exists()
-    assert not later.exists()
+    assert (
+        result.returncode != 0,
+        b"injected installer interruption" in error_log.read_bytes(),
+        started.exists(),
+        python_started.exists(),
+        later.exists(),
+    ) == (True, True, True, True, False)
 
     survivors = _windows_survivors((("uv", uv_pid_file), ("python", python_pid_file)))
     assert not survivors, f"native process tree survived installer cleanup: {survivors}"
+
+
+def _mcp_config_kept(config: Path, scenario: str, original: str, before: bytes) -> bool:
+    """An absent entry is appended after the original text; any other config is untouched."""
+    if scenario == "absent":
+        return config.read_text(encoding="utf-8").startswith(original) and (
+            config.read_bytes() != before
+        )
+    return config.read_bytes() == before
 
 
 def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
@@ -3454,12 +3600,10 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     )
 
     assert result.returncode == expected_exit, result.stderr
-    if scenario == "absent":
-        assert config.read_text(encoding="utf-8").startswith(original)
-        assert config.read_bytes() != before
-    else:
-        assert config.read_bytes() == before
-    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 1
+    assert (
+        _mcp_config_kept(config, scenario, original, before),
+        config.read_text(encoding="utf-8").count("[mcp_servers."),
+    ) == (True, 1)
 
 
 @pytest.mark.parametrize(
@@ -3512,12 +3656,10 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
     )
 
     assert result.returncode == expected_exit, result.stderr
-    if scenario == "absent":
-        assert config.read_text(encoding="utf-8").startswith(original)
-        assert config.read_bytes() != before
-    else:
-        assert config.read_bytes() == before
-    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 1
+    assert (
+        _mcp_config_kept(config, scenario, original, before),
+        config.read_text(encoding="utf-8").count("[mcp_servers."),
+    ) == (True, 1)
 
 
 def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path):
@@ -3566,6 +3708,7 @@ def test_unix_installer_probe_reports_absent_without_touching_the_file(tmp_path)
     assert result.stdout.strip() == "absent"
     assert destination.read_bytes() == before
 
+
 def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_path):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
@@ -3607,6 +3750,7 @@ def test_unix_installer_probe_reports_conflict_for_unrelated_inline_hooks(tmp_pa
 
     assert result.stdout.strip() == "conflict"
     assert destination.read_bytes() == before
+
 
 def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_path):
     """The probe replaced a merge: it must answer and change nothing."""
@@ -3656,6 +3800,7 @@ def test_windows_installer_probe_reports_absent_without_touching_the_file(tmp_pa
     assert result.stdout.strip() == "absent"
     assert destination.read_bytes() == before
 
+
 def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_path):
     source = ROOT / "install.ps1"
     home = tmp_path / "home"
@@ -3701,6 +3846,7 @@ def test_windows_installer_probe_reports_conflict_for_partial_inline_hooks(tmp_p
     assert result.stdout.strip() == "conflict"
     assert destination.read_bytes() == before
 
+
 def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path):
     bash = Path(r"C:\Program Files\Git\bin\bash.exe")
     if not bash.exists():
@@ -3739,6 +3885,7 @@ def test_unix_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path)
 
     assert result.stdout.strip() == "disabled"
     assert destination.read_bytes() == before
+
 
 def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_path):
     source = ROOT / "install.ps1"
@@ -3784,6 +3931,7 @@ def test_windows_installer_probe_reports_disabled_when_the_feature_is_off(tmp_pa
     assert result.stdout.strip() == "disabled"
     assert destination.read_bytes() == before
 
+
 def test_codex_wrapper_is_labeled_compatibility_heartbeat_fallback():
     wrapper = (ROOT / "scripts" / "codex-memory-wrapper.ps1").read_text(encoding="utf-8")
     assert "compatibility fallback" in wrapper.casefold()
@@ -3792,11 +3940,8 @@ def test_codex_wrapper_is_labeled_compatibility_heartbeat_fallback():
 
 
 def test_opencode_host_directory_maps_directly_to_worktree_or_null():
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     from integration_adapter import normalize_event
 
     supplied = normalize_event(
@@ -3888,35 +4033,48 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(
         timeout=10,
         check=False,
     )
-
     assert result.returncode == 0, result.stderr
     observed = json.loads(result.stdout)
     payload = json.loads(observed["commands"][0]["stdin"])
-    assert payload["directory"] == directory
-    assert payload["transcript_text"].startswith("m8-")
-    assert "m7-" not in payload["transcript_text"]
-    assert len(payload["transcript_text"]) <= 8000
-    assert observed["requests"][0]["query"]["limit"] == 12
-    assert observed["commands"][1]["stdin"]
     compact_payload = json.loads(observed["commands"][1]["stdin"])
-    assert compact_payload["transcript_text"].startswith("m8-")
-    assert "## Health" in observed["system"][0]
-    assert "project:demo" in observed["system"][0]
-    assert "sequence:7" in observed["system"][0]
-    assert observed["commands"][0]["args"] == [
-        "uv",
-        "run",
-        "--locked",
-        "--no-sync",
-        "--directory",
-        root,
-        "python",
-        f"{root}/scripts/integration_adapter.py",
-        "--source",
-        "opencode",
-        "--event",
-        "session_end",
-    ]
+    assert (
+        payload["directory"],
+        payload["transcript_text"].startswith("m8-"),
+        "m7-" in payload["transcript_text"],
+        len(payload["transcript_text"]) <= 8000,
+        observed["requests"][0]["query"]["limit"],
+        compact_payload["transcript_text"].startswith("m8-"),
+        _unmet_substrings(
+            (
+                ("## Health", observed["system"][0], True),
+                ("project:demo", observed["system"][0], True),
+                ("sequence:7", observed["system"][0], True),
+            )
+        ),
+        observed["commands"][0]["args"],
+    ) == (
+        directory,
+        True,
+        False,
+        True,
+        12,
+        True,
+        [],
+        [
+            "uv",
+            "run",
+            "--locked",
+            "--no-sync",
+            "--directory",
+            root,
+            "python",
+            f"{root}/scripts/integration_adapter.py",
+            "--source",
+            "opencode",
+            "--event",
+            "session_end",
+        ],
+    )
 
 
 def test_opencode_node_harness_times_out_stalled_capture(tmp_path, opencode_plugin_url: str):
@@ -4004,21 +4162,24 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
 
     assert result.returncode == 0, result.stderr
     tool, idle = json.loads(result.stdout)
-    assert tool["changed"] is True
-    assert tool["dirty"] is True
-    assert tool["significant"] is True
-    assert idle["dirty"] is True
-    for payload in (tool, idle):
-        assert "token_percent" not in payload
-        assert "compaction_confirmed" not in payload
+    assert (
+        tool["changed"] is True,
+        tool["dirty"] is True,
+        tool["significant"] is True,
+        idle["dirty"] is True,
+        _progress_signal_keys(tool, idle),
+    ) == (True, True, True, True, [])
+
+
+def _progress_signal_keys(*payloads: dict) -> list[str]:
+    """Signals a host did not supply must not appear as if it had."""
+    names = ("token_percent", "compaction_confirmed")
+    return [name for payload in payloads for name in names if name in payload]
 
 
 def test_codex_project_state_observes_session_start_before_recovery(monkeypatch, tmp_path):
-    import sys
 
-    scripts = ROOT / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    _ensure_scripts_on_path()
     import codex_memory
 
     calls = []
@@ -4110,18 +4271,22 @@ def test_install_scripts_generate_context(tmp_path):
     """
     install_ps1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
     install_sh = (ROOT / "install.sh").read_text(encoding="utf-8")
-    assert "session_start_context" in install_ps1, (
-        "install.ps1 must call session_start_context.py during OpenCode setup"
+    # Both installers call session_start_context.py during OpenCode setup.
+    assert (
+        _unmet_substrings(
+            (
+                ("session_start_context", install_ps1, True),
+                ("session_start_context", install_sh, True),
+                ("sync-args", install_sh, True),
+                ("sync-args", install_ps1, True),
+                ("--locked", install_sh, True),
+                ("--no-default-groups", install_sh, True),
+                ("--locked", install_ps1, True),
+                ("--no-default-groups", install_ps1, True),
+            )
+        )
+        == []
     )
-    assert "session_start_context" in install_sh, (
-        "install.sh must call session_start_context.py during OpenCode setup"
-    )
-    assert "sync-args" in install_sh
-    assert "sync-args" in install_ps1
-    assert "--locked" in install_sh
-    assert "--no-default-groups" in install_sh
-    assert "--locked" in install_ps1
-    assert "--no-default-groups" in install_ps1
 
     sh_codex = install_sh.split("# Codex CLI", 1)[1].split("# Claude Code", 1)[0]
     sh_claude = install_sh.split("# Claude Code", 1)[1].split("# OpenCode configuration", 1)[0]
@@ -4130,34 +4295,35 @@ def test_install_scripts_generate_context(tmp_path):
     ps_claude = install_ps1.split("# Claude Code", 1)[1].split("# --- 8.", 1)[0]
     ps_opencode = install_ps1.split("# OpenCode", 1)[1].split("# Codex", 1)[0]
 
-    assert 'CLAUDE_MCP="$HOME/.claude.json"' in sh_claude
     assert (
-        '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory"'
-        in sh_claude
+        _unmet_substrings(
+            (
+                ('CLAUDE_MCP="$HOME/.claude.json"', sh_claude, True),
+                (
+                    '"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory"',
+                    sh_claude,
+                    True,
+                ),
+                (".claude/.mcp.json", install_sh, False),
+                ("Existing ~/.claude.json found without llm-wiki", sh_claude, True),
+                ("grep -q '\"llm-wiki\"'", sh_claude, True),
+                ("scripts/installer_config.py", sh_opencode, True),
+                ("opencode", sh_opencode, True),
+                ('--root "$VAULT_ROOT"', sh_opencode, True),
+                ('--state-root "$STATE_ROOT"', sh_opencode, True),
+                ('--cwd "$CALLER_CWD"', sh_opencode, True),
+                ("active)", sh_opencode, True),
+                ("conflict)", sh_opencode, True),
+                ("configured_unverified)", sh_opencode, True),
+                ("not_detected)", sh_opencode, True),
+                ("OPENCODE_CONFIG=", sh_opencode, False),
+                ("grep", sh_opencode, False),
+            )
+        )
+        == []
     )
-    assert ".claude/.mcp.json" not in install_sh
-    assert "Existing ~/.claude.json found without llm-wiki" in sh_claude
-    assert "grep -q '\"llm-wiki\"'" in sh_claude
 
-    assert "scripts/installer_config.py" in sh_opencode
-    assert "opencode" in sh_opencode
-    assert '--root "$VAULT_ROOT"' in sh_opencode
-    assert '--state-root "$STATE_ROOT"' in sh_opencode
-    assert '--cwd "$CALLER_CWD"' in sh_opencode
-    assert "active)" in sh_opencode
-    assert "conflict)" in sh_opencode
-    assert "configured_unverified)" in sh_opencode
-    assert "not_detected)" in sh_opencode
-    assert "OPENCODE_CONFIG=" not in sh_opencode
-    assert "grep" not in sh_opencode
-
-    def parse_shell_json(block: str, destination: str) -> dict:
-        line = next(line for line in block.splitlines() if f'> "${destination}"' in line)
-        match = re.search(r"printf '%s\\n' '(.*?)'\"\$VAULT_JSON\"'(.*?)' >", line)
-        assert match, line
-        return json.loads(match.group(1) + '"ROOT"' + match.group(2))
-
-    claude_json = parse_shell_json(sh_claude, "CLAUDE_MCP")
+    claude_json = _parse_shell_json(sh_claude, "CLAUDE_MCP")
     assert claude_json == {
         "mcpServers": {
             "llm-wiki": {
@@ -4175,59 +4341,79 @@ def test_install_scripts_generate_context(tmp_path):
         }
     }
     sh_codex_mcp = _shell_function(install_sh, "configure_codex_mcp")
-    assert 'CODEX_CONFIG="$HOME/.codex/config.toml"' in sh_codex
-    assert "config-state" in sh_codex_mcp
-    assert "[mcp_servers.llm-wiki]" in sh_codex_mcp
-    assert 'command = "uv"' in sh_codex_mcp
-    assert 'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"' in sh_codex_mcp
-    assert "config.bak" in sh_codex_mcp
-    assert "grep" not in sh_codex_mcp
-    assert "$CODEX_HOOKS_STATE" in sh_codex
-    assert "codex_inline_hooks_state" in install_sh
-    assert "hooks-state" in install_sh
+    assert (
+        _unmet_substrings(
+            (
+                ('CODEX_CONFIG="$HOME/.codex/config.toml"', sh_codex, True),
+                ("config-state", sh_codex_mcp, True),
+                ("[mcp_servers.llm-wiki]", sh_codex_mcp, True),
+                ('command = "uv"', sh_codex_mcp, True),
+                (
+                    'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"',
+                    sh_codex_mcp,
+                    True,
+                ),
+                ("config.bak", sh_codex_mcp, True),
+                ("grep", sh_codex_mcp, False),
+                ("$CODEX_HOOKS_STATE", sh_codex, True),
+                ("codex_inline_hooks_state", install_sh, True),
+                ("hooks-state", install_sh, True),
+                (
+                    '$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"',
+                    install_ps1,
+                    True,
+                ),
+                ("$claudeMcp = $claudeUserConfig", ps_claude, True),
+                ("mcpServers = [ordered]@{", ps_claude, True),
+                (".claude\\.mcp.json", install_ps1, False),
+                ("Existing ~/.claude.json found without llm-wiki", ps_claude, True),
+                ("-notmatch '\"llm-wiki\"\\s*:'", ps_claude, True),
+                ("scripts\\installer_config.py", ps_opencode, True),
+                ('"opencode", "--root", $VAULT_ROOT', ps_opencode, True),
+                ('"--state-root", $STATE_ROOT', ps_opencode, True),
+                ('"--cwd", $callerDirectory', ps_opencode, True),
+                ('"active" {', ps_opencode, True),
+                ('"conflict" {', ps_opencode, True),
+                ('"configured_unverified" {', ps_opencode, True),
+                ('"not_detected" {', ps_opencode, True),
+                ("$openCodeMcp", ps_opencode, False),
+                ("-notmatch", ps_opencode, False),
+                ('$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"', ps_codex, True),
+                ("function Install-CodexMcp", install_ps1, True),
+                ("config-state", install_ps1, True),
+                ("[mcp_servers.llm-wiki]", install_ps1, True),
+                ('command = "uv"', install_ps1, True),
+                ('args = ["run", "--locked", "--no-sync", "--directory"', install_ps1, True),
+                ("Copy-Item -LiteralPath $Config", install_ps1, True),
+                ("Config.bak", install_ps1, True),
+                ("codex-memory-wrapper", ps_codex, True),
+                ("$codexHooksState", ps_codex, True),
+                ("hooks-state", install_ps1, True),
+                ("v4.0 optional features", install_sh, False),
+                ("mcp-server", install_sh.split("Useful commands:", 1)[-1], False),
+                ("function Write-Utf8NoBom", install_ps1, True),
+                ("[System.IO.File]::WriteAllText", install_ps1, True),
+                ("[System.Text.UTF8Encoding]::new($false)", install_ps1, True),
+                ("Write-Utf8NoBom $claudeMcp", ps_claude, True),
+                ("Set-Content -LiteralPath $claudeMcp", ps_claude, False),
+                ("Add-Content -LiteralPath $claudeMcp", ps_claude, False),
+                ("Set-Content -LiteralPath $Config", install_ps1, False),
+                ("Add-Content -LiteralPath $Config", install_ps1, False),
+            )
+        )
+        == []
+    )
 
-    assert '$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"' in install_ps1
-    assert "$claudeMcp = $claudeUserConfig" in ps_claude
-    assert "mcpServers = [ordered]@{" in ps_claude
-    assert ".claude\\.mcp.json" not in install_ps1
-    assert "Existing ~/.claude.json found without llm-wiki" in ps_claude
-    assert "-notmatch '\"llm-wiki\"\\s*:'" in ps_claude
 
-    assert "scripts\\installer_config.py" in ps_opencode
-    assert '"opencode", "--root", $VAULT_ROOT' in ps_opencode
-    assert '"--state-root", $STATE_ROOT' in ps_opencode
-    assert '"--cwd", $callerDirectory' in ps_opencode
-    assert '"active" {' in ps_opencode
-    assert '"conflict" {' in ps_opencode
-    assert '"configured_unverified" {' in ps_opencode
-    assert '"not_detected" {' in ps_opencode
-    assert "$openCodeMcp" not in ps_opencode
-    assert "-notmatch" not in ps_opencode
+def _parse_shell_json(block: str, destination: str) -> dict:
+    line = next(line for line in block.splitlines() if f'> "${destination}"' in line)
+    match = re.search(r"printf '%s\\n' '(.*?)'\"\$VAULT_JSON\"'(.*?)' >", line)
+    assert match, line
+    return json.loads(match.group(1) + '"ROOT"' + match.group(2))
 
-    assert '$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"' in ps_codex
-    assert "function Install-CodexMcp" in install_ps1
-    assert "config-state" in install_ps1
-    assert "[mcp_servers.llm-wiki]" in install_ps1
-    assert 'command = "uv"' in install_ps1
-    assert 'args = ["run", "--locked", "--no-sync", "--directory"' in install_ps1
-    assert "Copy-Item -LiteralPath $Config" in install_ps1
-    assert "Config.bak" in install_ps1
-    assert "codex-memory-wrapper" in ps_codex
-    assert "$codexHooksState" in ps_codex
-    assert "hooks-state" in install_ps1
 
-    assert "v4.0 optional features" not in install_sh
-    assert "mcp-server" not in install_sh.split("Useful commands:", 1)[-1]
-
-    assert "function Write-Utf8NoBom" in install_ps1
-    assert "[System.IO.File]::WriteAllText" in install_ps1
-    assert "[System.Text.UTF8Encoding]::new($false)" in install_ps1
-    for block, config_var in ((ps_claude, "$claudeMcp"),):
-        assert f"Write-Utf8NoBom {config_var}" in block
-        assert f"Set-Content -LiteralPath {config_var}" not in block
-        assert f"Add-Content -LiteralPath {config_var}" not in block
-    assert "Set-Content -LiteralPath $Config" not in install_ps1
-    assert "Add-Content -LiteralPath $Config" not in install_ps1
+def test_windows_installer_resolves_one_external_state_root(tmp_path):
+    """Resolve-StateRoot keeps an external state root, from the process or the user."""
     install_path = ROOT / "install.ps1"
     external = str(tmp_path / "external runtime")
     vault = str(tmp_path / "vault")
@@ -4320,16 +4506,23 @@ def test_windows_scheduler_payload_carries_exact_roots_and_uv(tmp_path):
     quoted_root = root.replace("'", "''")
     quoted_state = state.replace("'", "''")
     quoted_uv = uv_path.replace("'", "''")
-    assert Path(value["Execute"]).name.casefold() in {
-        "pwsh",
-        "pwsh.exe",
-        "powershell.exe",
-    }
-    assert "-Kind 'nightly'" in decoded
-    assert f"-VaultRoot '{quoted_root}'" in decoded
-    assert f"-StateRoot '{quoted_state}'" in decoded
-    assert f"-UvPath '{quoted_uv}'" in decoded
-    assert str(runner).replace("'", "''") in decoded
+    assert (
+        _unmet_substrings(
+            (
+                (
+                    Path(value["Execute"]).name.casefold(),
+                    {"pwsh", "pwsh.exe", "powershell.exe"},
+                    True,
+                ),
+                ("-Kind 'nightly'", decoded, True),
+                (f"-VaultRoot '{quoted_root}'", decoded, True),
+                (f"-StateRoot '{quoted_state}'", decoded, True),
+                (f"-UvPath '{quoted_uv}'", decoded, True),
+                (str(runner).replace("'", "''"), decoded, True),
+            )
+        )
+        == []
+    )
 
 
 def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path):

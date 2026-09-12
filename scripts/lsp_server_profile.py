@@ -55,7 +55,10 @@ READINESS_WORK_DONE_PROGRESS = "work-done-progress"
 _READINESS_POLICIES = frozenset({READINESS_INITIALIZED, READINESS_WORK_DONE_PROGRESS})
 
 # A pinned artifact is identified by an npm-style Subresource Integrity string.
-_INTEGRITY_PREFIX = "sha512-"
+# npm publishes sha512 Subresource Integrity; go.dev publishes sha256. Both are
+# SRI strings and both name their algorithm, so the prefix selects the hash
+# rather than the module assuming one.
+INTEGRITY_ALGORITHMS = ("sha512-", "sha256-")
 _SHA256_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
@@ -94,8 +97,8 @@ def _require_tuple_of_text(value: object, label: str) -> tuple[str, ...]:
 
 def _require_integrity(value: object) -> str:
     text = _require_text(value, "package_integrity")
-    if not text.startswith(_INTEGRITY_PREFIX):
-        raise ProfileError("package_integrity must be a sha512 SRI string")
+    if not text.startswith(INTEGRITY_ALGORITHMS):
+        raise ProfileError("package_integrity must be a sha256 or sha512 SRI string")
     return text
 
 
@@ -114,12 +117,42 @@ def _require_node_major(value: object) -> int:
     return value
 
 
+def _require_runtime_choice(node_major: object, native: object) -> None:
+    """A profile is a Node program or a native executable, never both or neither.
+
+    Every managed server was a Node program until gopls; the runtime is now a
+    property of the profile instead of an assumption of the module. Research:
+    `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+    if not isinstance(native, bool):
+        raise ProfileError("native must be a boolean")
+    if native == (node_major is not None):
+        raise ProfileError("a profile declares either node_major or native")
+
+
 def _require_node_minor(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ProfileError("node_minor_floor must be an integer")
     if value < 0:
         raise ProfileError("node_minor_floor must not be negative")
     return value
+
+
+# `platform.machine()` answers `x86_64` on Linux and `AMD64` on Windows for the
+# same processor, and `arm64`/`aarch64` for the same one again. The archives are
+# named by one spelling each, so both sides are normalized before comparison.
+_MACHINE_ALIASES = {
+    "amd64": "x86_64",
+    "x64": "x86_64",
+    "aarch64": "arm64",
+}
+
+
+def normalized_platform(system: str, machine: str) -> tuple[str, str]:
+    """One spelling of an operating system and a processor."""
+    name = str(system).strip().lower()
+    processor = str(machine).strip().lower()
+    return (name, _MACHINE_ALIASES.get(processor, processor))
 
 
 _SCALAR_TYPES = (bool, int, str)
@@ -232,6 +265,120 @@ class PackageLaunch:
 
 
 @dataclass(frozen=True, slots=True)
+class PlatformArtifact:
+    """One platform's copy of an artifact that is not one file for everybody.
+
+    The npm pins are platform-neutral; a Go toolchain is not. Each row names
+    the archive for one `(system, machine)` pair by digest and by size, so the
+    pin is checkable from the source rather than from whatever the running
+    machine happens to download.
+    """
+
+    system: str
+    machine: str
+    url: str
+    integrity: str
+    size: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.system, "platform_artifact.system")
+        _require_text(self.machine, "platform_artifact.machine")
+        url = _require_text(self.url, "platform_artifact.url")
+        if not url.startswith("https://"):
+            raise ProfileError("platform_artifact.url must be https")
+        _require_integrity(self.integrity)
+        self._check_size()
+
+    def _check_size(self) -> None:
+        if not isinstance(self.size, int) or isinstance(self.size, bool):
+            raise ProfileError("platform_artifact.size must be an integer")
+        if self.size <= 0:
+            raise ProfileError("platform_artifact.size must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class ServerComponent:
+    """One more archive an install needs, with where its payload belongs.
+
+    Rust publishes its analyzer, its compiler, its standard library, its
+    sources and cargo as five archives of one release, and rust-analyzer needs
+    all of them to answer. Each is a `rust-installer` bundle whose payload sits
+    under `<archive-root>/<component>/`, so `strip_components` drops those two
+    and `prefix` says where the rest lands inside the managed root. Research:
+    `docs/research/2026-09-12-installing-rust-for-precise-navigation.md`.
+    """
+
+    name: str
+    prefix: Path
+    artifacts: tuple[PlatformArtifact, ...]
+    strip_components: int = 0
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "component.name")
+        _require_relative(self.prefix, "component.prefix")
+        self._check_artifacts()
+        self._check_strip()
+
+    def _check_artifacts(self) -> None:
+        if not isinstance(self.artifacts, tuple) or not self.artifacts:
+            raise ProfileError("component.artifacts must be a non-empty tuple")
+        if any(not isinstance(item, PlatformArtifact) for item in self.artifacts):
+            raise ProfileError("component.artifacts must hold PlatformArtifact values")
+
+    def _check_strip(self) -> None:
+        if not isinstance(self.strip_components, int) or isinstance(
+            self.strip_components, bool
+        ):
+            raise ProfileError("component.strip_components must be an integer")
+        if self.strip_components < 0:
+            raise ProfileError("component.strip_components must not be negative")
+
+    def artifact_for_platform(
+        self, system: str, machine: str
+    ) -> PlatformArtifact | None:
+        """This platform's archive of the component, or None when none is pinned."""
+        wanted = normalized_platform(system, machine)
+        for artifact in self.artifacts:
+            if normalized_platform(artifact.system, artifact.machine) == wanted:
+                return artifact
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBuild:
+    """A server that is compiled at install time rather than unpacked.
+
+    gopls is published only as a Go module, so its install unpacks a pinned
+    toolchain and then builds one pinned module version with it. `module` and
+    `version` are what is built; `toolchain_relative` is the compiler inside
+    the unpacked archive; `binary_relative` is where the build writes the
+    server. Research:
+    `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+
+    module: str
+    version: str
+    toolchain_relative: Path
+    binary_relative: Path
+    timeout_seconds: float = 900.0
+
+    def __post_init__(self) -> None:
+        _require_text(self.module, "source_build.module")
+        _require_text(self.version, "source_build.version")
+        _require_relative(self.toolchain_relative, "source_build.toolchain_relative")
+        _require_relative(self.binary_relative, "source_build.binary_relative")
+        self._check_timeout()
+
+    def _check_timeout(self) -> None:
+        if not isinstance(self.timeout_seconds, (int, float)) or isinstance(
+            self.timeout_seconds, bool
+        ):
+            raise ProfileError("source_build.timeout_seconds must be a number")
+        if self.timeout_seconds <= 0:
+            raise ProfileError("source_build.timeout_seconds must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeOption:
     """An initialization option whose value is a path only known at install time.
 
@@ -318,7 +465,7 @@ class LanguageServerProfile:
     server_relative: Path
     managed_relative_root: Path
     install_manifest_schema: str
-    node_major: int
+    node_major: int | None
     launch_flags: tuple[str, ...]
     server_notifications: frozenset[str]
     configuration: object
@@ -332,6 +479,17 @@ class LanguageServerProfile:
     identity_notification: IdentityNotification | None = None
     package_launch: PackageLaunch | None = None
     configuration_names: tuple[str, ...] = ()
+    native: bool = False
+    platform_artifacts: tuple[PlatformArtifact, ...] = ()
+    source_build: SourceBuild | None = None
+    max_compressed_bytes: int | None = None
+    max_decompressed_bytes: int | None = None
+    max_members: int | None = None
+    environment_template: tuple[tuple[str, str], ...] = ()
+    max_member_bytes: int | None = None
+    components: tuple[ServerComponent, ...] = ()
+    strip_components: int = 0
+    install_prefix: Path | None = None
 
     def __post_init__(self) -> None:
         self._check_names()
@@ -378,12 +536,42 @@ class LanguageServerProfile:
             raise ProfileError("package_url must be https")
 
     def _check_runtime(self) -> None:
-        _require_node_major(self.node_major)
-        _require_node_minor(self.node_minor_floor)
+        _require_runtime_choice(self.node_major, self.native)
+        self._check_interpreter()
         _require_readiness(self.readiness)
         if not isinstance(self.server_notifications, frozenset):
             raise ProfileError("server_notifications must be a frozenset")
         _require_tuple_of_text(tuple(sorted(self.server_notifications)), "notification")
+
+    def _check_interpreter(self) -> None:
+        if self.native:
+            return
+        _require_node_major(self.node_major)
+        _require_node_minor(self.node_minor_floor)
+
+    def launch_environment(self, state_root: Path) -> dict[str, str]:
+        """This profile's own environment variables, with `{root}` filled in.
+
+        Empty for every Node profile. gopls is a compiler's client: it runs
+        `go list` while it answers, so its pinned toolchain has to be on the
+        `PATH` of the process and its caches have to sit inside the managed
+        root rather than in the operator's home directory.
+        """
+        root = self.managed_root(state_root)
+        return {
+            name: value.format(root=str(root))
+            for name, value in self.environment_template
+        }
+
+    def artifact_for_platform(
+        self, system: str, machine: str
+    ) -> PlatformArtifact | None:
+        """This platform's archive, or None when the profile pins one for all."""
+        wanted = normalized_platform(system, machine)
+        for artifact in self.platform_artifacts:
+            if normalized_platform(artifact.system, artifact.machine) == wanted:
+                return artifact
+        return None
 
     def managed_root(self, state_root: Path) -> Path:
         """Derive this profile's managed artifact root without creating it."""
@@ -402,10 +590,15 @@ class LanguageServerProfile:
         return f"{self.degradation_prefix}_{_require_text(reason, 'reason')}"
 
     def launch_command(self, node: Path, server: Path, owner: Path) -> tuple[str, ...]:
-        """Build the exact argv for this server under its owner scratch root."""
+        """Build the exact argv for this server under its owner scratch root.
+
+        A native profile is its own interpreter, so `node` is the executable
+        itself and appears once.
+        """
         _require_absolute_paths(node, server, owner)
         tail = self._owner_arguments(owner)
-        return (str(node), str(server), *self.launch_flags, *tail)
+        head = (str(server),) if self.native else (str(node), str(server))
+        return (*head, *self.launch_flags, *tail)
 
     def _owner_arguments(self, owner: Path) -> tuple[str, ...]:
         """The owner-scoped argument, joined as a path rather than as text.

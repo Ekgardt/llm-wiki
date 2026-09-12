@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -166,18 +167,23 @@ def _parse_timestamp(value: Any) -> datetime | None:
         raise ValueError("invalid integration event") from exc
 
 
+_TOOL_NAMES = {
+    "edit": "Edit",
+    "write": "Write",
+    "multi_edit": "MultiEdit",
+    "multiedit": "MultiEdit",
+    "notebook_edit": "NotebookEdit",
+    "notebookedit": "NotebookEdit",
+    "bash": "Bash",
+    "shell": "Bash",
+    # Codex edits files through `apply_patch`; its patch text is the command.
+    "apply_patch": "Edit",
+}
+_PATCHED_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+
+
 def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
-    tool_name = _first_string(raw.get("tool_name"), raw.get("tool")) or ""
-    tool_name = {
-        "edit": "Edit",
-        "write": "Write",
-        "multi_edit": "MultiEdit",
-        "multiedit": "MultiEdit",
-        "notebook_edit": "NotebookEdit",
-        "notebookedit": "NotebookEdit",
-        "bash": "Bash",
-        "shell": "Bash",
-    }.get(tool_name.lower(), tool_name)
+    raw_name = _first_string(raw.get("tool_name"), raw.get("tool")) or ""
     tool_input = raw.get("tool_input") if source != "opencode" else raw.get("input")
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
     target = (
@@ -189,7 +195,18 @@ def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
         )
         or ""
     )
-    return {"tool_name": tool_name, "target": target}
+    return {
+        "tool_name": _TOOL_NAMES.get(raw_name.lower(), raw_name),
+        "target": _tool_target(raw_name, target),
+    }
+
+
+def _tool_target(raw_name: str, target: str) -> str:
+    """A patch is named by the first file it touches, not by its text."""
+    if raw_name.lower() != "apply_patch":
+        return target
+    match = _PATCHED_FILE.search(target)
+    return match.group(1).strip() if match else target
 
 
 DELTA_SCALAR_NAMES = ("goal", "phase", "current_task")

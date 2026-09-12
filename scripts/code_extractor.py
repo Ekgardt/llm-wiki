@@ -27,7 +27,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v11"
+EXTRACTOR_VERSION = "code-extractor/v12"
 SCIP_DEFINITION_ROLE = 0x1
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
@@ -403,6 +403,119 @@ def _sqlite_aliases(tree: ast.Module) -> set[str]:
     }
 
 
+MAX_BINDINGS = 8
+MAX_BINDING_BYTES = 256
+MAX_ROUTE_PATH_BYTES = 512
+_HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
+_HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
+
+
+def _parameter_names(node: Mapping[str, object]) -> list[str]:
+    """The callee's parameters, read from the signature the node already carries."""
+    signature = str(node.get("metadata", {}).get("signature", ""))
+    inside = signature.partition("(")[2].rpartition(")")[0]
+    names = [part.partition(":")[0].strip() for part in inside.split(",")]
+    return [name for name in names if name]
+
+
+def _bound_parameters(node: Mapping[str, object]) -> list[str]:
+    names = _parameter_names(node)
+    if node.get("kind") == "method" and names:
+        return names[1:]
+    return names
+
+
+def _passed_name(value: ast.expr) -> str | None:
+    if isinstance(value, (ast.Name, ast.Attribute)):
+        return ast.unparse(value)
+    return None
+
+
+def _positional_bindings(node: ast.Call, parameters: list[str]) -> list[str]:
+    pairs = []
+    for index, argument in enumerate(node.args):
+        passed = _passed_name(argument)
+        if passed is not None and index < len(parameters):
+            pairs.append(f"{passed}->{parameters[index]}")
+    return pairs
+
+
+def _keyword_bindings(node: ast.Call, parameters: list[str]) -> list[str]:
+    pairs = []
+    for keyword in node.keywords:
+        passed = _passed_name(keyword.value)
+        if passed is not None and keyword.arg in parameters:
+            pairs.append(f"{passed}->{keyword.arg}")
+    return pairs
+
+
+def _argument_bindings(node: ast.Call, target: Mapping[str, object]) -> str:
+    """`argument->parameter` pairs of one call, bounded in count and bytes."""
+    parameters = _bound_parameters(target)
+    pairs = _positional_bindings(node, parameters) + _keyword_bindings(node, parameters)
+    if not pairs:
+        return ""
+    return _bounded_bindings(pairs)
+
+
+def _bounded_bindings(pairs: list[str]) -> str:
+    kept = pairs[:MAX_BINDINGS]
+    text = ",".join(kept)
+    while len(text.encode("utf-8")) > MAX_BINDING_BYTES and kept:
+        kept.pop()
+        text = ",".join(kept)
+    remaining = len(pairs) - len(kept)
+    if not remaining:
+        return text
+    return f"{text}+{remaining} more".lstrip(",")
+
+
+def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> str | None:
+    """The HTTP client module a `module.method(...)` call names, if it is one."""
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return None
+    module, _symbol = aliases.get(func.value.id, ("", ""))
+    if module.split(".")[0] not in _HTTP_CLIENT_MODULES:
+        return None
+    return module
+
+
+def _request_path(node: ast.Call) -> str | None:
+    target = _string_constant(next(iter(node.args), None))
+    if target is None or len(target.encode("utf-8")) > MAX_ROUTE_PATH_BYTES:
+        return None
+    return _url_path(target)
+
+
+def _url_path(target: str) -> str | None:
+    if not target.startswith(("http://", "https://")):
+        return target or None
+    remainder = target.split("://", 1)[1]
+    _host, separator, path = remainder.partition("/")
+    if not separator:
+        return None
+    return f"/{path.split('?', 1)[0]}"
+
+
+def _http_client_call(
+    node: ast.Call, aliases: Mapping[str, tuple[str, str]]
+) -> tuple[str, str] | None:
+    """(METHOD, path) of an HTTP client call with a literal path, else None."""
+    func = node.func
+    if not _client_method(func, aliases):
+        return None
+    path = _request_path(node)
+    if path is None:
+        return None
+    return func.attr.upper(), path
+
+
+def _client_method(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> bool:
+    if not isinstance(func, ast.Attribute) or func.attr not in _HTTP_METHODS:
+        return False
+    return _client_module(func, aliases) is not None
+
+
 def _top_level_imports(tree: ast.Module) -> list[ast.alias]:
     return [
         alias
@@ -702,6 +815,7 @@ class _Collector:
         self.source_modules: dict[str, str] = {}
         self.files: dict[str, str] = {}
         self.tables: dict[str, list[str]] = {}
+        self.routes: dict[tuple[str, str], list[str]] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
         self.function_body_scope: dict[str, str] = {}
@@ -770,17 +884,24 @@ class _Collector:
         self,
         source_node_id: str,
         edge_type: str,
-        target_node_id: str,
+        target_node_id: str | None,
         source: _CapturedSource,
         span: tuple[int, int, int, int],
         *,
         confidence: str = "high",
+        literal: str | None = None,
     ) -> None:
+        """One resolved assertion, naming either a target node or a literal.
+
+        The graph contract allows exactly one of the two, so a literal
+        assertion is joined to its node-to-node neighbour by the span both
+        record as evidence.
+        """
         start, end, _, _ = span
         if end <= start:
             return
         assertion_id = _identifier(
-            "assertion", source_node_id, edge_type, target_node_id,
+            "assertion", source_node_id, edge_type, target_node_id or literal or "",
             source.record.logical_id, start, end,
         )
         if assertion_id in self.assertion_ids:
@@ -791,7 +912,7 @@ class _Collector:
             "source_node_id": source_node_id,
             "edge_type": edge_type,
             "target_node_id": target_node_id,
-            "literal": None,
+            "literal": literal,
             "confidence": confidence,
             "authority": "ai-derived",
             "resolution": "resolved",
@@ -1162,6 +1283,7 @@ class _Collector:
             "route", "code-route/v1", key,
             {"name": f"{method} {path}", "method": method, "path": path},
         )
+        self.routes.setdefault((method, path), []).append(route)
         self.add_occurrence(route, source, "definition", span)
         self.add_assertion(function_id, "EXPOSES", route, source, span)
 
@@ -1288,7 +1410,51 @@ class _Collector:
             _call_fallback_reason(node.func, aliases),
             fallback_candidates=self._candidate_modules(node.func, aliases),
         )
+        self._binding_edge(node, targets, source_node_id, ctx.source, span)
+        self._http_edge(ctx, node, aliases, source_node_id, span)
         self._sql_edges(node, owner, source_node_id, ctx.source, ctx.offsets)
+
+    def _binding_edge(
+        self,
+        node: ast.Call,
+        targets: list[str],
+        source_node_id: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        """What the caller passes, and to which parameter of the one callee.
+
+        A binding with no proven callee is not evidence, so an unresolved or
+        ambiguous call records nothing here (research
+        2026-09-11-argument-bindings-and-route-calls.md).
+        """
+        if len(targets) != 1:
+            return
+        bindings = _argument_bindings(node, self.nodes[targets[0]])
+        if not bindings:
+            return
+        self.add_assertion(
+            source_node_id, "BINDS_ARGUMENTS", None, source, span, literal=bindings
+        )
+
+    def _http_edge(
+        self,
+        ctx: _PythonFile,
+        node: ast.Call,
+        aliases: Mapping[str, tuple[str, str]],
+        source_node_id: str,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        """A client call with a literal path names the route it reaches."""
+        call = _http_client_call(node, aliases)
+        if call is None:
+            return
+        method, path = call
+        routes = self.routes.get((method, path), ())
+        self._resolved_edge(
+            source_node_id, "HTTP_CALLS", routes, f"{method} {path}", ctx.source, span,
+            "unresolved_reference", confidence="medium",
+        )
 
     def _resolved_edge(
         self,

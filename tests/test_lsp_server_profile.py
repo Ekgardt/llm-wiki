@@ -240,7 +240,7 @@ def test_the_registry_routes_a_file_to_its_server(path, expected):
 
 
 @pytest.mark.parametrize(
-    "path", [Path("main.go"), Path("lib.rs"), Path("README.md"), Path("Makefile")]
+    "path", [Path("lib.rb"), Path("README.md"), Path("Makefile")]
 )
 def test_an_unmanaged_language_falls_back_rather_than_failing(path):
     """None is the structural-evidence path, not an error."""
@@ -249,11 +249,48 @@ def test_an_unmanaged_language_falls_back_rather_than_failing(path):
 
 def test_asking_for_a_server_we_do_not_manage_is_an_error_not_a_guess():
     with pytest.raises(ProfileError):
-        lsp_profiles.profile_named("gopls")
+        lsp_profiles.profile_named("clangd")
 
 
 def test_the_registry_names_what_it_manages():
-    assert lsp_profiles.REGISTRY.names() == ("pyright", "typescript")
+    assert lsp_profiles.REGISTRY.names() == (
+        "gopls",
+        "pyright",
+        "rust-analyzer",
+        "typescript",
+    )
+
+
+def test_a_native_server_is_its_own_interpreter():
+    """gopls is an executable, not a Node program (#24, B).
+
+    Research: docs/research/2026-09-12-installing-go-and-building-gopls.md.
+    """
+    profile = lsp_profiles.profile_named("gopls")
+    command = profile.launch_command(
+        _abs("unused", "node"), _abs("managed", "gopls"), _abs("owner")
+    )
+
+    assert (command, profile.node_major) == ((str(_abs("managed", "gopls")),), None)
+    assert lsp_profiles.profile_for_path(Path("main.go")).name == "gopls"
+
+
+def test_a_profile_declares_one_runtime_and_only_one():
+    with pytest.raises(ProfileError):
+        _profile(node_major=None)
+    with pytest.raises(ProfileError):
+        _profile(native=True)
+
+
+def test_every_pinned_platform_archive_is_named_by_digest_and_size():
+    artifacts = lsp_profiles.GOPLS_PROFILE.platform_artifacts
+    systems = sorted({artifact.system for artifact in artifacts})
+
+    assert (systems, len(artifacts)) == (["darwin", "linux", "windows"], 5)
+    assert all(
+        artifact.integrity.startswith("sha256-") and artifact.size > 0
+        for artifact in artifacts
+    )
 
 
 def test_two_profiles_may_not_claim_the_same_suffix():
@@ -312,7 +349,7 @@ def _profile(**overrides) -> LanguageServerProfile:
     "overrides",
     [
         {"package_url": "http://example.invalid/a.tgz"},
-        {"package_integrity": "sha256-AAAA"},
+        {"package_integrity": "sha1-AAAA"},
         {"server_relative": _abs("absolute", "main.js")},
         {"server_relative": Path("../escape/main.js")},
         {"managed_relative_root": Path("../../etc")},

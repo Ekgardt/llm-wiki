@@ -2168,8 +2168,7 @@ class ProjectStore:
             self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
             raise
         except TransactionFailure as exc:
-            self._quarantine_precondition_failure(exc, slug, reserved.sequence)
-            raise
+            return self._replayed_or_quarantined(exc, reserved)
 
     def _apply_reserved(
         self,
@@ -2182,6 +2181,33 @@ class ProjectStore:
         return self._project_reserved(
             reserved, lease, writer_wait_seconds=writer_wait_seconds
         )
+
+    def _replayed_or_quarantined(
+        self, exc: TransactionFailure, reserved: ProjectCheckpointReservation
+    ) -> CheckpointReceipt:
+        """A precondition failure over a committed transaction is a replay.
+
+        The reservation row and the transaction do not change in the same
+        instant, so a second caller can find the row still `reserved` while
+        the transaction another caller ran is already `committed`. Grading
+        that as a failure quarantines an attempt whose work is durably in the
+        journal. Research:
+        `docs/research/2026-09-11-a-committed-transaction-is-not-a-failure.md`.
+        """
+        if exc.code != "precondition_failed":
+            raise exc
+        if self._committed_elsewhere(reserved):
+            return self._receipt(
+                _committed_reservation(reserved, str(reserved.transaction_id)),
+                duplicate=True,
+            )
+        self._quarantine_precondition_failure(exc, reserved.project, reserved.sequence)
+        raise exc
+
+    def _committed_elsewhere(self, reserved: ProjectCheckpointReservation) -> bool:
+        if not reserved.transaction_id:
+            return False
+        return self.coordinator.transaction_state(str(reserved.transaction_id)) == "committed"
 
     def _quarantine_precondition_failure(
         self, exc: TransactionFailure, slug: str, sequence: int

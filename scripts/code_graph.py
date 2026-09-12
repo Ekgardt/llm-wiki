@@ -3691,5 +3691,282 @@ def main() -> int:
     return 0
 
 
+# Issue #24, section B: `data_flow` is argument binding, not a data-flow graph.
+# The extractor records, per resolved call, which caller-visible name lands on
+# which parameter of the callee (`BINDS_ARGUMENTS`, literal
+# `argument->parameter`, joined to its `CALLS` edge by the span of the call);
+# this walk follows those bindings hop by hop and says so in its own answer.
+# Research: docs/research/2026-09-11-argument-bindings-and-route-calls.md.
+FLOW_MAX_DEPTH = 8
+FLOW_DEFAULT_DEPTH = 2
+FLOW_MAX_ROWS = 1000
+FLOW_MAX_SEEDS = 20
+FLOW_NOTE = (
+    "argument bindings of resolved calls, not data-flow analysis: "
+    "each hop names which argument binds which parameter"
+)
+
+
+def _flow_depth(max_depth: int | None) -> int:
+    if max_depth is None:
+        return FLOW_DEFAULT_DEPTH
+    return max(1, min(int(max_depth), FLOW_MAX_DEPTH))
+
+
+def _flow_row(graph, edge: dict, depth: int) -> dict | None:
+    target = graph.node(edge["target_node_id"])
+    source = graph.node(edge["source_node_id"])
+    if target is None or source is None:
+        return None
+    return {
+        "depth": depth,
+        "from": _stored_qualified_name(source),
+        "to": _stored_qualified_name(target),
+        "bindings": edge["literal"],
+        "symbol_id": target["node_id"],
+    }
+
+
+def _flow_hop(graph, frontier: list[str], seen: set[str], depth: int) -> tuple[list[dict], list[str]]:
+    """One hop of binding edges, and the nodes it opens for the next hop."""
+    edges = graph.argument_bindings(source_node_ids=frontier, max_rows=FLOW_MAX_ROWS)
+    return _flow_hop_rows(graph, edges, depth), _flow_hop_reached(edges, seen)
+
+
+def _flow_hop_rows(graph, edges: list[dict], depth: int) -> list[dict]:
+    rows = [_flow_row(graph, edge, depth) for edge in edges]
+    return [row for row in rows if row is not None]
+
+
+def _flow_hop_reached(edges: list[dict], seen: set[str]) -> list[str]:
+    return [str(edge["target_node_id"]) for edge in edges if str(edge["target_node_id"]) not in seen]
+
+
+def _flow_rows(graph, seeds: list[str], depth: int) -> list[dict]:
+    rows: list[dict] = []
+    seen = set(seeds)
+    frontier = list(seeds)
+    for hop in range(1, depth + 1):
+        if not frontier:
+            break
+        hop_rows, reached = _flow_hop(graph, frontier, seen, hop)
+        rows.extend(hop_rows)
+        seen.update(reached)
+        frontier = sorted(set(reached))[:FLOW_MAX_ROWS]
+    return rows[:FLOW_MAX_ROWS]
+
+
+def _flow_report(graph, symbol: str, seeds: list[str], rows: list[dict], depth: int) -> dict:
+    return {
+        **_store_report(graph),
+        "symbol": symbol,
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        "note": FLOW_NOTE,
+        **_dependency_reach(rows, depth),
+    }
+
+
+def find_argument_flows(
+    symbol: str,
+    directory: Path,
+    *,
+    with_report: bool = True,
+    max_depth: int | None = None,
+) -> list[dict] | dict | None:
+    """Argument bindings reachable from `symbol`, hop by hop, or None with no generation."""
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        depth = _flow_depth(max_depth)
+        rows = _flow_rows(graph, seeds, depth)
+        return _with_report(
+            "flows", rows, _flow_report(graph, symbol, seeds, rows, depth), with_report
+        )
+    finally:
+        graph.close()
+
+
+# Issue #24, section B: `cross_service` crosses the HTTP boundary the graph
+# already holds. A client call reaches a `route` node (`HTTP_CALLS`) and the
+# handler that serves it declares the same node (`EXPOSES`), so a walk that
+# turns around at a route follows a request into the service that answers it.
+# Research: docs/research/2026-09-11-argument-bindings-and-route-calls.md.
+SERVICE_EDGES = ("CALLS", "HTTP_CALLS")
+SERVICE_NOTE = (
+    "calls and literal-path HTTP client calls: a route is crossed into the "
+    "handler that exposes it, never into a caller the graph cannot prove. A "
+    "route this repository does not serve is matched against the exported "
+    "routes of every other indexed checkout, and such a hop names the "
+    "repository it lands in but is not walked further"
+)
+
+
+def _service_row(graph, edge: dict, depth: int, relation: str) -> dict | None:
+    target = graph.node(str(edge["target_node_id"]))
+    source = graph.node(str(edge["source_node_id"]))
+    if target is None or source is None:
+        return None
+    return {
+        "depth": depth,
+        "from": _stored_qualified_name(source),
+        "to": _stored_qualified_name(target),
+        "relation": relation,
+        "symbol_id": target["node_id"],
+    }
+
+
+def _service_rows_of(graph, edges: list[dict], depth: int) -> list[dict]:
+    rows = [
+        _service_row(graph, edge, depth, str(edge["edge_type"]).lower())
+        for edge in edges
+    ]
+    return [row for row in rows if row is not None]
+
+
+def _handler_rows(graph, routes: list[str], depth: int) -> list[dict]:
+    """Turn around at a route: the handler that exposes it serves the request."""
+    if not routes:
+        return []
+    edges = graph.edges(
+        edge_types=("EXPOSES",), target_node_ids=routes, max_rows=FLOW_MAX_ROWS
+    )
+    rows = [_service_row(graph, _reversed_edge(edge), depth, "handled_by") for edge in edges]
+    return [row for row in rows if row is not None]
+
+
+def _reversed_edge(edge: dict) -> dict:
+    return {
+        **edge,
+        "source_node_id": edge["target_node_id"],
+        "target_node_id": edge["source_node_id"],
+    }
+
+
+def _route_node_ids(graph, rows: list[dict]) -> list[str]:
+    reached = [graph.node(str(row["symbol_id"])) for row in rows]
+    return [str(node["node_id"]) for node in reached if node is not None and node["kind"] == "route"]
+
+
+def _hints_state_root() -> Path:
+    import memory_state
+
+    return _generation_state_root(memory_state)
+
+
+def _foreign_route_rows(graph, observation: dict, depth: int) -> list[dict]:
+    """A route no local generation holds may be served by another checkout (#24, D2)."""
+    from code_hints import find_routes
+
+    method, _, path = str(observation["target_text"] or "").partition(" ")
+    source = graph.node(str(observation["source_node_id"]))
+    if not path or source is None:
+        return []
+    matches = find_routes(
+        _hints_state_root(), method, path,
+        exclude_checkout_id=str(graph.repository_scope.checkout_id),
+    )
+    return [_foreign_row(source, observation, match, depth) for match in matches]
+
+
+def _foreign_row(source: dict, observation: dict, match: dict, depth: int) -> dict:
+    return {
+        "depth": depth,
+        "from": _stored_qualified_name(source),
+        "to": str(match["handler"]),
+        "relation": "handled_by_repository",
+        "symbol_id": "",
+        "route": str(observation["target_text"] or ""),
+        "repository_id": match["repository_id"],
+        "checkout_root": match["checkout_root"],
+        "file": match["file"],
+        "line": match["line"],
+    }
+
+
+def _foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
+    observations = graph.unresolved_edges(
+        edge_types=("HTTP_CALLS",), source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    )
+    return [row for item in observations for row in _foreign_route_rows(graph, item, depth)]
+
+
+def _quiet_foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
+    """A hint table is a disposable projection: its absence is not an error."""
+    try:
+        return _foreign_rows(graph, frontier, depth)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return []
+
+
+def _service_hop(graph, frontier: list[str], depth: int) -> list[dict]:
+    edges = graph.edges(
+        edge_types=SERVICE_EDGES, source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    )
+    rows = _service_rows_of(graph, edges, depth)
+    rows += _handler_rows(graph, _route_node_ids(graph, rows), depth)
+    return rows + _quiet_foreign_rows(graph, frontier, depth)
+
+
+def _service_frontier(rows: list[dict], seen: set[str]) -> list[str]:
+    """A foreign handler carries no node id here: its graph is a different one."""
+    identifiers = [str(row["symbol_id"]) for row in rows if row["symbol_id"]]
+    reached = [identity for identity in identifiers if identity not in seen]
+    seen.update(reached)
+    return sorted(set(reached))[:FLOW_MAX_ROWS]
+
+
+def _service_walk(graph, seeds: list[str], depth: int) -> list[dict]:
+    rows: list[dict] = []
+    seen = set(seeds)
+    frontier = list(seeds)
+    for hop in range(1, depth + 1):
+        if not frontier:
+            break
+        hop_rows = _service_hop(graph, frontier, hop)
+        rows.extend(hop_rows)
+        frontier = _service_frontier(hop_rows, seen)
+    return rows[:FLOW_MAX_ROWS]
+
+
+def _service_report(graph, symbol: str, seeds: list[str], rows: list[dict], depth: int) -> dict:
+    return {
+        **_store_report(graph),
+        "symbol": symbol,
+        "symbol_resolved": bool(seeds),
+        "resolved_symbol_nodes": len(seeds),
+        "note": SERVICE_NOTE,
+        "routes_crossed": len([row for row in rows if row["relation"] == "handled_by"]),
+        "repositories_crossed": len(
+            {row["repository_id"] for row in rows if row["relation"] == "handled_by_repository"}
+        ),
+        **_dependency_reach(rows, depth),
+    }
+
+
+def find_service_paths(
+    symbol: str,
+    directory: Path,
+    *,
+    with_report: bool = True,
+    max_depth: int | None = None,
+) -> list[dict] | dict | None:
+    """Calls and HTTP hops reachable from `symbol`, or None with no generation."""
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        depth = _flow_depth(max_depth)
+        rows = _service_walk(graph, seeds, depth)
+        return _with_report(
+            "hops", rows, _service_report(graph, symbol, seeds, rows, depth), with_report
+        )
+    finally:
+        graph.close()
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

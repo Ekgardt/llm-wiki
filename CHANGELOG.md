@@ -6,8 +6,90 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A replay over a committed transaction is a duplicate, not a quarantine.**
+  A project checkpoint row and its transaction do not change in the same
+  instant, so a second caller could find the row still `reserved` while the
+  transaction another caller ran was already `committed`; it then asked to
+  refresh the lease precondition of a transaction that was no longer
+  `prepared`, was told `precondition_failed`, and quarantined an attempt
+  whose work was durably in the journal. `precondition_failed` is now graded
+  against the transaction: committed means the caller gets the ordinary
+  duplicate receipt, anything else keeps the old fence error. Found by the
+  Windows job of CI run 34655557302, which is where the window is widest.
+
 ### Added
 
+- **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
+  `definition`, `references`, `implementations`, `type`, `callers`/`callees`
+  and `hover` for `.rs`. The binary is published, but it needs a toolchain
+  behind it — the project is read by `cargo metadata`, the sysroot by
+  `rustc --print sysroot`, and the standard library from its *sources* — so
+  the install unpacks five archives of one release (`rust-analyzer`, `rustc`,
+  `rust-std`, `cargo`, `rust-src`), each pinned by the SHA-256 the release
+  manifest publishes, into one toolchain under
+  `cache/code-tools/rust-analyzer/1.98.1/`. No compilation. Measured here:
+  49 s to install, 137.5 MB downloaded, 701 MB on disk, `definition` 0.10 s
+  warm. A profile may now declare further **components** with their own
+  platform tables and their own place in the managed root, archives may be
+  `.tar.xz`, and the per-member size bound is a profile's own — a language
+  server binary can be 90 MB. The profile also names the library path its
+  verified copy needs: `rust-analyzer` is linked against `librustc_driver` and
+  finds it relative to itself, so the copy in the owner root would otherwise
+  die before the handshake. Installation stays one explicit operator action
+  (`uv run python scripts/install_language_server.py --profile rust-analyzer
+  --state-root <state-root>`).
+- **Precise navigation for Go (#24, B).** `gopls v0.23.0` joins Pyright and
+  `typescript-language-server` as a managed profile, so `definition`,
+  `references`, `implementations`, `type`, `callers`/`callees` and `hover`
+  answer for `.go` files from a type checker instead of a name match. It is
+  the first managed server that is **built** rather than unpacked, because the
+  Go team publishes gopls only as a module: the install unpacks a pinned Go
+  toolchain (1.27.1, per-platform archive pinned by sha256) and compiles one
+  pinned module version with it, inside `cache/code-tools/gopls/v0.23.0/`,
+  with `GOPATH`, `GOCACHE`, `GOMODCACHE` and `GOBIN` under that root and
+  `GOTOOLCHAIN=local` so the pin cannot be swapped. Measured here: 44 s to
+  install, 324 MB on disk, `definition` 0.48 s cold and 0.10 s warm. It is
+  also the first **native** server: a profile now declares `node_major` or
+  `native`, identity stops probing Node for it, and the verified copy is
+  launched by path from the owner root instead of through an unlinked
+  descriptor — gopls hashes its own executable and re-executes itself, so a
+  file with no name makes it exit. The launch invariant is stated instead of
+  assumed: a generation may name the inherited descriptor or a file inside its
+  own owner root, never anything else. Installation stays one explicit
+  operator action (`uv run python scripts/install_language_server.py --profile
+  gopls --state-root <state-root>`); until it runs, Go answers from structural
+  evidence exactly as before. New module `scripts/go_source_build.py`.
+- **Argument bindings, the HTTP boundary and routes across repositories
+  (#24, B3/D2).** `get_architecture mode=data_flow` answers, hop by hop,
+  which caller-visible name binds which parameter of the callee, and says in
+  its own answer that this is argument binding and not data-flow analysis.
+  `mode=cross_service` follows calls plus literal-path HTTP client calls:
+  a call reaches the `route` node of the same method and path and the walk
+  turns around into the handler that exposes it; a route this repository
+  does not serve is matched against the exported routes of every other
+  indexed checkout and named with the repository it lives in, without
+  opening a second generation. The extractor (`code-extractor/v12`) records
+  one `BINDS_ARGUMENTS` literal assertion per resolved call (at most 8
+  `argument->parameter` pairs, 256 bytes) and one `HTTP_CALLS` assertion per
+  literal-path client call; the callee of a binding is named by the `CALLS`
+  assertion of the same call span, because the graph contract allows an
+  assertion to carry a target node or a literal, never both. Hint files gain
+  a `route` table (`code-hints/v2`) and new readers
+  `EvidenceGraph.argument_bindings` and `unresolved_edges` answer both
+  modes. Measured on this repository: 30 617 bindings, 24.0 s to index.
+  Derived generations rebuild themselves on the next nightly pass; until
+  then both modes answer nothing.
+- **The parity set asks the new questions (#24, E).**
+  `benchmark/code-parity-v2.json` carries the thirteen v1 tasks unchanged and
+  adds two argument-binding tasks and one "which tests exercise this
+  function" task, with gold read by hand from the working tree on
+  2026-09-11; the stand now defaults to it.
+  `benchmark/code-parity-cross-service-v1.json` asks the cross-service
+  questions against the two-repository fixture
+  `benchmark/build_cross_service_fixture.py` builds, because this repository
+  serves no HTTP route. No run is included: runs need the owner's word.
 - **The graph meets the agent where it searches (#24, C).** A Claude Code
   `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
   indexed repository gets a hint of at most three definitions (qualified name,
@@ -59,8 +141,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   hops, beside the unchanged `affected` groups. No new tool, no generation
   format change. Measured warm on a 1 020-file fixture: search ~99 ms,
   snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
-  `data_flow`/`cross_service` tracing is not feasible on the current graph
-  (no `DATA_FLOWS` or route-call edges) and is named as such. New modules
+  New modules
   `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
   `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
 - **The weights arrive with the install.** `scripts/install_models.py`
@@ -90,6 +171,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 - Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
 - The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
+- **Codex sessions leave the same breadcrumbs as Claude's.** Codex supports `UserPromptSubmit` and `PostToolUse` for `apply_patch` and `Bash`, and the template registered neither for capture, so a Codex session recorded no mid-session prompt or edit. Both are registered now through `integration_adapter.py --source codex`, a patch is recorded as an edit of the first file it touches, and the ownership rule and the doctor's runtime-hook check know the two new handlers. The capture path prints nothing, which is what Codex requires of a `UserPromptSubmit` hook. Research: `docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md`.
 - Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
 
 - The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).

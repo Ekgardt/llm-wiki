@@ -8885,6 +8885,14 @@ class MarkdownCoordinator:
                 )
             )
 
+    def transaction_state(self, transaction_id: str) -> str | None:
+        """The state of one transaction, or None when it is not recorded."""
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT state FROM "transaction" WHERE id = ?', (str(transaction_id),)
+            ).fetchone()
+        return None if row is None else str(row["state"])
+
     def _record(self, transaction_id: str) -> TransactionRecord:
         record = self._record_if_present(transaction_id)
         if record is None:

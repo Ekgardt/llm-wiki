@@ -89,9 +89,30 @@ def test_an_oversized_record_is_bounded_and_says_so(monkeypatch) -> None:
 
 def test_the_path_is_by_day_and_session(tmp_path: Path) -> None:
     relative = session_evidence.evidence_relative_path("2026-08-23", "abc/../123")
+    safe = session_evidence.evidence_relative_path("2026-08-23", "4f1c2d7e-1111-2222-3333-444455556666")
 
-    assert relative == "knowledge/raw/sessions/2026-08-23/abc-123.md"
-    assert ".." not in Path(relative).parts
+    assert (Path(relative).parent.as_posix(), Path(relative).name.startswith("abc-123-")) == (
+        "knowledge/raw/sessions/2026-08-23",
+        True,
+    )
+    assert (".." in Path(relative).parts, Path(safe).name) == (
+        False,
+        "4f1c2d7e-1111-2222-3333-444455556666.md",
+    )
+
+
+def test_sessions_whose_safe_names_meet_keep_separate_records() -> None:
+    """Memory Q3: replaced characters, a 64-character cut or no id put two sessions in one file."""
+    path = session_evidence.evidence_relative_path
+    long_prefix = "x" * 64
+    pairs = [
+        (path("d", "a/b"), path("d", "a:b")),
+        (path("d", long_prefix + "1"), path("d", long_prefix + "2")),
+        (path("d", "", b"first record"), path("d", "", b"second record")),
+    ]
+
+    assert [left != right for left, right in pairs] == [True, True, True]
+    assert max(len(Path(name).stem) for pair in pairs for name in pair) <= 64
 
 
 def test_writing_the_record_goes_through_the_transaction(tmp_path: Path, monkeypatch) -> None:

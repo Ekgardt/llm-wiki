@@ -1543,6 +1543,40 @@ def _assert_receipts_share_one_transaction(receipts) -> None:
     assert len({receipt.transaction_id for receipt in receipts}) == 1
 
 
+def _rewind_checkpoint_row(store: ProjectStore) -> None:
+    """The row a committed transaction left behind, as a slower writer sees it."""
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute("UPDATE project_checkpoints SET state = 'reserved'")
+        database.execute("UPDATE project_checkpoint_attempts SET state = 'reserved'")
+        database.commit()
+
+
+def test_a_replay_over_a_committed_transaction_is_a_duplicate_not_a_quarantine(
+    vault: Path, state_root: Path
+):
+    """CI 34655557302, Windows: the row lagged the transaction and lost the work.
+
+    Research: docs/research/2026-09-11-a-committed-transaction-is-not-a-failure.md.
+    """
+    store = ProjectStore(vault, state_root)
+    event = checkpoint_event()
+    first = store.checkpoint("demo", event, "agent-a")
+    _rewind_checkpoint_row(store)
+
+    second = ProjectStore(vault, state_root).checkpoint("demo", event, "agent-b")
+
+    assert (second.sequence, second.duplicate, second.transaction_id) == (
+        first.sequence,
+        True,
+        first.transaction_id,
+    )
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        states = database.execute(
+            "SELECT state FROM project_checkpoint_attempts ORDER BY attempt_number"
+        ).fetchall()
+    assert [row[0] for row in states] == ["committed"]
+
+
 def test_concurrent_duplicate_replay_creates_one_forward_attempt(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2088,6 +2122,11 @@ def test_the_vault_root_is_never_a_project(vault: Path) -> None:
     assert _compute_slug(vault / "sub-project", vault / "knowledge/projects") == "sub-project"
 
 
+def _checkpoints(store: ProjectStore, count: int) -> None:
+    for index in range(1, count + 1):
+        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"rb:event-{index}"), "agent-a")
+
+
 def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
     vault: Path, state_root: Path
 ) -> None:
@@ -2095,8 +2134,7 @@ def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
     import shutil
 
     store = ProjectStore(vault, state_root)
-    for index in range(1, 4):
-        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"rb:event-{index}"), "agent-a")
+    _checkpoints(store, 3)
     journal = vault / "knowledge/projects/demo/journal.md"
     before = project_journal.parse_journal_events("demo", journal.read_bytes())
     expected_state = store.render_state(before, _validated=True)
@@ -2105,8 +2143,11 @@ def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
     report = store.rebuild_journal("demo")
 
     rebuilt = project_journal.parse_journal_events("demo", journal.read_bytes())
-    assert [event["sequence"] for event in rebuilt] == [1, 2, 3]
-    assert report["events"] == 3 and report["last_sequence"] == 3
+    assert ([event["sequence"] for event in rebuilt], report["events"], report["last_sequence"]) == (
+        [1, 2, 3],
+        3,
+        3,
+    )
     assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
     store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
     assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4

@@ -364,16 +364,29 @@ def _safe_state() -> dict:
         return {}
 
 
-def _compile_failed_this_pass(before: str | None) -> str | None:
+COMPILE_DIED_WITHOUT_OUTCOME = "compile exited without recording an outcome"
+
+
+def _compile_failed_this_pass(
+    before: str | None, started_before: str | None = None
+) -> str | None:
     """The error of a compile that ran in this pass, or None.
 
     `maybe_compile` spawns the compile and returns 0 as soon as it is running,
     so the step it belongs to says nothing about the outcome. Waiting for the
     process to stop says nothing either. On 2026-08-22 that let a nightly pass
     report `failures=0` for a night whose compile had died a second in. The
-    stamp comparison keeps last night's error out of tonight's count.
+    stamp comparison keeps last night's error out of tonight's count, and a
+    compile killed before it could write any outcome is counted by its start
+    stamp (docs/research/2026-09-11-the-seven-questions-the-audits-left-open.md).
     """
     state = _safe_state()
+    if _compile_died_this_pass(state, started_before):
+        return COMPILE_DIED_WITHOUT_OUTCOME
+    return _recorded_compile_error(state, before)
+
+
+def _recorded_compile_error(state: dict, before: str | None) -> str | None:
     finished = state.get("last_compile_finished_at")
     if not finished or str(finished) == before:
         return None
@@ -382,9 +395,22 @@ def _compile_failed_this_pass(before: str | None) -> str | None:
     return str(state.get("last_compile_error") or "unknown")
 
 
+def _compile_died_this_pass(state: dict, started_before: str | None) -> bool:
+    """A compile started in this pass, is not running, and never left `running`."""
+    started = state.get("last_compile_started_at")
+    if not started or str(started) == started_before:
+        return False
+    return state.get("last_compile_status") == "running" and not _compile_running()
+
+
 def _last_compile_finished() -> str | None:
     finished = _safe_state().get("last_compile_finished_at")
     return str(finished) if finished else None
+
+
+def _last_compile_started() -> str | None:
+    started = _safe_state().get("last_compile_started_at")
+    return str(started) if started else None
 
 
 # How long a nightly pass follows a running compile before deferring the
@@ -499,6 +525,7 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
     # Step 2 must not skip compile just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
     before = _last_compile_finished()
+    started_before = _last_compile_started()
     failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
 
     log("Step 2b: waiting for compile to finish...")
@@ -508,12 +535,12 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         # pass. Counting it as a failure turned a slow healthy night red (#21).
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
         return failures
-    failures += _report_compile_outcome(log, before)
+    failures += _report_compile_outcome(log, before, started_before)
     return failures + _post_compile_pass(run_step, log)
 
 
-def _report_compile_outcome(log, before: str | None) -> int:
-    error = _compile_failed_this_pass(before)
+def _report_compile_outcome(log, before: str | None, started_before: str | None = None) -> int:
+    error = _compile_failed_this_pass(before, started_before)
     if error is None:
         return 0
     log(f"  compile: FAILED — {error}")

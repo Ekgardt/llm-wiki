@@ -69,8 +69,23 @@ def test_the_task_kinds_cover_the_contracted_families():
         "multi-hop",
         "architecture-summary",
         "community-naming",
+        "data-flow",
+        "which-tests",
     }
     assert expected <= kinds
+
+
+def _cross_service_tasks() -> list[dict]:
+    return stand.load_tasks(stand.CROSS_SERVICE_TASKS_PATH)["tasks"]
+
+
+def test_the_cross_service_set_asks_its_questions_of_both_tools():
+    """Two repositories, so it is a separate file with its own fixture builder."""
+    tasks = _cross_service_tasks()
+    sides = [set(task) >= {"llm_wiki", "llm_wiki_best", "cbm"} for task in tasks]
+
+    assert ([task["kind"] for task in tasks], sides) == (["cross-service"] * 2, [True, True])
+    assert all(task["gold"]["citations"] and task["gold"]["must"] for task in tasks)
 
 
 def test_grading_matches_on_word_boundaries():
