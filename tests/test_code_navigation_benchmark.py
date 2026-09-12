@@ -100,6 +100,28 @@ def _source_files(repository: QualificationRepository) -> dict[str, bytes]:
     }
 
 
+def _padding_block_spans(tree: ast.Module) -> set[int]:
+    """How many lines each top-level function of a padding module spans."""
+    return {
+        node.end_lineno - node.lineno + 1
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.end_lineno is not None
+    }
+
+
+def _padding_module_shape(module: Path) -> tuple:
+    """A padding module compiles, holds only functions of one size, and has no comments."""
+    content = module.read_bytes()
+    compile(content, module.as_posix(), "exec")
+    tree = ast.parse(content, filename=module.as_posix())
+    return (
+        bool(tree.body),
+        {type(node) for node in tree.body},
+        _padding_block_spans(tree),
+        b"#" in content,
+    )
+
+
 def test_generator_is_exactly_100_000_lines_and_byte_identical_across_roots(
     generated_pair: tuple[QualificationRepository, QualificationRepository],
 ) -> None:
@@ -119,21 +141,208 @@ def test_generator_is_exactly_100_000_lines_and_byte_identical_across_roots(
     assert len(padding_modules) == qualification_generator.PADDING_MODULES == 32
     assert len(_source_files(first)) == 48
     assert first.root.joinpath("qual", "padding_users.py").is_file()
+    assert qualification_generator.PADDING_BLOCK_LINES == 64
     for module in padding_modules:
-        content = module.read_bytes()
-        compile(content, module.as_posix(), "exec")
-        tree = ast.parse(content, filename=module.as_posix())
-        assert tree.body
-        assert all(isinstance(node, ast.FunctionDef) for node in tree.body)
-        assert qualification_generator.PADDING_BLOCK_LINES == 64
-        assert all(
-            node.end_lineno is not None
-            and node.end_lineno - node.lineno + 1 == qualification_generator.PADDING_BLOCK_LINES
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
+        assert _padding_module_shape(module) == (
+            True,
+            {ast.FunctionDef},
+            {qualification_generator.PADDING_BLOCK_LINES},
+            False,
         )
-        assert b"#" not in content
     assert not (first.root / ".git").exists()
+
+
+def _name_id(node) -> str | None:
+    """The identifier of an `ast.Name`, and nothing for any other node."""
+    if not isinstance(node, ast.Name):
+        return None
+    return node.id
+
+
+def _signature_shape(function: ast.FunctionDef) -> tuple:
+    """A padding function's whole signature, as one comparable tuple."""
+    return (
+        [argument.arg for argument in function.args.args],
+        _name_id(function.args.args[0].annotation),
+        _name_id(function.returns),
+        bool(function.decorator_list),
+        bool(function.args.posonlyargs),
+        bool(function.args.kwonlyargs),
+        function.args.vararg,
+        function.args.kwarg,
+    )
+
+
+_PADDING_SIGNATURE = (["accumulator"], "int", "int", False, False, False, None, None)
+
+
+def _assert_padding_signature(
+    function: ast.FunctionDef,
+    module_index: int,
+    block_index: int,
+) -> None:
+    assert function.name == f"padding_{module_index:02d}_{block_index:03d}"
+    assert _signature_shape(function) == _PADDING_SIGNATURE
+    assert function.end_lineno is not None
+    assert function.end_lineno - function.lineno + 1 == 64
+
+
+def _returns_accumulator(statement) -> bool:
+    if not isinstance(statement, ast.Return):
+        return False
+    return _name_id(statement.value) == "accumulator"
+
+
+def _call_shape(statement) -> tuple:
+    """The shape of `accumulator = callee(accumulator)`, for any statement."""
+    if not isinstance(statement, ast.Assign):
+        return ()
+    call = statement.value
+    return (
+        [_name_id(target) for target in statement.targets],
+        _name_id(getattr(call, "func", None)),
+        [_name_id(argument) for argument in getattr(call, "args", ())],
+        bool(getattr(call, "keywords", ())),
+    )
+
+
+def _aug_shape(operation) -> tuple:
+    """The shape of `accumulator += <int>`, for any statement."""
+    if not isinstance(operation, ast.AugAssign):
+        return ()
+    return (
+        _name_id(operation.target),
+        type(operation.op),
+        type(getattr(operation.value, "value", None)),
+    )
+
+
+def _aug_constants(operations) -> list[int]:
+    """Every constant added to the accumulator, refusing any other statement."""
+    values: list[int] = []
+    for operation in operations:
+        assert _aug_shape(operation) == ("accumulator", ast.Add, int)
+        values.append(operation.value.value)
+    return values
+
+
+def _chained_previous(body: list, module_index: int, block_index: int) -> tuple:
+    """Every block but the first opens by calling the block before it."""
+    if not block_index:
+        return ()
+    previous_name = f"padding_{module_index:02d}_{block_index - 1:03d}"
+    assert _call_shape(body.pop(0)) == (
+        ["accumulator"],
+        previous_name,
+        ["accumulator"],
+        False,
+    )
+    return (previous_name,)
+
+
+def _padding_block_facts(
+    function: ast.FunctionDef,
+    module_index: int,
+    block_index: int,
+) -> tuple[tuple, list[int]]:
+    """Check one block, and report what it calls and what it adds."""
+    _assert_padding_signature(function, module_index, block_index)
+    body = list(function.body)
+    assert _returns_accumulator(body.pop())
+    calls = _chained_previous(body, module_index, block_index)
+    assert body
+    return calls, _aug_constants(body)
+
+
+def _padding_module_facts(
+    module_index: int,
+    module_path: Path,
+    edges: dict,
+    constants: list[int],
+) -> str:
+    """Check one padding module, and report the name of its entry block."""
+    content = module_path.read_bytes()
+    assert b"#" not in content
+    tree = ast.parse(content, filename=module_path.as_posix())
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    assert len(functions) == (48 if module_index < 24 else 47)
+    assert len(functions) == len(tree.body)
+    for block_index, function in enumerate(functions):
+        calls, values = _padding_block_facts(function, module_index, block_index)
+        edges[function.name] = calls
+        constants.extend(values)
+    return functions[-1].name
+
+
+def _is_padding_module(module: str | None) -> bool:
+    if module is None:
+        return False
+    return module.startswith("padding.module_")
+
+
+def _single_plain_name(node: ast.ImportFrom) -> bool:
+    if len(node.names) != 1:
+        return False
+    return node.names[0].asname is None
+
+
+def _padding_import_nodes(users_tree: ast.Module) -> list:
+    return [
+        node
+        for node in users_tree.body
+        if isinstance(node, ast.ImportFrom) and _is_padding_module(node.module)
+    ]
+
+
+def _padding_module_names() -> list[str]:
+    return [f"padding.module_{index:02d}" for index in range(32)]
+
+
+def _assert_padding_imports(users_tree: ast.Module, entry_names: list[str]) -> None:
+    """The user module imports one entry block from each padding module."""
+    imports = _padding_import_nodes(users_tree)
+    assert [node.module for node in imports] == _padding_module_names()
+    assert [node.names[0].name for node in imports] == entry_names
+    assert [_single_plain_name(node) for node in imports] == [True] * len(imports)
+
+
+def _user_function(users_tree: ast.Module) -> ast.FunctionDef:
+    functions = [node for node in users_tree.body if isinstance(node, ast.FunctionDef)]
+    assert len(functions) == 1
+    assert functions[0].name == "exercise_padding"
+    return functions[0]
+
+
+def _called_entries(user_calls: list) -> list[str]:
+    """One `accumulator = entry(accumulator)` per padding module, in order."""
+    names: list[str] = []
+    for statement in user_calls:
+        shape = _call_shape(statement)
+        assert (shape[0], shape[2], shape[3]) == (
+            ["accumulator"],
+            ["accumulator"],
+            False,
+        )
+        names.append(shape[1])
+    return names
+
+
+def _assert_live_constants(constants: list[int]) -> None:
+    """Every added constant is distinct, and every one carries the fixture seed."""
+    assert len(constants) == len(set(constants))
+    assert {value // 10_000_000 for value in constants} == {FIXTURE_SEED}
+
+
+def _reachable_from(entries: list[str], edges: dict) -> set[str]:
+    reachable: set[str] = set()
+    pending = list(entries)
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(edges[name])
+    return reachable
 
 
 def test_padding_ast_is_live_and_reachable_from_every_static_user_call(
@@ -141,133 +350,77 @@ def test_padding_ast_is_live_and_reachable_from_every_static_user_call(
 ) -> None:
     repository = generated_pair[0]
     function_edges: dict[str, tuple[str, ...]] = {}
-    entry_names: list[str] = []
     live_constants: list[int] = []
     module_paths = sorted((repository.root / "padding").glob("module_*.py"))
-
-    for module_index, module_path in enumerate(module_paths):
-        content = module_path.read_bytes()
-        assert b"#" not in content
-        tree = ast.parse(content, filename=module_path.as_posix())
-        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-        assert len(functions) == (48 if module_index < 24 else 47)
-        assert len(functions) == len(tree.body)
-
-        for block_index, function in enumerate(functions):
-            expected_name = f"padding_{module_index:02d}_{block_index:03d}"
-            assert function.name == expected_name
-            assert not function.decorator_list
-            assert not function.args.posonlyargs
-            assert not function.args.kwonlyargs
-            assert function.args.vararg is None
-            assert function.args.kwarg is None
-            assert [argument.arg for argument in function.args.args] == ["accumulator"]
-            annotation = function.args.args[0].annotation
-            assert isinstance(annotation, ast.Name) and annotation.id == "int"
-            assert isinstance(function.returns, ast.Name) and function.returns.id == "int"
-            assert function.end_lineno is not None
-            assert function.end_lineno - function.lineno + 1 == 64
-
-            body = list(function.body)
-            returned = body.pop()
-            assert isinstance(returned, ast.Return)
-            assert isinstance(returned.value, ast.Name)
-            assert returned.value.id == "accumulator"
-
-            if block_index:
-                previous_name = f"padding_{module_index:02d}_{block_index - 1:03d}"
-                chain = body.pop(0)
-                assert isinstance(chain, ast.Assign)
-                assert len(chain.targets) == 1
-                assert isinstance(chain.targets[0], ast.Name)
-                assert chain.targets[0].id == "accumulator"
-                assert isinstance(chain.value, ast.Call)
-                assert isinstance(chain.value.func, ast.Name)
-                assert chain.value.func.id == previous_name
-                assert len(chain.value.args) == 1
-                assert isinstance(chain.value.args[0], ast.Name)
-                assert chain.value.args[0].id == "accumulator"
-                assert not chain.value.keywords
-                function_edges[function.name] = (previous_name,)
-            else:
-                function_edges[function.name] = ()
-
-            assert body
-            for operation in body:
-                assert isinstance(operation, ast.AugAssign)
-                assert isinstance(operation.target, ast.Name)
-                assert operation.target.id == "accumulator"
-                assert isinstance(operation.op, ast.Add)
-                assert isinstance(operation.value, ast.Constant)
-                assert isinstance(operation.value.value, int)
-                live_constants.append(operation.value.value)
-
-        entry_names.append(functions[-1].name)
-
-    assert len(live_constants) == len(set(live_constants))
-    assert all(value // 10_000_000 == FIXTURE_SEED for value in live_constants)
+    entry_names = [
+        _padding_module_facts(index, path, function_edges, live_constants)
+        for index, path in enumerate(module_paths)
+    ]
+    _assert_live_constants(live_constants)
 
     users_path = repository.root / "qual" / "padding_users.py"
     users_content = users_path.read_bytes()
     assert b"#" not in users_content
     users_tree = ast.parse(users_content, filename=users_path.as_posix())
-    padding_imports = [
-        node
-        for node in users_tree.body
-        if isinstance(node, ast.ImportFrom)
-        and node.module is not None
-        and node.module.startswith("padding.module_")
-    ]
-    assert [node.module for node in padding_imports] == [
-        f"padding.module_{index:02d}" for index in range(32)
-    ]
-    assert [node.names[0].name for node in padding_imports] == entry_names
-    assert all(len(node.names) == 1 and node.names[0].asname is None for node in padding_imports)
-
-    user_functions = [node for node in users_tree.body if isinstance(node, ast.FunctionDef)]
-    assert len(user_functions) == 1
-    user_function = user_functions[0]
-    assert user_function.name == "exercise_padding"
-    user_calls = user_function.body[:32]
-    called_entries: list[str] = []
-    for statement in user_calls:
-        assert isinstance(statement, ast.Assign)
-        assert len(statement.targets) == 1
-        assert isinstance(statement.targets[0], ast.Name)
-        assert statement.targets[0].id == "accumulator"
-        assert isinstance(statement.value, ast.Call)
-        assert isinstance(statement.value.func, ast.Name)
-        called_entries.append(statement.value.func.id)
-        assert len(statement.value.args) == 1
-        assert isinstance(statement.value.args[0], ast.Name)
-        assert statement.value.args[0].id == "accumulator"
-        assert not statement.value.keywords
+    _assert_padding_imports(users_tree, entry_names)
+    user_function = _user_function(users_tree)
+    called_entries = _called_entries(user_function.body[:32])
     assert called_entries == entry_names
+    live_constants.extend(_aug_constants(user_function.body[32:-1]))
+    assert _returns_accumulator(user_function.body[-1])
+    _assert_live_constants(live_constants)
+    assert _reachable_from(called_entries, function_edges) == set(function_edges)
 
-    for operation in user_function.body[32:-1]:
-        assert isinstance(operation, ast.AugAssign)
-        assert isinstance(operation.target, ast.Name)
-        assert operation.target.id == "accumulator"
-        assert isinstance(operation.op, ast.Add)
-        assert isinstance(operation.value, ast.Constant)
-        assert isinstance(operation.value.value, int)
-        live_constants.append(operation.value.value)
-    returned = user_function.body[-1]
-    assert isinstance(returned, ast.Return)
-    assert isinstance(returned.value, ast.Name)
-    assert returned.value.id == "accumulator"
-    assert len(live_constants) == len(set(live_constants))
-    assert all(value // 10_000_000 == FIXTURE_SEED for value in live_constants)
 
-    reachable: set[str] = set()
-    pending = list(called_entries)
-    while pending:
-        function_name = pending.pop()
-        if function_name in reachable:
-            continue
-        reachable.add(function_name)
-        pending.extend(function_edges[function_name])
-    assert reachable == set(function_edges)
+def _is_padding_definition(query) -> bool:
+    if query.capability != "definition":
+        return False
+    return query.expected_locations[0].path.startswith("padding/module_")
+
+
+def _padding_entry(repository, module_index: int) -> tuple:
+    """The path of a padding module and the name of its last block."""
+    module_path = repository.root / f"padding/module_{module_index:02d}.py"
+    tree = ast.parse(module_path.read_bytes(), filename=module_path.as_posix())
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    return module_path, functions[-1].name
+
+
+def _assert_padding_query(repository, module_index: int, query) -> None:
+    """A gold query points from the user module at one padding entry block."""
+    module_path, entry_name = _padding_entry(repository, module_index)
+    expected = entry_name.encode("ascii")
+    location = query.expected_locations[0]
+    assert (
+        query.path,
+        query.symbol,
+        query.direction,
+        len(query.expected_locations),
+        location.path,
+    ) == (
+        "qual/padding_users.py",
+        entry_name,
+        None,
+        1,
+        f"padding/module_{module_index:02d}.py",
+    )
+    assert module_path.read_bytes()[location.byte_start : location.byte_end] == expected
+    query_content = (repository.root / query.path).read_bytes()
+    assert query_content[query.byte_offset : query.byte_end] == expected
+
+
+def _sampled_padding_ids(repository, expected_ids: tuple) -> tuple:
+    sampled = benchmark_runner._performance_queries(repository.gold_queries)
+    return tuple(
+        query.query_id for query in sampled if query.query_id in expected_ids
+    )
+
+
+_PADDING_QUERY_IDS = tuple(f"definition-{index:03d}" for index in range(168, 200))
+
+
+def _query_ids(queries) -> tuple:
+    return tuple(query.query_id for query in queries)
 
 
 def test_exactly_32_padding_entries_are_bound_to_definition_gold_queries(
@@ -275,38 +428,78 @@ def test_exactly_32_padding_entries_are_bound_to_definition_gold_queries(
 ) -> None:
     repository = generated_pair[0]
     padding_queries = [
-        query
-        for query in repository.gold_queries
-        if query.capability == "definition"
-        and query.expected_locations[0].path.startswith("padding/module_")
+        query for query in repository.gold_queries if _is_padding_definition(query)
     ]
-    expected_ids = tuple(f"definition-{index:03d}" for index in range(168, 200))
-    assert tuple(query.query_id for query in padding_queries) == expected_ids
+    assert _query_ids(padding_queries) == _PADDING_QUERY_IDS
     assert len(padding_queries) == 32
 
     for module_index, query in enumerate(padding_queries):
-        module_path = repository.root / f"padding/module_{module_index:02d}.py"
-        module_tree = ast.parse(module_path.read_bytes(), filename=module_path.as_posix())
-        functions = [node for node in module_tree.body if isinstance(node, ast.FunctionDef)]
-        entry_name = functions[-1].name
-        assert query.path == "qual/padding_users.py"
-        assert query.symbol == entry_name
-        assert query.direction is None
-        assert len(query.expected_locations) == 1
-        location = query.expected_locations[0]
-        assert location.path == f"padding/module_{module_index:02d}.py"
-        assert module_path.read_bytes()[location.byte_start : location.byte_end] == (
-            entry_name.encode("ascii")
-        )
-        query_content = (repository.root / query.path).read_bytes()
-        assert query_content[query.byte_offset : query.byte_end] == entry_name.encode("ascii")
+        _assert_padding_query(repository, module_index, query)
 
-    sampled_padding_ids = tuple(
-        query.query_id
-        for query in benchmark_runner._performance_queries(repository.gold_queries)
-        if query.query_id in expected_ids
+    assert _sampled_padding_ids(repository, _PADDING_QUERY_IDS) == (
+        "definition-177",
+        "definition-199",
     )
-    assert sampled_padding_ids == ("definition-177", "definition-199")
+
+
+_SHARED_WORKLOAD_PATHS = (
+    "original_path",
+    "renamed_path",
+    "created_path",
+    "probe_path",
+)
+
+_PER_WORKLOAD_SYMBOLS = ("original_symbol", "edited_symbol", "created_symbol")
+
+_PER_WORKLOAD_CONTENTS = (
+    "original_content",
+    "edited_content",
+    "created_content",
+    "baseline_probe_content",
+    "create_probe_content",
+    "edit_probe_content",
+    "rename_probe_content",
+    "rename_old_probe_content",
+    "delete_probe_content",
+)
+
+
+def _distinct_count(workloads, attribute: str) -> int:
+    return len({getattr(workload, attribute) for workload in workloads})
+
+
+def _distinct_counts(workloads, attributes: tuple) -> set[int]:
+    return {_distinct_count(workloads, attribute) for attribute in attributes}
+
+
+def _assert_workload_probes(workload) -> None:
+    """A workload's probe file is its own, and every probe names its symbol."""
+    assert workload.probe_path not in {
+        workload.original_path,
+        workload.renamed_path,
+        workload.created_path,
+    }
+    assert workload.original_symbol != workload.edited_symbol
+    original_start = workload.original_content.index(workload.original_symbol.encode())
+    edited_start = workload.edited_content.index(workload.edited_symbol.encode())
+    assert (original_start, workload.original_symbol) != (
+        edited_start,
+        workload.edited_symbol,
+    )
+    assert workload.created_symbol.encode() in workload.create_probe_content
+    assert workload.edited_symbol.encode() in workload.edit_probe_content
+    assert workload.renamed_path.removesuffix(".py").split("/")[-1].encode() in (
+        workload.rename_probe_content
+    )
+    assert workload.edited_symbol.encode() in workload.delete_probe_content
+
+
+def _manifest_paths(repository) -> set:
+    return {path for path, _digest in repository.source_manifest}
+
+
+def _marked_paths(paths: set, marker: str) -> set:
+    return {path for path in paths if marker in path}
 
 
 def test_generator_contains_promised_semantics_and_dedicated_workloads(
@@ -327,50 +520,22 @@ def test_generator_contains_promised_semantics_and_dedicated_workloads(
     assert repository.ambiguous_symbols == ("execute",)
     assert len(repository.workloads) == 50
     assert len({workload.workload_id for workload in repository.workloads}) == 50
-    for attribute in ("original_path", "renamed_path", "created_path", "probe_path"):
-        assert len({getattr(workload, attribute) for workload in repository.workloads}) == 1
+    workloads = repository.workloads
+    assert _distinct_counts(workloads, _SHARED_WORKLOAD_PATHS) == {1}
     first = repository.workloads[0]
-    assert len({first.original_path, first.renamed_path, first.created_path, first.probe_path}) == 4
-    for attribute in ("original_symbol", "edited_symbol", "created_symbol"):
-        assert len({getattr(workload, attribute) for workload in repository.workloads}) == 50
-    for attribute in (
-        "original_content",
-        "edited_content",
-        "created_content",
-        "baseline_probe_content",
-        "create_probe_content",
-        "edit_probe_content",
-        "rename_probe_content",
-        "rename_old_probe_content",
-        "delete_probe_content",
-    ):
-        assert len({getattr(workload, attribute) for workload in repository.workloads}) == 50
-    for workload in repository.workloads:
-        assert workload.probe_path not in {
-            workload.original_path,
-            workload.renamed_path,
-            workload.created_path,
-        }
-        assert workload.original_symbol != workload.edited_symbol
-        original_start = workload.original_content.index(workload.original_symbol.encode())
-        edited_start = workload.edited_content.index(workload.edited_symbol.encode())
-        assert (original_start, workload.original_symbol) != (
-            edited_start,
-            workload.edited_symbol,
-        )
-        assert workload.created_symbol.encode() in workload.create_probe_content
-        assert workload.edited_symbol.encode() in workload.edit_probe_content
-        assert workload.renamed_path.removesuffix(".py").split("/")[-1].encode() in (
-            workload.rename_probe_content
-        )
-        assert workload.edited_symbol.encode() in workload.delete_probe_content
+    assert len(
+        {first.original_path, first.renamed_path, first.created_path, first.probe_path}
+    ) == 4
+    assert _distinct_counts(workloads, _PER_WORKLOAD_SYMBOLS) == {50}
+    assert _distinct_counts(workloads, _PER_WORKLOAD_CONTENTS) == {50}
+    for workload in workloads:
+        _assert_workload_probes(workload)
     assert (repository.root / first.original_path).read_bytes() == first.original_content
     assert (repository.root / first.probe_path).read_bytes() == first.baseline_probe_content
-    assert not any(
-        "cycle_" in path or "probe_" in path
-        for path, _digest in repository.source_manifest
-    )
-    assert any("broken" in path for path, _digest in repository.source_manifest)
+    manifest_paths = _manifest_paths(repository)
+    assert _marked_paths(manifest_paths, "cycle_") == set()
+    assert _marked_paths(manifest_paths, "probe_") == set()
+    assert _marked_paths(manifest_paths, "broken") != set()
 
 
 def test_workload_catalog_canonically_binds_every_variant_and_field(
@@ -425,33 +590,71 @@ def test_repository_identity_rejects_any_in_memory_workload_content_tamper(
             )
 
 
+_GOLD_CAPABILITIES = ("definition", "references", "calls")
+
+
+def _capability_counts(queries) -> dict:
+    return {
+        capability: sum(query.capability == capability for query in queries)
+        for capability in _GOLD_CAPABILITIES
+    }
+
+
+def _location_shape(location) -> tuple:
+    """A gold location spans bytes, carries a digest, and counts lines from one."""
+    return (
+        location.byte_end > location.byte_start,
+        len(location.source_sha256),
+        location.line >= 1,
+        location.character >= 0,
+    )
+
+
+def _gold_locations(queries) -> list:
+    return [location for query in queries for location in query.expected_locations]
+
+
+def _queries_of(queries, capability: str) -> list:
+    return [query for query in queries if query.capability == capability]
+
+
+def _expected_location_counts(queries) -> set:
+    return {len(query.expected_locations) for query in queries}
+
+
+def _cross_file(queries) -> set:
+    return {query.path != query.expected_locations[0].path for query in queries}
+
+
+def _directions(queries) -> set:
+    return {query.direction for query in queries}
+
+
 def test_gold_has_exact_counts_complete_ranges_and_cross_file_answers(
     generated_pair: tuple[QualificationRepository, QualificationRepository],
 ) -> None:
-    repository = generated_pair[0]
-    counts = {
-        capability: sum(query.capability == capability for query in repository.gold_queries)
-        for capability in ("definition", "references", "calls")
-    }
+    queries = generated_pair[0].gold_queries
     assert (DEFINITION_QUERIES, REFERENCE_QUERIES, CALL_QUERIES) == (200, 100, 100)
-    assert counts == {"definition": 200, "references": 100, "calls": 100}
-    assert len(repository.gold_queries) == 400
-    assert all(query.expected_locations for query in repository.gold_queries)
-    assert all(
-        location.byte_end > location.byte_start
-        and len(location.source_sha256) == 64
-        and location.line >= 1
-        and location.character >= 0
-        for query in repository.gold_queries
-        for location in query.expected_locations
-    )
-    definitions = [query for query in repository.gold_queries if query.capability == "definition"]
-    assert all(query.path != query.expected_locations[0].path for query in definitions)
-    references = [query for query in repository.gold_queries if query.capability == "references"]
-    assert all(len(query.expected_locations) >= 5 for query in references)
-    calls = [query for query in repository.gold_queries if query.capability == "calls"]
-    assert all(query.direction == "outgoing" for query in calls)
-    assert all(query.path != query.expected_locations[0].path for query in calls)
+    assert _capability_counts(queries) == {
+        "definition": 200,
+        "references": 100,
+        "calls": 100,
+    }
+    assert len(queries) == 400
+    assert min(_expected_location_counts(queries)) >= 1
+    assert {_location_shape(location) for location in _gold_locations(queries)} == {
+        (True, 64, True, True)
+    }
+    assert _cross_file(_queries_of(queries, "definition")) == {True}
+    assert min(_expected_location_counts(_queries_of(queries, "references"))) >= 5
+    calls = _queries_of(queries, "calls")
+    assert _directions(calls) == {"outgoing"}
+    assert _cross_file(calls) == {True}
+
+
+def _capability_tally(sample) -> dict:
+    capabilities = [query.capability for query in sample]
+    return {name: capabilities.count(name) for name in _GOLD_CAPABILITIES}
 
 
 def test_performance_sample_is_exact_deterministic_and_stratified(
@@ -464,9 +667,11 @@ def test_performance_sample_is_exact_deterministic_and_stratified(
     assert first_sample == second_sample
     assert len(first_sample) == benchmark_runner.PERFORMANCE_SAMPLES == 20
     assert len({query.query_id for query in first_sample}) == 20
-    assert [query.capability for query in first_sample].count("definition") == 10
-    assert [query.capability for query in first_sample].count("references") == 5
-    assert [query.capability for query in first_sample].count("calls") == 5
+    assert _capability_tally(first_sample) == {
+        "definition": 10,
+        "references": 5,
+        "calls": 5,
+    }
     assert tuple(query.query_id for query in first_sample) == (
         "definition-000",
         "references-000",
@@ -491,6 +696,24 @@ def test_performance_sample_is_exact_deterministic_and_stratified(
     )
 
 
+def _character_offset_bytes(repository, query) -> int:
+    """How many bytes of the query's line precede its character."""
+    text = (repository.root / query.path).read_text(encoding="utf-8")
+    prefix = text.splitlines()[query.line - 1][: query.codepoint_character]
+    return len(prefix.encode("utf-8"))
+
+
+def _is_unicode_query(repository, query) -> bool:
+    """A query is unicode-bearing by its symbol, or by a byte offset that differs."""
+    if any(ord(character) > 127 for character in query.symbol):
+        return True
+    return query.character != _character_offset_bytes(repository, query)
+
+
+def _line_start_bytes(content: bytes, line: int) -> int:
+    return sum(len(item) for item in content.splitlines(keepends=True)[: line - 1])
+
+
 def test_unicode_query_characters_are_utf8_byte_offsets(
     generated_pair: tuple[QualificationRepository, QualificationRepository],
 ) -> None:
@@ -498,20 +721,12 @@ def test_unicode_query_characters_are_utf8_byte_offsets(
     unicode_queries = [
         query
         for query in repository.gold_queries
-        if any(ord(character) > 127 for character in query.symbol)
-        or query.character
-        != len(
-            (repository.root / query.path)
-            .read_text(encoding="utf-8")
-            .splitlines()[query.line - 1][: query.codepoint_character]
-            .encode("utf-8")
-        )
+        if _is_unicode_query(repository, query)
     ]
     assert unicode_queries
     for query in unicode_queries:
         content = (repository.root / query.path).read_bytes()
-        lines = content.splitlines(keepends=True)
-        line_start = sum(len(line) for line in lines[: query.line - 1])
+        line_start = _line_start_bytes(content, query.line)
         assert query.byte_offset == line_start + query.character
         assert content[query.byte_offset : query.byte_end] == query.symbol.encode("utf-8")
 
@@ -759,6 +974,89 @@ def _gold_query_ids() -> list[str]:
     ]
 
 
+_OWNERSHIP_SCENARIOS = ("normal_shutdown", "crash", "timeout", "cancellation")
+
+
+def _ownership_section() -> dict:
+    return {
+        scenario: {"available": True, "orphan_count": 0}
+        for scenario in _OWNERSHIP_SCENARIOS
+    }
+
+
+def _token_tasks() -> list:
+    return [
+        {
+            "query_id": query_id,
+            "uncached_input_tokens": 10,
+            "cache_read_tokens": 0,
+            "raw_tool_tokens": 20,
+            "output_tokens": 15,
+        }
+        for query_id in _gold_query_ids()[:396]
+    ]
+
+
+def _performance_section(qualification: bool) -> dict:
+    """A correctness-only run measures no latency at all."""
+    if not qualification:
+        return {
+            "available": False,
+            "cold_readiness_seconds": None,
+            "warm_facade_p50_ms": None,
+            "warm_facade_p95_ms": None,
+            "direct_pyright_p95_ms": None,
+            "warm_overhead_p95_ms": None,
+            "sample_count": 0,
+        }
+    return {
+        "available": True,
+        "cold_readiness_seconds": 30.0,
+        "warm_facade_p50_ms": 5.0,
+        "warm_facade_p95_ms": 8.0,
+        "direct_pyright_p95_ms": 3.0,
+        "warm_overhead_p95_ms": 5.0,
+        "sample_count": 20,
+    }
+
+
+def _resources_section(qualification: bool) -> dict:
+    if not qualification:
+        return {
+            "available": False,
+            "client_peak_rss_mib": None,
+            "method": "not_measured_in_correctness_only",
+        }
+    return {
+        "available": True,
+        "client_peak_rss_mib": 60.0,
+        "method": "measured-test",
+    }
+
+
+_PYRIGHT_PROVENANCE = (
+    Provenance("lsp", "pyright", PYRIGHT_VERSION, "provider_reported"),
+)
+
+
+def _answer_status(symbol: str | None) -> NavigationStatus:
+    if symbol is None:
+        return NavigationStatus.ERROR
+    return NavigationStatus.OK
+
+
+def _answered_capability(request: object, symbol: str | None):
+    if symbol is None:
+        return None
+    return request.capability
+
+
+def _resolution_for(locations: tuple) -> ResolutionLabel:
+    if locations:
+        return ResolutionLabel.LSP_CONFIRMED
+    return ResolutionLabel.UNRESOLVED
+
+
 def _measured_report(mode: str = "qualification") -> dict[str, object]:
     qualification = mode == "qualification"
     return {
@@ -824,16 +1122,7 @@ def _measured_report(mode: str = "qualification") -> dict[str, object]:
         },
         "tokens": {
             "cache_read_label": "not_applicable_no_result_cache",
-            "tasks": [
-                {
-                    "query_id": query_id,
-                    "uncached_input_tokens": 10,
-                    "cache_read_tokens": 0,
-                    "raw_tool_tokens": 20,
-                    "output_tokens": 15,
-                }
-                for query_id in _gold_query_ids()[:396]
-            ],
+            "tasks": _token_tasks(),
             "default_items": 10,
             "max_default_estimated_tokens": 1200,
         },
@@ -852,30 +1141,10 @@ def _measured_report(mode: str = "qualification") -> dict[str, object]:
             "orphan_checks_attempted": 4,
             "orphan_checks_measured": 4,
             "orphan_process_rate": 0.0,
-            "ownership": {
-                scenario: {"available": True, "orphan_count": 0}
-                for scenario in (
-                    "normal_shutdown",
-                    "crash",
-                    "timeout",
-                    "cancellation",
-                )
-            },
+            "ownership": _ownership_section(),
         },
-        "performance": {
-            "available": qualification,
-            "cold_readiness_seconds": 30.0 if qualification else None,
-            "warm_facade_p50_ms": 5.0 if qualification else None,
-            "warm_facade_p95_ms": 8.0 if qualification else None,
-            "direct_pyright_p95_ms": 3.0 if qualification else None,
-            "warm_overhead_p95_ms": 5.0 if qualification else None,
-            "sample_count": 20 if qualification else 0,
-        },
-        "resources": {
-            "available": qualification,
-            "client_peak_rss_mib": 60.0 if qualification else None,
-            "method": "measured-test" if qualification else "not_measured_in_correctness_only",
-        },
+        "performance": _performance_section(qualification),
+        "resources": _resources_section(qualification),
         "operator_corpus": None,
         "errors": [],
         "market_superiority_claimed": False,
@@ -1319,6 +1588,44 @@ def test_citation_validation_requires_the_current_source_hash(tmp_path: Path) ->
     assert not _current_citation(tmp_path, location, expected_sha256="0" * 64)
 
 
+def _symbol_at(line: bytes, character: int) -> str:
+    return line[character:].split(b"(", 1)[0].strip().decode("utf-8")
+
+
+def _is_import_of(source_line: str, suffix: str) -> bool:
+    if not source_line.startswith("from "):
+        return False
+    return source_line.endswith(suffix)
+
+
+def _imported_module(content: bytes, symbol: str) -> str | None:
+    """The module a `from X import <symbol>` line names, if any line does."""
+    suffix = f" import {symbol}"
+    for source_line in content.decode("utf-8").splitlines():
+        if _is_import_of(source_line, suffix):
+            return source_line[5 : -len(suffix)]
+    return None
+
+
+def _definition_in(target_content: bytes, target_path: str, symbol: str):
+    """The location of `def <symbol>(`, or nothing when the file lacks it."""
+    byte_start = target_content.find(f"def {symbol}(".encode())
+    if byte_start < 0:
+        return None
+    byte_start += len(b"def ")
+    prefix = target_content[:byte_start]
+    return (
+        GoldLocation(
+            target_path,
+            prefix.count(b"\n") + 1,
+            byte_start - (prefix.rfind(b"\n") + 1),
+            byte_start,
+            byte_start + len(symbol.encode()),
+            hashlib.sha256(target_content).hexdigest(),
+        ),
+    )
+
+
 class BehavioralNavigationRuntime:
     """Small semantic fake that returns locations, never metric values."""
 
@@ -1352,49 +1659,29 @@ class BehavioralNavigationRuntime:
             Capability.CALLS: "calls",
         }[capability]
 
+    def _definition_locations(self, module: str, symbol: str):
+        """No location when the target file is absent; None when it lacks the symbol."""
+        target_path = f"{module.replace('.', '/')}.py"
+        target = self.repository.root / target_path
+        if not target.is_file():
+            return ()
+        return _definition_in(target.read_bytes(), target_path, symbol)
+
     def _dynamic_query(self, request: object) -> GoldQuery | None:
         path = self.repository.root / request.path
         if not path.is_file():
             return None
         content = path.read_bytes()
         lines = content.splitlines(keepends=True)
-        line = lines[request.line - 1]
-        tail = line[request.character :]
-        symbol = tail.split(b"(", 1)[0].strip().decode("utf-8")
-        import_suffix = f" import {symbol}"
-        module = next(
-            (
-                source_line[5 : -len(import_suffix)]
-                for source_line in content.decode("utf-8").splitlines()
-                if source_line.startswith("from ") and source_line.endswith(import_suffix)
-            ),
-            None,
-        )
+        symbol = _symbol_at(lines[request.line - 1], request.character)
+        module = _imported_module(content, symbol)
         if not module:
             return None
-        target_path = f"{module.replace('.', '/')}.py"
-        target = self.repository.root / target_path
-        expected: tuple[GoldLocation, ...] = ()
-        if target.is_file():
-            target_content = target.read_bytes()
-            marker = f"def {symbol}(".encode()
-            byte_start = target_content.find(marker)
-            if byte_start < 0:
-                return None
-            byte_start += len(b"def ")
-            prefix = target_content[:byte_start]
-            expected = (
-                GoldLocation(
-                    target_path,
-                    prefix.count(b"\n") + 1,
-                    byte_start - (prefix.rfind(b"\n") + 1),
-                    byte_start,
-                    byte_start + len(symbol.encode()),
-                    hashlib.sha256(target_content).hexdigest(),
-                ),
-            )
+        expected = self._definition_locations(module, symbol)
+        if expected is None:
+            return None
         digest = hashlib.sha256(content).hexdigest()
-        query_start = sum(len(item) for item in lines[: request.line - 1]) + request.character
+        query_start = _line_start_bytes(content, request.line) + request.character
         return GoldQuery(
             "dynamic",
             "definition",
@@ -1448,11 +1735,19 @@ class BehavioralNavigationRuntime:
         assert deadline > time.monotonic()
         self.calls.append(request)
         query = self._query_for_request(request)
-        expected = () if query is None else query.expected_locations
-        if query is not None and query.query_id == self.mismatch_query_id:
-            expected = ()
-        provenance = (Provenance("lsp", "pyright", PYRIGHT_VERSION, "provider_reported"),)
-        locations = tuple(
+        if query is None:
+            return self._navigation_result(request, None, ())
+        locations = self._navigation_locations(self._answered_locations(query))
+        return self._navigation_result(request, query.symbol, locations)
+
+    def _answered_locations(self, query: GoldQuery) -> tuple:
+        """The query under mismatch is the one that answers with nothing."""
+        if query.query_id == self.mismatch_query_id:
+            return ()
+        return query.expected_locations
+
+    def _navigation_locations(self, expected) -> tuple:
+        return tuple(
             NavigationLocation(
                 location.path,
                 PositionRange(location.byte_start, location.byte_end),
@@ -1461,35 +1756,41 @@ class BehavioralNavigationRuntime:
                 None,
                 None,
                 ResolutionLabel.LSP_CONFIRMED,
-                provenance,
+                _PYRIGHT_PROVENANCE,
             )
             for location in expected
         )
-        capability = request.capability
-        status = NavigationStatus.OK if query is not None else NavigationStatus.ERROR
+
+    def _navigation_result(
+        self,
+        request: object,
+        symbol: str | None,
+        locations: tuple,
+    ) -> NavigationResult:
+        """An answered query, or — with no symbol — the error shape."""
         return NavigationResult(
-            status,
-            capability,
-            capability if query is not None else None,
-            "pyright",
-            PYRIGHT_VERSION,
-            self.scope.repository_id,
-            self.scope.checkout_id,
-            "a" * 64,
-            "a" * 64,
-            1,
-            PositionEncoding.UTF8,
-            "query_ready",
-            query.symbol if query is not None else None,
-            len(locations),
-            request.offset,
-            request.limit,
-            locations,
-            (),
-            None,
-            ResolutionLabel.LSP_CONFIRMED if locations else ResolutionLabel.UNRESOLVED,
-            provenance,
-            (),
+            status=_answer_status(symbol),
+            requested_capability=request.capability,
+            effective_capability=_answered_capability(request, symbol),
+            provider="pyright",
+            provider_version=PYRIGHT_VERSION,
+            repository_id=self.scope.repository_id,
+            checkout_id=self.scope.checkout_id,
+            workspace_revision_before="a" * 64,
+            workspace_revision_after="a" * 64,
+            document_version=1,
+            position_encoding=PositionEncoding.UTF8,
+            readiness="query_ready",
+            symbol=symbol,
+            total=len(locations),
+            offset=request.offset,
+            limit=request.limit,
+            locations=locations,
+            diagnostics=(),
+            hover=None,
+            resolution=_resolution_for(locations),
+            provenance=_PYRIGHT_PROVENANCE,
+            warnings=(),
         )
 
     def direct_query(self, request: object, *, deadline: float) -> object:
@@ -1565,6 +1866,31 @@ def test_ownership_interruption_rejects_terminal_without_sent_proof(
     assert runtime.reset_calls == 1
 
 
+def _interruption_pending(deadline: float, cancellation) -> bool:
+    """The request is over before dispatch: out of time, or already cancelled."""
+    if deadline <= time.monotonic():
+        return True
+    if cancellation is None:
+        return False
+    return cancellation.is_cancelled()
+
+
+def _interruption(scenario: str, message: str) -> Exception:
+    if scenario == "timeout":
+        return TimeoutError(message)
+    return benchmark_runner.RequestCancelled(message)
+
+
+def _await_cancellation(cancellation, deadline: float) -> None:
+    assert cancellation is not None
+    assert cancellation.wait(max(0.0, deadline - time.monotonic()))
+
+
+def _await_deadline(deadline: float) -> None:
+    while time.monotonic() < deadline:
+        time.sleep(0.001)
+
+
 @pytest.mark.parametrize("scenario", ["timeout", "cancellation"])
 def test_ownership_interruption_dispatches_before_terminal_and_then_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
@@ -1596,23 +1922,17 @@ def test_ownership_interruption_dispatches_before_terminal_and_then_cleans_up(
                 events.append("empty-completed")
                 return []
             assert params == {"query": "__llm_wiki_ownership_probe_no_match__"}
-            if deadline <= time.monotonic() or (
-                cancellation is not None and cancellation.is_cancelled()
-            ):
+            if _interruption_pending(deadline, cancellation):
                 terminal.set()
-                if scenario == "timeout":
-                    raise TimeoutError("rejected before dispatch")
-                raise benchmark_runner.RequestCancelled("rejected before dispatch")
+                raise _interruption(scenario, "rejected before dispatch")
             sent.set()
             events.append("sent")
             if scenario == "cancellation":
-                assert cancellation is not None
-                assert cancellation.wait(max(0.0, deadline - time.monotonic()))
+                _await_cancellation(cancellation, deadline)
                 terminal.set()
                 events.append("terminal")
                 raise benchmark_runner.RequestCancelled("cancelled after dispatch")
-            while time.monotonic() < deadline:
-                time.sleep(0.001)
+            _await_deadline(deadline)
             terminal.set()
             events.append("terminal")
             raise TimeoutError("timed out after dispatch")
@@ -2442,6 +2762,22 @@ def test_partial_empty_mutation_absence_is_stale_but_positive_partial_is_valid(
     assert errors == []
 
 
+def _query_id_list(queries) -> list:
+    return [query.query_id for query in queries]
+
+
+def _expected_location_counts_list(queries) -> list:
+    return [len(query.expected_locations) for query in queries]
+
+
+def _first_location_paths(queries) -> list:
+    return [
+        query.expected_locations[0].path
+        for query in queries
+        if query.expected_locations
+    ]
+
+
 def test_mutation_checks_use_stable_probes_and_error_empty_never_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2483,23 +2819,15 @@ def test_mutation_checks_use_stable_probes_and_error_empty_never_passes(
     workload = repository.workloads[0]
     assert len(runtime.calls) == 5
     assert {request.path for request in runtime.calls} == {workload.probe_path}
-    assert [query.query_id for query in mutation_queries] == [
+    assert _query_id_list(mutation_queries) == [
         "mutation-000-create",
         "mutation-000-edit",
         "mutation-000-rename-new",
         "mutation-000-rename-old",
         "mutation-000-delete",
     ]
-    assert [len(query.expected_locations) for query in mutation_queries] == [
-        1,
-        1,
-        1,
-        0,
-        0,
-    ]
-    assert [
-        query.expected_locations[0].path for query in mutation_queries if query.expected_locations
-    ] == [
+    assert _expected_location_counts_list(mutation_queries) == [1, 1, 1, 0, 0]
+    assert _first_location_paths(mutation_queries) == [
         workload.created_path,
         workload.original_path,
         workload.renamed_path,
@@ -2966,6 +3294,33 @@ def test_cli_reports_sanitized_benchmark_timeout(
     assert "PRIVATE_TIMEOUT_DETAIL" not in captured.err
 
 
+_NOT_READY_RESULT = ("not_ready", True)
+_EMPTY_RESULT = ("provider_reported", False)
+
+
+def _location_identity(locations) -> set:
+    """What a direct answer points at, independently of how it is packaged."""
+    return {
+        (
+            location.path,
+            location.line,
+            location.character,
+            location.byte_start,
+            location.byte_end,
+        )
+        for location in locations
+    }
+
+
+def _answers_wrong(failure_mode: str, direct_calls: int) -> bool:
+    """Every call for one mode, every second call for the other."""
+    if failure_mode == "direct_wrong":
+        return True
+    if failure_mode != "direct_second_wrong":
+        return False
+    return direct_calls % 2 == 0
+
+
 @pytest.mark.parametrize(
     "failure_mode",
     [
@@ -3021,36 +3376,18 @@ def test_performance_samples_require_successful_direct_and_exact_facade_results(
                     partial=False,
                     locations=(),
                 )
-            if failure_mode in {"direct_wrong", "direct_second_wrong"} and (
-                failure_mode == "direct_wrong" or self.direct_calls % 2 == 0
-            ):
-                expected = {
-                    (
-                        location.path,
-                        location.line,
-                        location.character,
-                        location.byte_start,
-                        location.byte_end,
-                    )
-                    for location in query.expected_locations
-                }
-                wrong = next(
-                    candidate
-                    for candidate in self.repository.gold_queries
-                    if {
-                        (
-                            location.path,
-                            location.line,
-                            location.character,
-                            location.byte_start,
-                            location.byte_end,
-                        )
-                        for location in candidate.expected_locations
-                    }
-                    != expected
-                )
-                return self._direct_result_for_query(wrong)
+            if _answers_wrong(failure_mode, self.direct_calls):
+                return self._direct_result_for_query(self._other_query(query))
             return result
+
+        def _other_query(self, query: GoldQuery) -> GoldQuery:
+            """A gold query that points somewhere else than this one."""
+            expected = _location_identity(query.expected_locations)
+            return next(
+                candidate
+                for candidate in self.repository.gold_queries
+                if _location_identity(candidate.expected_locations) != expected
+            )
 
         def query(self, request: object, *, deadline: float) -> NavigationResult:
             result = super().query(request, deadline=deadline)

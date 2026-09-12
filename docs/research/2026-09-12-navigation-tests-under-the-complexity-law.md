@@ -39,5 +39,13 @@ and still asserts the same facts.
 - Compound assertions become one comparison against a named tuple of
   facts: `_location_facts`, `_fenced_outcome`, `_measured_claims`.
 
+- `tests/test_code_navigation_benchmark.py`: the 121-line AST walker over the
+  padding fixture (CCN 26) becomes a per-module, per-block pipeline
+  (`_padding_module_facts`, `_padding_block_facts`, `_aug_constants`,
+  `_reachable_from`); the gold-query checks compare one named tuple per
+  location; `_measured_report` builds its performance and resource sections
+  through `_performance_section` / `_resources_section` instead of eight
+  ternaries; the fake runtime's `query` returns early when nothing answered.
+
 Files: `tests/test_code_navigation.py`, `tests/test_model_policy.py`,
-`CHANGELOG.md`.
+`tests/test_code_navigation_benchmark.py`, `CHANGELOG.md`.
