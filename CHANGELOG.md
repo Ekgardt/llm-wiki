@@ -51,6 +51,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The decision rule is satisfied.** Three runs, every condition met on the
+  surface an agent actually reaches: 16 correct answers of 16 against
+  codebase-memory-mcp's 15, zero confident-wrong answers against their one, no
+  non-answers on either side, tokens 1.45× against a 1.5× ceiling and p95 per
+  task 1.58× against a 2× ceiling. The rule was written before the first number
+  was read and has not been touched since; by it, llm-wiki can now replace the
+  other tool, and removing it is the owner's call. What moved the numbers is in
+  `docs/research/2026-09-12-the-rule-is-satisfied.md`: six changes, of which one
+  added a capability and five removed waste — two wrong answers and four repeats
+  of work already done. Measured on the worktree checkout, because the installed
+  vault still holds no code generation of its own.
 - **Sixteen of sixteen, against fifteen.** After the two defect fixes and the
   three changes the owner approved on 2026-09-12, three runs of the parity set
   give our two surfaces 16 correct answers of 16 against codebase-memory-mcp's
