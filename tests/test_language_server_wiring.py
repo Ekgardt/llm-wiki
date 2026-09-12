@@ -87,9 +87,13 @@ def test_the_boundary_routes_a_file_to_the_server_that_owns_its_suffix(
 
 
 def test_an_unclaimed_suffix_keeps_the_behaviour_it_had_before_profiles() -> None:
-    """Not an error and not a new refusal: the same session it always opened."""
+    """Not an error and not a new refusal: the same session it always opened.
+
+    `.go` was an unclaimed suffix until gopls became a managed profile on
+    2026-09-12; `.rs` is the unclaimed one now.
+    """
     assert mcp_server._navigation_profile("README.md") is PYRIGHT_PROFILE
-    assert mcp_server._navigation_profile("main.go") is PYRIGHT_PROFILE
+    assert mcp_server._navigation_profile("lib.rs") is PYRIGHT_PROFILE
 
 
 def _claimed_suffixes() -> dict[str, str]:
