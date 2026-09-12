@@ -412,7 +412,13 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
     import repository_scope
 
     captured = {}
-    catalog = SimpleNamespace(catalog_path=tmp_path / "catalog.sqlite3")
+    catalog = SimpleNamespace(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        # This repository has no registered code generation, so the read falls
+        # through to the active pointer:
+        # docs/research/2026-09-12-the-vault-is-a-repository-too.md.
+        code_generation_for_repository=lambda _scope, **_options: (None, None),
+    )
     graph = SimpleNamespace(database_path=tmp_path / "evidence.sqlite3", close=lambda: None)
 
     def cancelled():
@@ -488,6 +494,13 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
         evidence_graph.EvidenceGraph,
         "open_active_for_repository",
         open_graph,
+    )
+    # No registered code generation here, so the read falls through to the
+    # active pointer: docs/research/2026-09-12-the-vault-is-a-repository-too.md.
+    monkeypatch.setattr(
+        evidence_graph.EvidenceGraph,
+        "open_code_for_repository",
+        lambda *_args, **_options: None,
     )
 
     assert code_graph._active_evidence_graph(tmp_path).database_path is graph.database_path

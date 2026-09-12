@@ -453,7 +453,7 @@
       "question": "Is _legacy_vector_source_membership (scripts/search_memory.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/search_memory.py:5020 (def _legacy_vector_source_membership)",
+          "scripts/search_memory.py:5038 (def _legacy_vector_source_membership)",
           "zero references anywhere in the repository outside its def: grep -rn _legacy_vector_source_membership . on 2026-09-12 returns that one line"
         ],
         "must": [

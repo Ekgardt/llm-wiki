@@ -19,6 +19,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A digest recomputed over damaged rows cannot catch them.** Moving the chunk
+  walk off the read path took the corruption fallback with it: five kinds of row
+  damage — a heading ancestry that is not a JSON list, a broken `chunk_order`, a
+  `source_sha256` or `chunk_id` that is not a sha256, blank content — were served
+  from the generation instead of falling back to lexical search, because the test
+  that damages a row also refreshes the manifest descriptor. The walk is back on
+  the read path and its verdict is now remembered by the artifact's content
+  digest, so it is paid once per distinct bytes instead of once per process; a
+  deep check still walks and still re-derives. Two fake catalogs in the code-graph
+  tests learned to answer the code-generation question the reader now asks first,
+  and the autonomous-bootstrap LSP test no longer uses one 0.8 s number for both
+  a real server start and the replacement budget it measures — a Windows runner
+  failed the start. See
+  `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+
 - **The parity gold described the tree of 2026-08-28, and graded on it.** Eight
   of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
   that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when

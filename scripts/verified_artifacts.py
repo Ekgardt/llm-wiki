@@ -45,6 +45,16 @@ def _entry_key(generation_id: str, relative_path: str, metadata: os.stat_result)
     )
 
 
+def _verdict_key(name: str, digest: str) -> str:
+    """A named verdict about content, keyed by the content's own digest.
+
+    Git's racily-clean rule does not apply here: the identity is the hash of the
+    bytes, so there is no stat to be raced. Research:
+    `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+    """
+    return "|".join(("verdict", str(name), str(digest)))
+
+
 def _loaded_document(path: Path) -> dict:
     raw = path.read_bytes()
     if len(raw) > MAX_CACHE_BYTES:
@@ -100,6 +110,18 @@ class VerifiedArtifacts:
         digest: str,
     ) -> None:
         self.fresh[_entry_key(generation_id, relative_path, metadata)] = digest
+
+    def verdict(self, name: str, digest: str | None) -> str | None:
+        """What was decided about these exact bytes before, or None to decide."""
+        if not digest:
+            return None
+        stored = self.entries.get(_verdict_key(name, digest))
+        return stored if isinstance(stored, str) else None
+
+    def remember_verdict(self, name: str, digest: str | None, value: str = "ok") -> None:
+        if not digest:
+            return
+        self.fresh[_verdict_key(name, digest)] = value
 
     def _merged(self) -> dict:
         merged = {**self.entries, **self.fresh}

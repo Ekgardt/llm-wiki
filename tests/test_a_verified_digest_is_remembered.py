@@ -145,17 +145,69 @@ def test_a_moved_artifact_has_no_remembered_digest(tmp_path):
     assert remembered is None
 
 
-def test_a_shallow_index_check_does_not_walk_every_row():
-    """The rows belong to the deep check; a read has the digest."""
-    import search_memory
+class _RefusesToBeWalked:
+    def execute(self, *_args, **_kwargs):
+        raise AssertionError("these rows were walked once already")
 
-    class _Refuses:
-        def execute(self, *_args, **_kwargs):
-            raise AssertionError("a read must not walk the index rows")
+
+def test_rows_already_walked_are_not_walked_again():
+    """The walk is paid once per distinct artifact digest, not once per read."""
+    import search_memory
 
     assert (
         search_memory._stored_chunks_match(  # noqa: SLF001
-            _Refuses(), None, count=3, deadline=None, cancelled=None
+            _RefusesToBeWalked(),
+            None,
+            count=3,
+            check_rows=False,
+            deadline=None,
+            cancelled=None,
         )
         is True
     )
+
+
+def test_a_digest_not_yet_walked_asks_for_the_walk(tmp_path):
+    """A first read of these bytes walks them; the next process does not."""
+    import search_memory
+
+    manifest = {"artifacts": [{"path": "search.sqlite3", "sha256": "d" * 64}]}
+
+    _cache, digest, first = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, manifest, False
+    )
+    cache, _digest, _walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, manifest, False
+    )
+    search_memory._remember_walked_rows(cache, digest, True)  # noqa: SLF001
+    _again, _digest, second = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, manifest, False
+    )
+
+    assert (digest, first, second) == ("d" * 64, True, False)
+
+
+def test_a_deep_check_walks_the_rows_even_when_remembered(tmp_path):
+    import search_memory
+
+    manifest = {"artifacts": [{"path": "search.sqlite3", "sha256": "e" * 64}]}
+    cache, digest, _first = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, manifest, False
+    )
+    search_memory._remember_walked_rows(cache, digest, True)  # noqa: SLF001
+
+    _cache, _digest, walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, manifest, True
+    )
+
+    assert walk is True
+
+
+def test_a_manifest_without_a_digest_asks_for_the_walk(tmp_path):
+    import search_memory
+
+    _cache, digest, walk = search_memory._fts_rows_need_walking(  # noqa: SLF001
+        tmp_path, {"artifacts": []}, False
+    )
+
+    assert (digest, walk) == (None, True)
