@@ -62,12 +62,18 @@ def _load() -> dict:
     return json.loads(MATRIX.read_bytes())
 
 
+def _assigns_name(node: ast.stmt, name: str) -> bool:
+    if not isinstance(node, ast.Assign):
+        return False
+    return any(
+        isinstance(target, ast.Name) and target.id == name for target in node.targets
+    )
+
+
 def _runner_literal(name: str) -> object:
     tree = ast.parse(RUNNER.read_text(encoding="utf-8"), filename=str(RUNNER))
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == name for target in node.targets
-        ):
+        if _assigns_name(node, name):
             return ast.literal_eval(node.value)
     raise AssertionError(f"runner constant not found: {name}")
 
@@ -138,14 +144,26 @@ def _validate_quality(quality: dict) -> None:
         assert all(type(value) in {int, float} and 0 <= value <= 1 for value in values)
 
 
+def _is_nonnegative_number(value: object) -> bool:
+    return type(value) in {int, float} and value >= 0
+
+
+def _resource_values(resources: dict) -> list:
+    return [value for key, value in resources.items() if key != "status"]
+
+
+def _unmeasured_resources(resources: dict) -> bool:
+    return resources["status"] == "unmeasured"
+
+
 def _validate_resources(resources: dict) -> None:
     _assert_keys(resources, RESOURCE_MEASUREMENT_FIELDS)
-    values = [value for key, value in resources.items() if key != "status"]
-    if resources["status"] == "unmeasured":
-        assert all(value is None for value in values)
-    else:
-        assert resources["status"] == "measured"
-        assert all(type(value) in {int, float} and value >= 0 for value in values)
+    values = _resource_values(resources)
+    if _unmeasured_resources(resources):
+        assert set(values) == {None}
+        return
+    unusable = [value for value in values if not _is_nonnegative_number(value)]
+    assert (resources["status"], unusable) == ("measured", [])
 
 
 def _validate_objective_values(matrix: dict, variant: dict, values: dict) -> None:
@@ -191,132 +209,235 @@ def _dominates(candidate: dict, selected: dict, objectives: dict) -> bool:
     return all(weakly_better) and any(strictly_better)
 
 
-def _validate_selection(matrix: dict, raw_reports: dict[str, bytes] | None = None) -> None:
-    selection = matrix["selection"]
-    selected = (selection["default_embedding"], selection["default_reranker"])
-    if not any(item is not None for item in selected):
-        assert selection["status"] == "awaiting_raw_benchmark"
-        assert selection["result_evidence"] is None
-        return
-    assert sum(item is not None for item in selected) == 1
-    assert selection["status"] == "selected_from_raw_benchmark"
-    evidence = selection["result_evidence"]
-    assert isinstance(evidence, dict) and evidence
-    _assert_keys(evidence, EVIDENCE_FIELDS)
-    target = next(item for item in selected if item is not None)
-    assert evidence["selected"] == target
-    candidate, variant = _resolve_target(matrix, target)
-    assert candidate["shipping_eligible"] is True
+_MEASURED_AT_PATTERN = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
+
+
+def _target_key(target: dict) -> tuple:
+    return tuple(target[field] for field in sorted(SELECTION_TARGET_FIELDS))
+
+
+def _variant_target(item: dict, variant: dict) -> dict:
+    return {
+        "dimensions": variant["dimensions"],
+        "id": item["id"],
+        "revision": item["revision"],
+        "variant_id": variant["variant_id"],
+    }
+
+
+def _shipping_target_keys(candidates: list) -> set:
+    return {
+        _target_key(_variant_target(item, variant))
+        for item in candidates
+        if item["shipping_eligible"]
+        for variant in item["variants"]
+    }
+
+
+def _validate_awaiting_selection(selection: dict) -> None:
+    """No default yet: the matrix must say so and carry no evidence."""
+    assert selection["status"] == "awaiting_raw_benchmark"
+    assert selection["result_evidence"] is None
+
+
+def _validate_measured_variant(variant: dict) -> None:
     _validate_quality(variant["quality"])
     _validate_resources(variant["resource_measurements"])
     assert variant["quality"]["status"] == "measured"
     assert variant["resource_measurements"]["status"] == "measured"
-    _assert_keys(evidence["measurements"], {"quality", "resources"})
-    assert evidence["measurements"] == {
-        "quality": variant["quality"],
-        "resources": variant["resource_measurements"],
-    }
-    assert _gate_outcomes_pass(evidence["gates"], selection["required_gates"])
+
+
+def _validate_evidence_fingerprints(matrix: dict, evidence: dict) -> None:
+    corpus = matrix["benchmark_contract"]["corpus"]
     assert evidence["matrix_policy_sha256"] == _matrix_policy_fingerprint(matrix)
     assert evidence["benchmark_contract_sha256"] == _sha256_json(
         matrix["benchmark_contract"]
     )
-    corpus = matrix["benchmark_contract"]["corpus"]
     assert evidence["benchmark_corpus_sha256"] == corpus["sha256"]
     assert _sha256_bytes((ROOT / corpus["path"]).read_bytes()) == corpus["sha256"]
+
+
+def _unusable_report_path_parts(path: PurePosixPath) -> list:
+    """Path shapes a published report path may not have."""
+    refusals = (
+        ("absolute", path.is_absolute()),
+        ("dot", "." in path.parts),
+        ("dotdot", ".." in path.parts),
+        ("root", path.parts[:2] != ("benchmark", "results")),
+        ("suffix", path.suffix != ".json"),
+    )
+    return [name for name, wrong in refusals if wrong]
+
+
+def _validate_raw_report(evidence: dict, raw_reports: dict[str, bytes] | None) -> None:
     report_path = evidence["raw_report_path"]
     path = PurePosixPath(report_path)
-    assert path.as_posix() == report_path
-    assert not path.is_absolute() and "." not in path.parts and ".." not in path.parts
-    assert path.parts[:2] == ("benchmark", "results") and path.suffix == ".json"
+    assert (path.as_posix(), _unusable_report_path_parts(path)) == (report_path, [])
     assert raw_reports is not None and report_path in raw_reports
     assert evidence["raw_report_sha256"] == _sha256_bytes(raw_reports[report_path])
     report = json.loads(raw_reports[report_path])
     _assert_keys(report, RAW_REPORT_FIELDS)
     assert report == {field: evidence[field] for field in RAW_REPORT_FIELDS}
+
+
+def _validate_measured_at(evidence: dict) -> None:
     measured_at = evidence["measured_at"]
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", measured_at)
+    assert re.fullmatch(_MEASURED_AT_PATTERN, measured_at)
     assert datetime.fromisoformat(measured_at.replace("Z", "+00:00")).tzinfo is not None
+
+
+def _validate_pareto_candidate(matrix: dict, item: dict) -> None:
+    _assert_keys(item, {"gates", "objective_values", "target"})
+    _, item_variant = _resolve_target(matrix, item["target"])
+    _validate_measured_variant(item_variant)
+    _validate_objective_values(matrix, item_variant, item["objective_values"])
+
+
+def _dominating_candidates(selected: dict, candidates: list, objectives: list) -> list:
+    return [
+        item
+        for item in candidates
+        if item is not selected
+        if _dominates(item["objective_values"], selected["objective_values"], objectives)
+    ]
+
+
+def _gate_passing(candidates: list, required: list) -> list:
+    return [item for item in candidates if _gate_outcomes_pass(item["gates"], required)]
+
+
+def _selected_pareto_candidate(candidates: list, target: dict) -> dict:
+    return next(item for item in candidates if item["target"] == target)
+
+
+def _validate_pareto(matrix: dict, selection: dict, evidence: dict, target: dict) -> None:
     pareto = evidence["pareto"]
     _assert_keys(pareto, {"candidates"})
     assert pareto["candidates"]
-    selected_candidate = None
-    gate_passing_candidates = []
-    evidenced_targets = set()
     for item in pareto["candidates"]:
-        _assert_keys(item, {"gates", "objective_values", "target"})
-        _, item_variant = _resolve_target(matrix, item["target"])
-        _validate_quality(item_variant["quality"])
-        _validate_resources(item_variant["resource_measurements"])
-        assert item_variant["quality"]["status"] == "measured"
-        assert item_variant["resource_measurements"]["status"] == "measured"
-        _validate_objective_values(matrix, item_variant, item["objective_values"])
-        if _gate_outcomes_pass(item["gates"], selection["required_gates"]):
-            gate_passing_candidates.append(item)
-        evidenced_targets.add(tuple(item["target"][field] for field in sorted(SELECTION_TARGET_FIELDS)))
-        if item["target"] == target:
-            selected_candidate = item
-    selected_kind_candidates = (
+        _validate_pareto_candidate(matrix, item)
+    required = selection["required_gates"]
+    selected = _selected_pareto_candidate(pareto["candidates"], target)
+    passing = _gate_passing(pareto["candidates"], required)
+    assert _gate_outcomes_pass(selected["gates"], required)
+    assert _dominating_candidates(selected, passing, selection["pareto_objectives"]) == []
+
+
+def _validate_evidenced_targets(matrix: dict, evidence: dict, candidate: dict) -> None:
+    kind_candidates = (
         matrix["embeddings"] if candidate["kind"] == "embedding" else matrix["rerankers"]
     )
-    required_targets = {
-        tuple(
-            {
-                "dimensions": variant["dimensions"],
-                "id": item["id"],
-                "revision": item["revision"],
-                "variant_id": variant["variant_id"],
-            }[field]
-            for field in sorted(SELECTION_TARGET_FIELDS)
-        )
-        for item in selected_kind_candidates
+    evidenced = {_target_key(item["target"]) for item in evidence["pareto"]["candidates"]}
+    assert evidenced == _shipping_target_keys(kind_candidates)
+
+
+def _validate_selection(matrix: dict, raw_reports: dict[str, bytes] | None = None) -> None:
+    selection = matrix["selection"]
+    selected = [
+        item
+        for item in (selection["default_embedding"], selection["default_reranker"])
+        if item is not None
+    ]
+    if not selected:
+        _validate_awaiting_selection(selection)
+        return
+    assert (len(selected), selection["status"]) == (1, "selected_from_raw_benchmark")
+    evidence = selection["result_evidence"]
+    _assert_keys(evidence, EVIDENCE_FIELDS)
+    target = selected[0]
+    candidate, variant = _resolve_target(matrix, target)
+    _validate_measured_variant(variant)
+    _assert_keys(evidence["measurements"], {"quality", "resources"})
+    assert (evidence["selected"], candidate["shipping_eligible"]) == (target, True)
+    assert evidence["measurements"] == {
+        "quality": variant["quality"],
+        "resources": variant["resource_measurements"],
+    }
+    assert _gate_outcomes_pass(evidence["gates"], selection["required_gates"])
+    _validate_evidence_fingerprints(matrix, evidence)
+    _validate_raw_report(evidence, raw_reports)
+    _validate_measured_at(evidence)
+    _validate_pareto(matrix, selection, evidence, target)
+    _validate_evidenced_targets(matrix, evidence, candidate)
+
+
+def _embedding_named(matrix: dict, model_id: str) -> dict:
+    return next(item for item in matrix["embeddings"] if item["id"] == model_id)
+
+
+def _variant_with_dimensions(candidate: dict, dimensions: int) -> dict:
+    return next(
+        item for item in candidate["variants"] if item["dimensions"] == dimensions
+    )
+
+
+def _objective_values(variant: dict) -> dict:
+    resources = variant["resource_measurements"]
+    return {
+        "index_bytes": resources["index_bytes"],
+        "overall": variant["quality"]["overall"],
+        "peak_rss_bytes": resources["peak_rss_bytes"],
+        "warm_p95_ms": resources["warm_p95_ms"],
+    }
+
+
+def _pareto_candidates(embeddings: list, gates: dict) -> list:
+    """One candidate per shipping-eligible variant, all with the same gates."""
+    return [
+        {
+            "gates": deepcopy(gates),
+            "objective_values": _objective_values(variant),
+            "target": _variant_target(item, variant),
+        }
+        for item in embeddings
         if item["shipping_eligible"]
         for variant in item["variants"]
+    ]
+
+
+def _synthetic_quality(offset: int) -> dict:
+    return {
+        "claim": None,
+        "overall": 0.7 + offset / 1000,
+        "per_language": {
+            "EN": 0.71 + offset / 1000,
+            "RU": 0.69 + offset / 1000,
+            "ZH": 0.7 + offset / 1000,
+        },
+        "status": "measured",
     }
-    assert evidenced_targets == required_targets
-    assert selected_candidate is not None
-    assert _gate_outcomes_pass(selected_candidate["gates"], selection["required_gates"])
-    assert not any(
-        item is not selected_candidate
-        and _dominates(
-            item["objective_values"],
-            selected_candidate["objective_values"],
-            selection["pareto_objectives"],
-        )
-        for item in gate_passing_candidates
-    )
+
+
+def _synthetic_resources(offset: int, dimensions: int) -> dict:
+    return {
+        "cold_first_query_ms": 40.0 + offset,
+        "index_bytes": 300000 + offset * 1000,
+        "indexing_throughput_documents_per_second": 100.0 - offset,
+        "model_load_ms": 200.0 + offset,
+        "peak_rss_bytes": 1000000000 + offset * 1000000,
+        "status": "measured",
+        "vector_bytes_per_document": dimensions * 4,
+        "warm_p50_ms": 7.0 + offset,
+        "warm_p95_ms": 10.0 + offset,
+    }
+
+
+def _fill_measured_embeddings(embeddings: list) -> None:
+    """Give every variant a distinct measured row, so ordering is unambiguous."""
+    for model_index, item in enumerate(embeddings):
+        for variant_index, variant in enumerate(item["variants"]):
+            offset = model_index * 10 + variant_index
+            variant["quality"] = _synthetic_quality(offset)
+            variant["resource_measurements"] = _synthetic_resources(
+                offset, variant["dimensions"]
+            )
 
 
 def _synthetic_measured_matrix() -> tuple[dict, dict[str, bytes]]:
     matrix = deepcopy(_load())
-    for model_index, item in enumerate(matrix["embeddings"]):
-        for variant_index, item_variant in enumerate(item["variants"]):
-            offset = model_index * 10 + variant_index
-            item_variant["quality"] = {
-                "claim": None,
-                "overall": 0.7 + offset / 1000,
-                "per_language": {
-                    "EN": 0.71 + offset / 1000,
-                    "RU": 0.69 + offset / 1000,
-                    "ZH": 0.7 + offset / 1000,
-                },
-                "status": "measured",
-            }
-            item_variant["resource_measurements"] = {
-                "cold_first_query_ms": 40.0 + offset,
-                "index_bytes": 300000 + offset * 1000,
-                "indexing_throughput_documents_per_second": 100.0 - offset,
-                "model_load_ms": 200.0 + offset,
-                "peak_rss_bytes": 1000000000 + offset * 1000000,
-                "status": "measured",
-                "vector_bytes_per_document": item_variant["dimensions"] * 4,
-                "warm_p50_ms": 7.0 + offset,
-                "warm_p95_ms": 10.0 + offset,
-            }
-    candidate = next(
-        item for item in matrix["embeddings"] if item["id"] == "Qwen/Qwen3-Embedding-0.6B"
-    )
-    variant = next(item for item in candidate["variants"] if item["dimensions"] == 384)
+    _fill_measured_embeddings(matrix["embeddings"])
+    candidate = _embedding_named(matrix, "Qwen/Qwen3-Embedding-0.6B")
+    variant = _variant_with_dimensions(candidate, 384)
     target = {
         "dimensions": 384,
         "id": candidate["id"],
@@ -341,30 +462,7 @@ def _synthetic_measured_matrix() -> tuple[dict, dict[str, bytes]]:
             "quality": deepcopy(variant["quality"]),
             "resources": deepcopy(variant["resource_measurements"]),
         },
-        "pareto": {
-            "candidates": [
-                {
-                    "gates": deepcopy(passing_gates),
-                    "objective_values": {
-                        "index_bytes": item_variant["resource_measurements"]["index_bytes"],
-                        "overall": item_variant["quality"]["overall"],
-                        "peak_rss_bytes": item_variant["resource_measurements"][
-                            "peak_rss_bytes"
-                        ],
-                        "warm_p95_ms": item_variant["resource_measurements"]["warm_p95_ms"],
-                    },
-                    "target": {
-                        "dimensions": item_variant["dimensions"],
-                        "id": item["id"],
-                        "revision": item["revision"],
-                        "variant_id": item_variant["variant_id"],
-                    },
-                }
-                for item in matrix["embeddings"]
-                if item["shipping_eligible"]
-                for item_variant in item["variants"]
-            ]
-        },
+        "pareto": {"candidates": _pareto_candidates(matrix["embeddings"], passing_gates)},
         "raw_report_path": report_path,
         "raw_report_sha256": "",
         "selected": deepcopy(target),
@@ -385,6 +483,102 @@ def test_matrix_exists_and_has_canonical_compact_sorted_bytes():
 
     assert raw == _canonical_bytes(matrix)
     assert b"\n " not in raw
+
+
+_CANDIDATE_FIELDS = {
+    "architecture",
+    "batch_size",
+    "benchmark_max_tokens",
+    "cache_policy",
+    "exclusion_reasons",
+    "formatting",
+    "id",
+    "kind",
+    "languages",
+    "license",
+    "native_library",
+    "native_max_tokens",
+    "revision",
+    "shipping_eligible",
+    "source_url",
+    "trust_remote_code",
+    "variants",
+}
+_VARIANT_FIELDS = {
+    "dimensions",
+    "precision",
+    "quality",
+    "resource_measurements",
+    "variant_id",
+}
+_MRL_FIELDS = {"enabled", "renormalize_after_truncation", "truncate_to_dimensions"}
+_CACHE_POLICY_FIELDS = {"network_access", "offline_required", "revision_scoped"}
+_INFERENCE_FIELDS = {
+    "l2_normalize",
+    "max_length_tokens",
+    "padding_side",
+    "pooling",
+    "truncation_side",
+}
+_EMBEDDING_FORMATTING_FIELDS = {"document", "instruction", "query"}
+_RERANKER_FORMATTING_FIELDS = {
+    "assistant_suffix",
+    "contract_type",
+    "document_template",
+    "instruction",
+    "max_length_tokens",
+    "query_template",
+    "score_tokens",
+    "scoring",
+    "system_prefix",
+    "truncation",
+    "user_template",
+}
+
+
+def _assert_embedding_formatting(candidate: dict) -> None:
+    _assert_keys(candidate["formatting"], _EMBEDDING_FORMATTING_FIELDS)
+    _assert_keys(candidate["inference"], _INFERENCE_FIELDS)
+
+
+def _assert_reranker_formatting(candidate: dict) -> None:
+    _assert_keys(candidate["formatting"], _RERANKER_FORMATTING_FIELDS)
+    if candidate["formatting"]["score_tokens"] is None:
+        return
+    _assert_keys(candidate["formatting"]["score_tokens"], {"negative", "positive"})
+
+
+def _assert_candidate_shape(candidate: dict) -> None:
+    """A candidate's own fields, plus the ones only one kind carries."""
+    expected = set(_CANDIDATE_FIELDS)
+    expected.update({"inference"} if candidate["kind"] == "embedding" else set())
+    _assert_keys(candidate, expected)
+    _assert_keys(candidate["cache_policy"], _CACHE_POLICY_FIELDS)
+    _assert_keys(candidate["native_library"], {"name", "support"})
+    _assert_formatting_shape(candidate)
+
+
+def _assert_formatting_shape(candidate: dict) -> None:
+    if candidate["kind"] == "embedding":
+        _assert_embedding_formatting(candidate)
+        return
+    _assert_reranker_formatting(candidate)
+
+
+def _assert_mrl_shape(candidate: dict, variant: dict) -> None:
+    if candidate["kind"] != "embedding":
+        return
+    _assert_keys(variant["mrl"], _MRL_FIELDS)
+
+
+def _assert_variant_shape(candidate: dict, variant: dict) -> None:
+    expected = set(_VARIANT_FIELDS)
+    expected.update({"mrl"} if candidate["kind"] == "embedding" else set())
+    _assert_keys(variant, expected)
+    _assert_mrl_shape(candidate, variant)
+    _assert_keys(variant["quality"], QUALITY_FIELDS)
+    _assert_keys(variant["quality"]["per_language"], TARGET_LANGUAGES)
+    _assert_keys(variant["resource_measurements"], RESOURCE_MEASUREMENT_FIELDS)
 
 
 def test_matrix_is_closed_at_every_policy_object_level():
@@ -490,95 +684,10 @@ def test_matrix_is_closed_at_every_policy_object_level():
         },
     )
     for candidate in matrix["embeddings"] + matrix["rerankers"]:
-        expected_candidate_fields = {
-            "architecture",
-            "batch_size",
-            "benchmark_max_tokens",
-            "cache_policy",
-            "exclusion_reasons",
-            "formatting",
-            "id",
-            "kind",
-            "languages",
-            "license",
-            "native_library",
-            "native_max_tokens",
-            "revision",
-            "shipping_eligible",
-            "source_url",
-            "trust_remote_code",
-            "variants",
-        }
-        if candidate["kind"] == "embedding":
-            expected_candidate_fields.add("inference")
-        _assert_keys(
-            candidate,
-            expected_candidate_fields,
-        )
-        _assert_keys(
-            candidate["cache_policy"],
-            {"network_access", "offline_required", "revision_scoped"},
-        )
-        if candidate["kind"] == "embedding":
-            _assert_keys(
-                candidate["formatting"], {"document", "instruction", "query"}
-            )
-            _assert_keys(
-                candidate["inference"],
-                {
-                    "l2_normalize",
-                    "max_length_tokens",
-                    "padding_side",
-                    "pooling",
-                    "truncation_side",
-                },
-            )
-        else:
-            _assert_keys(
-                candidate["formatting"],
-                {
-                    "assistant_suffix",
-                    "contract_type",
-                    "document_template",
-                    "instruction",
-                    "max_length_tokens",
-                    "query_template",
-                    "score_tokens",
-                    "scoring",
-                    "system_prefix",
-                    "truncation",
-                    "user_template",
-                },
-            )
-            if candidate["formatting"]["score_tokens"] is not None:
-                _assert_keys(
-                    candidate["formatting"]["score_tokens"],
-                    {"negative", "positive"},
-                )
-        _assert_keys(candidate["native_library"], {"name", "support"})
+        _assert_candidate_shape(candidate)
         assert candidate["variants"]
         for variant in candidate["variants"]:
-            expected_variant_fields = {
-                "dimensions",
-                "precision",
-                "quality",
-                "resource_measurements",
-                "variant_id",
-            }
-            if candidate["kind"] == "embedding":
-                expected_variant_fields.add("mrl")
-            _assert_keys(
-                variant,
-                expected_variant_fields,
-            )
-            if candidate["kind"] == "embedding":
-                _assert_keys(
-                    variant["mrl"],
-                    {"enabled", "renormalize_after_truncation", "truncate_to_dimensions"},
-                )
-            _assert_keys(variant["quality"], QUALITY_FIELDS)
-            _assert_keys(variant["quality"]["per_language"], TARGET_LANGUAGES)
-            _assert_keys(variant["resource_measurements"], RESOURCE_MEASUREMENT_FIELDS)
+            _assert_variant_shape(candidate, variant)
     lexical = matrix["lexical"]
     _assert_keys(
         lexical,
@@ -604,41 +713,74 @@ def test_matrix_is_closed_at_every_policy_object_level():
     _assert_keys(lexical["resource_measurements"], RESOURCE_MEASUREMENT_FIELDS)
 
 
+_VARIANT_ID_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+_REVISION_PATTERN = r"[0-9a-f]{40}"
+_NATIVE_LIBRARIES = {"sentence-transformers", "transformers"}
+
+
+def _normalized_id(model: dict) -> str:
+    return model["id"].strip().casefold()
+
+
+def _model_ids_sorted(candidates: list) -> bool:
+    ids = [_normalized_id(candidate) for candidate in candidates]
+    return ids == sorted(ids)
+
+
+def _model_contract_violations(model: dict) -> list:
+    """Every field of a pinned model that does not match the policy contract."""
+    checks = (
+        ("kind", model["kind"] in MODEL_KINDS),
+        ("revision", bool(re.fullmatch(_REVISION_PATTERN, model["revision"]))),
+        (
+            "source_url",
+            model["source_url"]
+            == f"https://huggingface.co/{model['id']}/tree/{model['revision']}",
+        ),
+        ("license", model["license"] in KNOWN_LICENSES),
+        ("trust_remote_code", model["trust_remote_code"] is False),
+        ("native_library", model["native_library"]["name"] in _NATIVE_LIBRARIES),
+        ("native_support", model["native_library"]["support"] == "native"),
+        ("shipping_eligible", type(model["shipping_eligible"]) is bool),
+    )
+    return [name for name, holds in checks if not holds]
+
+
+def _usable_dimension(dimension: object) -> bool:
+    return dimension is None or (type(dimension) is int and dimension > 0)
+
+
+def _named_variant_ids(variant_ids: list) -> bool:
+    return all(re.fullmatch(_VARIANT_ID_PATTERN, item) for item in variant_ids)
+
+
+def _usable_dimensions(dimensions: list) -> bool:
+    return all(_usable_dimension(item) for item in dimensions)
+
+
+def _variant_contract_violations(model: dict) -> list:
+    """Variant identities and dimensions: named, unique, and usable."""
+    variant_ids = [variant["variant_id"] for variant in model["variants"]]
+    dimensions = [variant["dimensions"] for variant in model["variants"]]
+    checks = (
+        ("variant_id_pattern", _named_variant_ids(variant_ids)),
+        ("variant_id_unique", len(variant_ids) == len(set(variant_ids))),
+        ("dimensions_unique", len(dimensions) == len(set(dimensions))),
+        ("dimensions_usable", _usable_dimensions(dimensions)),
+    )
+    return [name for name, holds in checks if not holds]
+
+
 def test_models_have_unique_normalized_ids_and_immutable_sources():
     matrix = _load()
     models = matrix["embeddings"] + matrix["rerankers"]
-    normalized = [model["id"].strip().casefold() for model in models]
+    normalized = [_normalized_id(model) for model in models]
+    orders = [_model_ids_sorted(matrix["embeddings"]), _model_ids_sorted(matrix["rerankers"])]
 
-    assert len(normalized) == len(set(normalized))
-    for candidates in (matrix["embeddings"], matrix["rerankers"]):
-        ids = [candidate["id"].strip().casefold() for candidate in candidates]
-        assert ids == sorted(ids)
+    assert (len(normalized), orders) == (len(set(normalized)), [True, True])
     for model in models:
-        assert model["kind"] in MODEL_KINDS
-        assert re.fullmatch(r"[0-9a-f]{40}", model["revision"])
-        assert model["source_url"] == (
-            f"https://huggingface.co/{model['id']}/tree/{model['revision']}"
-        )
-        assert model["license"] in KNOWN_LICENSES
-        assert model["trust_remote_code"] is False
-        assert model["native_library"]["name"] in {
-            "sentence-transformers",
-            "transformers",
-        }
-        assert model["native_library"]["support"] == "native"
-        assert type(model["shipping_eligible"]) is bool
-        variant_ids = [variant["variant_id"] for variant in model["variants"]]
-        assert all(
-            re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", variant_id)
-            for variant_id in variant_ids
-        )
-        assert len(variant_ids) == len(set(variant_ids))
-        dimensions = [variant["dimensions"] for variant in model["variants"]]
-        assert len(dimensions) == len(set(dimensions))
-        assert all(
-            dimension is None or type(dimension) is int and dimension > 0
-            for dimension in dimensions
-        )
+        assert _model_contract_violations(model) == []
+        assert _variant_contract_violations(model) == []
 
 
 def test_required_embedding_pins_and_formatting_are_exact():
@@ -725,6 +867,35 @@ def test_required_embedding_pins_and_formatting_are_exact():
     )
 
 
+def _reranker_variant_shape(model: dict) -> bool:
+    """A reranker ships exactly one float32 variant with no dimensions."""
+    if model["kind"] != "reranker":
+        return True
+    pairs = [(item["variant_id"], item["dimensions"]) for item in model["variants"]]
+    return pairs == [("float32", None)]
+
+
+def _model_variant_violations(model: dict) -> list:
+    variant_ids = [variant["variant_id"] for variant in model["variants"]]
+    checks = (
+        ("variant_id_unique", len(variant_ids) == len(set(variant_ids))),
+        ("reranker_variants", _reranker_variant_shape(model)),
+    )
+    return [name for name, holds in checks if not holds]
+
+
+def _shipping_language_violations(model: dict) -> list:
+    """A shipping model names supported languages and carries no exclusion."""
+    if not model["shipping_eligible"]:
+        return []
+    checks = (
+        ("languages_supported", set(model["languages"]) <= TARGET_LANGUAGES),
+        ("languages_present", bool(model["languages"])),
+        ("no_exclusions", model["exclusion_reasons"] == []),
+    )
+    return [name for name, holds in checks if not holds]
+
+
 def test_reranker_pins_depths_and_multilingual_shipping_coverage():
     matrix = _load()
     rerankers = {model["id"]: model for model in matrix["rerankers"]}
@@ -740,16 +911,8 @@ def test_reranker_pins_depths_and_multilingual_shipping_coverage():
         "Qwen/Qwen3-Reranker-0.6B",
     }
     for model in matrix["embeddings"] + matrix["rerankers"]:
-        variant_ids = [variant["variant_id"] for variant in model["variants"]]
-        assert len(variant_ids) == len(set(variant_ids))
-        if model["kind"] == "reranker":
-            assert [(variant["variant_id"], variant["dimensions"]) for variant in model["variants"]] == [
-                ("float32", None)
-            ]
-        if model["shipping_eligible"]:
-            assert set(model["languages"]) <= TARGET_LANGUAGES
-            assert model["languages"]
-            assert model["exclusion_reasons"] == []
+        assert _model_variant_violations(model) == []
+        assert _shipping_language_violations(model) == []
 
 
 def test_inference_and_offline_policy_is_bound_to_every_model():

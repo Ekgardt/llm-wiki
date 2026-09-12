@@ -66,12 +66,15 @@ class _FakeNodeProcess:
         self.tree: _FakeNodeTree | None = None
 
     def wait(self, timeout: float | None = None) -> int:
-        if timeout is not None:
-            self.wait_timeouts.append(timeout)
-        if self._times_out and (self._persistent_timeout or not self.killed):
+        self.wait_timeouts.extend([] if timeout is None else [timeout])
+        if self._still_times_out():
             raise subprocess.TimeoutExpired(("node", "--version"), timeout)
         self.returncode = -9 if self.killed else self._final_returncode
         return self.returncode
+
+    def _still_times_out(self) -> bool:
+        """A persistent timeout outlives the kill; a one-shot one does not."""
+        return self._times_out and (self._persistent_timeout or not self.killed)
 
     def kill(self) -> None:
         self.kill_calls += 1
@@ -274,24 +277,37 @@ def _install_prestarted_node_program(
     return node, [tree.process], [tree]
 
 
-def _pid_alive(pid: int) -> bool:
-    if os.name == "nt":
-        return lsp_process_tree._windows_pid_alive(pid)
+_DEAD_LINUX_STATES = {"Z", "X", "x"}
+
+
+def _linux_pid_is_reaped(pid: int) -> bool:
+    """On Linux a zombie answers signal 0, so its state has to be read."""
+    try:
+        payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    except (FileNotFoundError, OSError):
+        return True
+    closing = payload.rfind(")")
+    if closing < 0:
+        return False
+    return payload[closing + 2 :].split()[0] in _DEAD_LINUX_STATES
+
+
+def _signal_reaches_pid(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    if sys.platform.startswith("linux"):
-        try:
-            payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-        except (FileNotFoundError, OSError):
-            return False
-        closing = payload.rfind(")")
-        if closing >= 0 and payload[closing + 2 :].split()[0] in {"Z", "X", "x"}:
-            return False
     return True
+
+
+def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return lsp_process_tree._windows_pid_alive(pid)
+    if not _signal_reaches_pid(pid):
+        return False
+    return not _linux_pid_is_reaped(pid) if sys.platform.startswith("linux") else True
 
 
 def _terminate_if_alive(descendant_pid: int) -> None:
