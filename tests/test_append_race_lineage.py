@@ -29,6 +29,7 @@ import doctor
 import markdown_transaction
 import pytest
 from markdown_transaction import MarkdownCoordinator
+
 from tests.slow_machine import LONG_TIMEOUT
 
 # Bounds a hang on the slowest supported machine, not the expected duration, so
