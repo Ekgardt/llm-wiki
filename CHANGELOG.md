@@ -51,6 +51,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The vault is a repository too, and answers about its own code.** The
+  decision left open this morning, taken on the owner's instruction to decide by
+  rules 2 and 4: the vault's checkout gets a code generation beside its memory
+  one, because current practice keeps one index per data lifecycle and code apart
+  from documents, and because mixing them re-derives 240 MB of code index for a
+  knowledge edit. `admit_repository` no longer refuses the vault; a vault's code
+  roots exclude `knowledge/` and say so; a generation that holds code names its
+  roots in its manifest, so one checkout can carry both and a reader can tell
+  them apart; the graph opener asks for the code generation first; and
+  `refresh-all` adopts the vault once so the nightly keeps it fresh with no
+  operator action. Measured after indexing the installed vault:
+  `get_architecture mode=query` for `fuse_rrf` answers in 4.4 s where it
+  returned `"nodes": []` this morning. Reasons, sources and costs:
+  `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
 - **The decision rule is satisfied.** Three runs, every condition met on the
   surface an agent actually reaches: 16 correct answers of 16 against
   codebase-memory-mcp's 15, zero confident-wrong answers against their one, no
