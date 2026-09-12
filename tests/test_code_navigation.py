@@ -217,6 +217,97 @@ def test_navigation_tuple_fields_are_deeply_immutable(
     assert result.warnings == ("partial",)
 
 
+def _invalid_provenance_scalar(provenance: Provenance, location: object) -> None:
+    del provenance, location
+    Provenance("lsp", object(), "1.1.411", "provider_reported")  # type: ignore[arg-type]
+
+
+def _invalid_location_scalar(provenance: Provenance, location: object) -> None:
+    del location
+    NavigationLocation(  # type: ignore[arg-type]
+        1,
+        PositionRange(0, 4),
+        1,
+        0,
+        None,
+        None,
+        ResolutionLabel.LSP_CONFIRMED,
+        (provenance,),
+    )
+
+
+def _invalid_location_provenance(provenance: Provenance, location: object) -> None:
+    del provenance, location
+    NavigationLocation(
+        "pkg/api.py",
+        PositionRange(0, 4),
+        1,
+        0,
+        None,
+        None,
+        ResolutionLabel.LSP_CONFIRMED,
+        (object(),),  # type: ignore[arg-type]
+    )
+
+
+def _invalid_diagnostic_related(provenance: Provenance, location: object) -> None:
+    del location
+    NavigationDiagnostic(
+        "pkg/api.py",
+        PositionRange(0, 4),
+        DiagnosticSeverity.ERROR,
+        None,
+        "message",
+        (object(),),  # type: ignore[arg-type]
+        (provenance,),
+    )
+
+
+def _invalid_diagnostic_provenance(provenance: Provenance, location: object) -> None:
+    del provenance
+    NavigationDiagnostic(
+        "pkg/api.py",
+        PositionRange(0, 4),
+        DiagnosticSeverity.ERROR,
+        None,
+        "message",
+        (location,),  # type: ignore[arg-type]
+        (object(),),  # type: ignore[arg-type]
+    )
+
+
+_INVALID_RECORD_BUILDERS = {
+    "provenance_scalar": _invalid_provenance_scalar,
+    "location_scalar": _invalid_location_scalar,
+    "location_provenance": _invalid_location_provenance,
+    "diagnostic_related": _invalid_diagnostic_related,
+    "diagnostic_provenance": _invalid_diagnostic_provenance,
+}
+
+
+def _invalid_field_value(field: str) -> object:
+    """A value of the wrong type for that field: a string where an enum belongs."""
+    if field == "status":
+        return "partial"
+    return (object(),)
+
+
+def _build_invalid_record(
+    invalid_record: str,
+    result_values: dict,
+    provenance: Provenance,
+    location: object,
+) -> None:
+    """Construct the record the case names, with exactly one field of a wrong type."""
+    builder = _INVALID_RECORD_BUILDERS.get(invalid_record)
+    if builder is not None:
+        builder(provenance, location)
+        return
+    field = invalid_record.removeprefix("result_")
+    result_values[field] = _invalid_field_value(field)
+    NavigationResult(**result_values)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "invalid_record",
     [
@@ -282,56 +373,7 @@ def test_public_navigation_records_validate_nested_values(
         "warnings": ("partial",),
     }
     with pytest.raises(TypeError):
-        if invalid_record == "provenance_scalar":
-            Provenance("lsp", object(), "1.1.411", "provider_reported")  # type: ignore[arg-type]
-        elif invalid_record == "location_scalar":
-            NavigationLocation(  # type: ignore[arg-type]
-                1,
-                PositionRange(0, 4),
-                1,
-                0,
-                None,
-                None,
-                ResolutionLabel.LSP_CONFIRMED,
-                (provenance,),
-            )
-        elif invalid_record == "location_provenance":
-            NavigationLocation(
-                "pkg/api.py",
-                PositionRange(0, 4),
-                1,
-                0,
-                None,
-                None,
-                ResolutionLabel.LSP_CONFIRMED,
-                (object(),),  # type: ignore[arg-type]
-            )
-        elif invalid_record == "diagnostic_related":
-            NavigationDiagnostic(
-                "pkg/api.py",
-                PositionRange(0, 4),
-                DiagnosticSeverity.ERROR,
-                None,
-                "message",
-                (object(),),  # type: ignore[arg-type]
-                (provenance,),
-            )
-        elif invalid_record == "diagnostic_provenance":
-            NavigationDiagnostic(
-                "pkg/api.py",
-                PositionRange(0, 4),
-                DiagnosticSeverity.ERROR,
-                None,
-                "message",
-                (location,),
-                (object(),),  # type: ignore[arg-type]
-            )
-        else:
-            field = invalid_record.removeprefix("result_")
-            result_values[field] = (
-                "partial" if field == "status" else (object(),)
-            )
-            NavigationResult(**result_values)  # type: ignore[arg-type]
+        _build_invalid_record(invalid_record, result_values, provenance, location)
 
 
 @pytest.mark.parametrize("record_kind", ["request", "location", "diagnostic"])
@@ -678,18 +720,7 @@ def test_stable_queries_reuse_content_addressed_source_documents(
             False,
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(path)
-        return real_from_bytes(path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(
         scope,
         Capability.DEFINITIONS,
@@ -709,15 +740,69 @@ def test_stable_queries_reuse_content_addressed_source_documents(
         session.close(deadline=time.monotonic() + 5)
 
 
+def _write_cache_sources(repository: Path, prefix: str, names: tuple) -> tuple:
+    """Write one tiny module per name and return their repository paths."""
+    paths = tuple(f"pkg/{prefix}_{name}.py" for name in names)
+    for index, path in enumerate(paths):
+        (repository / path).write_text(f"value = {index}\n", encoding="utf-8")
+    return paths
+
+
+def _record_parsed_documents(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Collect the path of every document the cache actually parses."""
+    real_from_bytes = SourceDocument.from_bytes
+    parsed: list[str] = []
+
+    def recording_from_bytes(
+        cls: type[SourceDocument],
+        path: str,
+        content: bytes,
+    ) -> SourceDocument:
+        parsed.append(path)
+        return real_from_bytes(path, content)
+
+    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    return parsed
+
+
+def _cache_sources_and_documents(
+    scope: RepositoryScope,
+    repository: Path,
+    paths: tuple,
+) -> tuple[dict, dict]:
+    """The repository source and the parsed document behind each path."""
+    sources = {path: resolve_repository_source(scope, path) for path in paths}
+    documents = {
+        path: SourceDocument.from_bytes(path, (repository / path).read_bytes())
+        for path in paths
+    }
+    return sources, documents
+
+
+def _publish_consumed_documents(
+    navigation: CodeNavigation,
+    revision_entries: dict,
+    sources: dict,
+    documents: dict,
+    paths: tuple,
+) -> None:
+    """Fill the shared cache with these documents, every one of them consumed."""
+    from code_navigation import _AttemptDocuments
+
+    initial = _AttemptDocuments()
+    for path in paths:
+        initial[sources[path].uri] = documents[path]
+        initial.consume(sources[path].uri, documents[path])
+    navigation._publish_source_documents(revision_entries, initial)
+
+
 def test_source_document_cache_lru_tracks_only_consumed_documents(
     repository: Path,
     state_root: Path,
     semantic_pyright: SemanticPyrightFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = tuple(f"pkg/cache_{index}.py" for index in range(4))
-    for index, path in enumerate(paths):
-        (repository / path).write_text(f"value = {index}\n", encoding="utf-8")
+    paths = _write_cache_sources(repository, "cache", tuple(range(4)))
     scope = resolve_repository_scope(repository)
     revision = _revision(repository, "a")
     open_documents = {path: _open_document(scope, path) for path in paths}
@@ -736,18 +821,7 @@ def test_source_document_cache_lru_tracks_only_consumed_documents(
             (), "provider_reported", False
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(path)
-        return real_from_bytes(path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
 
     def query(path: str) -> None:
         result = navigation.query(
@@ -776,9 +850,7 @@ def test_source_document_cache_repeated_use_refreshes_attempt_recency(
     semantic_pyright: SemanticPyrightFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paths = tuple(f"pkg/repeated_{name}.py" for name in ("a", "b", "c"))
-    for path in paths:
-        (repository / path).write_text("value = 1\n", encoding="utf-8")
+    paths = _write_cache_sources(repository, "repeated", ("a", "b", "c"))
     scope = resolve_repository_scope(repository)
     revision = _revision(repository, "a")
     request_document = _open_document(scope, paths[0])
@@ -803,18 +875,7 @@ def test_source_document_cache_repeated_use_refreshes_attempt_recency(
             next(responses), "provider_reported", False
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(path)
-        return real_from_bytes(path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, paths[0], 1, 0)
     try:
         first = navigation.query(request, deadline=time.monotonic() + 5)
@@ -849,18 +910,7 @@ def test_source_document_cache_rejects_newline_dense_document_over_byte_bound(
             (), "provider_reported", False
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        parsed_path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(parsed_path)
-        return real_from_bytes(parsed_path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, path, 1, 0)
     try:
         first = navigation.query(request, deadline=time.monotonic() + 5)
@@ -894,18 +944,7 @@ def test_source_document_cache_rejects_path_and_key_heavy_document_over_byte_bou
             (), "provider_reported", False
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        parsed_path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(parsed_path)
-        return real_from_bytes(parsed_path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, path, 1, 0)
     try:
         first = navigation.query(request, deadline=time.monotonic() + 5)
@@ -924,26 +963,16 @@ def test_source_document_cache_concurrent_publication_preserves_access_order(
     semantic_pyright: SemanticPyrightFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from code_navigation import _AttemptDocuments
-
-    paths = tuple(f"pkg/concurrent_{name}.py" for name in ("a", "b", "c"))
-    for path in paths:
-        (repository / path).write_text("value = 1\n", encoding="utf-8")
+    paths = _write_cache_sources(repository, "concurrent", ("a", "b", "c"))
     scope = resolve_repository_scope(repository)
     revision = _revision(repository, "a")
     revision_entries = {entry.path: entry for entry in revision.entries}
-    sources = {path: resolve_repository_source(scope, path) for path in paths}
-    documents = {
-        path: SourceDocument.from_bytes(path, (repository / path).read_bytes())
-        for path in paths
-    }
+    sources, documents = _cache_sources_and_documents(scope, repository, paths)
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     monkeypatch.setattr(code_navigation, "_MAX_SOURCE_DOCUMENT_CACHE_ENTRIES", 2)
-    initial = _AttemptDocuments()
-    for path in paths[:2]:
-        initial[sources[path].uri] = documents[path]
-        initial.consume(sources[path].uri, documents[path])
-    navigation._publish_source_documents(revision_entries, initial)
+    _publish_consumed_documents(
+        navigation, revision_entries, sources, documents, paths[:2]
+    )
 
     slow = navigation._seed_source_documents(revision_entries)
     fast = navigation._seed_source_documents(revision_entries)
@@ -969,26 +998,16 @@ def test_source_document_cache_consume_after_eviction_republishes_when_stable(
     semantic_pyright: SemanticPyrightFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from code_navigation import _AttemptDocuments
-
-    paths = tuple(f"pkg/inverse_{name}.py" for name in ("a", "b", "c"))
-    for path in paths:
-        (repository / path).write_text("value = 1\n", encoding="utf-8")
+    paths = _write_cache_sources(repository, "inverse", ("a", "b", "c"))
     scope = resolve_repository_scope(repository)
     revision = _revision(repository, "a")
     revision_entries = {entry.path: entry for entry in revision.entries}
-    sources = {path: resolve_repository_source(scope, path) for path in paths}
-    documents = {
-        path: SourceDocument.from_bytes(path, (repository / path).read_bytes())
-        for path in paths
-    }
+    sources, documents = _cache_sources_and_documents(scope, repository, paths)
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     monkeypatch.setattr(code_navigation, "_MAX_SOURCE_DOCUMENT_CACHE_ENTRIES", 2)
-    initial = _AttemptDocuments()
-    for path in paths[:2]:
-        initial[sources[path].uri] = documents[path]
-        initial.consume(sources[path].uri, documents[path])
-    navigation._publish_source_documents(revision_entries, initial)
+    _publish_consumed_documents(
+        navigation, revision_entries, sources, documents, paths[:2]
+    )
 
     local = navigation._seed_source_documents(revision_entries)
     other = navigation._seed_source_documents(revision_entries)
@@ -1044,18 +1063,7 @@ def test_source_document_cache_structural_alias_refreshes_recency(
             (), "provider_reported", False
         ),
     )
-    real_from_bytes = SourceDocument.from_bytes
-    parsed: list[str] = []
-
-    def recording_from_bytes(
-        cls: type[SourceDocument],
-        path: str,
-        content: bytes,
-    ) -> SourceDocument:
-        parsed.append(path)
-        return real_from_bytes(path, content)
-
-    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(recording_from_bytes))
+    parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, paths[0], 1, 0)
     try:
         first = navigation.query(request, deadline=time.monotonic() + 5)
@@ -1317,6 +1325,85 @@ def test_provider_return_after_deadline_prevents_structural_callback(
         session.close(deadline=real_monotonic() + 5)
 
 
+_OPERATION_ALIASES = {
+    "structural": "query",
+    "query": "query",
+    "provider_target": "query",
+    "resolver": "resolve_symbol",
+    "resolve_symbol": "resolve_symbol",
+    "edge": "verify_edge",
+    "verify_edge": "verify_edge",
+}
+
+
+def _navigation_operation(kind: str, navigation, scope, deadline: float):
+    """Run the operation this case names, with the deadline it was given."""
+    runners = {
+        "query": lambda: navigation.query(
+            NavigationRequest(
+                scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
+            ),
+            deadline=deadline,
+        ),
+        "resolve_symbol": lambda: navigation.resolve_symbol(
+            "PublicApi", repository=scope, deadline=deadline
+        ),
+        "verify_edge": lambda: navigation.verify_edge(
+            _source_anchor(scope, "pkg/service.py", 10, 15),
+            _source_anchor(scope, "pkg/api.py", 2, 8),
+            repository=scope,
+            deadline=deadline,
+        ),
+    }
+    return runners[_OPERATION_ALIASES[kind]]()
+
+
+def _operation_slots(operation: str, resolver, verifier) -> dict:
+    """Give the operation under test its callback, and leave the others empty."""
+    by_operation = {
+        "resolve_symbol": {"resolver": resolver},
+        "verify_edge": {"edge": verifier},
+    }
+    slots = {"resolver": None, "edge": None}
+    slots.update(by_operation.get(operation, {}))
+    return slots
+
+
+def _callback_slots(callback_kind: str, callback) -> dict:
+    """Hand the callback to the one seam this case is about, and to no other."""
+    slots = dict.fromkeys(("structural", "resolver", "edge"))
+    slots[callback_kind] = callback
+    return slots
+
+
+def _patch_empty_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+    session,
+    document,
+) -> None:
+    """A synchronized session whose provider answers with no location at all."""
+    session._position_encoding = PositionEncoding.UTF8
+    monkeypatch.setattr(session, "synchronize", lambda value, *, deadline: None)
+    monkeypatch.setattr(session, "open_document", lambda path, *, deadline: document)
+    monkeypatch.setattr(
+        session,
+        "definition",
+        lambda anchor, *, deadline: ProviderLocations(
+            (), "provider_reported", False
+        ),
+    )
+
+
+def _single_location_definition(target):
+    """A provider that always answers with one location inside the target file."""
+    locations = (
+        LspLocation(target.uri, LspRange(LspPosition(0, 6), LspPosition(0, 15))),
+    )
+    return lambda anchor, *, deadline: ProviderLocations(
+        locations, "provider_reported", False
+    )
+
+
 @pytest.mark.parametrize("callback_kind", ["structural", "resolver", "edge"])
 def test_callback_return_after_deadline_never_publishes_facts(
     repository: Path,
@@ -1341,9 +1428,7 @@ def test_callback_return_after_deadline_never_publishes_facts(
         repository,
         state_root,
         semantic_pyright,
-        structural=callback if callback_kind == "structural" else None,
-        resolver=callback if callback_kind == "resolver" else None,
-        edge=callback if callback_kind == "edge" else None,
+        **_callback_slots(callback_kind, callback),
     )
     monkeypatch.setattr(
         code_navigation,
@@ -1353,43 +1438,79 @@ def test_callback_return_after_deadline_never_publishes_facts(
     monkeypatch.setattr(code_navigation.time, "monotonic", lambda: clock["now"])
     try:
         if callback_kind == "structural":
-            session._position_encoding = PositionEncoding.UTF8
-            monkeypatch.setattr(
-                session, "synchronize", lambda value, *, deadline: None
-            )
-            monkeypatch.setattr(
-                session, "open_document", lambda path, *, deadline: document
-            )
-            monkeypatch.setattr(
-                session,
-                "definition",
-                lambda anchor, *, deadline: ProviderLocations(
-                    (), "provider_reported", False
-                ),
-            )
-            result = navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
-                deadline=10.0,
-            )
-        elif callback_kind == "resolver":
-            result = navigation.resolve_symbol(
-                "PublicApi", repository=scope, deadline=10.0
-            )
-        else:
-            result = navigation.verify_edge(
-                _source_anchor(scope, "pkg/service.py", 10, 15),
-                _source_anchor(scope, "pkg/api.py", 2, 8),
-                repository=scope,
-                deadline=10.0,
-            )
+            _patch_empty_definitions(monkeypatch, session, document)
+        result = _navigation_operation(callback_kind, navigation, scope, 10.0)
         assert result.status is NavigationStatus.TIMEOUT
         assert result.locations == ()
         assert result.provenance == ()
     finally:
         monkeypatch.setattr(code_navigation.time, "monotonic", real_monotonic)
         session.close(deadline=real_monotonic() + 5)
+
+
+def _cross_deadline_on_stable_read(monkeypatch, clock: dict, target) -> None:
+    original_read = code_navigation.read_stable_bytes
+
+    def read_target(path: Path, max_bytes: int, **kwargs) -> bytes:
+        content = original_read(path, max_bytes, **kwargs)
+        if Path(path) == target.absolute_path:
+            clock["now"] = 11.0
+        return content
+
+    monkeypatch.setattr(code_navigation, "read_stable_bytes", read_target)
+    return None
+
+
+def _cross_deadline_on_source_document(monkeypatch, clock: dict, target) -> None:
+    del target
+    original_from_bytes = SourceDocument.from_bytes
+
+    def from_bytes(cls, path: str, content: bytes) -> SourceDocument:
+        value = original_from_bytes(path, content)
+        clock["now"] = 11.0
+        return value
+
+    monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(from_bytes))
+    return None
+
+
+def _cross_deadline_on_lsp_range(monkeypatch, clock: dict, target) -> None:
+    del target
+    original_to_byte_range = SourceDocument.to_byte_range
+
+    def to_byte_range(self, value, encoding):
+        result = original_to_byte_range(self, value, encoding)
+        clock["now"] = 11.0
+        return result
+
+    monkeypatch.setattr(SourceDocument, "to_byte_range", to_byte_range)
+    return None
+
+
+def _cross_deadline_on_byte_position(monkeypatch, clock: dict, target):
+    """This stage is reached only for a candidate the structural seam supplies."""
+    del target
+    original_byte_position = code_navigation._byte_position
+
+    def byte_position(document: SourceDocument, byte_offset: int):
+        result = original_byte_position(document, byte_offset)
+        clock["now"] = 11.0
+        return result
+
+    monkeypatch.setattr(code_navigation, "_byte_position", byte_position)
+
+    def structural_candidates(request, deadline):
+        return (_graph_location("pkg/api.py", 6, 15),)
+
+    return structural_candidates
+
+
+_DEADLINE_CROSSING_STAGES = {
+    "stable_read": _cross_deadline_on_stable_read,
+    "source_document": _cross_deadline_on_source_document,
+    "lsp_range": _cross_deadline_on_lsp_range,
+    "byte_position": _cross_deadline_on_byte_position,
+}
 
 
 @pytest.mark.parametrize(
@@ -1410,50 +1531,7 @@ def test_expensive_conversion_crossing_deadline_never_publishes_facts(
     clock = {"now": 1.0}
     real_monotonic = time.monotonic
     provider_calls = 0
-    structural = None
-
-    if crossing_stage == "stable_read":
-        original_read = code_navigation.read_stable_bytes
-
-        def read_target(path: Path, max_bytes: int, **kwargs) -> bytes:
-            content = original_read(path, max_bytes, **kwargs)
-            if Path(path) == target.absolute_path:
-                clock["now"] = 11.0
-            return content
-
-        monkeypatch.setattr(code_navigation, "read_stable_bytes", read_target)
-    elif crossing_stage == "source_document":
-        original_from_bytes = SourceDocument.from_bytes
-
-        def from_bytes(cls, path: str, content: bytes) -> SourceDocument:
-            value = original_from_bytes(path, content)
-            clock["now"] = 11.0
-            return value
-
-        monkeypatch.setattr(SourceDocument, "from_bytes", classmethod(from_bytes))
-    elif crossing_stage == "lsp_range":
-        original_to_byte_range = SourceDocument.to_byte_range
-
-        def to_byte_range(self, value, encoding):
-            result = original_to_byte_range(self, value, encoding)
-            clock["now"] = 11.0
-            return result
-
-        monkeypatch.setattr(SourceDocument, "to_byte_range", to_byte_range)
-    else:
-        original_byte_position = code_navigation._byte_position
-
-        def byte_position(document: SourceDocument, byte_offset: int):
-            result = original_byte_position(document, byte_offset)
-            clock["now"] = 11.0
-            return result
-
-        monkeypatch.setattr(code_navigation, "_byte_position", byte_position)
-
-        def structural_candidates(request, deadline):
-            return (_graph_location("pkg/api.py", 6, 15),)
-
-        structural = structural_candidates
+    structural = _DEADLINE_CROSSING_STAGES[crossing_stage](monkeypatch, clock, target)
 
     navigation, session = _navigation(
         repository,
@@ -1537,8 +1615,7 @@ def test_result_construction_crossing_deadline_never_publishes_facts(
         repository,
         state_root,
         semantic_pyright,
-        resolver=resolver if operation == "resolve_symbol" else None,
-        edge=verifier if operation == "verify_edge" else None,
+        **_operation_slots(operation, resolver, verifier),
     )
     monkeypatch.setattr(
         code_navigation,
@@ -1551,36 +1628,9 @@ def test_result_construction_crossing_deadline_never_publishes_facts(
         if operation == "query":
             _patch_stable_attempt(monkeypatch, session, revision, document)
             monkeypatch.setattr(
-                session,
-                "definition",
-                lambda anchor, *, deadline: ProviderLocations(
-                    (
-                        LspLocation(
-                            target.uri,
-                            LspRange(LspPosition(0, 6), LspPosition(0, 15)),
-                        ),
-                    ),
-                    "provider_reported",
-                    False,
-                ),
+                session, "definition", _single_location_definition(target)
             )
-            result = navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
-                deadline=10.0,
-            )
-        elif operation == "resolve_symbol":
-            result = navigation.resolve_symbol(
-                "PublicApi", repository=scope, deadline=10.0
-            )
-        else:
-            result = navigation.verify_edge(
-                _source_anchor(scope, "pkg/service.py", 10, 15),
-                _source_anchor(scope, "pkg/api.py", 2, 8),
-                repository=scope,
-                deadline=10.0,
-            )
+        result = _navigation_operation(operation, navigation, scope, 10.0)
         assert result.status is NavigationStatus.TIMEOUT
         assert result.locations == ()
         assert result.provenance == ()
@@ -1728,6 +1778,65 @@ def test_target_revision_mismatch_aborts_attempt_before_post_revision(
         session.close(deadline=time.monotonic() + 5)
 
 
+def _fenced_operation_slots(operation: str) -> dict:
+    """The structural and edge seams this operation needs, if it needs any."""
+    slots = {"structural": None, "edge": None}
+    if operation == "structural":
+        slots["structural"] = lambda request, deadline: (
+            _graph_location("pkg/api.py", 6, 15),
+        )
+    if operation == "verify_edge":
+        slots["edge"] = lambda source, target, repository, deadline: True
+    return slots
+
+
+def _target_locations(operation: str, target) -> tuple:
+    """Only the provider case answers with a location of its own."""
+    if operation != "provider_target":
+        return ()
+    return (
+        LspLocation(target.uri, LspRange(LspPosition(0, 6), LspPosition(0, 15))),
+    )
+
+
+def _fenced_query_result(monkeypatch, session, navigation, scope, document, operation, target):
+    """Run the query path with a provider answer shaped for this operation."""
+    session._position_encoding = PositionEncoding.UTF8
+    monkeypatch.setattr(session, "synchronize", lambda value, *, deadline: None)
+    monkeypatch.setattr(session, "open_document", lambda path, *, deadline: document)
+    monkeypatch.setattr(
+        session,
+        "definition",
+        lambda anchor, *, deadline: ProviderLocations(
+            _target_locations(operation, target), "provider_reported", False
+        ),
+    )
+    return _navigation_operation("query", navigation, scope, time.monotonic() + 5)
+
+
+def _fenced_result(monkeypatch, session, navigation, scope, document, operation, target):
+    if operation in {"provider_target", "structural"}:
+        return _fenced_query_result(
+            monkeypatch, session, navigation, scope, document, operation, target
+        )
+    return _navigation_operation(
+        "verify_edge", navigation, scope, time.monotonic() + 5
+    )
+
+
+def _expected_fenced_outcome(mutate_every_attempt: bool, operation: str) -> tuple:
+    """Status, location count and empty provenance a fenced retry may end with."""
+    if mutate_every_attempt:
+        return (NavigationStatus.STALE, 0, True)
+    if operation == "structural":
+        return (NavigationStatus.PARTIAL, 1, False)
+    return (NavigationStatus.OK, 1, False)
+
+
+def _fenced_outcome(result) -> tuple:
+    return (result.status, len(result.locations), result.provenance == ())
+
+
 @pytest.mark.parametrize("operation", ["provider_target", "structural", "verify_edge"])
 @pytest.mark.parametrize("failure_type", [FileNotFoundError, PermissionError, OSError])
 @pytest.mark.parametrize("mutate_every_attempt", [False, True])
@@ -1759,16 +1868,7 @@ def test_pre_revision_disk_read_failure_retries_every_fenced_path(
         repository,
         state_root,
         semantic_pyright,
-        structural=(
-            (lambda request, deadline: (_graph_location("pkg/api.py", 6, 15),))
-            if operation == "structural"
-            else None
-        ),
-        edge=(
-            (lambda source, target, repository, deadline: True)
-            if operation == "verify_edge"
-            else None
-        ),
+        **_fenced_operation_slots(operation),
     )
     monkeypatch.setattr(
         code_navigation,
@@ -1777,54 +1877,13 @@ def test_pre_revision_disk_read_failure_retries_every_fenced_path(
     )
     monkeypatch.setattr(code_navigation, "read_stable_bytes", read_target)
     try:
-        if operation in {"provider_target", "structural"}:
-            session._position_encoding = PositionEncoding.UTF8
-            monkeypatch.setattr(
-                session, "synchronize", lambda value, *, deadline: None
-            )
-            monkeypatch.setattr(
-                session, "open_document", lambda path, *, deadline: document
-            )
-            monkeypatch.setattr(
-                session,
-                "definition",
-                lambda anchor, *, deadline: ProviderLocations(
-                    (
-                        LspLocation(
-                            target.uri,
-                            LspRange(LspPosition(0, 6), LspPosition(0, 15)),
-                        ),
-                    )
-                    if operation == "provider_target"
-                    else (),
-                    "provider_reported",
-                    False,
-                ),
-            )
-            result = navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
-                deadline=time.monotonic() + 5,
-            )
-        else:
-            result = navigation.verify_edge(
-                _source_anchor(scope, "pkg/service.py", 10, 15),
-                _source_anchor(scope, "pkg/api.py", 2, 8),
-                repository=scope,
-                deadline=time.monotonic() + 5,
-            )
+        result = _fenced_result(
+            monkeypatch, session, navigation, scope, document, operation, target
+        )
         assert target_reads == 2
-        if mutate_every_attempt:
-            assert result.status is NavigationStatus.STALE
-            assert result.locations == ()
-            assert result.provenance == ()
-        elif operation == "structural":
-            assert result.status is NavigationStatus.PARTIAL
-            assert len(result.locations) == 1
-        else:
-            assert result.status is NavigationStatus.OK
-            assert len(result.locations) == 1
+        assert _fenced_outcome(result) == _expected_fenced_outcome(
+            mutate_every_attempt, operation
+        )
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2968,6 +3027,40 @@ def test_setup_timeout_after_absolute_deadline_skips_structural_fallback(
         session.close(deadline=real_monotonic() + 5)
 
 
+def _throwing_revision(error: type[BaseException]):
+    def compute(repository, *, deadline):
+        raise error()
+
+    return compute
+
+
+def _patch_early_revision(monkeypatch, early_stage: str, revision) -> None:
+    """Break the revision the way this stage names, or leave it as it is."""
+    replacements = {
+        "revision_timeout": _throwing_revision(TimeoutError),
+        "revision_error": _throwing_revision(RuntimeError),
+        "empty_revision": lambda repository, *, deadline: replace(
+            revision, revision_sha256=""
+        ),
+    }
+    replacement = replacements.get(early_stage)
+    if replacement is None:
+        return
+    monkeypatch.setattr(code_navigation, "_compute_revision", replacement)
+
+
+def _early_capability(early_stage: str) -> Capability:
+    if early_stage == "unsupported":
+        return Capability.DECLARATIONS
+    return Capability.DEFINITIONS
+
+
+def _early_deadline(early_stage: str) -> float:
+    if early_stage == "expired":
+        return 0.0
+    return time.monotonic() + 5
+
+
 @pytest.mark.parametrize(
     "early_stage",
     ["unsupported", "expired", "revision_timeout", "revision_error", "empty_revision"],
@@ -2983,30 +3076,9 @@ def test_early_results_preserve_live_session_readiness(
     revision = _revision(repository, "a")
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     session._readiness = "query_ready"
-    if early_stage == "revision_timeout":
-        monkeypatch.setattr(
-            code_navigation,
-            "_compute_revision",
-            lambda repository, *, deadline: (_ for _ in ()).throw(TimeoutError()),
-        )
-    elif early_stage == "revision_error":
-        monkeypatch.setattr(
-            code_navigation,
-            "_compute_revision",
-            lambda repository, *, deadline: (_ for _ in ()).throw(RuntimeError()),
-        )
-    elif early_stage == "empty_revision":
-        monkeypatch.setattr(
-            code_navigation,
-            "_compute_revision",
-            lambda repository, *, deadline: replace(revision, revision_sha256=""),
-        )
-    capability = (
-        Capability.DECLARATIONS
-        if early_stage == "unsupported"
-        else Capability.DEFINITIONS
-    )
-    deadline = 0.0 if early_stage == "expired" else time.monotonic() + 5
+    _patch_early_revision(monkeypatch, early_stage, revision)
+    capability = _early_capability(early_stage)
+    deadline = _early_deadline(early_stage)
     try:
         result = navigation.query(
             NavigationRequest(scope, capability, "pkg/service.py", 10, 20),
@@ -3059,6 +3131,22 @@ def test_setup_failure_structural_interruption_still_propagates(
         session.close(deadline=time.monotonic() + 5)
 
 
+_SECOND_CALL_FAILURES = {
+    "post_revision_timeout": TimeoutError,
+    "post_revision_error": RuntimeError,
+}
+
+
+def _revision_for_stage(stage: str, revisions: tuple, call: int):
+    """The revision this call answers with, or the failure the stage asks for."""
+    failure = _SECOND_CALL_FAILURES.get(stage)
+    if failure is not None and call == 2:
+        raise failure
+    if stage == "post_revision_stale":
+        return revisions[call - 1]
+    return revisions[0]
+
+
 @pytest.mark.parametrize(
     ("stage", "expected"),
     [
@@ -3105,13 +3193,7 @@ def test_post_setup_empty_results_preserve_readiness_and_empty_contract(
     ) -> WorkspaceRevision:
         nonlocal revision_calls
         revision_calls += 1
-        if stage == "post_revision_timeout" and revision_calls == 2:
-            raise TimeoutError
-        if stage == "post_revision_error" and revision_calls == 2:
-            raise RuntimeError
-        if stage == "post_revision_stale":
-            return revisions[revision_calls - 1]
-        return revisions[0]
+        return _revision_for_stage(stage, revisions, revision_calls)
 
     monkeypatch.setattr(code_navigation, "_compute_revision", compute)
     request_line = 1000 if stage == "anchor_validation" else 10
@@ -3169,9 +3251,7 @@ def test_callback_exceptions_are_redacted_at_every_boundary(
         repository,
         state_root,
         semantic_pyright,
-        structural=fail if callback_kind == "structural" else None,
-        resolver=fail if callback_kind == "resolver" else None,
-        edge=fail if callback_kind == "edge" else None,
+        **_callback_slots(callback_kind, fail),
     )
     monkeypatch.setattr(
         code_navigation,
@@ -3180,40 +3260,12 @@ def test_callback_exceptions_are_redacted_at_every_boundary(
     )
     try:
         if callback_kind == "structural":
-            document = _open_document(scope, "pkg/service.py")
-            session._position_encoding = PositionEncoding.UTF8
-            monkeypatch.setattr(
-                session, "synchronize", lambda value, *, deadline: None
+            _patch_empty_definitions(
+                monkeypatch, session, _open_document(scope, "pkg/service.py")
             )
-            monkeypatch.setattr(
-                session, "open_document", lambda path, *, deadline: document
-            )
-            monkeypatch.setattr(
-                session,
-                "definition",
-                lambda anchor, *, deadline: ProviderLocations(
-                    (), "provider_reported", False
-                ),
-            )
-            result = navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
-                deadline=time.monotonic() + 5,
-            )
-        elif callback_kind == "resolver":
-            result = navigation.resolve_symbol(
-                "PublicApi",
-                repository=scope,
-                deadline=time.monotonic() + 5,
-            )
-        else:
-            result = navigation.verify_edge(
-                _source_anchor(scope, "pkg/service.py", 10, 15),
-                _source_anchor(scope, "pkg/api.py", 2, 8),
-                repository=scope,
-                deadline=time.monotonic() + 5,
-            )
+        result = _navigation_operation(
+            callback_kind, navigation, scope, time.monotonic() + 5
+        )
         assert result.status is expected
         assert result.locations == ()
         assert all(
@@ -3242,9 +3294,7 @@ def test_navigation_interruption_propagates_from_every_callback_boundary(
         repository,
         state_root,
         semantic_pyright,
-        structural=interrupted if callback_kind == "structural" else None,
-        resolver=interrupted if callback_kind == "resolver" else None,
-        edge=interrupted if callback_kind == "edge" else None,
+        **_callback_slots(callback_kind, interrupted),
     )
     monkeypatch.setattr(
         code_navigation,
@@ -3252,42 +3302,14 @@ def test_navigation_interruption_propagates_from_every_callback_boundary(
         lambda repository, *, deadline: revision,
     )
     try:
+        if callback_kind == "structural":
+            _patch_empty_definitions(
+                monkeypatch, session, _open_document(scope, "pkg/service.py")
+            )
         with pytest.raises(code_navigation.NavigationInterruption):
-            if callback_kind == "structural":
-                document = _open_document(scope, "pkg/service.py")
-                session._position_encoding = PositionEncoding.UTF8
-                monkeypatch.setattr(
-                    session, "synchronize", lambda value, *, deadline: None
-                )
-                monkeypatch.setattr(
-                    session, "open_document", lambda path, *, deadline: document
-                )
-                monkeypatch.setattr(
-                    session,
-                    "definition",
-                    lambda anchor, *, deadline: ProviderLocations(
-                        (), "provider_reported", False
-                    ),
-                )
-                navigation.query(
-                    NavigationRequest(
-                        scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                    ),
-                    deadline=time.monotonic() + 5,
-                )
-            elif callback_kind == "resolver":
-                navigation.resolve_symbol(
-                    "PublicApi",
-                    repository=scope,
-                    deadline=time.monotonic() + 5,
-                )
-            else:
-                navigation.verify_edge(
-                    _source_anchor(scope, "pkg/service.py", 10, 15),
-                    _source_anchor(scope, "pkg/api.py", 2, 8),
-                    repository=scope,
-                    deadline=time.monotonic() + 5,
-                )
+            _navigation_operation(
+                callback_kind, navigation, scope, time.monotonic() + 5
+            )
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3451,6 +3473,45 @@ def test_provider_target_with_stale_pre_revision_hash_returns_stale(
         session.close(deadline=time.monotonic() + 5)
 
 
+_REPEATED_RANGES = (
+    LspRange(LspPosition(0, 0), LspPosition(0, 5)),
+    LspRange(LspPosition(0, 6), LspPosition(0, 15)),
+    LspRange(LspPosition(1, 4), LspPosition(1, 7)),
+    LspRange(LspPosition(1, 8), LspPosition(1, 14)),
+    LspRange(LspPosition(2, 8), LspPosition(2, 14)),
+)
+
+
+def _repeated_provider_locations(target, external_uri: str) -> tuple:
+    """Five locations inside the repository and two outside it."""
+    inside = tuple(LspLocation(target.uri, range_) for range_ in _REPEATED_RANGES)
+    outside = (
+        LspLocation(external_uri, LspRange(LspPosition(0, 0), LspPosition(0, 1))),
+        LspLocation(external_uri, LspRange(LspPosition(0, 1), LspPosition(0, 2))),
+    )
+    return inside + outside
+
+
+def _record_normalized_uris(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Collect every provider URI the navigation asks to normalize."""
+    real_normalize = code_navigation.normalize_provider_uri
+    normalized: list[str] = []
+
+    def recording_normalize(repository_scope: RepositoryScope, uri: str):
+        normalized.append(uri)
+        return real_normalize(repository_scope, uri)
+
+    monkeypatch.setattr(code_navigation, "normalize_provider_uri", recording_normalize)
+    return normalized
+
+
+def _location_facts(result) -> tuple:
+    """Status, count, the files pointed at, and how many distinct ranges."""
+    paths = {location.path for location in result.locations}
+    ranges = {location.range for location in result.locations}
+    return (result.status, len(result.locations), paths, len(ranges))
+
+
 def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
     repository: Path,
     state_root: Path,
@@ -3462,25 +3523,7 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
     document = _open_document(scope, "pkg/service.py")
     target = resolve_repository_source(scope, "pkg/api.py")
     external_uri = (repository.parent / "external-sensitive.py").resolve().as_uri()
-    ranges = (
-        LspRange(LspPosition(0, 0), LspPosition(0, 5)),
-        LspRange(LspPosition(0, 6), LspPosition(0, 15)),
-        LspRange(LspPosition(1, 4), LspPosition(1, 7)),
-        LspRange(LspPosition(1, 8), LspPosition(1, 14)),
-        LspRange(LspPosition(2, 8), LspPosition(2, 14)),
-    )
-    provider_locations = tuple(
-        LspLocation(target.uri, range_) for range_ in ranges
-    ) + (
-        LspLocation(
-            external_uri,
-            LspRange(LspPosition(0, 0), LspPosition(0, 1)),
-        ),
-        LspLocation(
-            external_uri,
-            LspRange(LspPosition(0, 1), LspPosition(0, 2)),
-        ),
-    )
+    provider_locations = _repeated_provider_locations(target, external_uri)
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     _patch_stable_attempt(monkeypatch, session, revision, document)
     monkeypatch.setattr(
@@ -3490,21 +3533,7 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
             provider_locations, "provider_reported", False
         ),
     )
-    real_normalize_provider_uri = code_navigation.normalize_provider_uri
-    normalized_uris: list[str] = []
-
-    def recording_normalize_provider_uri(
-        repository_scope: RepositoryScope,
-        uri: str,
-    ):
-        normalized_uris.append(uri)
-        return real_normalize_provider_uri(repository_scope, uri)
-
-    monkeypatch.setattr(
-        code_navigation,
-        "normalize_provider_uri",
-        recording_normalize_provider_uri,
-    )
+    normalized_uris = _record_normalized_uris(monkeypatch)
     request = NavigationRequest(
         scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
     )
@@ -3515,10 +3544,12 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
         )
 
         for result in results:
-            assert result.status is NavigationStatus.PARTIAL
-            assert len(result.locations) == 5
-            assert all(location.path == "pkg/api.py" for location in result.locations)
-            assert len({location.range for location in result.locations}) == 5
+            assert _location_facts(result) == (
+                NavigationStatus.PARTIAL,
+                5,
+                {"pkg/api.py"},
+                5,
+            )
         assert normalized_uris == [
             target.uri,
             external_uri,
@@ -3733,6 +3764,22 @@ def test_structural_fact_count_is_capped_at_ten_thousand(
         session.close(deadline=time.monotonic() + 5)
 
 
+def _candidate_slots(operation: str, structural, resolver) -> dict:
+    """The seam this operation reads its structural candidates from."""
+    if operation == "query":
+        return {"structural": structural, "resolver": None}
+    return {"structural": None, "resolver": resolver}
+
+
+def _bounded_result(monkeypatch, session, navigation, scope, operation, deadline):
+    """Run the operation, synchronizing the session when the query path needs it."""
+    if operation == "query":
+        _patch_empty_definitions(
+            monkeypatch, session, _open_document(scope, "pkg/service.py")
+        )
+    return _navigation_operation(operation, navigation, scope, deadline)
+
+
 @pytest.mark.parametrize("operation", ["query", "resolve_symbol"])
 def test_structural_cap_is_applied_after_unique_deduplication(
     repository: Path,
@@ -3752,13 +3799,10 @@ def test_structural_cap_is_applied_after_unique_deduplication(
         repository,
         state_root,
         semantic_pyright,
-        structural=(
-            (lambda request, deadline: candidates) if operation == "query" else None
-        ),
-        resolver=(
-            (lambda symbol, repository, deadline: candidates)
-            if operation == "resolve_symbol"
-            else None
+        **_candidate_slots(
+            operation,
+            lambda request, deadline: candidates,
+            lambda symbol, repository, deadline: candidates,
         ),
     )
     monkeypatch.setattr(code_navigation, "_MAX_NAVIGATION_FACTS", 2)
@@ -3768,34 +3812,14 @@ def test_structural_cap_is_applied_after_unique_deduplication(
         lambda repository, *, deadline: revision,
     )
     try:
-        if operation == "query":
-            document = _open_document(scope, "pkg/service.py")
-            session._position_encoding = PositionEncoding.UTF8
-            monkeypatch.setattr(
-                session, "synchronize", lambda value, *, deadline: None
-            )
-            monkeypatch.setattr(
-                session, "open_document", lambda path, *, deadline: document
-            )
-            monkeypatch.setattr(
-                session,
-                "definition",
-                lambda anchor, *, deadline: ProviderLocations(
-                    (), "provider_reported", False
-                ),
-            )
-            result = navigation.query(
-                NavigationRequest(
-                    scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
-                ),
-                deadline=time.monotonic() + 5,
-            )
-        else:
-            result = navigation.resolve_symbol(
-                "PublicApi",
-                repository=scope,
-                deadline=time.monotonic() + 5,
-            )
+        result = _bounded_result(
+            monkeypatch,
+            session,
+            navigation,
+            scope,
+            operation,
+            time.monotonic() + 5,
+        )
         assert result.status is NavigationStatus.PARTIAL
         assert result.total == 2
         assert [location.range for location in result.locations] == [

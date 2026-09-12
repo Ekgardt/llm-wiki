@@ -783,6 +783,20 @@ def test_models_have_unique_normalized_ids_and_immutable_sources():
         assert _variant_contract_violations(model) == []
 
 
+def _variant_pairs(model: dict) -> list:
+    return [(item["variant_id"], item["dimensions"]) for item in model["variants"]]
+
+
+def _pin_identity(model: dict) -> tuple:
+    """Revision, licence and token bounds: the fields a pin is made of."""
+    return (
+        model["revision"],
+        model["license"],
+        model["benchmark_max_tokens"],
+        model["native_max_tokens"],
+    )
+
+
 def test_required_embedding_pins_and_formatting_are_exact():
     embeddings = {model["id"]: model for model in _load()["embeddings"]}
     assert set(embeddings) == {
@@ -794,34 +808,40 @@ def test_required_embedding_pins_and_formatting_are_exact():
     }
 
     e5 = embeddings["intfloat/multilingual-e5-large-instruct"]
-    assert e5["revision"] == "274baa43b0e13e37fafa6428dbc7938e62e5c439"
-    assert e5["license"] == "MIT"
+    assert (e5["revision"], e5["license"]) == (
+        "274baa43b0e13e37fafa6428dbc7938e62e5c439",
+        "MIT",
+    )
     assert e5["formatting"] == {
         "document": "{text}",
         "instruction": "Given a web search query, retrieve relevant passages that answer the query",
         "query": "Instruct: {instruction}\nQuery: {text}",
     }
-    assert [(item["variant_id"], item["dimensions"]) for item in e5["variants"]] == [
+    assert _variant_pairs(e5) == [
         ("float32-1024d", 1024)
     ]
     assert (e5["benchmark_max_tokens"], e5["native_max_tokens"]) == (512, 512)
 
     small = embeddings["BAAI/bge-small-en-v1.5"]
-    assert small["revision"] == "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
-    assert small["license"] == "MIT"
+    assert (small["revision"], small["license"]) == (
+        "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+        "MIT",
+    )
     assert small["languages"] == ["EN"]
     assert small["formatting"] == {
         "document": "{text}",
         "instruction": "Represent this sentence for searching relevant passages:",
         "query": "{instruction} {text}",
     }
-    assert [(item["variant_id"], item["dimensions"]) for item in small["variants"]] == [
+    assert _variant_pairs(small) == [
         ("float32-384d", 384)
     ]
 
     gemma = embeddings["google/embeddinggemma-300m"]
-    assert gemma["revision"] == "57c266a740f537b4dc058e1b0cda161fd15afa75"
-    assert gemma["license"] == "Gemma"
+    assert (gemma["revision"], gemma["license"]) == (
+        "57c266a740f537b4dc058e1b0cda161fd15afa75",
+        "Gemma",
+    )
     assert gemma["shipping_eligible"] is False
     assert gemma["exclusion_reasons"] == ["license_requires_separate_acceptance"]
     assert gemma["formatting"] == {
@@ -829,7 +849,7 @@ def test_required_embedding_pins_and_formatting_are_exact():
         "instruction": "task: search result | query:",
         "query": "{instruction} {text}",
     }
-    assert [(item["variant_id"], item["dimensions"]) for item in gemma["variants"]] == [
+    assert _variant_pairs(gemma) == [
         ("float32-128d", 128),
         ("float32-256d", 256),
         ("float32-512d", 512),
@@ -837,27 +857,31 @@ def test_required_embedding_pins_and_formatting_are_exact():
     ]
 
     bge = embeddings["BAAI/bge-m3"]
-    assert bge["revision"] == "5617a9f61b028005a4858fdac845db406aefb181"
-    assert bge["license"] == "MIT"
+    assert (bge["revision"], bge["license"]) == (
+        "5617a9f61b028005a4858fdac845db406aefb181",
+        "MIT",
+    )
     assert bge["formatting"] == {
         "document": "{text}",
         "instruction": None,
         "query": "{text}",
     }
-    assert [(item["variant_id"], item["dimensions"]) for item in bge["variants"]] == [
+    assert _variant_pairs(bge) == [
         ("float32-1024d", 1024)
     ]
     assert (bge["benchmark_max_tokens"], bge["native_max_tokens"]) == (512, 8192)
 
     qwen = embeddings["Qwen/Qwen3-Embedding-0.6B"]
-    assert qwen["revision"] == "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
-    assert qwen["license"] == "Apache-2.0"
+    assert (qwen["revision"], qwen["license"]) == (
+        "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+        "Apache-2.0",
+    )
     assert qwen["formatting"] == {
         "document": "{text}",
         "instruction": "Given a web search query, retrieve relevant passages that answer the query",
         "query": "Instruct: {instruction}\nQuery:{text}",
     }
-    assert [(item["variant_id"], item["dimensions"]) for item in qwen["variants"]] == [
+    assert _variant_pairs(qwen) == [
         ("float32-384d", 384),
         ("float32-1024d", 1024),
     ]
@@ -871,7 +895,7 @@ def _reranker_variant_shape(model: dict) -> bool:
     """A reranker ships exactly one float32 variant with no dimensions."""
     if model["kind"] != "reranker":
         return True
-    pairs = [(item["variant_id"], item["dimensions"]) for item in model["variants"]]
+    pairs = _variant_pairs(model)
     return pairs == [("float32", None)]
 
 
@@ -1022,6 +1046,21 @@ def test_jieba_verified_policy_matches_locked_runtime_constants():
     assert _load()["selection"]["default_embedding"] is None
 
 
+def _measured_claims(item: dict) -> list:
+    """Anything that claims a measurement before a real run produced one."""
+    quality = item["quality"]
+    resources = item["resource_measurements"]
+    checks = (
+        ("quality_status", quality["status"] != "unmeasured"),
+        ("quality_claim", quality["claim"] is not None),
+        ("quality_overall", quality["overall"] is not None),
+        ("per_language", set(quality["per_language"].values()) != {None}),
+        ("resource_status", resources["status"] != "unmeasured"),
+        ("resource_values", set(_resource_values(resources)) != {None}),
+    )
+    return [name for name, claimed in checks if claimed]
+
+
 def test_matrix_contains_no_measurements_or_results_before_real_runs():
     matrix = _load()
     assert matrix["benchmark_contract"]["quality_claims_allowed"] is True
@@ -1034,13 +1073,7 @@ def test_matrix_contains_no_measurements_or_results_before_real_runs():
     for item in evidence:
         _validate_quality(item["quality"])
         _validate_resources(item["resource_measurements"])
-        assert item["quality"]["status"] == "unmeasured"
-        assert item["quality"]["claim"] is None
-        assert item["quality"]["overall"] is None
-        assert all(value is None for value in item["quality"]["per_language"].values())
-        measurements = item["resource_measurements"]
-        assert measurements["status"] == "unmeasured"
-        assert all(value is None for key, value in measurements.items() if key != "status")
+        assert _measured_claims(item) == []
 
 
 def test_real_retrieval_benchmark_extra_is_optional_and_locked():
@@ -1129,6 +1162,36 @@ def test_non_dominated_synthetic_matrix_can_select_without_changing_policy_tests
     assert _matrix_policy_fingerprint(matrix) == _matrix_policy_fingerprint(_load())
 
 
+_UNMEASURED_QUALITY = {
+    "overall": None,
+    "per_language": {"EN": None, "RU": None, "ZH": None},
+    "status": "unmeasured",
+}
+
+
+def _selected_variant(matrix: dict) -> dict:
+    candidate = _embedding_named(matrix, "Qwen/Qwen3-Embedding-0.6B")
+    return _variant_with_id(candidate, "float32-384d")
+
+
+def _variant_with_id(candidate: dict, variant_id: str) -> dict:
+    return next(
+        item for item in candidate["variants"] if item["variant_id"] == variant_id
+    )
+
+
+def _unmeasure_selected_variant(matrix: dict, reports: dict[str, bytes]) -> None:
+    """Take the measurement away from the variant the selection points at."""
+    del reports
+    _selected_variant(matrix)["quality"].update(_UNMEASURED_QUALITY)
+
+
+def _unship_selected_candidate(matrix: dict, reports: dict[str, bytes]) -> None:
+    del reports
+    selected_id = matrix["selection"]["default_embedding"]["id"]
+    _embedding_named(matrix, selected_id).update(shipping_eligible=False)
+
+
 def test_result_evidence_rejects_empty_unrelated_stale_and_unqualified_data():
     def rejected(mutator) -> None:
         matrix, reports = _synthetic_measured_matrix()
@@ -1170,25 +1233,24 @@ def test_result_evidence_rejects_empty_unrelated_stale_and_unqualified_data():
         )
     )
     rejected(unrelated_report)
-    rejected(
-        lambda matrix, reports: next(
-            variant
-            for candidate in matrix["embeddings"]
-            for variant in candidate["variants"]
-            if variant["variant_id"] == "float32-384d"
-            and candidate["id"] == "Qwen/Qwen3-Embedding-0.6B"
-        )["quality"].update(
-            overall=None,
-            per_language={"EN": None, "RU": None, "ZH": None},
-            status="unmeasured",
-        )
+    rejected(_unmeasure_selected_variant)
+    rejected(_unship_selected_candidate)
+
+
+def _candidate_with_target(candidates: list, target: dict, *, matches: bool) -> dict:
+    """The candidate that is the selected target, or the first that is not."""
+    return next(
+        item for item in candidates if (item["target"] == target) is matches
     )
-    rejected(
-        lambda matrix, reports: next(
-            candidate
-            for candidate in matrix["embeddings"]
-            if candidate["id"] == matrix["selection"]["default_embedding"]["id"]
-        ).update(shipping_eligible=False)
+
+
+def _make_dominating(variant: dict, selected_values: dict) -> None:
+    """Give a variant the selected one's numbers, and one byte less of index."""
+    variant["quality"]["overall"] = selected_values["overall"]
+    variant["resource_measurements"].update(
+        index_bytes=selected_values["index_bytes"] - 1,
+        peak_rss_bytes=selected_values["peak_rss_bytes"],
+        warm_p95_ms=selected_values["warm_p95_ms"],
     )
 
 
@@ -1196,30 +1258,13 @@ def test_selection_rejects_a_target_dominated_by_bound_eligible_evidence():
     matrix, reports = _synthetic_measured_matrix()
     selection = matrix["selection"]
     evidence = selection["result_evidence"]
-    selected_item = next(
-        item
-        for item in evidence["pareto"]["candidates"]
-        if item["target"] == selection["default_embedding"]
-    )
-    competitor = next(
-        item
-        for item in evidence["pareto"]["candidates"]
-        if item["target"] != selection["default_embedding"]
-    )
+    candidates = evidence["pareto"]["candidates"]
+    target = selection["default_embedding"]
+    selected_item = _candidate_with_target(candidates, target, matches=True)
+    competitor = _candidate_with_target(candidates, target, matches=False)
     _, competitor_variant = _resolve_target(matrix, competitor["target"])
-    selected_values = selected_item["objective_values"]
-    competitor_variant["quality"]["overall"] = selected_values["overall"]
-    competitor_variant["resource_measurements"].update(
-        index_bytes=selected_values["index_bytes"] - 1,
-        peak_rss_bytes=selected_values["peak_rss_bytes"],
-        warm_p95_ms=selected_values["warm_p95_ms"],
-    )
-    competitor["objective_values"] = {
-        "index_bytes": competitor_variant["resource_measurements"]["index_bytes"],
-        "overall": competitor_variant["quality"]["overall"],
-        "peak_rss_bytes": competitor_variant["resource_measurements"]["peak_rss_bytes"],
-        "warm_p95_ms": competitor_variant["resource_measurements"]["warm_p95_ms"],
-    }
+    _make_dominating(competitor_variant, selected_item["objective_values"])
+    competitor["objective_values"] = _objective_values(competitor_variant)
     report_path = evidence["raw_report_path"]
     reports[report_path] = _canonical_bytes(
         {field: evidence[field] for field in RAW_REPORT_FIELDS}
