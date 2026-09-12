@@ -181,5 +181,10 @@ def test_the_other_side_is_asked_about_the_directory_it_was_given(monkeypatch):
     assert '"project": "parity-cs-client-repo"' in seen["cmd"][-1]
 
 
-def test_the_default_project_name_is_the_dashed_checkout_path():
-    assert stand.default_cbm_project("/home/user/llm-wiki") == "home-user-llm-wiki"
+def test_the_default_project_name_is_the_dashed_checkout_path(tmp_path):
+    """No machine path in the expectation: `/home` is autofs on macOS and a
+    drive-anchored path on Windows, and the first version of this test asserted
+    a literal that only holds on this Linux box."""
+    name = stand.default_cbm_project(str(tmp_path / "outer" / "inner"))
+    assert name.endswith("outer-inner"), name
+    assert "/" not in name and "\\" not in name, name

@@ -114,6 +114,25 @@ vault), with explicit code roots to step around defect three. That measures the
 same code through the same product path. It is a workaround and it is named as
 one: the vault itself still answers nothing about its own code.
 
+## A fourth defect, mine, found by CI
+
+`timing::macos_full::py3.10-s2` failed on `7a457f2`. The shard holds
+`tests/test_code_parity_stand.py`, where the test I added asserted
+`default_cbm_project("/home/user/llm-wiki") == "home-user-llm-wiki"` — a literal
+that holds only on this Linux box. `/home` is an autofs mount on macOS and a
+drive-anchored path on Windows, so `Path(...).resolve()` returns something else
+there and the assertion is false; the Windows shard would have failed the same
+way once it ran. The job log was not readable while the run was still in
+progress, so the cause is identified by inspection of that shard's contents, not
+from the traceback — CI's rerun is the confirmation.
+
+Both halves are fixed rather than the one that failed: the derivation now joins
+the path's parts after its anchor, so no separator and no drive letter can
+survive on any platform, and the test asserts the dashing on a nested `tmp_path`
+plus the absence of separators, with no machine path in the expectation.
+
 Files: `benchmark/code-parity-v2.json`,
 `tests/test_parity_gold_resolves.py`,
+`tests/test_code_parity_stand.py`,
+`benchmark/run_code_parity.py`,
 `docs/research/2026-09-12-the-parity-run-found-the-stand-first.md`.

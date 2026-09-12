@@ -118,8 +118,13 @@ class RunContext(NamedTuple):
 
 
 def default_cbm_project(directory: str) -> str:
-    """codebase-memory-mcp's own default name for a checkout: its dashed path."""
-    return str(Path(directory).resolve()).strip("/").replace("/", "-")
+    """codebase-memory-mcp's own default name for a checkout: its dashed path.
+
+    Built from the path's parts rather than by replacing separators in its
+    string, so no separator and no drive anchor can survive on any platform.
+    """
+    resolved = Path(directory).resolve()
+    return "-".join(resolved.parts[1:] if resolved.anchor else resolved.parts)
 
 
 def load_tasks(path: Path) -> dict:
