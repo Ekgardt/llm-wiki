@@ -19,6 +19,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The parity gold described the tree of 2026-08-28, and graded on it.** Eight
+  of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
+  that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when
+  `fuse_rrf` sat at 1568 in the very commit whose message says the gold was read
+  by hand from the working tree — and five of them carried a line number as a
+  *required* term, so every side would have graded `wrong` on those tasks
+  whatever it answered. The two-hop task named `retrieve` as the only
+  second-hop caller of `_fused_candidates`; the callers are
+  `_partial_candidates` and `_executed_plan`. T07 asked whether
+  `_search_backends` is dead code after the H1 deletion had removed it from the
+  tree; it is retired with its reason recorded in the file and replaced by the
+  same question about `_legacy_vector_source_membership`, whose name occurs
+  exactly once in the repository — its own `def`. Every number is re-read from
+  the tree on 2026-09-12, and `tests/test_parity_gold_resolves.py` fails when a
+  citation stops resolving or a graded line number is one no citation names. A
+  stale benchmark does not crash; it publishes.
+
 - **A replay over a committed transaction is a duplicate, not a quarantine.**
   A project checkpoint row and its transaction do not change in the same
   instant, so a second caller could find the row still `reserved` while the
