@@ -948,7 +948,13 @@ def test_remaining_graph_queries_are_store_first_facades(tmp_path, monkeypatch):
         "communities": [["stored"]],
     }
     monkeypatch.setattr(code_graph, "_store_find_callees", lambda name, root: expected["callees"])
-    monkeypatch.setattr(code_graph, "_store_find_dead_code", lambda root: expected["dead"])
+    monkeypatch.setattr(
+            code_graph,
+            "_store_find_dead_code",
+            # `symbol` travels into the store since 2026-09-12: one name reads
+            # only the sources that mention it.
+            lambda root, symbol=None: expected["dead"],
+        )
     monkeypatch.setattr(
         code_graph,
         "_store_get_architecture",
