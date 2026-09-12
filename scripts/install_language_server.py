@@ -27,17 +27,19 @@ import argparse
 import base64
 import hashlib
 import json
+import platform
 import shutil
 import sys
 import tarfile
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from go_source_build import SourceBuildError
 from lsp_identity import INSTALL_MANIFEST_NAME, build_install_manifest
 from lsp_profiles import REGISTRY
-from lsp_server_profile import LanguageServerProfile, RuntimeOption
+from lsp_server_profile import LanguageServerProfile, RuntimeOption, ServerComponent
 from reliable_memory import canonical_json_bytes
 
 NETWORK_TIMEOUT_SECONDS = 60.0
@@ -118,17 +120,44 @@ def _member_relative(member: tarfile.TarInfo) -> Path:
     return Path(*path.parts)
 
 
-def _require_plain_member(member: tarfile.TarInfo) -> None:
+def _require_plain_member(member: tarfile.TarInfo, limit: int = MAX_MEMBER_BYTES) -> None:
+    """One member, bounded. A language server binary can be the whole archive.
+
+    The npm pins are small JavaScript files; `rust-analyzer` is a 90 MB
+    executable and `librustc_driver` is larger still, so the per-member bound
+    is a profile's own, like the compressed and decompressed ones.
+    """
     if not (member.isfile() or member.isdir()):
         raise InstallError(f"member is not a regular file or directory: {member.name!r}")
-    if member.size > MAX_MEMBER_BYTES:
+    if member.size > limit:
         raise InstallError(f"member exceeds its bound: {member.name!r}")
 
 
-def _rerooted(relative: Path, subdirectory: str | None) -> Path | None:
-    """Where a member lands, or None when it is outside the payload root."""
-    if subdirectory is None:
-        return relative
+@dataclass(frozen=True, slots=True)
+class _Placement:
+    """Where an archive's members land inside the staging directory.
+
+    `subdirectory` is the npm shape: re-root `package/` under a sibling
+    directory. `strip` and `prefix` are the rust-installer shape: drop the
+    archive root and the component name, and write the rest under one prefix.
+    See `docs/research/2026-09-12-installing-rust-for-precise-navigation.md`.
+    """
+
+    subdirectory: str | None = None
+    strip: int = 0
+    prefix: Path | None = None
+
+    def target(self, relative: Path) -> Path | None:
+        """The member's place, or None when it is outside the payload."""
+        if self.subdirectory is not None:
+            return _npm_rerooted(relative, self.subdirectory)
+        parts = relative.parts[self.strip :]
+        if not parts:
+            return None
+        return Path(*parts) if self.prefix is None else self.prefix / Path(*parts)
+
+
+def _npm_rerooted(relative: Path, subdirectory: str) -> Path | None:
     if relative.parts[0] != NPM_ROOT:
         return None
     return Path(subdirectory, *relative.parts[1:])
@@ -160,10 +189,11 @@ def _extract_member(
     archive: tarfile.TarFile,
     member: tarfile.TarInfo,
     root: Path,
-    subdirectory: str | None,
+    placement: _Placement,
+    member_limit: int = MAX_MEMBER_BYTES,
 ) -> int:
-    _require_plain_member(member)
-    destination = _rerooted(_member_relative(member), subdirectory)
+    _require_plain_member(member, member_limit)
+    destination = placement.target(_member_relative(member))
     if destination is None:
         return 0
     target = root / destination
@@ -173,22 +203,31 @@ def _extract_member(
     return _extract_file(archive, member, target)
 
 
+def _archive_mode(url: str) -> str:
+    """Gzip or xz, by the pinned URL's own suffix. npm ships one, Rust the other."""
+    return "r:xz" if url.endswith(".xz") else "r:gz"
+
+
 def _extract(
     content: bytes,
     root: Path,
-    subdirectory: str | None,
+    placement: _Placement,
     limit: int = MAX_DECOMPRESSED_BYTES,
     members_limit: int = MAX_MEMBERS,
+    mode: str = "r:gz",
+    member_limit: int = MAX_MEMBER_BYTES,
 ) -> None:
     """Unpack a bounded, contained archive under `root`."""
     written = 0
-    with tempfile.NamedTemporaryFile(suffix=".tgz") as scratch:
+    with tempfile.NamedTemporaryFile(suffix=".archive") as scratch:
         scratch.write(content)
         scratch.flush()
-        with tarfile.open(scratch.name, mode="r:gz") as archive:
+        with tarfile.open(scratch.name, mode=mode) as archive:
             members = _bounded_members(archive, members_limit)
             for member in members:
-                written += _extract_member(archive, member, root, subdirectory)
+                written += _extract_member(
+                    archive, member, root, placement, member_limit
+                )
                 _require_total(written, limit)
 
 
@@ -225,7 +264,7 @@ def _install_runtime(
         "runtime artifact",
         MAX_COMPRESSED_BYTES,
     )
-    _extract(content, staging, runtime.install_subdirectory)
+    _extract(content, staging, _Placement(subdirectory=runtime.install_subdirectory))
     return _sha256_file(staging / runtime.sibling_relative)
 
 
@@ -248,12 +287,55 @@ def _staged(
         "server artifact",
         compressed,
     )
-    _extract(content, staging, None, decompressed, profile.max_members or MAX_MEMBERS)
+    _extract(
+        content,
+        staging,
+        _profile_placement(profile),
+        decompressed,
+        profile.max_members or MAX_MEMBERS,
+        _archive_mode(profile.package_url),
+        profile.max_member_bytes or MAX_MEMBER_BYTES,
+    )
+    _install_components(profile, staging)
     _build_if_required(profile, staging)
     server_sha256 = _sha256_file(staging / profile.server_relative)
     runtime_sha256 = _install_runtime(profile.runtime_option, staging, runtime_artifact)
     return build_install_manifest(
         profile, server_sha256=server_sha256, runtime_sha256=runtime_sha256
+    )
+
+
+def _profile_placement(profile: LanguageServerProfile) -> _Placement:
+    return _Placement(strip=profile.strip_components, prefix=profile.install_prefix)
+
+
+def _install_components(profile: LanguageServerProfile, staging: Path) -> None:
+    """Unpack every further archive this profile declares, in order."""
+    compressed, decompressed = _bounds(profile)
+    for component in profile.components:
+        _install_component(component, staging, (compressed, decompressed), profile)
+
+
+def _install_component(
+    component: ServerComponent,
+    staging: Path,
+    bounds: tuple[int, int],
+    profile: LanguageServerProfile,
+) -> None:
+    artifact = component.artifact_for_platform(platform.system(), platform.machine())
+    if artifact is None:
+        raise InstallError(f"{component.name} has no pinned archive for this platform")
+    content = _artifact_bytes(
+        artifact.url, artifact.integrity, None, f"{component.name} artifact", bounds[0]
+    )
+    _extract(
+        content,
+        staging,
+        _Placement(strip=component.strip_components, prefix=component.prefix),
+        bounds[1],
+        profile.max_members or MAX_MEMBERS,
+        _archive_mode(artifact.url),
+        profile.max_member_bytes or MAX_MEMBER_BYTES,
     )
 
 

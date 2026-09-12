@@ -240,7 +240,7 @@ def test_the_registry_routes_a_file_to_its_server(path, expected):
 
 
 @pytest.mark.parametrize(
-    "path", [Path("lib.rs"), Path("README.md"), Path("Makefile")]
+    "path", [Path("lib.rb"), Path("README.md"), Path("Makefile")]
 )
 def test_an_unmanaged_language_falls_back_rather_than_failing(path):
     """None is the structural-evidence path, not an error."""
@@ -249,11 +249,16 @@ def test_an_unmanaged_language_falls_back_rather_than_failing(path):
 
 def test_asking_for_a_server_we_do_not_manage_is_an_error_not_a_guess():
     with pytest.raises(ProfileError):
-        lsp_profiles.profile_named("rust-analyzer")
+        lsp_profiles.profile_named("clangd")
 
 
 def test_the_registry_names_what_it_manages():
-    assert lsp_profiles.REGISTRY.names() == ("gopls", "pyright", "typescript")
+    assert lsp_profiles.REGISTRY.names() == (
+        "gopls",
+        "pyright",
+        "rust-analyzer",
+        "typescript",
+    )
 
 
 def test_a_native_server_is_its_own_interpreter():

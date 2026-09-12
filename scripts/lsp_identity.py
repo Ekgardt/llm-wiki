@@ -49,6 +49,7 @@ INSTALL_MANIFEST_NAME = "install-manifest.json"
 _REPOSITORY_CONFIG_NAMES = {
     "typescript": "tsconfig.json",
     "gopls": "go.mod",
+    "rust-analyzer": "Cargo.toml",
 }
 MAX_REPOSITORY_CONFIG_BYTES = 256 * 1024
 

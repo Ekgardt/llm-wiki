@@ -297,6 +297,54 @@ class PlatformArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class ServerComponent:
+    """One more archive an install needs, with where its payload belongs.
+
+    Rust publishes its analyzer, its compiler, its standard library, its
+    sources and cargo as five archives of one release, and rust-analyzer needs
+    all of them to answer. Each is a `rust-installer` bundle whose payload sits
+    under `<archive-root>/<component>/`, so `strip_components` drops those two
+    and `prefix` says where the rest lands inside the managed root. Research:
+    `docs/research/2026-09-12-installing-rust-for-precise-navigation.md`.
+    """
+
+    name: str
+    prefix: Path
+    artifacts: tuple[PlatformArtifact, ...]
+    strip_components: int = 0
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "component.name")
+        _require_relative(self.prefix, "component.prefix")
+        self._check_artifacts()
+        self._check_strip()
+
+    def _check_artifacts(self) -> None:
+        if not isinstance(self.artifacts, tuple) or not self.artifacts:
+            raise ProfileError("component.artifacts must be a non-empty tuple")
+        if any(not isinstance(item, PlatformArtifact) for item in self.artifacts):
+            raise ProfileError("component.artifacts must hold PlatformArtifact values")
+
+    def _check_strip(self) -> None:
+        if not isinstance(self.strip_components, int) or isinstance(
+            self.strip_components, bool
+        ):
+            raise ProfileError("component.strip_components must be an integer")
+        if self.strip_components < 0:
+            raise ProfileError("component.strip_components must not be negative")
+
+    def artifact_for_platform(
+        self, system: str, machine: str
+    ) -> PlatformArtifact | None:
+        """This platform's archive of the component, or None when none is pinned."""
+        wanted = normalized_platform(system, machine)
+        for artifact in self.artifacts:
+            if normalized_platform(artifact.system, artifact.machine) == wanted:
+                return artifact
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class SourceBuild:
     """A server that is compiled at install time rather than unpacked.
 
@@ -438,6 +486,10 @@ class LanguageServerProfile:
     max_decompressed_bytes: int | None = None
     max_members: int | None = None
     environment_template: tuple[tuple[str, str], ...] = ()
+    max_member_bytes: int | None = None
+    components: tuple[ServerComponent, ...] = ()
+    strip_components: int = 0
+    install_prefix: Path | None = None
 
     def __post_init__(self) -> None:
         self._check_names()

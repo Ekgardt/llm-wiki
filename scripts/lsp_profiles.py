@@ -38,6 +38,7 @@ from lsp_server_profile import (
     PlatformArtifact,
     ProfileRegistry,
     RuntimeOption,
+    ServerComponent,
     SourceBuild,
     freeze_profile_value,
     normalized_platform,
@@ -375,7 +376,311 @@ GOPLS_PROFILE = LanguageServerProfile(
     environment_template=GOPLS_ENVIRONMENT_TEMPLATE,
 )
 
-REGISTRY = ProfileRegistry((PYRIGHT_PROFILE, TYPESCRIPT_PROFILE, GOPLS_PROFILE))
+# ---------------------------------------------------------------------------
+# rust-analyzer: a published binary that still needs a toolchain behind it
+# ---------------------------------------------------------------------------
+#
+# The binary is a component of every Rust release, but it answers almost
+# nothing alone: the project is read by `cargo metadata`, the sysroot is found
+# by running `rustc --print sysroot`, and the standard library is analysed from
+# its *sources* (`rust-src`), not from the `.rlib`s the compiler links. So the
+# install is five archives of release 1.98.1, each pinned by the SHA-256 the
+# release manifest publishes, and no compilation at all. Research:
+# `docs/research/2026-09-12-installing-rust-for-precise-navigation.md`.
+
+RUST_VERSION = "1.98.1"
+RUST_ANALYZER_ARTIFACTS = (
+    PlatformArtifact(
+        system="linux",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-analyzer-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-Gb7vqTm5hr4AhqNqJMVAgBzoSe50857pM7YPlHsNRDE=",
+        size=9652548,
+    ),
+    PlatformArtifact(
+        system="linux",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-analyzer-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-oP2WCpqzYZOum6QxDl94D2yjj6hhYPrnOb5KxUG20Qw=",
+        size=8682148,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-analyzer-1.98.1-x86_64-apple-darwin.tar.xz",
+        integrity="sha256-JQQ+yGHX3NqH6alqrL3sbdOzkJ0dExQFY9IZM6DUWdY=",
+        size=9288876,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-analyzer-1.98.1-aarch64-apple-darwin.tar.xz",
+        integrity="sha256-55wcLyzvAeP2BE6enka5ljrHxmT2gdk175APszgor5o=",
+        size=8252972,
+    ),
+    PlatformArtifact(
+        system="windows",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-analyzer-1.98.1-x86_64-pc-windows-msvc.tar.xz",
+        integrity="sha256-7TQtmKfcMPW9kx9DXSLjL3+rjnPAZIrHH7K8sNPyA5w=",
+        size=9978332,
+    ),
+)
+
+RUSTC_ARTIFACTS = (
+    PlatformArtifact(
+        system="linux",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-6XTwNrKFZfN8DzvZLd76gJvuFsBPnc8Hue2W4Fqq98Q=",
+        size=79727616,
+    ),
+    PlatformArtifact(
+        system="linux",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-ifuDBBmTtIgWUUgVYG9TpSZHKbi0SWcaaykebwrnT0A=",
+        size=66438268,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-x86_64-apple-darwin.tar.xz",
+        integrity="sha256-ZBwwG9GcPOrRFMu2GRnF7SR1zlPi0BH+DJkOFsWhsEs=",
+        size=59313692,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-aarch64-apple-darwin.tar.xz",
+        integrity="sha256-c44/YBFLIFUPz0+KV8nOoFRCOfIUcJ9FWU/z/eMn9Xc=",
+        size=48951152,
+    ),
+    PlatformArtifact(
+        system="windows",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-x86_64-pc-windows-msvc.tar.xz",
+        integrity="sha256-y1NwhDqdFc5ubPZGG0yZdyIiDSaNDYE8KyuG8+1ZrCQ=",
+        size=71317968,
+    ),
+)
+
+RUST_STD_ARTIFACTS = (
+    PlatformArtifact(
+        system="linux",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-+j/0UBcqFsAmlEAwIwxQaZR6+TxyjZF5lx1E5eDPtWE=",
+        size=30715684,
+    ),
+    PlatformArtifact(
+        system="linux",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-m/eWpuxbAEgT69C2UHdafGpPOq6XrTYq4pR5jcpPOyM=",
+        size=30815124,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-apple-darwin.tar.xz",
+        integrity="sha256-SLmDUFiouqT/XkOH83csVyoBeisTOTxG4VFhXFTjIuk=",
+        size=29790160,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-apple-darwin.tar.xz",
+        integrity="sha256-Legx71Y853JRmk0YuiZZ8PdCjUl+9m2tJLWjXo+M0Xc=",
+        size=29763340,
+    ),
+    PlatformArtifact(
+        system="windows",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-pc-windows-msvc.tar.xz",
+        integrity="sha256-QnJ3ZKAaVNt0I+Q9sIqcgYQFZ5r2qaZ3Bo6M1Lg2EkI=",
+        size=23032992,
+    ),
+)
+
+CARGO_ARTIFACTS = (
+    PlatformArtifact(
+        system="linux",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-6h3p+eIxB9l+4rQacsVS80BkpZPaUDeJIYOHruWfO6Q=",
+        size=11662108,
+    ),
+    PlatformArtifact(
+        system="linux",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+        integrity="sha256-wJQlp/MArxSMC9/e0OfV8f58B1srlnTok1r6dpKXsvY=",
+        size=11108572,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-x86_64-apple-darwin.tar.xz",
+        integrity="sha256-dLEoIlPDH7iZJtUdV+R6BsbNJsk2V95y7fYipKtmOW8=",
+        size=9538248,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="arm64",
+        url="https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-aarch64-apple-darwin.tar.xz",
+        integrity="sha256-3lHU+t5PMa2OxAUmHMlr7cAA2QX5iYACdhDW4ojb4hs=",
+        size=8898152,
+    ),
+    PlatformArtifact(
+        system="windows",
+        machine="x86_64",
+        url="https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-x86_64-pc-windows-msvc.tar.xz",
+        integrity="sha256-1ujHOKBQOxawTbODijh2liDVU+Q29jLS6/Zn95Oy1E0=",
+        size=10258624,
+    ),
+)
+
+# `rust-src` is one archive for every platform, so its table names the same
+# file five times rather than pretending the choice matters.
+RUST_SRC_URL = "https://static.rust-lang.org/dist/2026-09-03/rust-src-1.98.1.tar.xz"
+RUST_SRC_INTEGRITY = "sha256-XIRuvOvMfi4Hd6TNqhIFFpFZPxan6U7brl5iQcxi2Yw="
+RUST_SRC_SIZE = 5741168
+
+RUST_SRC_ARTIFACTS = tuple(
+    PlatformArtifact(
+        system=system,
+        machine=machine,
+        url=RUST_SRC_URL,
+        integrity=RUST_SRC_INTEGRITY,
+        size=RUST_SRC_SIZE,
+    )
+    for system, machine in (
+        ("linux", "x86_64"),
+        ("linux", "arm64"),
+        ("darwin", "x86_64"),
+        ("darwin", "arm64"),
+        ("windows", "x86_64"),
+    )
+)
+
+# Every Rust archive is a rust-installer bundle: `<archive-root>/<component>/`
+# holds the tree as it belongs under the prefix, so two components are dropped
+# and the rest lands under one toolchain directory.
+RUST_TOOLCHAIN_PREFIX = Path("toolchain")
+RUST_STRIP_COMPONENTS = 2
+
+RUST_COMPONENTS = tuple(
+    ServerComponent(
+        name=name,
+        prefix=RUST_TOOLCHAIN_PREFIX,
+        artifacts=artifacts,
+        strip_components=RUST_STRIP_COMPONENTS,
+    )
+    for name, artifacts in (
+        ("rustc", RUSTC_ARTIFACTS),
+        ("rust-std", RUST_STD_ARTIFACTS),
+        ("cargo", CARGO_ARTIFACTS),
+        ("rust-src", RUST_SRC_ARTIFACTS),
+    )
+)
+
+# `rustc.tar.xz` is 79.7 MB on its own and the toolchain unpacks past a
+# gigabyte; the npm pins keep the module-wide bounds they have today.
+RUST_MAX_COMPRESSED_BYTES = 160 * 1024 * 1024
+RUST_MAX_DECOMPRESSED_BYTES = 3 * 1024 * 1024 * 1024
+RUST_MAX_MEMBERS = 65536
+# `rust-analyzer` itself is ~90 MB and `librustc_driver` larger; the npm pins
+# keep the 32 MB member bound they have today.
+RUST_MAX_MEMBER_BYTES = 512 * 1024 * 1024
+
+RUST_ANALYZER_RELATIVE = Path("toolchain/bin/rust-analyzer")
+RUST_ANALYZER_RELATIVE_WINDOWS = Path("toolchain/bin/rust-analyzer.exe")
+
+# The toolchain this profile installed is the only one on its PATH, so the
+# sysroot rust-analyzer discovers is ours; cargo writes its own state inside
+# the managed root rather than into the operator's home.
+#
+# The library path is not optional. `rust-analyzer` is dynamically linked
+# against `librustc_driver-*.so` and finds it through an RPATH relative to its
+# own location; the verified copy runs from the owner root, where that relative
+# path does not exist, and the process dies before the handshake with
+# `error while loading shared libraries` (measured 2026-09-12, exit 127).
+# Naming the directory here is what makes the copy runnable. Windows resolves
+# its DLLs through `PATH`, which already points at the same toolchain.
+RUST_ENVIRONMENT_TEMPLATE = (
+    ("PATH", "{root}/toolchain/bin"),
+    ("CARGO_HOME", "{root}/cargo-home"),
+    ("LD_LIBRARY_PATH", "{root}/toolchain/lib"),
+    ("DYLD_FALLBACK_LIBRARY_PATH", "{root}/toolchain/lib"),
+)
+
+# Read-only defaults: no `cargo check` on save, no build scripts run for a
+# navigation query, and no crate downloads triggered by opening a file.
+RUST_ANALYZER_CONFIGURATION = freeze_profile_value(
+    {
+        "rust-analyzer": {
+            "cargo": {"buildScripts": {"enable": False}},
+            "checkOnSave": False,
+            "procMacro": {"enable": False},
+        }
+    }
+)
+
+RUST_ANALYZER_NOTIFICATIONS = frozenset(
+    {"window/showMessage", "window/logMessage", "experimental/serverStatus"}
+)
+
+
+def _rust_artifact() -> PlatformArtifact:
+    """This machine's rust-analyzer archive, falling back to the Linux pin."""
+    found = None
+    for artifact in RUST_ANALYZER_ARTIFACTS:
+        if normalized_platform(artifact.system, artifact.machine) == _this_platform():
+            found = artifact
+    return found if found is not None else RUST_ANALYZER_ARTIFACTS[0]
+
+
+RUST_ARTIFACT = _rust_artifact()
+
+RUST_ANALYZER_PROFILE = LanguageServerProfile(
+    name="rust-analyzer",
+    language_ids=("rust",),
+    file_suffixes=(".rs",),
+    version=RUST_VERSION,
+    package_url=RUST_ARTIFACT.url,
+    package_integrity=RUST_ARTIFACT.integrity,
+    server_relative=_gopls_relative(
+        RUST_ANALYZER_RELATIVE, RUST_ANALYZER_RELATIVE_WINDOWS
+    ),
+    managed_relative_root=Path("cache/code-tools/rust-analyzer") / RUST_VERSION,
+    install_manifest_schema="rust-analyzer-install/v1",
+    node_major=None,
+    native=True,
+    launch_flags=(),
+    owner_argument_template=None,
+    server_notifications=RUST_ANALYZER_NOTIFICATIONS,
+    configuration=RUST_ANALYZER_CONFIGURATION,
+    initialization_options=freeze_profile_value({}),
+    readiness=READINESS_WORK_DONE_PROGRESS,
+    identity_notification=None,
+    runtime_option=None,
+    degradation_prefix="rust_analyzer",
+    configuration_names=("Cargo.toml", "Cargo.lock", "rust-project.json"),
+    platform_artifacts=RUST_ANALYZER_ARTIFACTS,
+    components=RUST_COMPONENTS,
+    strip_components=RUST_STRIP_COMPONENTS,
+    install_prefix=RUST_TOOLCHAIN_PREFIX,
+    max_compressed_bytes=RUST_MAX_COMPRESSED_BYTES,
+    max_decompressed_bytes=RUST_MAX_DECOMPRESSED_BYTES,
+    max_members=RUST_MAX_MEMBERS,
+    max_member_bytes=RUST_MAX_MEMBER_BYTES,
+    environment_template=RUST_ENVIRONMENT_TEMPLATE,
+)
+
+REGISTRY = ProfileRegistry(
+    (PYRIGHT_PROFILE, TYPESCRIPT_PROFILE, GOPLS_PROFILE, RUST_ANALYZER_PROFILE)
+)
 
 # The two notification methods that are not any one vendor's: `$/progress` is
 # the specification's own, and published diagnostics are asked for by every

@@ -21,6 +21,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
+  `definition`, `references`, `implementations`, `type`, `callers`/`callees`
+  and `hover` for `.rs`. The binary is published, but it needs a toolchain
+  behind it — the project is read by `cargo metadata`, the sysroot by
+  `rustc --print sysroot`, and the standard library from its *sources* — so
+  the install unpacks five archives of one release (`rust-analyzer`, `rustc`,
+  `rust-std`, `cargo`, `rust-src`), each pinned by the SHA-256 the release
+  manifest publishes, into one toolchain under
+  `cache/code-tools/rust-analyzer/1.98.1/`. No compilation. Measured here:
+  49 s to install, 137.5 MB downloaded, 701 MB on disk, `definition` 0.10 s
+  warm. A profile may now declare further **components** with their own
+  platform tables and their own place in the managed root, archives may be
+  `.tar.xz`, and the per-member size bound is a profile's own — a language
+  server binary can be 90 MB. The profile also names the library path its
+  verified copy needs: `rust-analyzer` is linked against `librustc_driver` and
+  finds it relative to itself, so the copy in the owner root would otherwise
+  die before the handshake. Installation stays one explicit operator action
+  (`uv run python scripts/install_language_server.py --profile rust-analyzer
+  --state-root <state-root>`).
 - **Precise navigation for Go (#24, B).** `gopls v0.23.0` joins Pyright and
   `typescript-language-server` as a managed profile, so `definition`,
   `references`, `implementations`, `type`, `callers`/`callees` and `hover`
