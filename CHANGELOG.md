@@ -51,15 +51,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **The graph is warm before the first question.** The first code answer in a
-  process paid the generation open — 2.22 s against 0.31 s for every later one —
-  so the server now opens the vault's code reader on a daemon thread at start,
-  exactly as it already warms the retrieval path, with `LLMWIKI_NO_GRAPH_WARMUP=1`
-  to keep the lazy behaviour. Measured: the warm-up takes 1.71 s on its own
-  thread and the first question then costs 0.30 s. The lease is returned
-  immediately, the vault's own checkout is the only thing warmed, and a failure is
-  swallowed rather than raised — bounds and alternatives in
-  `docs/research/2026-09-12-warming-the-graph-before-the-first-question.md`.
+- **A verified digest is remembered across processes, and the warm-up it would
+  have hidden is gone.** Hashing every artifact of a generation against its
+  manifest is what a cold open paid, in every new process, to learn what the
+  previous process already knew about an immutable file. It is now remembered by
+  stat identity — generation, path, device, inode, size, mtime — in the disposable
+  `cache/evidence-graph/verified-artifacts.json`, with Git's racily-clean rule:
+  an artifact whose mtime is not strictly older than the cache's own is hashed
+  anyway, and an unreadable cache is an empty cache. Cold open on the installed
+  vault 2.22 s → 1.71 s, and 4.9 s → 1.71 s across the evening. The graph warm-up
+  added earlier the same day is deleted: it moved the cost rather than removing
+  it, which is what the owner called it. What remains of the 1.71 s is measured
+  and named — 0.68 s of SQL, 0.55 s in two other hashers, 0.38 s walking the index
+  rows — in
+  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`.
 - **A reader checks the digest, a writer derives.** A cold code answer on the
   installed vault re-derived all 3 405 chunks of the search index before
   answering — 1.68 s of it spent inferring the language of each chunk — to prove

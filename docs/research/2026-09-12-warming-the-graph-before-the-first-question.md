@@ -1,5 +1,13 @@
 # Warming the graph before the first question
 
+> **Superseded the same evening.** The owner called the warm-up a crutch, and it
+> was one: it moved the cost instead of removing it. The structural fix is in
+> `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md` —
+> the verified digest is remembered by stat identity, Git's way — and the warm-up
+> was deleted with it. What follows is the research that led to the wrong choice,
+> kept because the measurements and the option prices in it are still true, and
+> because option D in it is what was done.
+
 Dated 2026-09-12, at the owner's request, after the digest decision cut a cold
 code answer from 4.9 s to 2.22 s
 (`docs/research/2026-09-12-a-reader-checks-the-digest-a-writer-derives.md`).

@@ -1523,12 +1523,15 @@ class _ArtifactScan:
     """Every artifact hashed against the manifest, under the generation bounds."""
 
     def __init__(self, generation_path: Path, state_root: Path) -> None:
+        from verified_artifacts import VerifiedArtifacts
+
         self.generation_path = generation_path
         self.state_root = state_root
         self.seen: set[str] = set()
         self.normalized: list[dict[str, object]] = []
         self.digests: dict[str, str] = {}
         self.total = 0
+        self.verified = VerifiedArtifacts(state_root)
 
     def add(self, artifact: object, **stop: object) -> None:
         if not isinstance(artifact, dict) or set(artifact) != _ARTIFACT_KEYS:
@@ -1547,13 +1550,42 @@ class _ArtifactScan:
             raise ValueError("generation artifact bytes exceed the supported bound")
         return size
 
-    def _verify(self, path_text: str, size: int, digest: str, **stop: object) -> None:
-        artifact_path = self.generation_path.joinpath(*PurePosixPath(path_text).parts)
+    def _remembered(self, artifact_path: Path, path_text: str, size: int) -> str | None:
+        """The digest already verified for these exact bytes, if any.
+
+        The stat identity is taken through the same runtime validation the hash
+        path uses, so a link, a wrong owner or an oversized file is refused here
+        exactly as it would be there.
+        """
+        metadata = validate_runtime_file(artifact_path, self.state_root, max_bytes=size)
+        return self.verified.remembered(
+            self.generation_path.name, path_text, metadata
+        )
+
+    def _hashed(self, artifact_path: Path, path_text: str, size: int, **stop: object) -> str:
         actual_size, actual_digest = _hash_artifact(
             artifact_path, self.state_root, size, **stop
         )
         if actual_size != size:
             raise ValueError(f"artifact has wrong size: {path_text}")
+        return actual_digest
+
+    def _verified_digest(
+        self, artifact_path: Path, path_text: str, size: int, **stop: object
+    ) -> str:
+        remembered = self._remembered(artifact_path, path_text, size)
+        if remembered is not None:
+            return remembered
+        actual_digest = self._hashed(artifact_path, path_text, size, **stop)
+        metadata = validate_runtime_file(artifact_path, self.state_root, max_bytes=size)
+        self.verified.remember(
+            self.generation_path.name, path_text, metadata, actual_digest
+        )
+        return actual_digest
+
+    def _verify(self, path_text: str, size: int, digest: str, **stop: object) -> None:
+        artifact_path = self.generation_path.joinpath(*PurePosixPath(path_text).parts)
+        actual_digest = self._verified_digest(artifact_path, path_text, size, **stop)
         if actual_digest != digest:
             raise ValueError(f"artifact has wrong hash: {path_text}")
         self.digests[path_text] = actual_digest
@@ -1570,6 +1602,7 @@ def _scan_artifacts(
     scan.normalized.sort(key=lambda item: str(item["path"]))
     if artifacts != scan.normalized:
         raise ValueError("artifacts must be normalized and sorted by path")
+    scan.verified.save()
     return scan
 
 
