@@ -2873,13 +2873,21 @@ def validate_generation_fts_artifact(
     manifest: dict[str, object],
     *,
     state_root: Path,
+    deep: bool = True,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Fail closed unless a generation-local FTS artifact is semantically valid.
 
-    The content check re-derives every chunk from the stored sources and
-    compares; it can only be asked of a generation this extractor built.
+    `deep` re-derives every chunk from the stored sources and compares it row by
+    row. That is a determinism check of our own chunker, so since 2026-09-12 it
+    runs where the rows are created — publication and registration — and in
+    `doctor`, not on every cold read: the read path is served by the artifact
+    digest, the manifest's versions and the entry seal, which already pin every
+    input. It cost 1.68 s of a 4.9 s cold answer on the installed vault. See
+    `docs/research/2026-09-12-a-reader-checks-the-digest-a-writer-derives.md`.
+
+    The content check can only be asked of a generation this extractor built.
     An older extractor's rows are not reproducible here — the 2026-09-07
     generation checked by the v3 chunker failed at row 9,272 and the vault
     answered lexical-only for two days — so for those the artifact is
@@ -2891,7 +2899,7 @@ def validate_generation_fts_artifact(
     generation_path = Path(generation_path)
     state_root = Path(state_root)
     authoritative_sources = None
-    if _reproducible_by_this_extractor(manifest):
+    if deep and _reproducible_by_this_extractor(manifest):
         authoritative_sources = _generation_authoritative_sources(
             generation_path,
             manifest,

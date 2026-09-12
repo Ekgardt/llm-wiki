@@ -1678,6 +1678,7 @@ def _validate_artifact_databases(
     graph_schema: str | None,
     state_root: Path,
     *,
+    deep: bool = True,
     deadline: float | None,
     monotonic: Callable[[], float],
     cancelled: Callable[[], bool] | None,
@@ -1699,6 +1700,7 @@ def _validate_artifact_databases(
             generation_path,
             normalized,
             state_root=state_root,
+            deep=deep,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1829,6 +1831,7 @@ def _validation_key(
     generation_id: str,
     manifest_digest: str,
     digests: dict[str, str],
+    deep: bool = False,
 ) -> tuple:
     """Identity earned by hashing, not assumed: id, manifest, every artifact.
 
@@ -1840,6 +1843,9 @@ def _validation_key(
         generation_id,
         manifest_digest,
         tuple(sorted(digests.items())),
+        # The depth is part of the identity: a shallow read must never satisfy a
+        # later deep registration (2026-09-12).
+        bool(deep),
     )
 
 
@@ -1876,6 +1882,7 @@ def _validate_databases_once(
     graph_schema: str | None,
     state_root: Path,
     *,
+    deep: bool,
     deadline: float | None,
     monotonic: Callable[[], float],
     cancelled: Callable[[], bool] | None,
@@ -1894,6 +1901,7 @@ def _validate_databases_once(
             normalized,
             graph_schema,
             state_root,
+            deep=deep,
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
@@ -1910,6 +1918,7 @@ def _validate_generation(
     generation_path: Path,
     state_root: Path,
     *,
+    deep: bool = False,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -1938,11 +1947,14 @@ def _validate_generation(
     )
     _require_schema_contract(normalized, graph_schema, scan.seen)
     _validate_databases_once(
-        _validation_key(generation_path, expected_id, sha256_bytes(raw), scan.digests),
+        _validation_key(
+            generation_path, expected_id, sha256_bytes(raw), scan.digests, deep
+        ),
         generation_path,
         normalized,
         graph_schema,
         state_root,
+        deep=deep,
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,
@@ -2132,12 +2144,14 @@ class GenerationCatalog:
         self,
         identifier: str,
         *,
+        deep: bool,
         deadline: float | None,
         cancelled: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
         manifest, seal = _validate_generation(
             self.generations_path / identifier,
             state_root=self.state_root,
+            deep=deep,
             deadline=deadline,
             monotonic=self._monotonic,
             cancelled=cancelled,
@@ -2148,6 +2162,7 @@ class GenerationCatalog:
         self,
         generation_id: str,
         *,
+        deep: bool = False,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
@@ -2176,23 +2191,29 @@ class GenerationCatalog:
             monotonic=self._monotonic,
             cancelled=cancelled,
         )
-        remembered = self._remembered_validation(identifier, seal)
+        remembered = self._remembered_validation((identifier, deep), seal)
         if remembered is not None:
             return remembered
         validated = self._validated_generation(
-            identifier, deadline=deadline, cancelled=cancelled
+            identifier, deep=deep, deadline=deadline, cancelled=cancelled
         )
-        self._validated[identifier] = (seal, validated)
+        self._validated[(identifier, deep)] = (seal, validated)
         return validated
 
     def _remembered_validation(
-        self, identifier: str, seal: tuple[_EntrySeal, ...]
+        self, identity: tuple[str, bool], seal: tuple[_EntrySeal, ...]
     ) -> tuple | None:
-        """The stored result, when the directory has not moved since it was taken."""
-        stored = self._validated.get(identifier)
-        if stored is None:
-            return None
-        if stored[0] != seal:
+        """The stored result, when the directory has not moved since it was taken.
+
+        A deep verdict answers a shallow question: it checked everything the
+        shallow one would and more. The reverse is never true, which is why the
+        depth is in the key at all.
+        """
+        identifier, deep = identity
+        stored = self._validated.get((identifier, True))
+        if stored is None or deep:
+            stored = self._validated.get(identity)
+        if stored is None or stored[0] != seal:
             return None
         return stored[1]
 
@@ -2235,7 +2256,7 @@ class GenerationCatalog:
             raise TypeError("expected_repository_scope must be a RepositoryScope or None")
         identifier = _generation_id(generation_id)
         manifest, encoded, seal = self._validate(
-            identifier, deadline=deadline, cancelled=cancelled
+            identifier, deep=True, deadline=deadline, cancelled=cancelled
         )
         scope = _manifest_scope(manifest)
         _require_publication_scope(scope, expected_repository_scope)
@@ -2387,7 +2408,7 @@ class GenerationCatalog:
         self._check_deadline(deadline)
         _check_cancelled(cancelled)
         manifest, encoded, seal = self._validate(
-            generation_id, deadline=deadline, cancelled=cancelled
+            generation_id, deep=True, deadline=deadline, cancelled=cancelled
         )
         timestamp = _utc_timestamp(self._clock)
         capability = self._acquire_seal_capability(
