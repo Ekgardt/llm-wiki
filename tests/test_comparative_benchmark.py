@@ -76,20 +76,34 @@ def test_required_comparative_artifacts_exist():
     assert REPORT_SCHEMA.is_file()
 
 
-def test_schema_is_closed_at_every_object_level():
-    def visit(rule: object) -> None:
-        if isinstance(rule, dict):
-            if rule.get("type") == "object":
-                assert rule.get("additionalProperties") is False
-                assert set(rule.get("required", ())) == set(rule.get("properties", ()))
-            for value in rule.values():
-                visit(value)
-        elif isinstance(rule, list):
-            for value in rule:
-                visit(value)
+def _open_object_rules(rule: object) -> list:
+    """Object rules that accept unknown fields, or whose required set is not exact."""
+    if isinstance(rule, dict):
+        return _open_rules_in_mapping(rule)
+    if isinstance(rule, list):
+        return [found for value in rule for found in _open_object_rules(value)]
+    return []
 
+
+def _open_rules_in_mapping(rule: dict) -> list:
+    found = [] if _object_rule_is_closed(rule) else [sorted(rule.get("properties", ()))]
+    for value in rule.values():
+        found.extend(_open_object_rules(value))
+    return found
+
+
+def _object_rule_is_closed(rule: dict) -> bool:
+    if rule.get("type") != "object":
+        return True
+    if rule.get("additionalProperties") is not False:
+        return False
+    return set(rule.get("required", ())) == set(rule.get("properties", ()))
+
+
+def test_schema_is_closed_at_every_object_level():
     for path in (SCHEMA, LEDGER_SCHEMA, REPORT_SCHEMA):
-        visit(json.loads(path.read_text(encoding="utf-8")))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert _open_object_rules(document) == []
 
 
 def test_contract_is_canonical_schema_valid_and_semantically_closed():
@@ -323,6 +337,64 @@ def test_loader_rejects_input_inequality_and_claim_gate_relaxation(tmp_path):
         runner.load_contract(relaxed_path, SCHEMA)
 
 
+_EXPECTED_SMOKE_CLAIMS = (
+    "deterministic-fake-offline-smoke",
+    False,
+    False,
+    False,
+    6,
+    1,
+    1,
+)
+_EXPECTED_PROVENANCE_FIELDS = frozenset(
+    {"configuration_sha256", "implementation_status", "source_revision"}
+)
+_EXPECTED_FAILURE_FIELDS = frozenset(
+    {"category", "code", "message", "phase", "retryable"}
+)
+
+
+def _smoke_claims(report: dict) -> tuple:
+    """What the smoke report claims about itself, in one comparable tuple."""
+    bounded = report["bounded"]
+    return (
+        report["mode"],
+        report["network_access"],
+        report["quality_claim"],
+        report["heavy_comparison_available"],
+        bounded["adapter_count"],
+        bounded["task_count"],
+        bounded["attempts_per_adapter"],
+    )
+
+
+def _ledger_adapters(ledgers: list) -> tuple:
+    return ({ledger["adapter_id"] for ledger in ledgers}, len(ledgers))
+
+
+def _ledger_metric_shapes(ledgers: list) -> set:
+    """Each ledger's metric field set, and whether every value is unmeasured."""
+    return {
+        (
+            frozenset(ledger["metrics"]),
+            set(ledger["metrics"].values()) == {None},
+        )
+        for ledger in ledgers
+    }
+
+
+def _provenance_fields(ledgers: list) -> set:
+    return {frozenset(ledger["adapter_provenance"]) for ledger in ledgers}
+
+
+def _failure_fields(ledgers: list) -> set:
+    return {
+        frozenset(ledger["failure"])
+        for ledger in ledgers
+        if ledger["outcome"] == "failure"
+    }
+
+
 def test_smoke_is_deterministic_bounded_and_keeps_raw_failures():
     runner = _runner_module()
     contract = runner.load_contract(CONTRACT, SCHEMA)
@@ -330,34 +402,16 @@ def test_smoke_is_deterministic_bounded_and_keeps_raw_failures():
     first = runner.run_smoke(contract)
     second = runner.run_smoke(contract)
 
+    ledgers = first["raw_task_ledgers"]
+
     assert first == second
-    assert first["mode"] == "deterministic-fake-offline-smoke"
-    assert first["network_access"] is False
-    assert first["quality_claim"] is False
-    assert first["heavy_comparison_available"] is False
-    assert first["bounded"]["adapter_count"] == 6
-    assert first["bounded"]["task_count"] == 1
-    assert first["bounded"]["attempts_per_adapter"] == 1
-    assert {ledger["adapter_id"] for ledger in first["raw_task_ledgers"]} == ADAPTER_IDS
-    assert len(first["raw_task_ledgers"]) == len(ADAPTER_IDS)
-    assert any(ledger["outcome"] == "failure" for ledger in first["raw_task_ledgers"])
-    assert all(set(ledger["metrics"]) == METRIC_FIELDS for ledger in first["raw_task_ledgers"])
-    assert all(all(value is None for value in ledger["metrics"].values()) for ledger in first["raw_task_ledgers"])
+    assert _smoke_claims(first) == _EXPECTED_SMOKE_CLAIMS
+    assert _ledger_adapters(ledgers) == (ADAPTER_IDS, len(ADAPTER_IDS))
+    assert _ledger_metric_shapes(ledgers) == {(frozenset(METRIC_FIELDS), True)}
+    assert "failure" in {ledger["outcome"] for ledger in ledgers}
     assert runner.validate_report(first, REPORT_SCHEMA, LEDGER_SCHEMA) == first
-    for ledger in first["raw_task_ledgers"]:
-        assert set(ledger["adapter_provenance"]) == {
-            "configuration_sha256",
-            "implementation_status",
-            "source_revision",
-        }
-        if ledger["outcome"] == "failure":
-            assert set(ledger["failure"]) == {
-                "category",
-                "code",
-                "message",
-                "phase",
-                "retryable",
-            }
+    assert _provenance_fields(ledgers) == {_EXPECTED_PROVENANCE_FIELDS}
+    assert _failure_fields(ledgers) == {_EXPECTED_FAILURE_FIELDS}
 
 
 def test_smoke_reports_expected_and_observed_runtime_without_claiming_match():
@@ -647,6 +701,39 @@ def test_real_adapter_registry_is_complete_and_bounded():
     assert all(spec.max_results > 0 for spec in specs.values())
 
 
+_EXPECTED_FIXTURE_CLAIMS = (
+    "deterministic-adapter-integration-fixture",
+    False,
+    False,
+    True,
+)
+
+
+def _fixture_claims(report: dict) -> tuple:
+    return (
+        report["mode"],
+        report["quality_claim"],
+        report["public_claim_gate"]["eligible"],
+        report["statistics"]["computed"],
+    )
+
+
+def _ledger_identities(ledgers: list) -> set:
+    return {
+        (ledger["adapter_id"], ledger["task_id"], ledger["seed"], ledger["attempt"])
+        for ledger in ledgers
+    }
+
+
+def _fingerprints_per_case(ledgers: list) -> set:
+    """How many distinct input fingerprints each (task, seed) produced: must be one."""
+    grouped: dict = {}
+    for ledger in ledgers:
+        key = (ledger["task_id"], ledger["seed"])
+        grouped.setdefault(key, set()).add(ledger["input_fingerprint"])
+    return {len(values) for values in grouped.values()}
+
+
 def test_deterministic_adapter_fixture_runs_all_tasks_seeds_and_attempts(tmp_path):
     runner = _runner_module()
     contract = runner.load_contract(CONTRACT, SCHEMA)
@@ -655,24 +742,13 @@ def test_deterministic_adapter_fixture_runs_all_tasks_seeds_and_attempts(tmp_pat
     first = runner.execute_comparison(contract, manifest, fixture_mode=True)
     second = runner.execute_comparison(contract, manifest, fixture_mode=True)
 
+    ledgers = first["raw_task_ledgers"]
+
     assert first == second
-    assert first["mode"] == "deterministic-adapter-integration-fixture"
-    assert first["quality_claim"] is False
-    assert first["public_claim_gate"]["eligible"] is False
-    assert first["statistics"]["computed"] is True
-    assert len(first["raw_task_ledgers"]) == 6 * 2 * 3 + 1
-    assert any(ledger["outcome"] == "failure" for ledger in first["raw_task_ledgers"])
-    identities = {
-        (ledger["adapter_id"], ledger["task_id"], ledger["seed"], ledger["attempt"])
-        for ledger in first["raw_task_ledgers"]
-    }
-    assert len(identities) == len(first["raw_task_ledgers"])
-    grouped_fingerprints = {}
-    for ledger in first["raw_task_ledgers"]:
-        grouped_fingerprints.setdefault((ledger["task_id"], ledger["seed"]), set()).add(
-            ledger["input_fingerprint"]
-        )
-    assert all(len(values) == 1 for values in grouped_fingerprints.values())
+    assert _fixture_claims(first) == _EXPECTED_FIXTURE_CLAIMS
+    assert (len(ledgers), len(_ledger_identities(ledgers))) == (6 * 2 * 3 + 1, len(ledgers))
+    assert "failure" in {ledger["outcome"] for ledger in ledgers}
+    assert _fingerprints_per_case(ledgers) == {1}
     assert set(first["metric_summaries"]) == ADAPTER_IDS
     for summary in first["metric_summaries"].values():
         assert set(summary["query_latency_ms"]) == {"p50", "p95"}

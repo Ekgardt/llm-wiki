@@ -89,6 +89,24 @@ def test_extracts_required_python_nodes_and_honest_relationships():
     assert all(assertion["resolution"] == "resolved" for assertion in result.assertions)
 
 
+def _occurrence_of(result, node_id: str) -> dict:
+    return next(item for item in result.occurrences if item["node_id"] == node_id)
+
+
+def _assertion_of_type(result, edge_type: str) -> dict:
+    return next(item for item in result.assertions if item["edge_type"] == edge_type)
+
+
+def _evidence_of(result, assertion_id: str) -> dict:
+    return next(
+        item for item in result.evidence if item["assertion_id"] == assertion_id
+    )
+
+
+def _edge_types(records, wanted: set) -> set:
+    return {item["edge_type"] for item in records if item["edge_type"] in wanted}
+
+
 def test_preserves_exact_utf8_byte_and_line_spans_for_declarations_and_edges():
     from code_extractor import extract_code
 
@@ -96,14 +114,18 @@ def test_preserves_exact_utf8_byte_and_line_spans_for_declarations_and_edges():
     source = _source("app.py", content)
     result = extract_code((source,), repository_id="repo")
     caller = _node(result, "function", "caller")
-    occurrence = next(item for item in result.occurrences if item["node_id"] == caller["node_id"])
-    call = next(item for item in result.assertions if item["edge_type"] == "CALLS")
-    evidence = next(item for item in result.evidence if item["assertion_id"] == call["assertion_id"])
+    occurrence = _occurrence_of(result, caller["node_id"])
+    call = _assertion_of_type(result, "CALLS")
+    evidence = _evidence_of(result, call["assertion_id"])
+    declaration = content[occurrence["byte_start"] : occurrence["byte_end"]]
+    quoted = content[evidence["byte_start"] : evidence["byte_end"]]
 
-    assert content[occurrence["byte_start"]:occurrence["byte_end"]].startswith(b"def caller")
+    assert declaration.startswith(b"def caller")
     assert (occurrence["line_start"], occurrence["line_end"]) == (3, 4)
-    assert content[evidence["byte_start"]:evidence["byte_end"]] == b"target()"
-    assert evidence["span_sha256"] == hashlib.sha256(b"target()").hexdigest()
+    assert (quoted, evidence["span_sha256"]) == (
+        b"target()",
+        hashlib.sha256(b"target()").hexdigest(),
+    )
 
 
 def test_uses_stable_non_line_identity_and_scip_symbol_when_supplied():
@@ -199,15 +221,10 @@ def test_package_init_relative_import_resolves_sibling_module():
         repository_id="repo",
     )
 
-    resolved = [
-        item for item in result.assertions
-        if item["edge_type"] in {"IMPORTS", "CALLS"}
-    ]
-    assert {item["edge_type"] for item in resolved} == {"IMPORTS", "CALLS"}
-    assert not [
-        item for item in result.observations
-        if item["edge_type"] in {"IMPORTS", "CALLS"}
-    ]
+    wanted = {"IMPORTS", "CALLS"}
+
+    assert _edge_types(result.assertions, wanted) == wanted
+    assert _edge_types(result.observations, wanted) == set()
 
 
 def test_package_init_from_dot_import_targets_submodule_when_alias_is_unused():
@@ -228,6 +245,28 @@ def test_package_init_from_dot_import_targets_submodule_when_alias_is_unused():
     assert modules[imported["target_node_id"]] == "scripts/pkg/dep.py"
 
 
+def _module_paths(result) -> dict:
+    return {
+        item["node_id"]: item["metadata"]["path"]
+        for item in result.nodes
+        if item["kind"] == "module"
+    }
+
+
+def _module_node_id(result, relative_path: str) -> str:
+    paths = _module_paths(result)
+    return next(node_id for node_id, path in paths.items() if path == relative_path)
+
+
+def _edge_from(result, edge_type: str, source_node_id: str) -> dict:
+    return next(
+        item
+        for item in result.assertions
+        if item["edge_type"] == edge_type
+        if item["source_node_id"] == source_node_id
+    )
+
+
 def test_ordinary_module_from_dot_import_targets_sibling_submodule():
     from code_extractor import extract_code
 
@@ -237,23 +276,10 @@ def test_ordinary_module_from_dot_import_targets_sibling_submodule():
         _source("scripts/pkg/dep.py", b"VALUE = 1\n"),
     )
     result = extract_code(sources, repository_id="repo")
-    modules = {
-        item["node_id"]: item["metadata"]["path"]
-        for item in result.nodes
-        if item["kind"] == "module"
-    }
-    service_module = next(
-        item["node_id"]
-        for item in result.nodes
-        if item["kind"] == "module"
-        and item["metadata"]["path"] == "scripts/pkg/service.py"
-    )
-    imported = next(
-        item for item in result.assertions
-        if item["edge_type"] == "IMPORTS" and item["source_node_id"] == service_module
-    )
+    service_module = _module_node_id(result, "scripts/pkg/service.py")
+    imported = _edge_from(result, "IMPORTS", service_module)
 
-    assert modules[imported["target_node_id"]] == "scripts/pkg/dep.py"
+    assert _module_paths(result)[imported["target_node_id"]] == "scripts/pkg/dep.py"
 
 
 def test_from_dot_import_preserves_ambiguous_submodule_candidates():
@@ -539,6 +565,39 @@ def test_tree_sitter_languages_extract_when_available_and_degrade_when_absent(mo
     assert {item["reason"] for item in degraded.observations} == {"unsupported_semantics"}
 
 
+_MAX_OBSERVATION_TARGET_CHARS = 4096
+
+
+def _unusable_targets(targets: list) -> list:
+    """Targets that break the canonical rule: empty, multi-line, or over the bound."""
+    return [
+        target
+        for target in targets
+        if not _target_is_canonical(target)
+    ]
+
+
+def _target_is_canonical(target: str) -> bool:
+    if not target or "\r" in target or "\n" in target:
+        return False
+    within_chars = len(target) <= _MAX_OBSERVATION_TARGET_CHARS
+    return within_chars and len(target.encode()) <= _MAX_OBSERVATION_TARGET_CHARS
+
+
+def _observation_ending_with(observations: list, suffix: str) -> dict:
+    return next(item for item in observations if item["target_text"].endswith(suffix))
+
+
+def _observation_evidence(result, observation_id: str) -> dict:
+    return next(
+        item for item in result.evidence if item["observation_id"] == observation_id
+    )
+
+
+def _target_starting_with(targets: list, prefix: str) -> str:
+    return next(target for target in targets if target.startswith(prefix))
+
+
 def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact():
     import code_extractor
 
@@ -564,23 +623,20 @@ def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact()
         item for item in result.observations if item["edge_type"] == "CALLS"
     ]
     targets = [item["target_text"] for item in call_observations]
-
-    assert targets
-    assert all(target and "\r" not in target and "\n" not in target for target in targets)
-    assert all(len(target) <= 4096 and len(target.encode()) <= 4096 for target in targets)
-    assert "messages .flatMap" in targets
-    oversized = next(target for target in targets if target.startswith('client["'))
+    oversized = _target_starting_with(targets, 'client["')
     digest = hashlib.sha256(oversized_function.encode()).hexdigest()
+
+    assert (_unusable_targets(targets), "messages .flatMap" in targets) == ([], True)
     assert oversized.endswith(f"... [sha256:{digest}]")
 
-    chained = next(item for item in call_observations if item["target_text"].endswith(".slice"))
-    evidence = next(
-        item for item in result.evidence
-        if item["observation_id"] == chained["observation_id"]
+    chained = _observation_ending_with(call_observations, ".slice")
+    evidence = _observation_evidence(result, chained["observation_id"])
+    exact_span = content[evidence["byte_start"] : evidence["byte_end"]]
+
+    assert (b"\r\n" in exact_span, exact_span.endswith(b".slice(-MAX_TRANSCRIPT_CHARS)")) == (
+        True,
+        True,
     )
-    exact_span = content[evidence["byte_start"]:evidence["byte_end"]]
-    assert b"\r\n" in exact_span
-    assert exact_span.endswith(b".slice(-MAX_TRANSCRIPT_CHARS)")
     assert evidence["span_sha256"] == hashlib.sha256(exact_span).hexdigest()
 
 
@@ -619,6 +675,33 @@ def test_syntax_bare_call_shadowed_by_parameter_is_unresolved():
     )
 
 
+def _assertions_of_type(result, edge_type: str) -> list:
+    return [item for item in result.assertions if item["edge_type"] == edge_type]
+
+
+def _observations_of(result, edge_type: str, reason: str) -> list:
+    return [
+        item
+        for item in result.observations
+        if item["edge_type"] == edge_type
+        if item["reason"] == reason
+    ]
+
+
+def _sql_evidence_spans(result, content: bytes) -> set:
+    """The exact bytes every READS/WRITES edge points at."""
+    assertion_ids = {
+        item["assertion_id"]
+        for item in result.assertions
+        if item["edge_type"] in {"READS", "WRITES"}
+    }
+    return {
+        content[item["byte_start"] : item["byte_end"]]
+        for item in result.evidence
+        if item["assertion_id"] in assertion_ids
+    }
+
+
 def test_python_nested_scope_resolution_never_leaks_to_sibling_scope():
     from code_extractor import extract_code
 
@@ -633,11 +716,10 @@ def test_python_nested_scope_resolution_never_leaks_to_sibling_scope():
 
     result = extract_code((source,), repository_id="repo")
 
-    assert len([item for item in result.assertions if item["edge_type"] == "CALLS"]) == 1
-    assert len([
-        item for item in result.observations
-        if item["edge_type"] == "CALLS" and item["reason"] == "unresolved_reference"
-    ]) == 1
+    resolved = _assertions_of_type(result, "CALLS")
+    unresolved = _observations_of(result, "CALLS", "unresolved_reference")
+
+    assert (len(resolved), len(unresolved)) == (1, 1)
 
 
 def test_missing_python_base_is_an_observation():
@@ -680,18 +762,13 @@ def test_emits_only_explicit_implements_reads_and_writes_relationships():
     result = extract_code((python, typescript), repository_id="repo")
 
     edges = {item["edge_type"] for item in result.assertions}
-    assert {"IMPLEMENTS", "READS", "WRITES"} <= edges
-    assert "entry-point" not in {item["kind"] for item in result.nodes}
+    kinds = {item["kind"] for item in result.nodes}
 
-    sql_evidence = [
-        evidence
-        for evidence in result.evidence
-        if evidence["assertion_id"] in {
-            item["assertion_id"] for item in result.assertions
-            if item["edge_type"] in {"READS", "WRITES"}
-        }
-    ]
-    assert {python.content[item["byte_start"]:item["byte_end"]] for item in sql_evidence} == {b"users"}
+    assert ({"IMPLEMENTS", "READS", "WRITES"} <= edges, "entry-point" in kinds) == (
+        True,
+        False,
+    )
+    assert _sql_evidence_spans(result, python.content) == {b"users"}
 
 
 def test_unsupported_route_entry_and_sql_semantics_are_observations():
