@@ -492,9 +492,20 @@ def _architecture(directory: str, **arguments) -> dict:
     return data
 
 
+def _rows(answer: dict, key: str) -> list[dict]:
+    """Rows as objects under either shape; `<key>_cols` arrived 2026-09-12."""
+    cols = answer.get(f"{key}_cols")
+    if cols is None:
+        return answer[key]
+    return [dict(zip(cols, row)) for row in answer[key]]
+
+
 def test_get_architecture_serves_search_and_snippet(indexed):
     search = _architecture(str(indexed), mode="search", symbol="top", limit=5)
-    assert [row["qualified_name"] for row in search["results"]] == ["pkg.core.top", "pkg.core.top_level"]
+    assert [row["qualified_name"] for row in _rows(search, "results")] == [
+        "pkg.core.top",
+        "pkg.core.top_level",
+    ]
     snippet = _architecture(str(indexed), mode="snippet", symbol="pkg.core.helper")
     assert snippet["snippets"][0]["precision"] == "exact"
 
@@ -502,7 +513,7 @@ def test_get_architecture_serves_search_and_snippet(indexed):
 def test_get_architecture_serves_depth_walks_and_symbol_reach(indexed):
     callers = _architecture(str(indexed), mode="callers", symbol="helper", depth=2)
     assert callers["depth_applied"] == 2
-    assert [row["depth"] for row in callers["architecture"]["callers"]] == [1, 2]
+    assert [row["depth"] for row in _rows(callers["architecture"], "callers")] == [1, 2]
     impact = _architecture(str(indexed), mode="impact")
     assert _picked(impact, {"affected_symbols": []}) == {"affected_symbols": []}
     assert "affected_symbols_note" in impact

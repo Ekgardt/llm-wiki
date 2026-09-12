@@ -136,6 +136,10 @@ def shape_code_answer(
         return data
     answer, omitted = _without_opaque_identifiers(data, include_node_ids)
     answer = _with_row_constants(answer, 0)
+    return _as_columnar(_shaped_to_budget(answer, omitted, budget_tokens), 0)
+
+
+def _shaped_to_budget(answer: dict, omitted: list[str], budget_tokens: int | None):
     if budget_tokens is None:
         return _fitted_to_default(answer, omitted)
     return _fitted(answer, omitted, budget_tokens)
@@ -388,6 +392,41 @@ def _payable_row_constants(key: str, value) -> dict:
     return _constants_if_cheaper(key, value, keys)
 
 
+# The second columnar move, added 2026-09-12: once the constant columns are
+# hoisted out, what remains still spells every key name again on every row.
+# A header stated once plus one array per row says the same thing, and the
+# parity run measured the cost of not doing it — 949 tokens against 56 on one
+# caller list. Chosen the same way as the constants above: both shapes are
+# estimated and the cheaper one wins, so a two-row table does not move.
+# Research: `docs/research/2026-09-12-three-changes-to-pass-them.md`.
+
+
+def _is_uniform_table(rows: list) -> bool:
+    """Every row carries exactly the same keys, so a header cannot lose one."""
+    if not _is_constant_table(rows):
+        return False
+    first = set(rows[0])
+    return all(set(row) == first for row in rows)
+
+
+def _columnar(key: str, rows: list, cols: list[str]) -> dict:
+    return {
+        f"{key}_cols": cols,
+        key: [[row[name] for name in cols] for row in rows],
+    }
+
+
+def _columnar_if_cheaper(key: str, rows: list) -> dict:
+    """The header-plus-arrays form of a table, when it costs fewer tokens."""
+    if not _is_uniform_table(rows):
+        return {}
+    cols = sorted(rows[0])
+    columnar = _columnar(key, rows, cols)
+    if estimate_tokens(columnar) >= estimate_tokens({key: rows}):
+        return {}
+    return columnar
+
+
 def _compacted_entry(key, value, depth: int) -> dict:
     """One key's contribution: its value, plus row constants when they pay."""
     descended = _with_row_constants(value, depth + 1)
@@ -398,6 +437,36 @@ def _compacted_entry(key, value, depth: int) -> dict:
         key: _hoisted_rows(descended, sorted(constants)),
         f"{key}_row_constants": constants,
     }
+
+
+def _columnar_entry(key, value, depth: int) -> dict:
+    columnar = _columnar_if_cheaper(key, _as_columnar(value, depth + 1))
+    if columnar:
+        return columnar
+    return {key: _as_columnar(value, depth + 1)}
+
+
+def _columnar_dict(mapping: dict, depth: int) -> dict:
+    compacted: dict = {}
+    for key, value in mapping.items():
+        compacted.update(_columnar_entry(key, value, depth))
+    return compacted
+
+
+def _as_columnar(value, depth: int):
+    """The header-plus-arrays form everywhere it pays, applied last of all.
+
+    Last, because every step before it reads rows as objects: the budget trims
+    a row, names the field it dropped, and counts what it kept. Turning rows
+    into arrays earlier broke all three (measured 2026-09-12: seven failures in
+    `tests/test_answer_budget.py`), so this runs on the answer that is already
+    shaped and is the only step after which nothing reads a row again.
+    """
+    if depth > _MAX_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return _columnar_dict(value, depth)
+    return value
 
 
 def _row_constant_dict(mapping: dict, depth: int) -> dict:

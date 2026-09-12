@@ -153,6 +153,20 @@ def _call(name: str, arguments: dict) -> dict:
     return data
 
 
+def _table(answer: dict, key: str) -> list[dict]:
+    """Rows as objects, whichever shape the answer used.
+
+    Since 2026-09-12 a table that measures cheaper is emitted as `<key>_cols`
+    plus one array per row, so a test that reads a field by name asks for the
+    rows through here and stays true under either shape.
+    """
+    rows = answer[key]
+    cols = answer.get(f"{key}_cols")
+    if cols is None:
+        return rows
+    return [dict(zip(cols, row)) for row in rows]
+
+
 def _values(rows: list, key: str) -> list:
     """Present values only, so a dropped field reads as an empty list."""
     return [row[key] for row in rows if key in row]
@@ -164,10 +178,10 @@ def _values(rows: list, key: str) -> list:
 def test_the_query_mode_stops_paying_for_a_hash_no_caller_reads(monkeypatch):
     _architecture(monkeypatch, _query_answer(rows=3))
     data = _call("get_architecture", dict(_QUERY_ARGUMENTS))
-    assert _values(data["nodes"], "node_id") == []
+    assert _values(_table(data, "nodes"), "node_id") == []
     assert data["answer_budget"]["omitted_fields"] == ["node_id"]
     # The citation the answer exists to deliver is untouched.
-    assert _values(data["nodes"], "name") == [f"caller_number_{i}" for i in range(3)]
+    assert _values(_table(data, "nodes"), "name") == [f"caller_number_{i}" for i in range(3)]
 
 
 def test_the_callers_mode_pays_the_same_tax_under_a_different_key(monkeypatch):
@@ -177,7 +191,7 @@ def test_the_callers_mode_pays_the_same_tax_under_a_different_key(monkeypatch):
         "get_architecture",
         {"directory": ".", "mode": "callers", "symbol": "fuse_rrf"},
     )
-    callers = data["architecture"]["callers"]
+    callers = _table(data["architecture"], "callers")
     assert _values(callers, "symbol_id") == []
     assert data["answer_budget"]["omitted_fields"] == ["symbol_id"]
     assert _values(callers, "line") == [2845, 141]
@@ -199,7 +213,10 @@ def test_an_explicit_opt_in_brings_the_identifiers_back(monkeypatch):
     data = _call(
         "get_architecture", {**_QUERY_ARGUMENTS, "include_node_ids": True}
     )
-    assert _values(data["nodes"], "node_id") == [_node_row(0)["node_id"], _node_row(1)["node_id"]]
+    assert _values(_table(data, "nodes"), "node_id") == [
+        _node_row(0)["node_id"],
+        _node_row(1)["node_id"],
+    ]
     assert "answer_budget" not in data
 
 
@@ -431,7 +448,7 @@ def test_a_column_that_never_varies_is_stated_once_not_once_per_row():
         "status": "candidate",
         "graph_complete": False,
     }
-    assert shaped["candidates"] == [
+    assert _table(shaped, "candidates") == [
         {"name": "a", "file": "x.py"},
         {"name": "b", "file": "y.py"},
         {"name": "c", "file": "z.py"},
@@ -456,4 +473,19 @@ def test_a_column_mixing_false_and_zero_is_not_called_constant():
     ]
     shaped = answer_budget.shape_code_answer({"rows": list(rows)})
     assert "rows_row_constants" not in shaped
-    assert shaped["rows"] == rows
+    assert _table(shaped, "rows") == rows
+
+
+def test_a_long_table_states_its_header_once_and_loses_nothing():
+    """The columnar move of 2026-09-12: cheaper, and recoverable row for row."""
+    rows = [
+        {"qualified_name": f"scripts.retrieval.caller_{index}", "line": 1000 + index}
+        for index in range(12)
+    ]
+    shaped = answer_budget.shape_code_answer({"callers": list(rows)})
+
+    assert shaped["callers_cols"] == ["line", "qualified_name"]
+    assert _table(shaped, "callers") == rows
+    assert answer_budget.estimate_tokens(shaped) < answer_budget.estimate_tokens(
+        {"callers": rows}
+    )
