@@ -51,6 +51,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The parity numbers exist, and they say keep the other tool.** Three runs of
+  the sixteen-task set and three of the cross-service pair, llm-wiki against
+  codebase-memory-mcp, both sides indexing the same checkout, graded by a rule
+  written before the numbers were read. Correct answers: 13 and 14 of 16 for our
+  two columns against 15; tokens 9 869 / 7 685 against 5 565; p95 per task
+  12.7 s / 10.2 s against 4.2 s; one confident-wrong answer each and no
+  non-answers on either side. Every grade repeated exactly in all three runs. We
+  win "which tests exercise this function" outright and the cross-service route
+  question in 0.6 s against 2.0 s; we lose "where is this constant defined" in
+  every run, because the generation holds no module-level constant node. Two of
+  the rule's four conditions fail, so codebase-memory-mcp stays installed and
+  the four things that would close the gap are named in
+  `docs/research/2026-09-12-the-first-honest-parity-numbers.md`. Runs are in
+  `benchmark/code-parity-v2-2026-09-12-run{1,2,3}.json` and
+  `benchmark/code-parity-cross-service-2026-09-12-run{1,2,3}.json`.
+
 - **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
   `definition`, `references`, `implementations`, `type`, `callers`/`callees`
   and `hover` for `.rs`. The binary is published, but it needs a toolchain
