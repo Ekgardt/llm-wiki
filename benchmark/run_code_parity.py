@@ -48,6 +48,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 # v2 carries the thirteen v1 tasks unchanged and adds the data-flow and
@@ -59,7 +60,6 @@ CROSS_SERVICE_TASKS_PATH = (
     Path(__file__).resolve().parent / "code-parity-cross-service-v1.json"
 )
 CBM_BINARY = Path.home() / ".local" / "bin" / "codebase-memory-mcp"
-CBM_PROJECT = "home-user-llm-wiki"
 CALL_BUDGET_SECONDS = 60.0
 KILL_GRACE_SECONDS = 10.0
 ANSWER_EXCERPT_CHARS = 4000
@@ -102,6 +102,24 @@ SERENA_READ_TOOLS = frozenset(
     }
 )
 SIDES = ("llm_wiki", "llm_wiki_best", "cbm", "trace_mcp", "serena")
+
+
+class RunContext(NamedTuple):
+    """What every side needs to address the repository under measurement.
+
+    `cbm_project` exists because codebase-memory-mcp addresses a checkout by
+    project name, not by path: a stand that hard-codes one name answers about
+    one repository whatever `--directory` says, which on the cross-service set
+    would have measured this vault instead of the two-repository fixture.
+    """
+
+    directory: str
+    cbm_project: str
+
+
+def default_cbm_project(directory: str) -> str:
+    """codebase-memory-mcp's own default name for a checkout: its dashed path."""
+    return str(Path(directory).resolve()).strip("/").replace("/", "-")
 
 
 def load_tasks(path: Path) -> dict:
@@ -194,10 +212,10 @@ def _llm_wiki_outcome(proc: subprocess.CompletedProcess, seconds: float) -> dict
     }
 
 
-def run_llm_wiki_call(call: dict, directory: str) -> dict:
+def run_llm_wiki_call(call: dict, context: RunContext) -> dict:
     payload = {
         "tool": call["tool"],
-        "arguments": {"directory": directory, **call["arguments"]},
+        "arguments": {"directory": context.directory, **call["arguments"]},
     }
     cmd = [
         sys.executable,
@@ -228,14 +246,13 @@ def _cbm_outcome(proc: subprocess.CompletedProcess, seconds: float) -> dict:
     return {"status": status, "seconds": seconds, "text": _cbm_text(document)}
 
 
-def run_cbm_call(call: dict, directory: str) -> dict:
-    del directory  # cbm addresses the repository by project name
-    arguments = {"project": CBM_PROJECT, **call["arguments"]}
+def run_cbm_call(call: dict, context: RunContext) -> dict:
+    arguments = {"project": context.cbm_project, **call["arguments"]}
     cmd = [str(CBM_BINARY), "cli", "--json", call["tool"], json.dumps(arguments)]
     return _timed_subprocess(cmd, _cbm_outcome)
 
 
-def run_trace_mcp_call(call: dict, directory: str) -> dict:
+def run_trace_mcp_call(call: dict, context: RunContext) -> dict:
     """One call against a freshly started trace-mcp, cost and all.
 
     Started per call, like every other side: the stand measures what a caller
@@ -249,11 +266,11 @@ def run_trace_mcp_call(call: dict, directory: str) -> dict:
         call["tool"],
         call["arguments"],
         timeout=CALL_BUDGET_SECONDS,
-        cwd=directory,
+        cwd=context.directory,
     )
 
 
-def run_serena_call(call: dict, directory: str) -> dict:
+def run_serena_call(call: dict, context: RunContext) -> dict:
     """One call against a freshly started Serena, refusing anything that writes."""
     from mcp_stdio_client import call_tool
 
@@ -264,7 +281,7 @@ def run_serena_call(call: dict, directory: str) -> dict:
         call["tool"],
         call["arguments"],
         timeout=CALL_BUDGET_SECONDS,
-        cwd=directory,
+        cwd=context.directory,
     )
 
 
@@ -296,10 +313,10 @@ def run_side(calls: list[dict], runner) -> dict:
     }
 
 
-def _scored_side(task: dict, side: str, directory: str) -> dict:
+def _scored_side(task: dict, side: str, context: RunContext) -> dict:
     calls = task[side]
     runner = _RUNNERS[side]
-    outcome = run_side(calls, lambda call: runner(call, directory))
+    outcome = run_side(calls, lambda call: runner(call, context))
     must = _side_terms(task, calls, "must")
     must_not = _side_terms(task, calls, "must_not")
     return {
@@ -312,10 +329,10 @@ def _scored_side(task: dict, side: str, directory: str) -> dict:
     }
 
 
-def score_task(task: dict, directory: str, sides: tuple[str, ...]) -> dict:
+def score_task(task: dict, context: RunContext, sides: tuple[str, ...]) -> dict:
     row = {"id": task["id"], "kind": task["kind"], "question": task["question"]}
     for side in sides:
-        row[side] = _scored_side(task, side, directory)
+        row[side] = _scored_side(task, side, context)
         _print_progress(task, side, row[side])
     return row
 
@@ -368,12 +385,13 @@ def summarize(rows: list[dict], sides: tuple[str, ...]) -> dict:
     return {side: _side_summary(rows, side) for side in sides}
 
 
-def run_stand(tasks_path: Path, directory: str, sides: tuple[str, ...]) -> dict:
+def run_stand(tasks_path: Path, context: RunContext, sides: tuple[str, ...]) -> dict:
     document = load_tasks(tasks_path)
-    rows = [score_task(task, directory, sides) for task in document["tasks"]]
+    rows = [score_task(task, context, sides) for task in document["tasks"]]
     return {
         "version": document["version"],
-        "directory": directory,
+        "directory": context.directory,
+        "cbm_project": context.cbm_project,
         "budget_seconds": CALL_BUDGET_SECONDS,
         "tasks": rows,
         "summary": summarize(rows, sides),
@@ -403,8 +421,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--directory", default=str(ROOT))
     parser.add_argument("--sides", nargs="+", choices=SIDES, default=list(SIDES))
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--cbm-project",
+        default=None,
+        help="codebase-memory-mcp project name; default: the dashed --directory.",
+    )
     parser.add_argument("--child", default=None, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
+
+
+def _cbm_project(args) -> str:
+    return args.cbm_project or default_cbm_project(args.directory)
 
 
 def _write_report(report: dict, out: Path | None) -> None:
@@ -418,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.child is not None:
         return _run_child(args.child)
-    report = run_stand(args.tasks, args.directory, tuple(args.sides))
+    context = RunContext(args.directory, _cbm_project(args))
+    report = run_stand(args.tasks, context, tuple(args.sides))
     _write_report(report, args.out)
     return 0
 

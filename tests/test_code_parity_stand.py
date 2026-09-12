@@ -165,3 +165,21 @@ def test_the_child_protocol_round_trips_a_real_tool_error(tmp_path):
     parsed = json.loads(proc.stdout)
     assert "data" in parsed
     assert parsed["seconds"] >= 0
+
+
+def test_the_other_side_is_asked_about_the_directory_it_was_given(monkeypatch):
+    """A hard-coded project name measures one repository whatever --directory says."""
+    seen: dict[str, list[str]] = {}
+
+    def _capture(cmd, outcome):
+        seen["cmd"] = cmd
+        return {"status": "answered", "seconds": 0.0, "text": ""}
+
+    monkeypatch.setattr(stand, "_timed_subprocess", _capture)
+    context = stand.RunContext("/tmp/parity-cs/client-repo", "parity-cs-client-repo")
+    stand.run_cbm_call({"tool": "trace_path", "arguments": {}}, context)
+    assert '"project": "parity-cs-client-repo"' in seen["cmd"][-1]
+
+
+def test_the_default_project_name_is_the_dashed_checkout_path():
+    assert stand.default_cbm_project("/home/user/llm-wiki") == "home-user-llm-wiki"
