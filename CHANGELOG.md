@@ -21,6 +21,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Precise navigation for Go (#24, B).** `gopls v0.23.0` joins Pyright and
+  `typescript-language-server` as a managed profile, so `definition`,
+  `references`, `implementations`, `type`, `callers`/`callees` and `hover`
+  answer for `.go` files from a type checker instead of a name match. It is
+  the first managed server that is **built** rather than unpacked, because the
+  Go team publishes gopls only as a module: the install unpacks a pinned Go
+  toolchain (1.27.1, per-platform archive pinned by sha256) and compiles one
+  pinned module version with it, inside `cache/code-tools/gopls/v0.23.0/`,
+  with `GOPATH`, `GOCACHE`, `GOMODCACHE` and `GOBIN` under that root and
+  `GOTOOLCHAIN=local` so the pin cannot be swapped. Measured here: 44 s to
+  install, 324 MB on disk, `definition` 0.48 s cold and 0.10 s warm. It is
+  also the first **native** server: a profile now declares `node_major` or
+  `native`, identity stops probing Node for it, and the verified copy is
+  launched by path from the owner root instead of through an unlinked
+  descriptor — gopls hashes its own executable and re-executes itself, so a
+  file with no name makes it exit. The launch invariant is stated instead of
+  assumed: a generation may name the inherited descriptor or a file inside its
+  own owner root, never anything else. Installation stays one explicit
+  operator action (`uv run python scripts/install_language_server.py --profile
+  gopls --state-root <state-root>`); until it runs, Go answers from structural
+  evidence exactly as before. New module `scripts/go_source_build.py`.
 - **Argument bindings, the HTTP boundary and routes across repositories
   (#24, B3/D2).** `get_architecture mode=data_flow` answers, hop by hop,
   which caller-visible name binds which parameter of the callee, and says in

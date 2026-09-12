@@ -34,6 +34,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+from go_source_build import SourceBuildError
 from lsp_identity import INSTALL_MANIFEST_NAME, build_install_manifest
 from lsp_profiles import REGISTRY
 from lsp_server_profile import LanguageServerProfile, RuntimeOption
@@ -60,27 +61,48 @@ def _integrity_digest(integrity: str) -> bytes:
     return base64.b64decode(integrity.split("-", 1)[1], validate=True)
 
 
+def _integrity_hash(integrity: str, content: bytes) -> bytes:
+    """Hash `content` with the algorithm the SRI string names."""
+    algorithm = integrity.split("-", 1)[0]
+    if algorithm not in ("sha256", "sha512"):
+        raise InstallError(f"unsupported integrity algorithm: {algorithm}")
+    return hashlib.new(algorithm, content).digest()
+
+
 def _require_integrity(content: bytes, integrity: str, label: str) -> None:
-    if hashlib.sha512(content).digest() != _integrity_digest(integrity):
+    if _integrity_hash(integrity, content) != _integrity_digest(integrity):
         raise InstallError(f"{label} does not match its pinned integrity hash")
 
 
-def _fetch(url: str) -> bytes:
+def _fetch(url: str, limit: int) -> bytes:
     request = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(request, timeout=NETWORK_TIMEOUT_SECONDS) as response:
         if response.geturl() != url:
             raise InstallError(f"{url} redirected; a pinned URL must be served directly")
-        content = response.read(MAX_COMPRESSED_BYTES + 1)
-    if len(content) > MAX_COMPRESSED_BYTES:
+        content = response.read(limit + 1)
+    if len(content) > limit:
         raise InstallError(f"{url} exceeds the compressed bound")
     return content
 
 
-def _artifact_bytes(url: str, integrity: str, local: Path | None, label: str) -> bytes:
-    """The pinned tarball, from disk when the operator supplied it, else fetched."""
-    content = _fetch(url) if local is None else local.read_bytes()
+def _artifact_bytes(
+    url: str, integrity: str, local: Path | None, label: str, limit: int
+) -> bytes:
+    """The pinned archive, from disk when the operator supplied it, else fetched."""
+    content = _fetch(url, limit) if local is None else local.read_bytes()
     _require_integrity(content, integrity, label)
     return content
+
+
+def _bounds(profile: LanguageServerProfile) -> tuple[int, int]:
+    """This profile's archive bounds.
+
+    A Go toolchain is ~67 MB compressed and ~250 MB unpacked, far past the npm
+    bounds; the ceilings are per profile so the npm pins keep theirs.
+    """
+    compressed = profile.max_compressed_bytes or MAX_COMPRESSED_BYTES
+    decompressed = profile.max_decompressed_bytes or MAX_DECOMPRESSED_BYTES
+    return (compressed, decompressed)
 
 
 def _member_path_escapes(path: Path) -> bool:
@@ -119,7 +141,19 @@ def _extract_file(archive: tarfile.TarFile, member: tarfile.TarInfo, target: Pat
     target.parent.mkdir(parents=True, exist_ok=True)
     with source, open(target, "wb") as handle:
         shutil.copyfileobj(source, handle, length=64 * 1024)
+    _apply_execute_bit(member, target)
     return member.size
+
+
+def _apply_execute_bit(member: tarfile.TarInfo, target: Path) -> None:
+    """A compiler in a tarball is only a compiler if it stays executable.
+
+    The npm pins are JavaScript files run by Node, so this never mattered
+    before; `go` and `gopls` are executables.
+    """
+    if not member.mode & 0o111:
+        return
+    target.chmod(target.stat().st_mode | 0o755)
 
 
 def _extract_member(
@@ -139,28 +173,36 @@ def _extract_member(
     return _extract_file(archive, member, target)
 
 
-def _extract(content: bytes, root: Path, subdirectory: str | None) -> None:
-    """Unpack a bounded, contained tarball under `root`."""
+def _extract(
+    content: bytes,
+    root: Path,
+    subdirectory: str | None,
+    limit: int = MAX_DECOMPRESSED_BYTES,
+    members_limit: int = MAX_MEMBERS,
+) -> None:
+    """Unpack a bounded, contained archive under `root`."""
     written = 0
     with tempfile.NamedTemporaryFile(suffix=".tgz") as scratch:
         scratch.write(content)
         scratch.flush()
         with tarfile.open(scratch.name, mode="r:gz") as archive:
-            members = _bounded_members(archive)
+            members = _bounded_members(archive, members_limit)
             for member in members:
                 written += _extract_member(archive, member, root, subdirectory)
-                _require_total(written)
+                _require_total(written, limit)
 
 
-def _bounded_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+def _bounded_members(
+    archive: tarfile.TarFile, limit: int = MAX_MEMBERS
+) -> list[tarfile.TarInfo]:
     members = archive.getmembers()
-    if len(members) > MAX_MEMBERS:
+    if len(members) > limit:
         raise InstallError("archive exceeds the member bound")
     return members
 
 
-def _require_total(written: int) -> None:
-    if written > MAX_DECOMPRESSED_BYTES:
+def _require_total(written: int, limit: int = MAX_DECOMPRESSED_BYTES) -> None:
+    if written > limit:
         raise InstallError("archive exceeds the decompressed bound")
 
 
@@ -177,7 +219,11 @@ def _install_runtime(
     if runtime.package_url is None or runtime.package_integrity is None:
         raise InstallError("profile names a runtime path with no pinned artifact")
     content = _artifact_bytes(
-        runtime.package_url, runtime.package_integrity, local, "runtime artifact"
+        runtime.package_url,
+        runtime.package_integrity,
+        local,
+        "runtime artifact",
+        MAX_COMPRESSED_BYTES,
     )
     _extract(content, staging, runtime.install_subdirectory)
     return _sha256_file(staging / runtime.sibling_relative)
@@ -194,15 +240,36 @@ def _staged(
     profile: LanguageServerProfile, staging: Path, artifacts: tuple[Path | None, Path | None]
 ) -> dict[str, str]:
     server_artifact, runtime_artifact = artifacts
+    compressed, decompressed = _bounds(profile)
     content = _artifact_bytes(
-        profile.package_url, profile.package_integrity, server_artifact, "server artifact"
+        profile.package_url,
+        profile.package_integrity,
+        server_artifact,
+        "server artifact",
+        compressed,
     )
-    _extract(content, staging, None)
+    _extract(content, staging, None, decompressed, profile.max_members or MAX_MEMBERS)
+    _build_if_required(profile, staging)
     server_sha256 = _sha256_file(staging / profile.server_relative)
     runtime_sha256 = _install_runtime(profile.runtime_option, staging, runtime_artifact)
     return build_install_manifest(
         profile, server_sha256=server_sha256, runtime_sha256=runtime_sha256
     )
+
+
+def _build_if_required(profile: LanguageServerProfile, staging: Path) -> None:
+    """Compile the server when the archive was a compiler rather than a server.
+
+    The digest of what the build produced is recorded by the caller and is what
+    gates every launch, exactly as an unpacked entry file's digest is. Research:
+    `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+    build = profile.source_build
+    if build is None:
+        return
+    from go_source_build import build_source_server
+
+    build_source_server(staging, build)
 
 
 def install_language_server(
@@ -249,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             server_artifact=arguments.artifact,
             runtime_artifact=arguments.runtime_artifact,
         )
-    except (InstallError, OSError, tarfile.TarError, ValueError) as error:
+    except (InstallError, SourceBuildError, OSError, tarfile.TarError, ValueError) as error:
         print(f"install failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps({"profile": profile.name, "root": str(root)}, indent=2))

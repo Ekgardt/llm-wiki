@@ -48,6 +48,7 @@ INSTALL_MANIFEST_NAME = "install-manifest.json"
 # a changed `pyrightconfig.json` is for Pyright.
 _REPOSITORY_CONFIG_NAMES = {
     "typescript": "tsconfig.json",
+    "gopls": "go.mod",
 }
 MAX_REPOSITORY_CONFIG_BYTES = 256 * 1024
 
@@ -414,6 +415,43 @@ def _inspected_identity(
     deadline: float | None,
 ) -> PyrightIdentity:
     codes = _artifact_codes(profile, state_root, server_digest, deadline)
+    if profile.native:
+        return _native_identity(profile, server, server_digest, configuration_sha256, codes)
+    return _node_identity(
+        profile, server, server_digest, configuration_sha256, codes, deadline
+    )
+
+
+def _native_identity(
+    profile: LanguageServerProfile,
+    server: Path,
+    server_digest: tuple[str, str],
+    configuration_sha256: str,
+    codes: set[str],
+) -> PyrightIdentity:
+    """A native server is its own interpreter, so there is no Node to probe.
+
+    What still gates the launch is the same thing: the digest recorded at
+    install time against the file on disk. Research:
+    `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+    return _built_identity(
+        profile,
+        (None, None, None),
+        (server, server_digest[0] or None),
+        configuration_sha256,
+        tuple(sorted(codes)),
+    )
+
+
+def _node_identity(
+    profile: LanguageServerProfile,
+    server: Path,
+    server_digest: tuple[str, str],
+    configuration_sha256: str,
+    codes: set[str],
+    deadline: float | None,
+) -> PyrightIdentity:
     node, node_version, node_major, node_codes = _probe_node(deadline)
     codes.update(_reprefixed(profile, node_codes))
     codes.update(_node_floor_codes(profile, node_version, node_major))

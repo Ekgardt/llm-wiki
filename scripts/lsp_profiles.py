@@ -26,6 +26,7 @@ it look arbitrary and are not:
 
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 
 from lsp_server_profile import (
@@ -34,9 +35,12 @@ from lsp_server_profile import (
     IdentityNotification,
     LanguageServerProfile,
     PackageLaunch,
+    PlatformArtifact,
     ProfileRegistry,
     RuntimeOption,
+    SourceBuild,
     freeze_profile_value,
+    normalized_platform,
 )
 from pyright_profile import (
     PYRIGHT_CONFIGURATION,
@@ -204,7 +208,174 @@ TYPESCRIPT_PROFILE = LanguageServerProfile(
     ),
 )
 
-REGISTRY = ProfileRegistry((PYRIGHT_PROFILE, TYPESCRIPT_PROFILE))
+# ---------------------------------------------------------------------------
+# gopls: the one profile that is compiled rather than unpacked
+# ---------------------------------------------------------------------------
+#
+# The Go team publishes gopls only as a Go module, so this profile pins a Go
+# toolchain per platform and builds one pinned module version with it. The
+# binary a build produces is not bit-reproducible, so what is pinned here is
+# every input; the digest that build produced is recorded in the install
+# manifest and checked before each launch, exactly as Pyright's entry file is.
+# Research: `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+
+GO_VERSION = "1.27.1"
+GOPLS_VERSION = "v0.23.0"
+
+GO_ARTIFACTS = (
+    PlatformArtifact(
+        system="linux",
+        machine="x86_64",
+        url="https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz",
+        integrity="sha256-Y9M58NpatTY1pW8kkKeYTf4S38/yKtdJ9j7a9ZAWhEU=",
+        size=70553950,
+    ),
+    PlatformArtifact(
+        system="linux",
+        machine="arm64",
+        url="https://dl.google.com/go/go1.27.1.linux-arm64.tar.gz",
+        integrity="sha256-NFC0Wj+e6FaHknNqXF5wofLps2w1qPdJWMA+UdfZK+w=",
+        size=67009954,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="x86_64",
+        url="https://dl.google.com/go/go1.27.1.darwin-amd64.tar.gz",
+        integrity="sha256-j49SxmSVQs8Ce7ybnGjR7AQvnzSAikBBPwuLP2bzyqQ=",
+        size=71621873,
+    ),
+    PlatformArtifact(
+        system="darwin",
+        machine="arm64",
+        url="https://dl.google.com/go/go1.27.1.darwin-arm64.tar.gz",
+        integrity="sha256-7iFdV+DsJpxgzJzspo5r2jIbqe5a/iT0sJiHA8LYfRI=",
+        size=68100347,
+    ),
+    PlatformArtifact(
+        system="windows",
+        machine="x86_64",
+        url="https://dl.google.com/go/go1.27.1.windows-amd64.zip",
+        integrity="sha256-o5EbXg4bEFPyXtBnX0wcaq0eK/zyU98rm+TKq9Lt2V0=",
+        size=78931360,
+    ),
+)
+
+# The unpacked toolchain and the built server, both inside the managed root.
+GO_TOOLCHAIN_RELATIVE = Path("go/bin/go")
+GOPLS_BINARY_RELATIVE = Path("bin/gopls")
+GO_TOOLCHAIN_RELATIVE_WINDOWS = Path("go/bin/go.exe")
+GOPLS_BINARY_RELATIVE_WINDOWS = Path("bin/gopls.exe")
+
+# Measured on `go1.27.1.linux-amd64.tar.gz` (2026-09-12): 17 353 members,
+# 243 910 739 bytes unpacked, largest member 28 238 898 bytes. The npm pins keep
+# the module-wide bounds they have today; these are this profile's own.
+GOPLS_MAX_COMPRESSED_BYTES = 96 * 1024 * 1024
+GOPLS_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024
+GOPLS_MAX_MEMBERS = 32768
+
+# gopls reports package loading as work-done progress, and answers before it
+# finishes if asked -- the same trap tsserver sets, and the same gate.
+GOPLS_NOTIFICATIONS = frozenset({"window/showMessage", "window/logMessage"})
+
+# Local, read-only defaults: no build on save, no module downloads triggered by
+# a navigation query, and the standard library kept out of workspace symbols.
+GOPLS_CONFIGURATION = freeze_profile_value(
+    {
+        "gopls": {
+            "build.allowModfileModifications": False,
+            "build.allowImplicitNetworkAccess": False,
+            "ui.diagnostic.analyses": {},
+            "ui.navigation.importShortcut": "Definition",
+        }
+    }
+)
+
+
+# gopls runs `go list` while it answers, so the pinned toolchain has to be the
+# one on its PATH -- only ours, so a system Go cannot answer instead -- and its
+# caches have to live inside the managed root. `GOTOOLCHAIN=local` keeps the pin
+# a pin at query time for the same reason it does at build time.
+GOPLS_ENVIRONMENT_TEMPLATE = (
+    ("PATH", "{root}/go/bin"),
+    ("GOROOT", "{root}/go"),
+    ("GOPATH", "{root}/gopath"),
+    ("GOMODCACHE", "{root}/gopath/pkg/mod"),
+    ("GOCACHE", "{root}/gocache"),
+    ("GOTOOLCHAIN", "local"),
+)
+
+
+def _gopls_artifact() -> PlatformArtifact:
+    """This machine's toolchain archive, falling back to the 64-bit Linux pin.
+
+    A platform with no pin cannot install, and the profile still has to exist:
+    `doctor` and the registry are read on every platform, and an import that
+    raised would take the whole navigation path down instead of one language.
+    """
+    found = None
+    for artifact in GO_ARTIFACTS:
+        if normalized_platform(artifact.system, artifact.machine) == _this_platform():
+            found = artifact
+    return found if found is not None else GO_ARTIFACTS[0]
+
+
+def _this_platform() -> tuple[str, str]:
+    return normalized_platform(platform.system(), platform.machine())
+
+
+def _windows() -> bool:
+    return _this_platform()[0] == "windows"
+
+
+def _gopls_relative(posix: Path, windows: Path) -> Path:
+    return windows if _windows() else posix
+
+
+GOPLS_ARTIFACT = _gopls_artifact()
+
+GOPLS_PROFILE = LanguageServerProfile(
+    name="gopls",
+    language_ids=("go",),
+    file_suffixes=(".go",),
+    version=GOPLS_VERSION,
+    package_url=GOPLS_ARTIFACT.url,
+    package_integrity=GOPLS_ARTIFACT.integrity,
+    server_relative=_gopls_relative(GOPLS_BINARY_RELATIVE, GOPLS_BINARY_RELATIVE_WINDOWS),
+    managed_relative_root=Path("cache/code-tools/gopls") / GOPLS_VERSION,
+    install_manifest_schema="gopls-install/v1",
+    node_major=None,
+    native=True,
+    # `gopls` with no argument is `gopls serve` over stdio, which is what every
+    # editor launches. A `-mode=` flag belongs to the subcommand and is not
+    # passed here, so the argv stays the one the upstream default documents.
+    launch_flags=(),
+    owner_argument_template=None,
+    server_notifications=GOPLS_NOTIFICATIONS,
+    configuration=GOPLS_CONFIGURATION,
+    initialization_options=freeze_profile_value({}),
+    readiness=READINESS_WORK_DONE_PROGRESS,
+    identity_notification=None,
+    runtime_option=None,
+    degradation_prefix="gopls",
+    configuration_names=("go.mod", "go.work", "go.sum"),
+    platform_artifacts=GO_ARTIFACTS,
+    source_build=SourceBuild(
+        module="golang.org/x/tools/gopls",
+        version=GOPLS_VERSION,
+        toolchain_relative=_gopls_relative(
+            GO_TOOLCHAIN_RELATIVE, GO_TOOLCHAIN_RELATIVE_WINDOWS
+        ),
+        binary_relative=_gopls_relative(
+            GOPLS_BINARY_RELATIVE, GOPLS_BINARY_RELATIVE_WINDOWS
+        ),
+    ),
+    max_compressed_bytes=GOPLS_MAX_COMPRESSED_BYTES,
+    max_decompressed_bytes=GOPLS_MAX_DECOMPRESSED_BYTES,
+    max_members=GOPLS_MAX_MEMBERS,
+    environment_template=GOPLS_ENVIRONMENT_TEMPLATE,
+)
+
+REGISTRY = ProfileRegistry((PYRIGHT_PROFILE, TYPESCRIPT_PROFILE, GOPLS_PROFILE))
 
 # The two notification methods that are not any one vendor's: `$/progress` is
 # the specification's own, and published diagnostics are asked for by every

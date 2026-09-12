@@ -147,6 +147,14 @@ reindex. Research:
   call site. The report carries `symbol_resolved`, `depth_applied` and
   `depth_frontier_open` exactly as `dependencies` does, and `callers` keeps
   `unresolved_callers`.
+- **Languages.** Python (Pyright 1.1.411), TypeScript/JavaScript
+  (`typescript-language-server` 6.0.0 with tsserver 5.9.3) and Go (gopls
+  v0.23.0) have a precise tier; every other indexed language answers from
+  structural evidence and says so. Each server is installed by one explicit
+  operator action and is never fetched by a query. gopls is the one that is
+  compiled at install time, from a pinned Go toolchain, because upstream
+  publishes no binary — see
+  `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
 - **`mode=data_flow` with `depth`** (1–8) — argument bindings, hop by hop,
   never data-flow analysis. Each row names the callee and the
   `argument->parameter` pairs the call passes (`bindings`), bounded at 8

@@ -1407,12 +1407,35 @@ def _check_windows_system_root(values: Mapping[str, str]) -> None:
         )
 
 
-def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Build a new, canonical environment containing only required process values."""
+def lsp_environment(
+    source: Mapping[str, str] | None = None,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a new, canonical environment containing only required process values.
+
+    `extra` is a profile's own declaration — gopls needs its pinned toolchain on
+    `PATH` and its caches inside the managed root, and a server that is a
+    compiler's client cannot be launched with the allowlist alone. It is code,
+    not operator input, and every pair is checked like an inherited one.
+    Research: `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
     values = os.environ if source is None else source
     _check_environment_pairs(values)
     _check_windows_system_root(values)
-    return {name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values}
+    environment = {
+        name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values
+    }
+    return _with_profile_environment(environment, extra)
+
+
+def _with_profile_environment(
+    environment: dict[str, str], extra: Mapping[str, str] | None
+) -> dict[str, str]:
+    if not extra:
+        return environment
+    _check_environment_pairs(extra)
+    environment.update(dict(extra))
+    return environment
 
 
 @dataclass(slots=True)
@@ -1473,6 +1496,7 @@ class LspProcess:
         generation_bootstrap: GenerationBootstrap,
         bootstrap_timeout_seconds: float | None = None,
         generation_guard: GenerationGuardFactory | None = None,
+        environment_overrides: Mapping[str, str] | None = None,
     ) -> LspProcess:
         return _start_configured_lsp_process(
             cls,
@@ -1485,6 +1509,7 @@ class LspProcess:
             generation_bootstrap=generation_bootstrap,
             bootstrap_timeout_seconds=bootstrap_timeout_seconds,
             generation_guard=generation_guard,
+            environment_overrides=environment_overrides,
         )
 
     def request(
@@ -2187,6 +2212,7 @@ def _start_configured_lsp_process(
     generation_bootstrap: GenerationBootstrap,
     bootstrap_timeout_seconds: float | None,
     generation_guard: GenerationGuardFactory | None,
+    environment_overrides: Mapping[str, str] | None = None,
 ) -> LspProcess:
     configured_deadline = _validated_future_deadline(deadline)
     if bootstrap_timeout_seconds is None:
@@ -2208,6 +2234,7 @@ def _start_configured_lsp_process(
         owner_root=owner_root,
         configured_deadline=configured_deadline,
         generation_configuration=configuration,
+        environment_overrides=environment_overrides,
     )
 
 
@@ -2477,6 +2504,7 @@ def _launch_first_generation(
             arguments,
             guarded_launch,
             cwd=cwd,
+            owner_root=owner_root,
         )
         generation = _prepare_generation(
             coordinator,
@@ -2570,11 +2598,12 @@ def _start_lsp_process_impl(
     configured_deadline: float | None,
     generation_configuration: _GenerationConfiguration,
     ownership_state_root: Path | None = None,
+    environment_overrides: Mapping[str, str] | None = None,
 ) -> LspProcess:
     cwd = _validated_cwd(cwd)
     owner_root = Path(owner_root)
     arguments = _validated_command(command, cwd)
-    environment = lsp_environment()
+    environment = lsp_environment(extra=environment_overrides)
     owner_nonce = _validated_owner_root(owner_root)
     generation_nonce = _new_generation_nonce()
     started_monotonic = time.monotonic()
@@ -4507,6 +4536,7 @@ def _launch_restart_candidate(
             instance._command,
             guarded_launch,
             cwd=instance._cwd,
+            owner_root=instance.owner_root,
         )
         candidate = _prepare_generation(
             coordinator,
@@ -6194,27 +6224,92 @@ def _launch_pass_fds(launch: GenerationLaunch) -> tuple[int, ...]:
     return pass_fds
 
 
+def _launch_inside_owner(name: str, owner_root: Path | None) -> bool:
+    """True when the program is the verified copy this owner root holds.
+
+    A native server cannot be executed through an unlinked descriptor: gopls
+    reads its own executable to hash it and to start its telemetry child, and
+    both fail once the file is gone (measured 2026-09-12: `can't hash gopls
+    executable: no such file or directory`, exit 1). The verified copy is
+    therefore launched by path from the owner root, which is private to this
+    process tree, and the launch is still not allowed to name anything else.
+    Research: `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+    if owner_root is None:
+        return False
+    candidate = Path(name)
+    return candidate.is_absolute() and candidate.parent == owner_root.resolve()
+
+
 def _generation_launch(
     command: Sequence[str],
     launch: GenerationLaunch | None,
     *,
     cwd: Path,
+    owner_root: Path | None = None,
 ) -> tuple[tuple[str, ...], tuple[int, ...]]:
     if launch is None:
         return tuple(command), ()
-    return _launch_arguments(command, launch, cwd), _launch_pass_fds(launch)
+    return (
+        _launch_arguments(command, launch, cwd, owner_root),
+        _launch_pass_fds(launch),
+    )
 
 
-def _launch_arguments(command: Sequence[str], launch: GenerationLaunch, cwd: Path) -> tuple[str, ...]:
+def _launch_arguments(
+    command: Sequence[str],
+    launch: GenerationLaunch,
+    cwd: Path,
+    owner_root: Path | None = None,
+) -> tuple[str, ...]:
     if not isinstance(launch.command, tuple):
         raise TypeError("generation launch command must be a tuple")
     arguments = tuple(_validated_command(launch.command, cwd))
     _check_launch_command_bounds(arguments)
-    if not arguments or arguments[0] != command[0]:
-        raise ValueError(
-            "generation launch cannot replace the configured executable"
-        )
+    _require_same_program(arguments, command, launch, owner_root)
     return arguments
+
+
+def _require_same_program(
+    arguments: tuple[str, ...],
+    command: Sequence[str],
+    launch: GenerationLaunch,
+    owner_root: Path | None = None,
+) -> None:
+    """A generation may verify the program, never substitute a different one.
+
+    An interpreted server keeps its interpreter as argv[0] and the verified
+    copy arrives as an argument. A native server has no interpreter: the
+    verified copy *is* the program, and it can only be named by the descriptor
+    the guard opened and passes in. Anything else is a substitution and is
+    refused. Research:
+    `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+    """
+    if not arguments:
+        raise ValueError("generation launch cannot replace the configured executable")
+    if _same_program_name(arguments[0], command, launch, owner_root):
+        return
+    raise ValueError("generation launch cannot replace the configured executable")
+
+
+def _same_program_name(
+    name: str,
+    command: Sequence[str],
+    launch: GenerationLaunch,
+    owner_root: Path | None,
+) -> bool:
+    return (
+        name == command[0]
+        or _is_inherited_descriptor(name, launch.pass_fds)
+        or _launch_inside_owner(name, owner_root)
+    )
+
+
+def _is_inherited_descriptor(name: str, pass_fds: Sequence[int]) -> bool:
+    if not _is_descriptor_path(name):
+        return False
+    number = name.rsplit("/", 1)[-1]
+    return number.isdecimal() and int(number) in tuple(pass_fds)
 
 
 def _check_argument_strings(arguments: Sequence[object]) -> None:
@@ -6241,9 +6336,26 @@ def _checked_arguments(arguments: list[str]) -> list[str]:
     return arguments
 
 
+# A native server is executed as an inherited descriptor whose file has already
+# been unlinked, so resolving the symlink names a path that no longer exists.
+# The descriptor itself is what has to be checked, and `os.stat` follows it to
+# the open file. Research:
+# `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+DESCRIPTOR_ROOTS = ("/proc/self/fd/", "/dev/fd/")
+
+
+def _is_descriptor_path(name: str) -> bool:
+    return name.startswith(DESCRIPTOR_ROOTS)
+
+
 def _resolved_executable(name: str, cwd: Path) -> Path:
     """The executable as an absolute path, however the caller wrote it."""
-    executable = Path(name)
+    if _is_descriptor_path(name):
+        return Path(name)
+    return _resolved_file_executable(Path(name), name, cwd)
+
+
+def _resolved_file_executable(executable: Path, name: str, cwd: Path) -> Path:
     if executable.is_absolute():
         return executable.resolve()
     if executable.parent != Path("."):
@@ -6262,8 +6374,15 @@ def _check_executable_kind(resolved: Path, name: str) -> None:
     """Refuse what the platform will not spawn as a program of its own."""
     if os.name == "nt" and resolved.suffix.casefold() in {".bat", ".cmd"}:
         raise ValueError("Windows shell scripts are not valid LSP executables")
-    if not resolved.is_file():
+    if not _is_regular_program(resolved, name):
         raise FileNotFoundError(name)
+
+
+def _is_regular_program(resolved: Path, name: str) -> bool:
+    """A regular file, reached through a descriptor path when that is what it is."""
+    if not _is_descriptor_path(name):
+        return resolved.is_file()
+    return stat.S_ISREG(os.stat(resolved).st_mode)
 
 
 def _check_executable_permission(resolved: Path) -> None:
