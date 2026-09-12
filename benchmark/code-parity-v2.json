@@ -322,7 +322,7 @@
             "mode": "query",
             "query": "{\"start\": {\"name\": \"EDITORIAL_NAMES\"}, \"hops\": [], \"limit\": 10}"
           },
-          "note": "no better surface exists: the generation indexes no module-level constant node"
+          "note": "the generation indexes module-level constants since code-extractor/v14 (2026-09-12); before that this question had no surface to land on and both our columns graded wrong in every run"
         }
       ],
       "cbm": [

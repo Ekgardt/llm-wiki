@@ -25,7 +25,9 @@ MAX_LOCATIONS = 5
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SNIPPET_LINES = 120
 MAX_NAME_MATCHES = 200
-SNIPPET_KINDS = ("class", "function", "method")
+# `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
+# definition an operator asks for by name like any other.
+SNIPPET_KINDS = ("class", "function", "method", "constant")
 
 
 def _definition_pattern(symbol: str) -> re.Pattern[str]:

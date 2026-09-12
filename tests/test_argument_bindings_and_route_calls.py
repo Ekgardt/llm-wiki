@@ -187,3 +187,49 @@ def test_an_annotation_with_a_comma_does_not_invent_a_parameter():
     literals = sorted(str(item["literal"]) for item in _edges(result, "BINDS_ARGUMENTS"))
 
     assert literals == ["alpha->first,beta->second"]
+
+
+CONSTANTS = b"""\
+from typing import Final
+
+EDITORIAL_NAMES: Final[frozenset[str]] = frozenset({"index.md"})
+MAX_ROWS = 10
+lower_case = 1
+
+
+class Holder:
+    INSIDE = 2
+
+
+def scoped():
+    LOCAL = 3
+    return LOCAL
+"""
+
+
+def _nodes_of_kind(result, kind: str) -> list[str]:
+    return sorted(
+        str(node["metadata"]["name"]) for node in result.nodes if node["kind"] == kind
+    )
+
+
+def test_a_module_level_upper_case_name_is_a_constant_node():
+    """The parity set asked where a constant is defined and nothing answered.
+
+    Module level and upper case only: a lower-case module variable, a class
+    attribute and a function local stay out
+    (`docs/research/2026-09-12-three-changes-to-pass-them.md`).
+    """
+    result = _extract(pkg_settings=CONSTANTS)
+
+    assert _nodes_of_kind(result, "constant") == ["EDITORIAL_NAMES", "MAX_ROWS"]
+
+
+def test_a_constant_carries_the_definition_occurrence_that_answers_where():
+    result = _extract(pkg_settings=CONSTANTS)
+    node = next(item for item in result.nodes if item["kind"] == "constant")
+    roles = [
+        row["role"] for row in result.occurrences if row["node_id"] == node["node_id"]
+    ]
+
+    assert roles == ["definition"]

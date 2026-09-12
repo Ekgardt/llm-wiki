@@ -27,7 +27,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v13"
+EXTRACTOR_VERSION = "code-extractor/v14"
 SCIP_DEFINITION_ROLE = 0x1
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
@@ -319,6 +319,28 @@ def _python_name_span(
     name_offset = match.group(0).rfind(node.name.encode())
     start = line_start + match.start() + name_offset
     return start, start + len(node.name.encode())
+
+
+def _is_constant_name(name: str) -> bool:
+    """The convention that separates a constant from a variable: UPPER_CASE."""
+    return name[:1].isalpha() and name == name.upper()
+
+
+def _assignment_targets(node: ast.Assign | ast.AnnAssign) -> list[ast.expr]:
+    if isinstance(node, ast.Assign):
+        return list(node.targets)
+    return [node.target]
+
+
+def _constant_targets(node: ast.Assign | ast.AnnAssign) -> list[ast.Name]:
+    """The upper-case plain names one assignment binds."""
+    names = [item for item in _assignment_targets(node) if isinstance(item, ast.Name)]
+    return [item for item in names if _is_constant_name(item.id)]
+
+
+def _python_target_span(target: ast.Name, offsets: tuple[int, ...]) -> tuple[int, int]:
+    start = offsets[target.lineno - 1] + target.col_offset
+    return start, start + len(target.id.encode())
 
 
 def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -1145,12 +1167,60 @@ class _Collector:
             self.check_stop()
             self._python_definition(ctx, node, owner)
 
-    def _python_definition(self, ctx: _PythonFile, node: ast.stmt, owner: _PythonOwner) -> None:
+    def _definition_handler(self, node: ast.stmt):
+        """The writer for one statement kind, or None when nothing is defined."""
         if isinstance(node, ast.ClassDef):
-            self._python_class(ctx, node, owner)
-            return
+            return self._python_class
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            self._python_function(ctx, node, owner)
+            return self._python_function
+        return self._assignment_handler(node)
+
+    def _assignment_handler(self, node: ast.stmt):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            return self._python_constant
+        return None
+
+    def _python_definition(self, ctx: _PythonFile, node: ast.stmt, owner: _PythonOwner) -> None:
+        handler = self._definition_handler(node)
+        if handler is None:
+            return
+        handler(ctx, node, owner)
+
+    def _python_constant(
+        self, ctx: _PythonFile, node: ast.Assign | ast.AnnAssign, owner: _PythonOwner
+    ) -> None:
+        """A module-level UPPER_CASE name is a constant the graph can answer for.
+
+        Only module level, and only the upper-case convention: a mutable
+        module variable is rarely the subject of "where is this defined", and
+        every node costs bytes in every generation. Added 2026-09-12 because
+        the parity set's constant question had no surface to land on
+        (`docs/research/2026-09-12-three-changes-to-pass-them.md`).
+        """
+        if owner.name != ctx.module_name:
+            return
+        for target in _constant_targets(node):
+            self._constant_node(ctx, node, target, owner)
+
+    def _constant_node(
+        self,
+        ctx: _PythonFile,
+        statement: ast.stmt,
+        target: ast.Name,
+        owner: _PythonOwner,
+    ) -> None:
+        source = ctx.source
+        span = ctx.span(statement)
+        name_span = _python_target_span(target, ctx.offsets)
+        scheme, key = self.symbol_identity(
+            source, span, name_span, "python", owner.name, target.id, target.id,
+        )
+        node_id = self.add_node(
+            "constant", scheme, key,
+            {"name": target.id, "owner": owner.name, "path": source.record.relative_path},
+        )
+        self.add_occurrence(node_id, source, "definition", span)
+        self.add_assertion(owner.node_id, "DEFINES", node_id, source, span)
 
     def _python_class(self, ctx: _PythonFile, node: ast.ClassDef, owner: _PythonOwner) -> None:
         source = ctx.source
