@@ -139,16 +139,46 @@ def test_a_submodule_is_refused_and_names_its_superproject(vault, tmp_path):
     assert Path(refusal.value.details["superproject"]) == outer.resolve()
 
 
-def test_the_vault_itself_is_refused(vault, tmp_path):
+def test_the_vault_is_admitted_as_a_repository_like_any_other(vault, tmp_path):
+    """The vault is also a repository; its code lives in a code generation.
+
+    It used to be refused with `repository_is_the_vault`, whose reason — the
+    nightly builds it — stopped being true when #29.2 emptied VAULT_CODE_ROOTS.
+    Decision: `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+    """
     import repository_index
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
 
-    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.admit_repository(root, state_root=state)
+    admission = repository_index.admit_repository(root, state_root=state)
 
-    assert refusal.value.reason == "repository_is_the_vault"
+    assert admission.root == root.resolve()
+
+
+def test_the_memory_tree_is_excluded_from_the_vault_code_roots(vault, tmp_path):
+    """`knowledge/` is the memory generation's, and the receipt says so."""
+    import repository_index
+
+    root, state = vault
+    _repository(root, {"scripts/alpha.py": ALPHA, "knowledge/notes/page.md": "# page\n"})
+
+    roots = repository_index.selected_code_roots(root, None, memory_owner=True)
+
+    assert "knowledge" not in roots.selected
+    assert "knowledge" in roots.excluded
+
+
+def test_asking_a_code_index_for_the_memory_tree_is_refused_by_name(vault, tmp_path):
+    import repository_index
+
+    root, state = vault
+    _repository(root, {"scripts/alpha.py": ALPHA, "knowledge/notes/page.md": "# page\n"})
+
+    with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
+        repository_index.selected_code_roots(root, ["scripts", "knowledge"])
+
+    assert refusal.value.reason == "repository_root_is_the_memory_tree"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="ownership is a POSIX boundary")
@@ -641,3 +671,41 @@ def test_registered_manifests_skip_a_row_whose_bytes_stopped_matching(tmp_path):
     }
 
     assert identifiers == {"gen-2"}
+
+
+def test_the_vault_reads_its_own_code_generation_not_its_memory_one(vault, tmp_path):
+    """The point of the 2026-09-12 decision, end to end.
+
+    One checkout, two generations: the memory one the active pointer names, and
+    the code one only ever registered. A code question must reach the second,
+    which is why a code generation says `code_roots` in its manifest and the
+    graph opener asks for that first.
+    """
+    import repository_index
+    from code_graph import find_callers
+
+    root, state = vault
+    _repository(root, {"scripts/alpha.py": ALPHA})
+
+    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
+
+    answer = find_callers("helper", root, with_report=True)
+    assert answer["source_generation"] == receipt["generation_id"]
+    assert [row["qualified_name"] for row in answer["callers"]] == ["scripts.alpha.caller"]
+
+
+def test_a_code_generation_names_its_roots_and_a_memory_one_does_not(vault, tmp_path):
+    import json
+
+    import repository_index
+
+    root, state = vault
+    _repository(root, {"scripts/alpha.py": ALPHA})
+
+    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
+    manifest_path = (
+        state / "cache/evidence-graph/generations" / receipt["generation_id"] / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["code_roots"] == ["scripts"]

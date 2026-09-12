@@ -222,11 +222,16 @@ _MANIFEST_KEYS = {
     "vector_state",
     "repository_scope",
     "code_capture",
+    # A generation that holds code names its roots; a memory generation has no
+    # such key, which is how one checkout can carry both and a reader can tell
+    # them apart (decision 2026-09-12, the vault is a repository too).
+    "code_roots",
 }
 _REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {
     "parent_generation_id",
     "repository_scope",
     "code_capture",
+    "code_roots",
 }
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
 _VECTOR_FILES = {"vectors.npy", "vectors.json"}
@@ -1469,10 +1474,20 @@ def _normalized_capture_section(value: dict[str, object], _parent: str | None) -
 
 # Insertion order is the manifest's own section order and is load-bearing only
 # for readability; canonical JSON sorts keys before anything is hashed.
+def _normalized_code_roots_section(value: dict[str, object], _parent: str | None) -> object:
+    roots = value["code_roots"]
+    if not isinstance(roots, list) or not all(isinstance(name, str) for name in roots):
+        raise ValueError("code_roots must be an array of strings")
+    if not roots:
+        raise ValueError("code_roots must name at least one root when present")
+    return list(roots)
+
+
 _OPTIONAL_MANIFEST_SECTIONS = {
     "parent_generation_id": _normalized_parent_section,
     "repository_scope": _normalized_scope_section,
     "code_capture": _normalized_capture_section,
+    "code_roots": _normalized_code_roots_section,
 }
 
 
@@ -1938,6 +1953,13 @@ def _validate_generation(
     _check_deadline(deadline, monotonic)
     digests = {"manifest.json": sha256_bytes(raw), **scan.digests}
     return normalized, _content_seal(final_seal, digests)
+
+
+def _holds_code_for(manifest: dict[str, object], scope: RepositoryScope) -> bool:
+    """True when this manifest is a code generation of exactly this repository."""
+    if not manifest.get("code_roots"):
+        return False
+    return _manifest_belongs_to(manifest, scope)
 
 
 class GenerationCatalog:
@@ -2965,6 +2987,30 @@ class GenerationCatalog:
             _check_deadline(deadline, time.monotonic)
             _append_ancestors(ordered, seen, parents, identifier, deadline, cancelled)
         return ordered
+
+    def code_generation_for_repository(
+        self,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, dict[str, object]] | tuple[None, None]:
+        """The newest registered generation of this repository that holds code.
+
+        The vault carries two generations of one checkout — memory, which the
+        active pointer names, and code, which is only ever registered — so a code
+        question cannot use the pointer. A generation that holds code says so with
+        `code_roots`; this returns the newest such registration for the scope, or
+        (None, None) when the repository has none yet. Decision:
+        `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+        """
+        expected = RepositoryScope.from_dict(repository_scope.as_dict())
+        for identifier, _registered_at, manifest in self.registered_manifests(
+            deadline=deadline, cancelled=cancelled
+        ):
+            if _holds_code_for(manifest, expected):
+                return identifier, manifest
+        return None, None
 
     def registered_manifests(
         self,

@@ -1375,6 +1375,24 @@ def _active_graph_or_none(
         resolve_scope, directory, deadline=deadline, cancelled=cancelled
     )
     _check_generation_stop(deadline, cancelled)
+    return _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled)
+
+
+def _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled):
+    """The repository's code generation when it has one, else the active pointer.
+
+    A vault carries a memory generation and a code generation of the same
+    checkout, and only the first is ever activated, so a code answer asks for
+    the code one first. Every other repository has no memory generation and
+    falls straight through. Decision:
+    `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+    """
+    code = _bounded_call(
+        graph_class.open_code_for_repository, catalog, scope,
+        deadline=deadline, cancelled=cancelled,
+    )
+    if code is not None:
+        return code
     return _bounded_call(
         graph_class.open_active_for_repository, catalog, scope,
         deadline=deadline, cancelled=cancelled,
@@ -1416,9 +1434,8 @@ def _leased_active_graph(directory, read_only, deadline, cancelled):
         resolve_scope=lambda: _bounded_call(
             resolve_repository_scope, directory, deadline=deadline, cancelled=cancelled
         ),
-        open_graph=lambda scope: _bounded_call(
-            SharedEvidenceGraph.open_active_for_repository, catalog, scope,
-            deadline=deadline, cancelled=cancelled,
+        open_graph=lambda scope: _opened_code_or_active(
+            SharedEvidenceGraph, catalog, scope, deadline, cancelled
         ),
     )
 

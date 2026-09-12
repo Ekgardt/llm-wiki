@@ -3789,6 +3789,85 @@ class EvidenceGraph:
                 return outcome
         raise PermissionError("active Evidence Graph changed while opening")
 
+    @classmethod
+    def open_code_for_repository(
+        cls,
+        catalog: object,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> EvidenceGraph | None:
+        """Open the registered code generation of this repository, if it has one.
+
+        A code generation is registered and never activated, so the active
+        pointer cannot name it — and on the vault the pointer names the memory
+        generation of the very same checkout. Every other gate is the one
+        `open_active_for_repository` uses: the manifest must still match its
+        catalog row, the scope must be the same repository, and the seal is
+        re-checked after the open. Decision:
+        `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+        """
+        _check_build_stop(deadline, cancelled, time.monotonic)
+        expected_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+        options = _stop_options(deadline, cancelled)
+        _identifier, manifest = catalog.code_generation_for_repository(
+            expected_scope, **options
+        )
+        resolved = _resolved_repository_manifest(manifest)
+        if resolved is None:
+            return None
+        return cls._opened_code_generation(
+            catalog, *resolved, expected_scope, options, deadline, cancelled
+        )
+
+    @classmethod
+    def _opened_code_generation(
+        cls,
+        catalog: object,
+        manifest: dict,
+        schema: GraphSchema,
+        expected_scope: RepositoryScope,
+        options: dict,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> EvidenceGraph | None:
+        graph = None
+        try:
+            admitted = cls._admitted_generation(catalog, manifest, expected_scope, options)
+            if admitted is None:
+                return None
+            validated, seal, generation_scope = admitted
+            if not _names_evidence_artifact(validated):
+                return None
+            graph = cls._generation_graph(
+                catalog, manifest["generation_id"], schema, deadline, cancelled
+            )
+            graph.repository_scope = generation_scope
+            return cls._settled_code_open(catalog, manifest, seal, deadline, cancelled, graph)
+        except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
+            if graph is not None:
+                graph.close()
+            return None
+
+    @staticmethod
+    def _settled_code_open(
+        catalog: object,
+        manifest: dict,
+        seal: object,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+        graph: EvidenceGraph,
+    ) -> EvidenceGraph | None:
+        """The seal must still hold; a registered generation has no pointer to re-read."""
+        generation_path = catalog.generations_path / manifest["generation_id"]
+        if catalog._deadline_seal_unchanged(  # noqa: SLF001
+            generation_path, seal, deadline, cancelled=cancelled
+        ):
+            return graph
+        graph.close()
+        return None
+
     @staticmethod
     def _admitted_generation(
         catalog: object,

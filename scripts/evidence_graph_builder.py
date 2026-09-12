@@ -570,6 +570,7 @@ def _build_manifest(
     search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
     code_capture: corpus_snapshot.CodeCaptureContract | None = None,
+    code_roots: tuple[str, ...] = (),
     vectors: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
     if graph_schema is evidence_graph.GraphSchema.V3 and code_capture is None:
@@ -598,7 +599,9 @@ def _build_manifest(
         "vector_state": "absent",
     }
     manifest.update(
-        _optional_manifest_fields(parent_generation_id, repository_scope, code_capture)
+        _optional_manifest_fields(
+            parent_generation_id, repository_scope, code_capture, code_roots
+        )
     )
     manifest.update(_vector_manifest_fields(vectors))
     return manifest
@@ -672,10 +675,24 @@ def _optional_artifacts(
     return optional
 
 
+def _code_roots_field(code_roots: tuple[str, ...]) -> dict[str, object]:
+    """A generation that holds code says which roots it holds.
+
+    The vault is a repository too since 2026-09-12, so one checkout can carry a
+    memory generation and a code generation at once, and a reader asking for
+    code must be able to tell them apart without opening either. Absent on a
+    memory generation, which is what "holds memory only" means.
+    """
+    if not code_roots:
+        return {}
+    return {"code_roots": list(code_roots)}
+
+
 def _optional_manifest_fields(
     parent_generation_id: str | None,
     repository_scope: RepositoryScope | None,
     code_capture: corpus_snapshot.CodeCaptureContract | None,
+    code_roots: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The fields a manifest carries only when the build actually has them."""
     fields: dict[str, object] = {}
@@ -684,6 +701,7 @@ def _optional_manifest_fields(
     if repository_scope:
         fields["repository_scope"] = repository_scope.as_dict()
     fields.update(_code_capture_field(code_capture))
+    fields.update(_code_roots_field(code_roots))
     return fields
 
 
@@ -1024,6 +1042,7 @@ def build_full_generation(
             graph_schema=graph_schema,
             snapshot=snapshot,
             code_capture=code_capture,
+            code_roots=_policy_code_roots(policy),
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1197,6 +1216,14 @@ def _manifest_versions(snapshot: corpus_snapshot.CorpusSnapshot | None):
     )
 
 
+def _policy_code_roots(policy: Mapping[str, object] | None) -> tuple[str, ...]:
+    """The code roots the corpus policy named, or none for a memory-only corpus."""
+    if not policy:
+        return ()
+    roots = policy.get("code_roots") or ()
+    return tuple(str(name) for name in roots)
+
+
 def _write_generation_manifests(
     generation_path: Path,
     database_path: Path,
@@ -1216,6 +1243,7 @@ def _write_generation_manifests(
     graph_schema: evidence_graph.GraphSchema,
     snapshot: corpus_snapshot.CorpusSnapshot | None,
     code_capture: corpus_snapshot.CodeCaptureContract | None,
+    code_roots: tuple[str, ...],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> Mapping[str, object]:
@@ -1259,6 +1287,7 @@ def _write_generation_manifests(
         search_artifact=search_artifact,
         incremental_manifest_bytes=incremental_manifest_bytes,
         code_capture=code_capture,
+        code_roots=code_roots,
         vectors=vectors,
     )
     _write_canonical_file(
