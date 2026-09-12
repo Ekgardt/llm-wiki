@@ -3207,6 +3207,16 @@ def _stored_chunks_match(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
+    """Every row, when the rows are being checked; the count alone otherwise.
+
+    Walking 3 405 rows to check their order and their uniqueness costs 0.38 s of
+    a cold answer and proves a property of a file whose digest the caller has
+    already verified. It belongs with the re-derivation it was written beside:
+    publication, registration and `doctor` ask for it, a read does not
+    (`docs/research/2026-09-12-a-reader-checks-the-digest-a-writer-derives.md`).
+    """
+    if expected_chunks is None:
+        return True
     seen: set[str] = set()
     for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)

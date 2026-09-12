@@ -62,9 +62,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   vault 2.22 s → 1.71 s, and 4.9 s → 1.71 s across the evening. The graph warm-up
   added earlier the same day is deleted: it moved the cost rather than removing
   it, which is what the owner called it. What remains of the 1.71 s is measured
-  and named — 0.68 s of SQL, 0.55 s in two other hashers, 0.38 s walking the index
-  rows — in
-  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`.
+  and named in
+  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`, and
+  two of its three parts were the same waste elsewhere: the format receipt hashed
+  241 MB to key a verdict it already had, and the index check walked all 3 405
+  rows on a read that already has the digest. Both fixed, cold open **1.23 s** —
+  4.9 s this morning. What remains is the seal's own read after the open, which is
+  the fence itself and stays.
 - **A reader checks the digest, a writer derives.** A cold code answer on the
   installed vault re-derived all 3 405 chunks of the search index before
   answering — 1.68 s of it spent inferring the language of each chunk — to prove

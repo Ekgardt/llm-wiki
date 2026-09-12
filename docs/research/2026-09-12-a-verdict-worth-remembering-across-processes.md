@@ -79,6 +79,27 @@ its gates are "a brake against drift and not a control against intent". The
 manifest equality against the catalog row, the seal re-check after the open, and
 the deep re-derivation at publication and in `doctor` are untouched.
 
+## Two more places, the same rule
+
+After the first measurement the remaining 1.71 s was profiled again, and two of
+its three parts were the same waste in other modules:
+
+- `evidence_graph._require_validated_format` hashed 241 MB (0.32 s) **only to key
+  the format receipt it already had** — the receipt is keyed by digest, and the
+  catalog had just verified that digest for those exact bytes. It now fetches the
+  remembered digest and hashes only when the stat moved.
+- `search_memory._stored_chunks_match` walked all 3 405 index rows (0.38 s plus
+  SQL) to check their order and uniqueness even when no re-derivation was asked
+  for. That check belongs with the re-derivation it was written beside, and the
+  read path already has the digest.
+
+Measured after both: **1.23 s** cold, from 4.9 s this morning.
+
+What is left is the seal's own read: `_require_sealed_content` hashes the held
+descriptors (0.4 s) to prove the bytes right now, after the open. That is the
+fence itself rather than a repeat of it, so it stays, and it is the honest floor
+for a cold open.
+
 ## Bounds
 
 One cache file per state root; at most 512 remembered entries, oldest evicted;

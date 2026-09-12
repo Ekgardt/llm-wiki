@@ -105,3 +105,57 @@ def test_the_cache_keeps_a_bounded_number_of_entries(tmp_path):
     reopened = verified_artifacts.VerifiedArtifacts(tmp_path)
 
     assert len(reopened.entries) == verified_artifacts.MAX_ENTRIES
+
+
+def test_the_format_receipt_key_comes_from_the_remembered_digest(tmp_path):
+    """0.32 s of a cold answer was hashing 241 MB to look up a stored verdict."""
+    import evidence_graph
+
+    generation = tmp_path / "cache/evidence-graph/generations/generation-7"
+    generation.mkdir(parents=True)
+    database = generation / "evidence.sqlite3"
+    database.write_bytes(b"payload")
+    cache = verified_artifacts.VerifiedArtifacts(tmp_path)
+    cache.remember("generation-7", "evidence.sqlite3", _aged(database, 60), "known")
+    cache.save()
+
+    remembered = evidence_graph._remembered_artifact_digest(  # noqa: SLF001
+        verified_artifacts.VerifiedArtifacts(tmp_path), database
+    )
+
+    assert remembered == "known"
+
+
+def test_a_moved_artifact_has_no_remembered_digest(tmp_path):
+    import evidence_graph
+
+    generation = tmp_path / "cache/evidence-graph/generations/generation-7"
+    generation.mkdir(parents=True)
+    database = generation / "evidence.sqlite3"
+    database.write_bytes(b"payload")
+    cache = verified_artifacts.VerifiedArtifacts(tmp_path)
+    cache.remember("generation-7", "evidence.sqlite3", _aged(database, 60), "known")
+    cache.save()
+    database.write_bytes(b"payload changed")
+
+    remembered = evidence_graph._remembered_artifact_digest(  # noqa: SLF001
+        verified_artifacts.VerifiedArtifacts(tmp_path), database
+    )
+
+    assert remembered is None
+
+
+def test_a_shallow_index_check_does_not_walk_every_row():
+    """The rows belong to the deep check; a read has the digest."""
+    import search_memory
+
+    class _Refuses:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("a read must not walk the index rows")
+
+    assert (
+        search_memory._stored_chunks_match(  # noqa: SLF001
+            _Refuses(), None, count=3, deadline=None, cancelled=None
+        )
+        is True
+    )

@@ -3593,6 +3593,15 @@ def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
     return " WHERE reason=?", (reason,)
 
 
+def _remembered_artifact_digest(cache, database_path: Path) -> str | None:
+    """The digest the catalog verified for this exact file, or None."""
+    try:
+        metadata = database_path.stat()
+    except OSError:
+        return None
+    return cache.remembered(database_path.parent.name, database_path.name, metadata)
+
+
 class EvidenceGraph:
     """Read-only facade over one catalog-selected immutable graph generation."""
 
@@ -3648,6 +3657,27 @@ class EvidenceGraph:
         receipt = _format_receipt_path(self.database_path.parent)
         return receipt if _receipt_inside_root(receipt, self.state_root) else None
 
+    def _artifact_digest(
+        self, deadline: float | None, cancelled: Callable[[], bool] | None
+    ) -> str:
+        """The artifact's digest, remembered by stat identity when it can be.
+
+        The receipt below is keyed by the digest, and computing that digest read
+        241 MB on this vault — 0.32 s of a cold answer — to look up a verdict the
+        catalog had already stored for the very same bytes. The catalog remembers
+        each artifact's verified digest against its device, inode, size and mtime
+        (2026-09-12), so the key is fetched rather than recomputed, and a file
+        whose stat moved is hashed exactly as before.
+        """
+        from verified_artifacts import VerifiedArtifacts
+
+        remembered = _remembered_artifact_digest(
+            VerifiedArtifacts(self.state_root), self.database_path
+        )
+        if remembered is not None:
+            return remembered
+        return _hashed_database_bytes(self.database_path, deadline, cancelled)
+
     def _require_validated_format(
         self,
         database: sqlite3.Connection,
@@ -3667,7 +3697,7 @@ class EvidenceGraph:
         edited artifact is still fully validated and refused.
         """
         receipt = self._format_receipt_location()
-        digest = _hashed_database_bytes(self.database_path, deadline, cancelled)
+        digest = self._artifact_digest(deadline, cancelled)
         if _artifact_format_known(digest, self.schema, receipt):
             return
         _validate_connection(
