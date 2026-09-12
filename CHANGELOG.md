@@ -51,6 +51,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Sixteen of sixteen, against fifteen.** After the two defect fixes and the
+  three changes the owner approved on 2026-09-12, three runs of the parity set
+  give our two surfaces 16 correct answers of 16 against codebase-memory-mcp's
+  15, with zero confident-wrong answers against their one and no non-answers on
+  either side; every grade repeated exactly across the three runs. The
+  cross-service route question is ours too: correct in 0.6 s against their
+  partial in 2.0 s. Cost is the one condition of the decision rule still unmet
+  on the default surface — tokens 1.57× and p95 2.74× against ceilings of 1.5×
+  and 2× — while the `query` surface passes all four at 1.18× and 1.36×. The
+  other tool stays installed until the default surface passes too, and what the
+  remaining gap is made of is measured in
+  `docs/research/2026-09-12-sixteen-of-sixteen.md`: two `find_dead_code` calls at
+  11 s carry the whole p95, and a quarter of the largest answer is one absolute
+  path prefix repeated 110 times.
+
 - **The parity numbers exist, and they say keep the other tool.** Three runs of
   the sixteen-task set and three of the cross-service pair, llm-wiki against
   codebase-memory-mcp, both sides indexing the same checkout, graded by a rule
