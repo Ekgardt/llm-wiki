@@ -62,11 +62,15 @@ delete the warm-up.**
 - It lives under `cache/`, which the contract already calls disposable and
   regenerable; deleting it costs one slow open per generation.
 
-By rule 4 this removes the work instead of moving it: every process opens in
-~0.3 s — the CLI path and the benchmark's fresh-process-per-call shape
-included — and the warm-up thread, 1.71 s of CPU at every server start and wasted
-whenever the session asks nothing about code, is deleted rather than left as
-decoration.
+By rule 4 this removes the work instead of moving it, for every process — the CLI
+path and the benchmark's fresh-process-per-call shape included — and the warm-up
+thread, 1.71 s of CPU at every server start and wasted whenever the session asks
+nothing about code, is deleted rather than left as decoration.
+
+What this section first predicted — "every process opens in ~0.3 s" — was wrong,
+and the measurements below say so: hashing the manifest's artifacts was one of
+four costs, not all of it. The first step took the cold open from 2.22 s to
+1.71 s; the two that follow took it to 1.23 s.
 
 ## What is given up, stated plainly
 
