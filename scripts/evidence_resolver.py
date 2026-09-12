@@ -933,6 +933,15 @@ MAX_DAILY_PART_BYTES = 16 * 1024
 # What separates one captured entry from the next in a daily log.
 _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
 
+# The other kind of entry. The transactional appender writes its marker; the
+# capture path writes a `## [HH:MM:SS] …` block and no marker at all. Measured
+# on `knowledge/daily/2026-09-11.md` (2026-09-12): one marker, five blocks, and
+# the slice two claims recorded ended at a block start — so it was never a
+# candidate and those claims read `evidence_unresolved` for a boundary the file
+# still has. Research:
+# `docs/research/2026-09-12-a-daily-grows-by-two-kinds-of-entry.md`.
+_DAILY_BLOCK_MARKER = b"\n## "
+
 # A day is bounded, but the scan for a historical slice must be bounded too.
 MAX_EVIDENCE_SLICE_CANDIDATES = 4096
 
@@ -983,6 +992,22 @@ def _entry_ends(content: bytes, offset: int) -> range:
     return range(cursor, offset + 1)
 
 
+def _slice_offsets(content: bytes) -> list[int]:
+    """Every place an entry begins, of either kind.
+
+    Deliberately not `_daily_entry_offsets`: that one defines how a day is
+    split for compilation (`_daily_part_bounds`), and that split must keep
+    meaning what it meant. This one only widens the search for a slice that
+    already exists.
+    """
+    offsets = set(_daily_entry_offsets(content))
+    position = content.find(_DAILY_BLOCK_MARKER)
+    while position != -1:
+        offsets.add(position + 1)
+        position = content.find(_DAILY_BLOCK_MARKER, position + 1)
+    return sorted(offsets)
+
+
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
     """Where a historical slice beginning at `start` could have ended.
 
@@ -994,7 +1019,7 @@ def _slice_boundaries(content: bytes, start: int) -> list[int]:
     candidate to the next and needs them ascending.
     """
     ends: set[int] = set()
-    for offset in _daily_entry_offsets(content):
+    for offset in _slice_offsets(content):
         if offset > start:
             ends.update(end for end in _entry_ends(content, offset) if end > start)
     return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
