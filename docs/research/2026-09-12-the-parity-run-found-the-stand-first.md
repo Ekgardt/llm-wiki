@@ -48,12 +48,27 @@ between them.
 **Two. The v2 gold described a tree from 2026-08-28.** Eight of sixteen tasks
 cited line numbers that resolve to nothing: `scripts/retrieval.py:1378 (def
 fuse_rrf)` when `fuse_rrf` is at 1568 — and it was at 1568 in the very commit
-that claims to have read it. Five tasks graded on a line number as a *required
-term* (`"2845"`, `"1221"`, `"2765"`, `"1137"`, `"3007"`), so every side would
-have graded `wrong` on those tasks whatever it answered, and the totals would
-have looked like a product failure. One task, T07, asked whether
-`_search_backends` is dead code; the H1 deletion had removed that function from
-the tree, so the question measured nothing.
+that claims to have read it.
+
+Correction to my own first reading of this, made before I read the grader:
+`_found` treats a nested list as **alternatives**, not as a conjunction, so
+`["_fused_candidates", "2845"]` is satisfied by naming the function alone and a
+stale line number inside a pair costs nothing. Five tasks were *not* made
+ungradeable, as I first wrote. Two were:
+
+- **T04** grades on `["retrieval.py", "2765"]` — two separate entries, both
+  required — and `_page_diverse` is at 3030, so no correct answer could earn
+  the second.
+- **T10** requires `["retrieve", "3007"]` as one of two entries, and `retrieve`
+  is not a caller of `_fused_candidates` in this tree at all; the callers are
+  `_partial_candidates` and `_executed_plan`. An honest answer could not match
+  it.
+
+One more task, T07, asked whether `_search_backends` is dead code; the H1
+deletion had removed that function from the tree, so the question measured
+nothing. The rest is an evidence defect rather than a grading one: every
+citation is the gold's proof, and a proof that points at the wrong line is not
+a proof.
 
 **Three. The collector refuses this repository by its own bound.** Indexing
 `/home/user/llm-wiki-tasks` with default roots is refused with *duplicate corpus

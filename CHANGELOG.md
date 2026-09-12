@@ -23,9 +23,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
   that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when
   `fuse_rrf` sat at 1568 in the very commit whose message says the gold was read
-  by hand from the working tree — and five of them carried a line number as a
-  *required* term, so every side would have graded `wrong` on those tasks
-  whatever it answered. The two-hop task named `retrieve` as the only
+  by hand from the working tree. A nested `must` entry is alternatives, not a
+  conjunction, so most of those stale numbers cost no grade; two tasks were
+  genuinely unsatisfiable — T04 requires the line `_page_diverse` no longer
+  occupies as a separate term, and T10 requires a caller this tree does not
+  have. The two-hop task named `retrieve` as the only
   second-hop caller of `_fused_candidates`; the callers are
   `_partial_candidates` and `_executed_plan`. T07 asked whether
   `_search_backends` is dead code after the H1 deletion had removed it from the
