@@ -82,14 +82,21 @@ def _require_success(completed, build: SourceBuild) -> None:
 def _require_binary(staging: Path, build: SourceBuild) -> Path:
     binary = staging / build.binary_relative
     if not binary.is_file():
-        raise SourceBuildError(f"the build wrote no {build.binary_relative}")
+        raise SourceBuildError(f"the build wrote no {build.binary_relative.as_posix()}")
     return binary
 
 
 def _require_toolchain(staging: Path, build: SourceBuild) -> Path:
+    """The compiler the archive was supposed to contain.
+
+    Relative paths are reported as POSIX text so one message reads the same on
+    every platform, the way `install_manifest` records `server_relative_path`.
+    """
     toolchain = staging / build.toolchain_relative
     if not toolchain.is_file():
-        raise SourceBuildError(f"the unpacked archive holds no {build.toolchain_relative}")
+        raise SourceBuildError(
+            f"the unpacked archive holds no {build.toolchain_relative.as_posix()}"
+        )
     return toolchain
 
 

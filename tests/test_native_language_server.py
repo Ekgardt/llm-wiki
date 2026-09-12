@@ -108,10 +108,12 @@ def test_a_build_that_writes_nothing_is_a_failure_not_an_install(tmp_path):
 
 
 def test_a_source_build_refuses_an_unusable_declaration():
+    """`Path("/x")` is absolute on POSIX and drive-relative on Windows, so the
+    escaping path is written with `..`, which is refused on both."""
     with pytest.raises(ProfileError):
         _build(timeout_seconds=0)
     with pytest.raises(ProfileError):
-        _build(binary_relative=Path("/absolute/gopls"))
+        _build(binary_relative=Path("../escape/gopls"))
 
 
 def test_the_launch_may_verify_the_program_but_never_substitute_one(tmp_path):
