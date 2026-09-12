@@ -955,6 +955,24 @@ def test_inference_and_offline_policy_is_bound_to_every_model():
         assert all(variant["precision"] == "float32" for variant in model["variants"])
 
 
+_MRL_MODELS = frozenset({"Qwen/Qwen3-Embedding-0.6B", "google/embeddinggemma-300m"})
+
+
+def _expected_mrl(model_id: str, variant: dict) -> dict:
+    """Only the two Matryoshka models truncate, and they renormalize when they do."""
+    if model_id not in _MRL_MODELS:
+        return {
+            "enabled": False,
+            "renormalize_after_truncation": False,
+            "truncate_to_dimensions": None,
+        }
+    return {
+        "enabled": True,
+        "renormalize_after_truncation": True,
+        "truncate_to_dimensions": variant["dimensions"],
+    }
+
+
 def test_embedding_inference_and_mrl_contracts_are_exact():
     embeddings = {model["id"]: model for model in _load()["embeddings"]}
     assert embeddings["intfloat/multilingual-e5-large-instruct"]["inference"] == {
@@ -980,19 +998,7 @@ def test_embedding_inference_and_mrl_contracts_are_exact():
     }
     for model in embeddings.values():
         for variant in model["variants"]:
-            mrl = variant["mrl"]
-            if model["id"] in {"Qwen/Qwen3-Embedding-0.6B", "google/embeddinggemma-300m"}:
-                assert mrl == {
-                    "enabled": True,
-                    "renormalize_after_truncation": True,
-                    "truncate_to_dimensions": variant["dimensions"],
-                }
-            else:
-                assert mrl == {
-                    "enabled": False,
-                    "renormalize_after_truncation": False,
-                    "truncate_to_dimensions": None,
-                }
+            assert variant["mrl"] == _expected_mrl(model["id"], variant)
 
 
 def test_reranker_formatting_contracts_are_complete_and_reproducible():

@@ -543,13 +543,19 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
         validate_schema(report, FULL_REPORT_SCHEMA)
 
 
+def _full_matrix_cells() -> list:
+    """One cell per adapter, corpus size and selectivity fraction."""
+    return [
+        _fake_full_cell(adapter, size, fraction)
+        for size in CORPUS_SIZES
+        for fraction in SELECTIVITY
+        for adapter in ADAPTER_IDS
+    ]
+
+
 def test_full_atomic_report_rejects_duplicate_matrix_cells(tmp_path) -> None:
     runner = _runner()
-    cells = []
-    for size in CORPUS_SIZES:
-        for fraction in SELECTIVITY:
-            for adapter in ADAPTER_IDS:
-                cells.append(_fake_full_cell(adapter, size, fraction))
+    cells = _full_matrix_cells()
     cells[-1] = json.loads(json.dumps(cells[0]))
     report = runner.build_report(
         mode="full",
@@ -576,6 +582,36 @@ def test_smoke_atomic_report_rejects_duplicate_adapter_cells(tmp_path) -> None:
     with pytest.raises(ValueError, match="smoke matrix cells"):
         runner.write_report_atomic(report, tmp_path / "smoke.json", mode="smoke")
     assert not (tmp_path / "smoke.json").exists()
+
+
+_JITTERY_METRICS = (
+    "rss_bytes",
+    "disk_bytes",
+    "startup_ms",
+    "build_ms",
+    "update_ms",
+    "delete_ms",
+    "concurrent_reader_p95_ms",
+    "batch_throughput_qps",
+    "latency_ms",
+)
+
+_FLAT_LATENCY_PROFILE = {
+    "cold": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
+    "warm": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
+}
+
+
+def _normalize_jittery_cell(cell: dict) -> None:
+    """Drop the wall-clock fields that jitter between two identical runs."""
+    metrics = cell.get("metrics", {})
+    for name in _JITTERY_METRICS:
+        metrics.pop(name, None)
+    # Adoption reasons include the measured p95 values normalized above.
+    cell.pop("adoption", None)
+    if "latency_profiles" not in cell:
+        return
+    cell["latency_profiles"] = json.loads(json.dumps(_FLAT_LATENCY_PROFILE))
 
 
 def test_cli_smoke_json_is_deterministic(tmp_path) -> None:
@@ -613,22 +649,7 @@ def test_cli_smoke_json_is_deterministic(tmp_path) -> None:
     for report in (a, b):
         report.pop("generated_at", None)
         for cell in report.get("cells", []):
-            cell.get("metrics", {}).pop("rss_bytes", None)
-            cell.get("metrics", {}).pop("disk_bytes", None)
-            cell.get("metrics", {}).pop("startup_ms", None)
-            cell.get("metrics", {}).pop("build_ms", None)
-            cell.get("metrics", {}).pop("update_ms", None)
-            cell.get("metrics", {}).pop("delete_ms", None)
-            cell.get("metrics", {}).pop("concurrent_reader_p95_ms", None)
-            cell.get("metrics", {}).pop("batch_throughput_qps", None)
-            cell.get("metrics", {}).pop("latency_ms", None)
-            # Adoption reasons include the measured p95 values normalized above.
-            cell.pop("adoption", None)
-            if "latency_profiles" in cell:
-                cell["latency_profiles"] = {
-                    "cold": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
-                    "warm": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
-                }
+            _normalize_jittery_cell(cell)
     assert a == b
 
 

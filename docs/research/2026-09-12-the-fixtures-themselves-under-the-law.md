@@ -46,10 +46,19 @@ Behaviour unchanged, proven by the same tests passing before and after.
   `main` splits into the probe, the one transient failure, and the success
   payload; its bytes on stdout are unchanged.
 
-The managed gate checks a second thing lizard does not: more than two `if`
-statements at one level. Every helper written here was re-measured with
-`structure_check.py` and split until none has three.
+The gate checks three things lizard does not: more than two `if` statements
+at one level, `if`/`for`/`while` nesting over two, and branching hidden
+inside a conditional expression. Every helper written here was re-measured
+and split until it passes, and the five older places that failed those
+checks were fixed with it: two ternaries carrying an `or`
+(`tests/test_code_navigation.py`, `tests/test_code_navigation_benchmark.py`),
+the triple loop and the jittery-field normalization in
+`tests/test_scale_matrix.py`, and the MRL expectation in
+`tests/test_model_policy.py`. `ccn_gate.py` now passes on every Python file
+in `tests/`, `scripts/`, `benchmark/` and `integrations/`.
 
 Files: `tests/fake_lsp_server.py`, `tests/test_runtime_deletion_contract.py`,
 `tests/test_pyright_profile.py`, `tests/test_code_navigation_benchmark.py`,
+`tests/test_code_navigation.py`, `tests/test_model_policy.py`,
+`tests/test_scale_matrix.py`,
 `benchmark/fixtures/comparative_adapter_fixture.py`, `CHANGELOG.md`.

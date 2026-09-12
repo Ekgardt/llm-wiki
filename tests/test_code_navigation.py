@@ -1912,7 +1912,9 @@ def test_query_source_hash_is_checked_before_utf8_decode(
     def open_document(path: str, *, deadline: float) -> OpenDocument:
         nonlocal open_calls
         open_calls += 1
-        return invalid if open_calls == 1 or mutate_every_attempt else clean
+        if open_calls == 1 or mutate_every_attempt:
+            return invalid
+        return clean
 
     def definition(anchor: SourceAnchor, *, deadline: float) -> ProviderLocations:
         nonlocal provider_calls

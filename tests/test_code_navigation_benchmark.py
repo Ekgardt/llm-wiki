@@ -2711,6 +2711,12 @@ def _result_with_locations(
     )
 
 
+def _partial_or_ok(partial: bool) -> NavigationStatus:
+    if partial:
+        return NavigationStatus.PARTIAL
+    return NavigationStatus.OK
+
+
 @pytest.mark.parametrize("partial_absence_call", [4, 5], ids=["rename-old", "delete"])
 def test_partial_empty_mutation_absence_is_stale_but_positive_partial_is_valid(
     tmp_path: Path,
@@ -2753,11 +2759,8 @@ def test_partial_empty_mutation_absence_is_stale_but_positive_partial_is_valid(
                         (Provenance("lsp", "pyright", PYRIGHT_VERSION, "provider_reported"),),
                     ),
                 )
-            status = (
-                NavigationStatus.PARTIAL
-                if locations or self.calls == partial_absence_call
-                else NavigationStatus.OK
-            )
+            partial = bool(locations) or self.calls == partial_absence_call
+            status = _partial_or_ok(partial)
             return _result_with_locations(request, status, locations)
 
     errors: list[dict[str, str]] = []
