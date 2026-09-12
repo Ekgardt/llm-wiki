@@ -482,6 +482,7 @@ _INTERNAL_CELL_FIELDS = ("_exact_p95_ms", "adopted", "is_default")
 
 
 def _full_matrix_cells() -> list:
+    """One cell per adapter, corpus size and selectivity fraction."""
     return [
         _fake_full_cell(adapter, size, fraction)
         for size in CORPUS_SIZES
@@ -541,16 +542,6 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
     report["executed_corpus_sizes"] = [1, 2, 3, 4, 5]
     with pytest.raises(SchemaValidationError):
         validate_schema(report, FULL_REPORT_SCHEMA)
-
-
-def _full_matrix_cells() -> list:
-    """One cell per adapter, corpus size and selectivity fraction."""
-    return [
-        _fake_full_cell(adapter, size, fraction)
-        for size in CORPUS_SIZES
-        for fraction in SELECTIVITY
-        for adapter in ADAPTER_IDS
-    ]
 
 
 def test_full_atomic_report_rejects_duplicate_matrix_cells(tmp_path) -> None:
