@@ -142,6 +142,13 @@ def test_closed_roles_use_only_the_approved_lease_timing(
         registry.acquire("backup", scope="global")  # type: ignore[arg-type]
 
 
+def _refusal_code(expired: bool, process_state: str) -> str:
+    """Which refusal an acquire meets when the recorded owner is still there."""
+    if expired and process_state == "unknown":
+        return "owner_liveness_unknown"
+    return "owner_busy"
+
+
 @pytest.mark.parametrize("expired", [False, True], ids=("live-lease", "expired"))
 @pytest.mark.parametrize("process_state", ["alive", "dead", "unknown"])
 def test_takeover_requires_expiry_and_positive_process_death(
@@ -157,15 +164,11 @@ def test_takeover_requires_expiry_and_positive_process_death(
     first = registry.acquire(
         "doctor", scope="global", actor_id="first-actor", token="first-token"
     )
-    _expire(
-        state_root,
-        first,
-        clock.value - timedelta(seconds=1)
-        if expired
-        else clock.value + timedelta(seconds=1),
-    )
+    offset = timedelta(seconds=-1 if expired else 1)
+    _expire(state_root, first, clock.value + offset)
+    takeover_allowed = expired and process_state == "dead"
 
-    if expired and process_state == "dead":
+    if takeover_allowed:
         second = registry.acquire(
             "doctor", scope="global", actor_id="second-actor", token="second-token"
         )
@@ -177,9 +180,10 @@ def test_takeover_requires_expiry_and_positive_process_death(
         registry.acquire(
             "doctor", scope="global", actor_id="second-actor", token="second-token"
         )
-    expected = "owner_liveness_unknown" if expired and process_state == "unknown" else "owner_busy"
-    assert error.value.code == expected
-    assert _owner_count(state_root) == 1
+    assert (error.value.code, _owner_count(state_root)) == (
+        _refusal_code(expired, process_state),
+        1,
+    )
 
 
 @pytest.mark.parametrize(

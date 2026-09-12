@@ -71,6 +71,60 @@ def test_legacy_cli_starts_without_site_packages(arguments):
     assert "No module named 'yaml'" not in result.stderr
 
 
+
+def _live_only_entries(entries: list) -> list:
+    """Entries the snapshot must not carry: the live-only page is not a source."""
+    return [
+        entry["source"]["logical_id"]
+        for entry in entries
+        if "live-only" in entry["source"]["logical_id"]
+    ]
+
+
+def _entry_paths_and_digests(entries: list) -> set:
+    return {
+        (entry["source"]["relative_path"], entry["source"]["sha256"])
+        for entry in entries
+    }
+
+
+def _entry_identities(entries: list) -> set:
+    return {
+        (
+            entry["source"]["logical_id"],
+            entry["source"]["size"],
+            entry["source"]["git_oid"],
+        )
+        for entry in entries
+    }
+
+
+def _snapshot_identities(snapshot) -> set:
+    return {
+        (source.record.logical_id, source.record.size, source.record.git_oid)
+        for source in snapshot.sources
+    }
+
+
+def _descriptor_facts(root: Path, descriptors: list) -> set:
+    """Each written artifact by its own size and digest on disk."""
+    return {
+        (
+            descriptor["path"],
+            (root / descriptor["path"]).stat().st_size,
+            hashlib.sha256((root / descriptor["path"]).read_bytes()).hexdigest(),
+        )
+        for descriptor in descriptors
+    }
+
+
+def _declared_facts(descriptors: list) -> set:
+    return {
+        (descriptor["path"], descriptor["size"], descriptor["sha256"])
+        for descriptor in descriptors
+    }
+
+
 class TestL0:
     """Test L0 (one-sentence summary) extraction."""
 
@@ -470,37 +524,14 @@ class TestCapturedTierBatch:
             "source:knowledge/notes/concept/same.md",
             "source:knowledge/notes/pattern/same.md",
         }
-        assert all(
-            "live-only" not in entry["source"]["logical_id"] for entry in entries
-        )
-        assert {
-            (entry["source"]["relative_path"], entry["source"]["sha256"])
-            for entry in entries
-        } == set(snapshot.source_hashes)
-        assert {
-            (
-                entry["source"]["logical_id"],
-                entry["source"]["size"],
-                entry["source"]["git_oid"],
-            )
-            for entry in entries
-        } == {
-            (source.record.logical_id, source.record.size, source.record.git_oid)
-            for source in snapshot.sources
-        }
+        assert _live_only_entries(entries) == []
+        assert _entry_paths_and_digests(entries) == set(snapshot.source_hashes)
+        assert _entry_identities(entries) == _snapshot_identities(snapshot)
         assert {entry["tiers"]["l2"] for entry in entries} == {
             "---\ntype: concept\n---\n# One\n\nFirst body.\n",
             "---\ntype: pattern\n---\n# Two\n\nSecond body.\n",
         }
-        assert all(
-            (first / descriptor["path"]).stat().st_size == descriptor["size"]
-            for descriptor in descriptors
-        )
-        assert all(
-            hashlib.sha256((first / descriptor["path"]).read_bytes()).hexdigest()
-            == descriptor["sha256"]
-            for descriptor in descriptors
-        )
+        assert _descriptor_facts(first, descriptors) == _declared_facts(descriptors)
         assert (first / "tiers/tiers.json").read_bytes() == (
             second / "tiers/tiers.json"
         ).read_bytes()

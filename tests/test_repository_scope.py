@@ -44,13 +44,22 @@ LOCAL_GIT_ENVIRONMENT = {
 }
 
 
+_GIT_CONFIG_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+
+
+def _is_inherited_git_variable(name: str) -> bool:
+    """Whether a variable of the calling shell must not reach the test's git."""
+    if name in LOCAL_GIT_ENVIRONMENT or name == "GIT_TEMPLATE_DIR":
+        return True
+    return name.startswith(_GIT_CONFIG_PREFIXES)
+
+
 def _git(*args: str, cwd: Path) -> None:
-    environment = os.environ.copy()
-    for name in tuple(environment):
-        if name in LOCAL_GIT_ENVIRONMENT or name == "GIT_TEMPLATE_DIR" or name.startswith(
-            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
-        ):
-            environment.pop(name)
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not _is_inherited_git_variable(name)
+    }
     isolation = cwd / ".git-test-isolation"
     hooks = isolation / "hooks"
     template = isolation / "template"

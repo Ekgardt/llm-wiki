@@ -103,6 +103,36 @@ def _journal_with_events(count: int, *, empty: bool = False):
     )
 
 
+def _mismatched_spans(content: bytes, evidence) -> list:
+    """Evidence whose recorded digest is not the digest of the bytes it cites."""
+    return [
+        row["evidence_id"]
+        for row in evidence
+        if hashlib.sha256(content[row["byte_start"] : row["byte_end"]]).hexdigest()
+        != row["span_sha256"]
+    ]
+
+
+def _event_edge_ids(result) -> set:
+    return {
+        row["assertion_id"]
+        for row in result.assertions
+        if row["edge_type"] == "CHECKPOINT_EVIDENCED_BY_EVENT"
+    }
+
+
+def _early_event_evidence(content: bytes, result) -> list:
+    """Event evidence that cites bytes before the field it is supposed to quote."""
+    marker = content.index(b'"evidence_event_ids"')
+    edges = _event_edge_ids(result)
+    return [
+        row["evidence_id"]
+        for row in result.evidence
+        if row["assertion_id"] in edges
+        if row["byte_start"] <= marker
+    ]
+
+
 def test_projects_journal_edges_without_mutating_authoritative_bytes():
     from project_extractor import extract_projects
 
@@ -127,21 +157,8 @@ def test_projects_journal_edges_without_mutating_authoritative_bytes():
         "CHECKPOINT_HAS_BLOCKER",
         "CHECKPOINT_EVIDENCED_BY_EVENT",
     }
-    for evidence in result.evidence:
-        span = before[evidence["byte_start"] : evidence["byte_end"]]
-        assert span
-        assert hashlib.sha256(span).hexdigest() == evidence["span_sha256"]
-    evidence_event_edges = {
-        row["assertion_id"]
-        for row in result.assertions
-        if row["edge_type"] == "CHECKPOINT_EVIDENCED_BY_EVENT"
-    }
-    evidence_marker = before.index(b'"evidence_event_ids"')
-    assert all(
-        row["byte_start"] > evidence_marker
-        for row in result.evidence
-        if row["assertion_id"] in evidence_event_edges
-    )
+    assert _mismatched_spans(before, result.evidence) == []
+    assert _early_event_evidence(before, result) == []
 
 
 def test_public_journal_parser_is_read_only_validated_and_deterministic():

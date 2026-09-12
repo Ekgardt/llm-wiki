@@ -333,6 +333,26 @@ class TestBuildAll:
         assert list(context_dir.iterdir()) == []
 
 
+def _descriptor_fields(descriptors: list) -> set:
+    return {frozenset(item) for item in descriptors}
+
+
+def _context_payloads(generation, descriptors: list) -> list:
+    return [json.loads((generation / item["path"]).read_bytes()) for item in descriptors]
+
+
+def _payload_identities(payloads: list) -> set:
+    return {item["source"]["logical_id"] for item in payloads}
+
+
+def _payload_keys(payloads: list) -> set:
+    return {item["key"] for item in payloads}
+
+
+def _source_identities(sources) -> set:
+    return {source.record.logical_id for source in sources}
+
+
 class TestSnapshotContexts:
     def test_source_generation_uses_captured_bytes_without_live_reread(self, tmp_path, monkeypatch):
         import contextual_retrieval
@@ -386,14 +406,15 @@ class TestSnapshotContexts:
             _snapshot(*sources), generation, use_llm=False
         )
 
-        assert len(descriptors) == 2
+        payloads = _context_payloads(generation, descriptors)
+        fields = _descriptor_fields(descriptors)
+
+        assert (len(descriptors), fields) == (2, {frozenset({"path", "size", "sha256"})})
         assert descriptors == sorted(descriptors, key=lambda item: item["path"])
-        assert all(set(item) == {"path", "size", "sha256"} for item in descriptors)
-        payloads = [json.loads((generation / item["path"]).read_bytes()) for item in descriptors]
-        assert {item["source"]["logical_id"] for item in payloads} == {
-            source.record.logical_id for source in sources
-        }
-        assert len({item["key"] for item in payloads}) == 2
+        assert (_payload_identities(payloads), len(_payload_keys(payloads))) == (
+            _source_identities(sources),
+            2,
+        )
         assert not (generation / "shared.ctx").exists()
 
     @pytest.mark.parametrize(

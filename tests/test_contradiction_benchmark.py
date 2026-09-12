@@ -14,23 +14,34 @@ CORPUS = ROOT / "benchmark/contradiction-v1.json"
 SCHEMA = ROOT / "benchmark/contradiction-v1.schema.json"
 
 
+_CLAIM_KEYS = ("new_extraction", "expected_new_claim", "existing_claim")
+
+
+def _validity_bounds(corpus: dict) -> list:
+    """Every `from`/`to` of every claim of every case, in one flat list."""
+    return [
+        case[claim_key]["validity"][bound]
+        for case in corpus["cases"]
+        for claim_key in _CLAIM_KEYS
+        for bound in ("from", "to")
+    ]
+
+
+def _category_floor(corpus: dict) -> int:
+    counts = Counter(case["category"] for case in corpus["cases"])
+    return min(counts[name] for name in corpus["categories"])
+
+
 def test_frozen_corpus_is_closed_canonical_and_has_required_coverage():
     raw = CORPUS.read_bytes()
     corpus = json.loads(raw)
     validate_schema(corpus, SCHEMA)
+    negative_controls = sum(case["negative_control"] for case in corpus["cases"])
+
     assert canonical_json_bytes(corpus) + b"\n" == raw
-    interval_values = [
-        interval[bound]
-        for case in corpus["cases"]
-        for claim_key in ("new_extraction", "expected_new_claim", "existing_claim")
-        for interval in (case[claim_key]["validity"],)
-        for bound in ("from", "to")
-    ]
-    assert {type(value) for value in interval_values} == {str, type(None)}
-    assert len(corpus["cases"]) >= 240
-    categories = Counter(case["category"] for case in corpus["cases"])
-    assert all(categories[name] >= 40 for name in corpus["categories"])
-    assert sum(case["negative_control"] for case in corpus["cases"]) >= 200
+    assert {type(value) for value in _validity_bounds(corpus)} == {str, type(None)}
+    assert (len(corpus["cases"]) >= 240, _category_floor(corpus) >= 40) == (True, True)
+    assert negative_controls >= 200
 
 
 def test_frozen_benchmark_meets_every_exact_gate():

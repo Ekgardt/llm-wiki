@@ -69,9 +69,8 @@ class _FakeGraph:
         return rows
 
     def _ends(self, node_id: str, direction: str) -> list[str]:
-        if direction == "out":
-            return [t for s, t in self.calls if s == node_id]
-        return [s for s, t in self.calls if t == node_id]
+        index = 1 if direction == "out" else 0
+        return [edge[index] for edge in self.calls if edge[1 - index] == node_id]
 
     def neighbors(self, node_id, *, direction, edge_types, **_bounds):
         if node_id in self.refuse:
