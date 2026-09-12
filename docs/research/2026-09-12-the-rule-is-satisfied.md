@@ -84,9 +84,20 @@ p95 **2.50×** against the 2× ceiling. It is one answer — the architecture
 summary at 6.6 s and the two-hop walk at ~9.8 s — and the cause is the same cold
 generation validation, paid on a 240 MB generation instead of the worktree's.
 
-So: the rule is satisfied as measured on the worktree, and three of its four
-conditions are satisfied on the installed vault, with the one gap named and
-measured rather than averaged away.
+Then the speed work of
+`docs/research/2026-09-12-a-reader-checks-the-digest-a-writer-derives.md` closed
+the fourth condition on the vault too. Three more runs, same command:
+
+| side | correct (of 16) | tokens | p95 per task | confident-wrong |
+|---|---|---|---|---|
+| `llm_wiki` | 16, 16, 16 | 8 108 | 3.99 / 4.17 / 4.03 s | 0 |
+| `llm_wiki_best` | 16, 16, 16 | 6 196 | 4.68 / 4.64 / 4.73 s | 0 |
+| `cbm` | 15, 15, 15 | 10 638 | 2.57 / 2.61 / 2.55 s | 1 |
+
+Ratios: tokens **0.76×** and p95 **1.58×** against ceilings of 1.5× and 2×.
+**All four conditions are satisfied on the installed vault**, not on a stand-in
+for it: more correct answers, fewer confident-wrong ones, fewer tokens, and a p95
+inside the ceiling.
 
 ## What this measurement is not
 
