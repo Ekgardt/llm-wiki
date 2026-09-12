@@ -5944,6 +5944,49 @@ def _start_encoder_warmup() -> None:
     threading.Thread(target=warmup_retrieval_path, name="encoder-warmup", daemon=True).start()
 
 
+def _warm_graph_lease(deadline_seconds: float):
+    """The validated reader, or None for any reason at all."""
+    try:
+        from code_graph import _active_evidence_graph
+        from memory_state import ROOT
+
+        return _active_evidence_graph(
+            Path(ROOT), deadline=time.monotonic() + deadline_seconds
+        )
+    except BaseException:  # noqa: BLE001 - a warm-up never breaks serving
+        return None
+
+
+def warmup_code_graph(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
+    """Open and cache the vault's code reader before the first question needs it.
+
+    Measured on the installed vault 2026-09-12: the first code answer in a
+    process costs 2.22 s and every later one 0.31 s, because the first pays the
+    generation open — the repository scope, the artifact digests, the seal. This
+    pays it on a daemon thread at start, exactly as `warmup_retrieval_path` pays
+    the encoder's load, so the operator's first question does not.
+
+    Bounds, from
+    `docs/research/2026-09-12-warming-the-graph-before-the-first-question.md`:
+    the vault's own checkout only — never every registered repository, which
+    would hold one reader each — one attempt, its own deadline, and a failure
+    that is swallowed. The lease is returned immediately: what the next caller
+    wants is the cached reader, not a held lock.
+    """
+    lease = _warm_graph_lease(deadline_seconds)
+    if lease is None:
+        return
+    lease.close()
+
+
+def _start_graph_warmup() -> None:
+    """Warm the code graph unless the operator asked for the lazy behaviour."""
+    if os.environ.get("LLMWIKI_NO_GRAPH_WARMUP") == "1":
+        return
+
+    threading.Thread(target=warmup_code_graph, name="graph-warmup", daemon=True).start()
+
+
 def build_server():
     """Build the one MCP server every transport serves.
 
@@ -5970,6 +6013,7 @@ def run_server() -> int:
 
     server = build_server()
     _start_encoder_warmup()
+    _start_graph_warmup()
 
     async def main():
         async with stdio_server() as (read_stream, write_stream):

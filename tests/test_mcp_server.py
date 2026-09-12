@@ -1417,7 +1417,9 @@ class TestHelperFunctions:
 
         mcp_server._find_dead_code(str(tmp_path), live=True)
 
-        assert seen == [{"live": True, "with_report": True}]
+        # `symbol` travels down since 2026-09-12: a question about one name reads
+        # only the sources that mention it instead of the whole repository.
+        assert seen == [{"live": True, "with_report": True, "symbol": None}]
 
 
 def _assert_grounded_call(call, vault, started) -> None:
@@ -2561,6 +2563,10 @@ class TestHandleToolCall:
 
         assert envelope["data"]["architecture"] == {
             "symbol": "target",
+            # Where the symbol is defined, added 2026-09-12: the question the
+            # mode is asked most often is "where is this", and the answer used to
+            # carry every line around the definition except its own.
+            "definition": [],
             "callers": [1],
             "callees": [2],
             "dependencies": [3],

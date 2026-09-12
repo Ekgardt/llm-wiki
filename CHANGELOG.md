@@ -51,6 +51,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The graph is warm before the first question.** The first code answer in a
+  process paid the generation open — 2.22 s against 0.31 s for every later one —
+  so the server now opens the vault's code reader on a daemon thread at start,
+  exactly as it already warms the retrieval path, with `LLMWIKI_NO_GRAPH_WARMUP=1`
+  to keep the lazy behaviour. Measured: the warm-up takes 1.71 s on its own
+  thread and the first question then costs 0.30 s. The lease is returned
+  immediately, the vault's own checkout is the only thing warmed, and a failure is
+  swallowed rather than raised — bounds and alternatives in
+  `docs/research/2026-09-12-warming-the-graph-before-the-first-question.md`.
+- **A reader checks the digest, a writer derives.** A cold code answer on the
+  installed vault re-derived all 3 405 chunks of the search index before
+  answering — 1.68 s of it spent inferring the language of each chunk — to prove
+  that our own chunker is deterministic, when the artifact digest, the manifest's
+  versions and the entry seal already pin every input. That re-derivation now runs
+  where the rows are created and in `doctor`; a read trusts the digest. Depth is
+  part of the memo keys, and a deep verdict answers a shallow question while the
+  reverse never does. Cold 4.9 s → 2.22 s, warm 0.31 s.
 - **The vault is a repository too, and answers about its own code.** The
   decision left open this morning, taken on the owner's instruction to decide by
   rules 2 and 4: the vault's checkout gets a code generation beside its memory
