@@ -42,6 +42,18 @@ def call_local(limit, offset):
     return requests.post("/unknown", json=offset)
 """
 
+ANNOTATED = b"""\
+from typing import Any
+
+
+def receive(first: list[dict[str, Any]] | None, second: int = 0) -> None:
+    return (first, second)
+
+
+def send(alpha, beta):
+    return receive(alpha, beta)
+"""
+
 CALLER = b"""\
 def receive(first, second=None):
     return (first, second)
@@ -162,3 +174,16 @@ def test_bindings_are_bounded_in_count_and_bytes():
         True,
     )
     assert _bounded_bindings(long_pairs).endswith("+1 more")
+
+
+def test_an_annotation_with_a_comma_does_not_invent_a_parameter():
+    """`dict[str, Any]` is one annotation, not two parameters.
+
+    Splitting the whole signature on `,` named the second parameter
+    `Any]] | None` and misaligned every parameter after it; the parity run of
+    2026-09-12 caught it as `dense_hits->Any]] | None`.
+    """
+    result = _extract(caller=ANNOTATED)
+    literals = sorted(str(item["literal"]) for item in _edges(result, "BINDS_ARGUMENTS"))
+
+    assert literals == ["alpha->first,beta->second"]

@@ -303,6 +303,26 @@ def test_snippet_by_qualified_name_is_the_stored_definition_span(indexed):
     assert len(snippet["source_sha256"]) == 64
 
 
+def test_the_definition_site_answers_where_without_paying_for_the_source(indexed):
+    """A "where is X defined" question wants a path and a line, not a snippet.
+
+    The parity run of 2026-09-12 graded our symbol answer `partial` on exactly
+    this question: it carried the call-site lines around the definition and not
+    the definition's own.
+    """
+    from symbol_snippet import definition_sites
+
+    [site] = definition_sites(indexed, "pkg.core.Widget.frob", _deadline())
+    expected = {
+        "qualified_name": "pkg.core.Widget.frob",
+        "file": "pkg/core.py",
+        "line": 18,
+        "end_line": 19,
+    }
+    assert _picked(site, expected) == expected
+    assert "source" not in site
+
+
 def test_snippet_accepts_a_partial_owner_and_refuses_a_wrong_one(indexed):
     from symbol_snippet import snippet_for_symbol
 

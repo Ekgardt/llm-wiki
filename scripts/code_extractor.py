@@ -27,7 +27,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v12"
+EXTRACTOR_VERSION = "code-extractor/v13"
 SCIP_DEFINITION_ROLE = 0x1
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
@@ -410,11 +410,45 @@ _HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
 
+_OPENING_BRACKETS = "[({"
+_CLOSING_BRACKETS = "])}"
+
+
+def _bracket_step(character: str) -> int:
+    """+1 entering a bracket, -1 leaving one, 0 for anything else."""
+    if character in _OPENING_BRACKETS:
+        return 1
+    return -1 if character in _CLOSING_BRACKETS else 0
+
+
+def _separates_parameters(character: str, depth: int) -> bool:
+    return character == "," and depth == 0
+
+
+def _top_level_parts(text: str) -> list[str]:
+    """Split on commas outside brackets: `dict[str, Any]` is one part, not two."""
+    parts: list[str] = [""]
+    depth = 0
+    for character in text:
+        depth += _bracket_step(character)
+        if _separates_parameters(character, depth):
+            parts.append("")
+            continue
+        parts[-1] += character
+    return parts
+
+
 def _parameter_names(node: Mapping[str, object]) -> list[str]:
-    """The callee's parameters, read from the signature the node already carries."""
+    """The callee's parameters, read from the signature the node already carries.
+
+    Split at top-level commas only: the first version split the whole signature
+    on `,`, so `dense: list[dict[str, Any]] | None` invented a parameter named
+    `Any]] | None` and misaligned every parameter after it — which the parity run
+    of 2026-09-12 caught as `dense_hits->Any]] | None`.
+    """
     signature = str(node.get("metadata", {}).get("signature", ""))
     inside = signature.partition("(")[2].rpartition(")")[0]
-    names = [part.partition(":")[0].strip() for part in inside.split(",")]
+    names = [part.partition(":")[0].strip() for part in _top_level_parts(inside)]
     return [name for name in names if name]
 
 
