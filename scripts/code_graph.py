@@ -2220,18 +2220,29 @@ def _live_dead_candidates_in_file(path: Path, result: dict, incoming) -> list[di
     return [item for item in found if item is not None]
 
 
-def _stored_dead_code_result(directory: Path, with_report: bool):
+def _stored_dead_code_result(directory: Path, with_report: bool, symbol=None):
     if with_report:
-        return _store_find_dead_code(directory, with_report=True)
-    return _store_find_dead_code(directory)
+        return _store_find_dead_code(directory, with_report=True, symbol=symbol)
+    return _store_find_dead_code(directory, symbol=symbol)
 
 
 def find_dead_code(
-    directory: Path, *, live: bool = False, with_report: bool = False
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+    symbol: str | None = None,
 ) -> list[dict] | dict:
-    """Return conservative dead-code candidates from the incomplete static graph."""
+    """Return conservative dead-code candidates from the incomplete static graph.
+
+    `symbol` narrows the question to one name, and with it the reference scan:
+    asking about one function used to parse every Python source in the
+    repository (11 s, measured 2026-09-12) to answer about one of them. The
+    verdict for that name is unchanged — a file that does not mention the name
+    cannot reference it — and the report says how many sources were skipped.
+    """
     if not live:
-        stored = _stored_dead_code_result(directory, with_report)
+        stored = _stored_dead_code_result(directory, with_report, symbol)
         if stored is not None:
             return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
@@ -2431,7 +2442,7 @@ def _called_names(graph) -> frozenset[str] | None:
         return None
 
 
-def _reference_index(graph):
+def _reference_index(graph, names=None):
     """What the corpus names as a value, or None when the read refused.
 
     A store that cannot serve sources has none, and for such a store "nothing
@@ -2443,7 +2454,7 @@ def _reference_index(graph):
     if reader is None:
         return value_references.EMPTY_INDEX
     try:
-        return value_references.build_reference_index(reader())
+        return value_references.build_reference_index(reader(), names=names)
     except (ValueError, sqlite3.Error):
         return None
 
@@ -2453,7 +2464,9 @@ def _stored_dead_candidates(graph, nodes, directory) -> list[dict]:
     return candidates
 
 
-def _classified_dead_nodes(graph, nodes, directory) -> tuple[list[dict], dict]:
+def _classified_dead_nodes(
+    graph, nodes, directory, names=None
+) -> tuple[list[dict], dict]:
     """Split the nodes into candidates and the reasons the rest were dropped.
 
     The dropped count is reported, never silent: this pass removes more than
@@ -2461,7 +2474,7 @@ def _classified_dead_nodes(graph, nodes, directory) -> tuple[list[dict], dict]:
     tell a smaller answer from a better one.
     """
     called_names = _called_names(graph)
-    index = _reference_index(graph)
+    index = _reference_index(graph, names)
     verdicts = [
         _dead_code_verdict(graph, node, directory, called_names, index)
         for node in nodes
@@ -2511,15 +2524,32 @@ def _marked_complete(candidates: list[dict], report: dict) -> list[dict]:
     return _ordered_dead_candidates(candidates)
 
 
+def _scope_names(symbol: str | None) -> frozenset[str] | None:
+    """The names a narrowed reference scan must read, or None for all of them."""
+    if not symbol:
+        return None
+    return frozenset(part for part in str(symbol).split(".") if part)
+
+
+def _dead_nodes_for(graph, symbol: str | None) -> list[dict]:
+    """Every candidate node, or only those the named symbol could be."""
+    nodes = _stored_dead_nodes(graph)
+    if not symbol:
+        return nodes
+    wanted = str(symbol).rsplit(".", 1)[-1]
+    return [node for node in nodes if str(node["metadata"].get("name")) == wanted]
+
+
 def _store_find_dead_code(
-    directory: Path, *, with_report: bool = False
+    directory: Path, *, with_report: bool = False, symbol: str | None = None
 ) -> list[dict] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
+        nodes = _dead_nodes_for(graph, symbol)
         candidates, dropped = _classified_dead_nodes(
-            graph, _stored_dead_nodes(graph), directory
+            graph, nodes, directory, _scope_names(symbol)
         )
         report = _store_report(graph)
         ordered = _marked_complete(candidates, report)

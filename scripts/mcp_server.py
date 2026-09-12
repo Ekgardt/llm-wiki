@@ -1565,6 +1565,7 @@ def _find_dead_code(
             resolved,
             live=live,
             with_report=True,
+            symbol=symbol,
             deadline=operation_deadline,
         )
     except TimeoutError as reason:
