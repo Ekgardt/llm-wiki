@@ -104,10 +104,18 @@ def _completion_landed(project: str, claim) -> bool:
 
 
 def _completed_or_already(project: str, claim, label: str) -> bool:
-    """Complete the claim, or accept a completion that already landed."""
+    """Complete the claim, or accept a completion that already landed.
+
+    The completion time is captured once and replayed on every attempt: the
+    operation id is the claim's, and the transaction layer adopts a bound
+    operation only when the block matches, so a fresh clock reading would make
+    each retry a different request. Research:
+    `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+    """
+    completed_at = datetime.now(timezone.utc)
     try:
         return _under_contention(
-            blackboard.complete_task, project, claim, label=label
+            blackboard.complete_task, project, claim, completed_at, label=label
         )
     except AssertionError:
         if _completion_landed(project, claim):
@@ -588,3 +596,43 @@ def test_a_failed_call_reports_the_contention_that_led_to_it() -> None:
     ):
         assert expected in message, message
     assert isinstance(raised.value.__cause__, blackboard.BlackboardConflictError)
+
+
+def _one_claim(project: str = "demo"):
+    return _claim(project, "one task", "agent-1", resources=["only/resource"])
+
+
+def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):
+    """The transaction layer adopts a bound operation only when the block matches.
+
+    A retry after `database is locked` used to build a record with a fresh clock
+    reading, so the same operation id carried a different request and the retry
+    was refused for good — main run 34760092169. Research:
+    `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+    """
+    claim = _one_claim()
+    when = datetime.now(timezone.utc)
+
+    first = blackboard._completion_record(claim, when)
+    replayed = blackboard._completion_record(claim, when)
+
+    assert first == replayed
+
+
+def test_a_fresh_clock_reading_is_a_different_request(blackboard_vault):
+    claim = _one_claim()
+    when = datetime.now(timezone.utc)
+
+    later = blackboard._completion_record(claim, when + timedelta(seconds=1))
+
+    assert later != blackboard._completion_record(claim, when)
+
+
+def test_a_completion_without_a_time_records_the_moment_it_ran(blackboard_vault):
+    claim = _one_claim()
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert blackboard.complete_task("demo", claim) is True
+    records = blackboard._read_jsonl(blackboard._bb_dir("demo") / "completed.jsonl")
+    stamped = [row["completed_at"] for row in records if row.get("id") == claim.claim_id]
+    assert stamped and stamped[0] >= blackboard._timestamp(before)

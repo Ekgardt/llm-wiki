@@ -774,14 +774,28 @@ def _delete_exact_claim(
     return True
 
 
-def complete_task(project: str, claim: BlackboardClaim) -> bool:
-    """Publish completion, then release only the exact claim epochs."""
+def complete_task(
+    project: str, claim: BlackboardClaim, completed_at: datetime | None = None
+) -> bool:
+    """Publish completion, then release only the exact claim epochs.
+
+    `completed_at` exists so a retry can replay its own request. The operation id
+    is `blackboard-complete:<claim id>`, and the transaction layer adopts a bound
+    operation only when the block offered is the block it is bound to; a fresh
+    clock reading on the second attempt made every retry a different request, so a
+    completion interrupted by `database is locked` could never be finished.
+    Measured on main, run 34760092169: attempt 1 `database is locked`, attempt 2
+    `operation_id is already bound to a different request`. A caller that retries
+    after an unknown outcome passes the value it used the first time; a single-shot
+    caller passes nothing and gets the moment it ran. Research:
+    `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+    """
     if not isinstance(claim, BlackboardClaim):
         raise TypeError("complete_task requires a BlackboardClaim")
     slug = _sanitize_project(project)
     if slug != claim.project:
         raise BlackboardFenceError("blackboard claim project changed")
-    current = _utc_now(None)
+    current = completed_at or _utc_now(None)
     coordinator = _coordinator()
     _load_live_claim(coordinator, claim, current)
     _append_once(

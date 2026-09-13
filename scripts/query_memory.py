@@ -2303,13 +2303,35 @@ def _unfenced(raw: str) -> str:
     return match.group("body")
 
 
+_UNPARSABLE_EXCERPT_CHARS = 200
+
+
+def _excerpt(raw: str) -> str:
+    """The first words of an answer that would not parse, fit to be read.
+
+    The provider's own message is the diagnosis: 18 of 19 rows of a LongMemEval
+    run said only "returned invalid JSON" while the provider had said
+    "API Error: ... safeguards flagged this message", which named both the cause
+    and the fix. Bounded and redacted, because an oversized excerpt inside an
+    error is its own failure. Research:
+    `docs/research/2026-09-13-an-unparsable-answer-must-say-what-it-said.md`.
+    """
+    from secret_redact import redact_secrets
+
+    collapsed = " ".join(str(raw).split())
+    return redact_secrets(collapsed[:_UNPARSABLE_EXCERPT_CHARS])
+
+
 def _parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
         return json.loads(_unfenced(raw))
     except (TypeError, json.JSONDecodeError) as exc:
-        raise GroundedQAError("grounded QA provider returned invalid JSON") from exc
+        raise GroundedQAError(
+            "grounded QA provider returned invalid JSON "
+            f"({len(str(raw))} chars, starts: {_excerpt(raw)})"
+        ) from exc
 
 
 def answer(question: str, *, profile: str | None = None) -> str:

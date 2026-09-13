@@ -34,6 +34,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A retry of a completion must replay its own request.** `complete_task` built
+  its record with a fresh clock reading, so a completion interrupted by
+  `database is locked` could never be finished: the operation id was the claim's,
+  the payload was not, and the transaction layer adopts a bound operation only
+  when the block matches. It takes `completed_at` now, defaulting to the moment it
+  runs, and a retry-aware caller replays the value it used first. Main run
+  34760092169 failed on exactly this. See
+  `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+- **A refusal says what the provider said.** Eighteen of nineteen rows of a
+  LongMemEval run carried only "grounded QA provider returned invalid JSON" while
+  the provider had answered `API Error: ... safeguards flagged this message`,
+  which named both the cause and the fix. The refusal now carries the response
+  length and its first 200 characters, whitespace collapsed and redacted. See
+  `docs/research/2026-09-13-an-unparsable-answer-must-say-what-it-said.md`.
+
 - **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
   minutes above the measured 22-30 minute range, and one shard that took 45 on a
   slow runner was cancelled at the cap — which GitHub reports as `cancelled`, not
