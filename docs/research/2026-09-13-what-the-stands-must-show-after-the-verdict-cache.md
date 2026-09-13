@@ -83,6 +83,26 @@ asks about. A numberless anchor is allowed only when its note starts with `def `
 so prose inside a citation ("grep -rn x scripts/ (on this date)") is not mistaken
 for one.
 
+## A death that named nothing
+
+CI run 34727708815 on `694991b`: 45 checks green, and
+`timing::windows_full::py3.11-s2` red — 2 058 of 2 080 tests finished, then no
+summary, no `junit.xml`, no traceback, and the runner terminated two orphan
+python processes. 14 minutes into a 40-minute budget, so not a timeout. `-q`
+prints one dot *after* a test, so the log named nothing; the same job cannot be
+re-run while GitHub holds the workflow run, and the identical file passes 215 of
+215 locally (2 min 56 s, no leftover processes).
+
+Two changes make the next occurrence self-describing, and neither changes a test:
+`PYTHONFAULTHANDLER=1` for every shard, so a native crash prints the Python stack
+it died on; and `-v` for the Windows shards only, so a test whose process is
+killed has already printed its name. Windows is where this happened, and its logs
+are the ones nobody reads for volume.
+
+I am not claiming a cause. The candidates that fit the evidence — an external
+kill, a native abort, a runner eviction — are distinguished by exactly the two
+lines those flags add.
+
 ## Open, and honest
 
 I have not yet measured the cold open with the verdict present; the 0.38 s is
@@ -93,5 +113,6 @@ what this note assumes and I will say so with the numbers.
 
 Files: `scripts/search_memory.py`, `scripts/verified_artifacts.py`,
 `benchmark/run_code_parity.py`, `benchmark/code-parity-v2.json`,
-`tests/test_parity_gold_resolves.py`,
+`tests/test_parity_gold_resolves.py`, `.github/workflows/tests.yml`,
+`docs/REPORT-2026-09-13-stands.md`,
 `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.

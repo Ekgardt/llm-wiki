@@ -17,6 +17,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   request, and the runtime-deletion guard resolves paths through a dispatch on
   node type. No test lost an assertion: each file was run before and after.
 
+### Added
+
+- **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
+  records all of them on `694991b`: the parity stand at 16 of 16 against the
+  other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the
+  14 both answered; code navigation 200/200 definitions and F1 1.0 on references
+  and calls with 0 orphan processes; durability 0 silent losses over 108 killed
+  trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
+  at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
+  last one is open and unexplained.
+- **A killed test names itself on Windows.** `PYTHONFAULTHANDLER=1` on every
+  shard and `-v` on the Windows shards, after a job died with no summary, no
+  junit and no traceback (run 34727708815, 2 058 of 2 080 tests).
+
 ### Fixed
 
 - **A definition's line number is not a fact worth storing.** The parity gold
