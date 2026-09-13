@@ -534,8 +534,8 @@ def _dotted_path(path: str) -> str:
 def _name_without_its_path(path: str, name: str) -> str:
     """The part of a qualified name the path does not already spell.
 
-    The longest match wins, so `scripts.retrieval._fused_candidates` beside
-    `/home/user/llm-wiki/scripts/retrieval.py` becomes `_fused_candidates`, and
+    The longest match wins, so `scripts.retrieval._fused_candidates` beside a
+    path ending `scripts/retrieval.py` becomes `_fused_candidates`, while
     `pkg.mod.Class.method` keeps `Class.method` — the class is not in the path.
     An absolute path is fine: what matters is that the trail *ends* with the
     module.

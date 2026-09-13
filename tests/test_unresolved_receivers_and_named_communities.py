@@ -309,6 +309,8 @@ def test_named_communities_survive_the_budget_that_dropped_the_hashes():
             "communities": [["code:node:" + "a" * 32, "code:node:" + "b" * 32]]
         }
     }
+    # The path spells the module, so the shaped answer keeps the bare name:
+    # docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
     member = {
         "qualified_name": "scripts.retrieval.fuse_rrf",
         "file": "scripts/retrieval.py",
@@ -328,8 +330,10 @@ def test_named_communities_survive_the_budget_that_dropped_the_hashes():
     }
 
     assert "communities" not in shape_code_answer(hashed)["architecture"]
+    shortened = {**member, "qualified_name": "fuse_rrf"}
+
     assert shape_code_answer(named)["architecture"]["communities"][0]["members"] == [
-        member
+        shortened
     ]
 
 
