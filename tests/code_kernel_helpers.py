@@ -139,6 +139,54 @@ def create_semantic_pyright_fixture(
     return SemanticPyrightFixture(identity, config_path, event_log)
 
 
+_REGULAR_TAR_TYPES = {tarfile.REGTYPE, tarfile.AREGTYPE}
+
+
+def _default_pyright_entries(
+    package_bytes: bytes | None,
+    server_bytes: bytes,
+    include_package: bool,
+    include_server: bool,
+) -> tuple[PyrightTarEntry, ...]:
+    """The three members a real npm tarball carries, minus what a test drops."""
+    manifest = package_bytes or canonical_json_bytes(
+        {"name": "pyright", "version": "1.1.411"}
+    )
+    optional = (
+        (include_package, PyrightTarEntry("package/package.json", manifest)),
+        (include_server, PyrightTarEntry("package/langserver.index.js", server_bytes)),
+    )
+    return (
+        PyrightTarEntry("package", kind=tarfile.DIRTYPE),
+        *(entry for wanted, entry in optional if wanted),
+    )
+
+
+def _pyright_tar_info(entry: PyrightTarEntry) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(entry.name)
+    info.type = entry.kind
+    info.linkname = entry.linkname
+    info.mode = 0o777
+    info.uid = 123
+    info.gid = 456
+    info.mtime = 789
+    info.pax_headers = dict(entry.pax_headers or {})
+    info.size = len(entry.data) if entry.kind in _REGULAR_TAR_TYPES else 0
+    return info
+
+
+def _write_pyright_tarball(
+    destination: Path, entries: tuple[PyrightTarEntry, ...], tar_format: int
+) -> None:
+    with destination.open("xb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tar_format) as archive:
+                for entry in entries:
+                    info = _pyright_tar_info(entry)
+                    payload = io.BytesIO(entry.data) if info.size else None
+                    archive.addfile(info, payload)
+
+
 def create_pyright_install_artifact(
     destination: Path,
     *,
@@ -151,33 +199,12 @@ def create_pyright_install_artifact(
 ) -> PyrightInstallArtifactFixture:
     """Create a deterministic synthetic npm-style Pyright tarball."""
     if entries is None:
-        package_bytes = package_bytes or canonical_json_bytes(
-            {"name": "pyright", "version": "1.1.411"}
+        entries = _default_pyright_entries(
+            package_bytes, server_bytes, include_package, include_server
         )
-        values = [PyrightTarEntry("package", kind=tarfile.DIRTYPE)]
-        if include_package:
-            values.append(PyrightTarEntry("package/package.json", package_bytes))
-        if include_server:
-            values.append(PyrightTarEntry("package/langserver.index.js", server_bytes))
-        entries = tuple(values)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("xb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tar_format) as archive:
-                for entry in entries:
-                    info = tarfile.TarInfo(entry.name)
-                    info.type = entry.kind
-                    info.linkname = entry.linkname
-                    info.mode = 0o777
-                    info.uid = 123
-                    info.gid = 456
-                    info.mtime = 789
-                    info.pax_headers = dict(entry.pax_headers or {})
-                    regular = entry.kind in {tarfile.REGTYPE, tarfile.AREGTYPE}
-                    info.size = len(entry.data) if regular else 0
-                    archive.addfile(info, io.BytesIO(entry.data) if regular else None)
-
+    _write_pyright_tarball(destination, entries, tar_format)
     content = destination.read_bytes()
     return PyrightInstallArtifactFixture(
         path=destination,
@@ -272,6 +299,47 @@ def fixture_digest(root: Path) -> str:
     return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
 
 
+def _lockfile_entry(
+    integrity: str, url: str, package_version: str, link: bool
+) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "integrity": integrity,
+        "resolved": url,
+        "version": package_version,
+    }
+    entry.update({"link": True} if link else {})
+    return entry
+
+
+def _lockfile_document(version: int, entry: dict[str, object]) -> dict[str, object]:
+    """npm's two shapes: v1 keys by name, everything later by install path."""
+    if version == 1:
+        return {"dependencies": {"pyright": entry}, "lockfileVersion": 1}
+    return {"lockfileVersion": version, "packages": {"node_modules/pyright": entry}}
+
+
+def _write_pyright_lockfile(
+    destination: Path, version: int | None, entry: dict[str, object]
+) -> None:
+    if version is None:
+        return
+    (destination / "package-lock.json").write_text(
+        json.dumps(_lockfile_document(version, entry), sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+
+def _write_pyright_manifest(
+    destination: Path,
+    build_manifest,
+    server_bytes: bytes,
+    overrides: Mapping[str, object] | None,
+) -> None:
+    manifest = build_manifest(server_sha256=hashlib.sha256(server_bytes).hexdigest())
+    manifest.update(dict(overrides or {}))
+    (destination / "install-manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+
 def create_pyright_fixture(
     destination: Path,
     *,
@@ -300,36 +368,16 @@ def create_pyright_fixture(
         canonical_json_bytes({"name": package_name, "version": package_version})
     )
 
-    if not managed and lockfile_version is not None:
-        entry: dict[str, object] = {
-            "integrity": integrity,
-            "resolved": PYRIGHT_PACKAGE_URL,
-            "version": package_version,
-        }
-        if lockfile_link:
-            entry["link"] = True
-        if lockfile_version == 1:
-            lockfile: dict[str, object] = {
-                "dependencies": {"pyright": entry},
-                "lockfileVersion": 1,
-            }
-        else:
-            lockfile = {
-                "lockfileVersion": lockfile_version,
-                "packages": {"node_modules/pyright": entry},
-            }
-        (destination / "package-lock.json").write_text(
-            json.dumps(lockfile, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
+    if not managed:
+        _write_pyright_lockfile(
+            destination,
+            lockfile_version,
+            _lockfile_entry(integrity, PYRIGHT_PACKAGE_URL, package_version, lockfile_link),
         )
-
     if managed:
-        manifest = build_pyright_install_manifest(
-            server_sha256=hashlib.sha256(server_bytes).hexdigest()
+        _write_pyright_manifest(
+            destination, build_pyright_install_manifest, server_bytes, manifest_overrides
         )
-        if manifest_overrides is not None:
-            manifest.update(manifest_overrides)
-        (destination / "install-manifest.json").write_bytes(canonical_json_bytes(manifest))
     return server
 
 
@@ -658,10 +706,8 @@ def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
     )
 
 
-def captured_snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
-    """Add the canonical capture fixture required for analyzer-backed generations."""
-    snapshot = snapshot_for_records(records)
-    files = tuple(
+def _capture_files(snapshot: CorpusSnapshot) -> tuple:
+    return tuple(
         CodeCaptureFile(
             source.record.logical_id,
             source.record.relative_path,
@@ -670,55 +716,65 @@ def captured_snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
         )
         for source in snapshot.sources
     )
+
+
+def _capture_file_row(item) -> dict:
+    return {
+        "source_id": item.source_id,
+        "relative_path": item.relative_path,
+        "sha256": item.sha256,
+        "stat": {
+            name: getattr(item.stat, name) for name in item.stat.__dataclass_fields__
+        },
+    }
+
+
+def _capture_directory_row(item) -> dict:
+    return {
+        "relative_path": item.relative_path,
+        "entry_count": item.entry_count,
+        "entries_sha256": item.entries_sha256,
+    }
+
+
+def _membership_digest(files: tuple, directories: tuple) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "files": [_capture_file_row(item) for item in files],
+                "directories": [_capture_directory_row(item) for item in directories],
+            }
+        )
+    ).hexdigest()
+
+
+def _capture_policy(files: tuple, directories: tuple) -> RepositoryCodePolicy:
+    roots = {item.relative_path for item in files}
+    roots.update(item.relative_path for item in directories)
+    suffixes = {Path(item.relative_path).suffix.casefold() for item in files}
+    return RepositoryCodePolicy(
+        roots=tuple(sorted(roots)),
+        include_globs=("**",),
+        ignore_globs=(),
+        suffixes=tuple(sorted(suffixes)),
+    )
+
+
+def captured_snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
+    """Add the canonical capture fixture required for analyzer-backed generations."""
+    snapshot = snapshot_for_records(records)
+    files = _capture_files(snapshot)
     empty_entries = hashlib.sha256(canonical_json_bytes([])).hexdigest()
     directories = (
         DirectoryMembership("fixture-a", 0, empty_entries),
         DirectoryMembership("fixture-b", 0, empty_entries),
     )
-    membership = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "files": [
-                    {
-                        "source_id": item.source_id,
-                        "relative_path": item.relative_path,
-                        "sha256": item.sha256,
-                        "stat": {
-                            name: getattr(item.stat, name)
-                            for name in item.stat.__dataclass_fields__
-                        },
-                    }
-                    for item in files
-                ],
-                "directories": [
-                {
-                    "relative_path": item.relative_path,
-                    "entry_count": item.entry_count,
-                    "entries_sha256": item.entries_sha256,
-                }
-                for item in directories
-                ],
-            }
-        )
-    ).hexdigest()
     contract = CodeCaptureContract(
-        policy=RepositoryCodePolicy(
-            roots=tuple(
-                sorted(
-                    {
-                        *(item.relative_path for item in files),
-                        *(item.relative_path for item in directories),
-                    }
-                )
-            ),
-            include_globs=("**",),
-            ignore_globs=(),
-            suffixes=tuple(sorted({Path(item.relative_path).suffix.casefold() for item in files})),
-        ),
+        policy=_capture_policy(files, directories),
         limits=RepositoryCodeLimits(),
         files=files,
         directories=directories,
-        membership_sha256=membership,
+        membership_sha256=_membership_digest(files, directories),
     )
     return replace(snapshot, code_capture=contract)
 

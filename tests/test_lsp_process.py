@@ -2495,15 +2495,23 @@ def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
         threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.01)
         raise TimeoutError("autonomous replacement bootstrap expired")
 
-    configured_deadline = time.monotonic() + 0.8
+    # Two different numbers were one number here. The first start spawns a real
+    # server and handshakes with it, so its deadline must be sized for the
+    # slowest supported machine; the autonomous replacement budget is what this
+    # test measures, and it must stay small because the replacement waits its
+    # budget out. Sharing 0.8 s for both made a Windows runner fail the start
+    # (CI 34725227244, 2026-09-12: "LSP startup deadline expired after initial
+    # lease publication").
+    configured_budget_seconds = 0.8
     process = LspProcess.start_configured(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
         owner_root=tmp_path / OWNER_NONCE,
-        deadline=configured_deadline,
+        deadline=time.monotonic() + _STARTUP_BUDGET_SECONDS,
         server_request_handlers={"workspace/configuration": lambda _params: True},
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
+        bootstrap_timeout_seconds=configured_budget_seconds,
     )
     coordinator = process._coordinator
     configured_budget = coordinator.generation_configuration.bootstrap_timeout_seconds

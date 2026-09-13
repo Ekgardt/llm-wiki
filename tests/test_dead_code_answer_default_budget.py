@@ -74,10 +74,19 @@ def _live_shaped_answer() -> dict:
     }
 
 
+def _rows(answer: dict, key: str) -> list[dict]:
+    """Rows as objects under either shape; `<key>_cols` arrived 2026-09-12."""
+    cols = answer.get(f"{key}_cols")
+    if cols is None:
+        return answer[key]
+    return [dict(zip(cols, row)) for row in answer[key]]
+
+
 def _reasons(answer: dict) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for row in answer["candidates"]:
-        counts[row["reason"]] = counts.get(row["reason"], 0) + 1
+    for row in _rows(answer, "candidates"):
+        reason = row.get("reason") or answer.get("candidates_row_constants", {}).get("reason")
+        counts[reason] = counts.get(reason, 0) + 1
     return counts
 
 

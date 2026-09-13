@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import time
 import uuid
+from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import Enum, unique
 from functools import lru_cache
@@ -1080,6 +1081,27 @@ def _canonical_json(value: object, label: str) -> str:
     return encoded.decode("utf-8")
 
 
+# One walk per source instead of one per occurrence. `content.count(b"\n", 0,
+# start)` rescans the file from byte zero for every occurrence, which on the
+# installed vault was 11 124 scans and 1.24 s of a single 3.2 s answer
+# (measured 2026-09-12). The newline offsets of a source are a fact about the
+# source; taken once, every occurrence of it is a binary search. Same check,
+# same refusal, nothing traded.
+@lru_cache(maxsize=64)
+def _newline_offsets(content: bytes) -> tuple[int, ...]:
+    offsets: list[int] = []
+    position = content.find(b"\n")
+    while position >= 0:
+        offsets.append(position)
+        position = content.find(b"\n", position + 1)
+    return tuple(offsets)
+
+
+def _line_at(offsets: tuple[int, ...], index: int) -> int:
+    """The 1-based line the byte at `index` starts on."""
+    return bisect_left(offsets, index) + 1
+
+
 def _validate_occurrence_lines(
     content: bytes,
     start: int,
@@ -1089,9 +1111,9 @@ def _validate_occurrence_lines(
 ) -> None:
     if end <= start:
         raise ValueError("occurrence byte range must be non-empty")
-    expected_start = content.count(b"\n", 0, start) + 1
-    expected_end = content.count(b"\n", 0, end) + 1
-    if (line_start, line_end) != (expected_start, expected_end):
+    offsets = _newline_offsets(content)
+    expected = (_line_at(offsets, start), _line_at(offsets, end))
+    if (line_start, line_end) != expected:
         raise ValueError("occurrence line range does not match its captured source bytes")
 
 
@@ -3571,6 +3593,15 @@ def _reason_filter(reason: str | None) -> tuple[str, tuple[object, ...]]:
     return " WHERE reason=?", (reason,)
 
 
+def _remembered_artifact_digest(cache, database_path: Path) -> str | None:
+    """The digest the catalog verified for this exact file, or None."""
+    try:
+        metadata = database_path.stat()
+    except OSError:
+        return None
+    return cache.remembered(database_path.parent.name, database_path.name, metadata)
+
+
 class EvidenceGraph:
     """Read-only facade over one catalog-selected immutable graph generation."""
 
@@ -3626,6 +3657,27 @@ class EvidenceGraph:
         receipt = _format_receipt_path(self.database_path.parent)
         return receipt if _receipt_inside_root(receipt, self.state_root) else None
 
+    def _artifact_digest(
+        self, deadline: float | None, cancelled: Callable[[], bool] | None
+    ) -> str:
+        """The artifact's digest, remembered by stat identity when it can be.
+
+        The receipt below is keyed by the digest, and computing that digest read
+        241 MB on this vault — 0.32 s of a cold answer — to look up a verdict the
+        catalog had already stored for the very same bytes. The catalog remembers
+        each artifact's verified digest against its device, inode, size and mtime
+        (2026-09-12), so the key is fetched rather than recomputed, and a file
+        whose stat moved is hashed exactly as before.
+        """
+        from verified_artifacts import VerifiedArtifacts
+
+        remembered = _remembered_artifact_digest(
+            VerifiedArtifacts(self.state_root), self.database_path
+        )
+        if remembered is not None:
+            return remembered
+        return _hashed_database_bytes(self.database_path, deadline, cancelled)
+
     def _require_validated_format(
         self,
         database: sqlite3.Connection,
@@ -3645,7 +3697,7 @@ class EvidenceGraph:
         edited artifact is still fully validated and refused.
         """
         receipt = self._format_receipt_location()
-        digest = _hashed_database_bytes(self.database_path, deadline, cancelled)
+        digest = self._artifact_digest(deadline, cancelled)
         if _artifact_format_known(digest, self.schema, receipt):
             return
         _validate_connection(
@@ -3766,6 +3818,85 @@ class EvidenceGraph:
             if outcome is not _RETRY:
                 return outcome
         raise PermissionError("active Evidence Graph changed while opening")
+
+    @classmethod
+    def open_code_for_repository(
+        cls,
+        catalog: object,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> EvidenceGraph | None:
+        """Open the registered code generation of this repository, if it has one.
+
+        A code generation is registered and never activated, so the active
+        pointer cannot name it — and on the vault the pointer names the memory
+        generation of the very same checkout. Every other gate is the one
+        `open_active_for_repository` uses: the manifest must still match its
+        catalog row, the scope must be the same repository, and the seal is
+        re-checked after the open. Decision:
+        `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+        """
+        _check_build_stop(deadline, cancelled, time.monotonic)
+        expected_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+        options = _stop_options(deadline, cancelled)
+        _identifier, manifest = catalog.code_generation_for_repository(
+            expected_scope, **options
+        )
+        resolved = _resolved_repository_manifest(manifest)
+        if resolved is None:
+            return None
+        return cls._opened_code_generation(
+            catalog, *resolved, expected_scope, options, deadline, cancelled
+        )
+
+    @classmethod
+    def _opened_code_generation(
+        cls,
+        catalog: object,
+        manifest: dict,
+        schema: GraphSchema,
+        expected_scope: RepositoryScope,
+        options: dict,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> EvidenceGraph | None:
+        graph = None
+        try:
+            admitted = cls._admitted_generation(catalog, manifest, expected_scope, options)
+            if admitted is None:
+                return None
+            validated, seal, generation_scope = admitted
+            if not _names_evidence_artifact(validated):
+                return None
+            graph = cls._generation_graph(
+                catalog, manifest["generation_id"], schema, deadline, cancelled
+            )
+            graph.repository_scope = generation_scope
+            return cls._settled_code_open(catalog, manifest, seal, deadline, cancelled, graph)
+        except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
+            if graph is not None:
+                graph.close()
+            return None
+
+    @staticmethod
+    def _settled_code_open(
+        catalog: object,
+        manifest: dict,
+        seal: object,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+        graph: EvidenceGraph,
+    ) -> EvidenceGraph | None:
+        """The seal must still hold; a registered generation has no pointer to re-read."""
+        generation_path = catalog.generations_path / manifest["generation_id"]
+        if catalog._deadline_seal_unchanged(  # noqa: SLF001
+            generation_path, seal, deadline, cancelled=cancelled
+        ):
+            return graph
+        graph.close()
+        return None
 
     @staticmethod
     def _admitted_generation(

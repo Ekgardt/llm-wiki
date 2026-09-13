@@ -519,14 +519,18 @@ def test_record_ownership_is_inverted_once_not_rescanned_per_source():
     )
     source_ids = tuple(f"source:{index}" for index in range(20))
 
+    def legacy_ids(records, collection, source_id):
+        return sorted(
+            record_id
+            for (record_collection, record_id), owners in records.items()
+            if record_collection == collection
+            if source_id in owners
+        )
+
     def legacy_group(records, owners):
         return {
             source_id: {
-                collection: sorted(
-                    record_id
-                    for (record_collection, record_id), record_owners in records.items()
-                    if record_collection == collection and source_id in record_owners
-                )
+                collection: legacy_ids(records, collection, source_id)
                 for collection in evidence_graph_builder._RECORD_COLLECTIONS
             }
             for source_id in owners

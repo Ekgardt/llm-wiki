@@ -25,7 +25,9 @@ MAX_LOCATIONS = 5
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SNIPPET_LINES = 120
 MAX_NAME_MATCHES = 200
-SNIPPET_KINDS = ("class", "function", "method")
+# `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
+# definition an operator asks for by name like any other.
+SNIPPET_KINDS = ("class", "function", "method", "constant")
 
 
 def _definition_pattern(symbol: str) -> re.Pattern[str]:
@@ -204,5 +206,46 @@ def snippet_for_symbol(directory: Path, symbol: str, deadline: float) -> dict:
         return {"symbol": symbol, "snippets": [], "graph": "unavailable_or_absent"}
     try:
         return _graph_snippets(graph, directory, symbol, deadline)
+    finally:
+        graph.close()
+
+
+def _definition_site(graph, node: dict, deadline: float) -> dict | None:
+    """Where the graph says one node is defined: path and line span, no source."""
+    occurrence = _definition_occurrence(graph, node["node_id"], deadline)
+    if occurrence is None:
+        return None
+    return {
+        **_node_fields(node),
+        "file": str(node["metadata"].get("path") or ""),
+        "line": int(occurrence["line_start"]),
+        "end_line": int(occurrence["line_end"]),
+    }
+
+
+def _graph_definition_sites(graph, symbol: str, deadline: float) -> list[dict]:
+    try:
+        nodes = _matching_nodes(graph, symbol, deadline)
+    except ValueError:
+        return []
+    sites = [_definition_site(graph, node, deadline) for node in nodes]
+    return [site for site in sites if site is not None]
+
+
+def definition_sites(directory: Path, symbol: str, deadline: float) -> list[dict]:
+    """Every definition of the symbol the active generation knows, without source.
+
+    A "where is X defined" question is answered by a path and a line, and the
+    generation already stores both as the `definition` occurrence of the node.
+    The parity run of 2026-09-12 graded our symbol answer `partial` because it
+    carried call-site lines and not this one.
+    """
+    from code_graph import _active_evidence_graph
+
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return []
+    try:
+        return _graph_definition_sites(graph, symbol, deadline)
     finally:
         graph.close()

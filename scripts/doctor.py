@@ -4545,10 +4545,13 @@ def _validated_search_artifact(
     try:
         from search_memory import validate_generation_fts_artifact
 
+        # The operator's own deep check: the read path trusts the digest, and
+        # this is where a re-derivation belongs (2026-09-12).
         validate_generation_fts_artifact(
             generation_path,
             diagnostic,
             state_root=state_root,
+            deep=True,
             deadline=deadline,
         )
     except (OSError, PermissionError, TypeError, ValueError, sqlite3.Error):

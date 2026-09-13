@@ -1565,6 +1565,7 @@ def _find_dead_code(
             resolved,
             live=live,
             with_report=True,
+            symbol=symbol,
             deadline=operation_deadline,
         )
     except TimeoutError as reason:
@@ -1782,6 +1783,15 @@ def _architecture_symbol_dependencies(request: dict):
     )
 
 
+def _architecture_definition(request: dict) -> list:
+    """Where the symbol is defined, from the generation's definition occurrence."""
+    from symbol_snippet import definition_sites
+
+    return definition_sites(
+        request["resolved"], request["symbol"], request["deadline"]
+    )
+
+
 def _architecture_symbol(request: dict) -> dict:
     deadline = request["deadline"]
     callers = _architecture_callers(request)
@@ -1789,8 +1799,12 @@ def _architecture_symbol(request: dict) -> dict:
     callees = _architecture_callees(request)
     _check_deadline(deadline)
     dependencies = _architecture_symbol_dependencies(request)
+    _check_deadline(deadline)
     return {
         "symbol": request["symbol"],
+        # A "where is it" question is answered by the definition, not by the
+        # call sites around it (parity run 2026-09-12, task T04).
+        "definition": _architecture_definition(request),
         "callers": callers.get("callers", []),
         "callees": callees.get("callees", []),
         "dependencies": dependencies.get("dependencies", []),

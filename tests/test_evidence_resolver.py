@@ -368,3 +368,38 @@ def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path
                 _reference("2026-01-02", part, block, marker, marker + len(quote))
             )
         )
+
+
+def test_a_slice_that_ends_at_a_capture_block_still_resolves(vault: Path) -> None:
+    """A daily grows by two kinds of entry, and both end a historical slice.
+
+    The transactional appender writes `<!-- llm-wiki-operation: … -->`; the
+    capture path writes a `## [HH:MM:SS] …` block and no marker. Until
+    2026-09-12 only the marker was a candidate boundary, so two claims on the
+    live vault cited bytes whose slice ended at a block start and could not be
+    resolved at all. Research:
+    `docs/research/2026-09-12-a-daily-grows-by-two-kinds-of-entry.md`.
+    """
+    from evidence_resolver import EvidenceRef, EvidenceResolver
+
+    compiled = (
+        b"# day\n"
+        b"<!-- llm-wiki-operation: op-1 -->\n"
+        b"## [09:20:13] first\n"
+        b"the line the page quoted\n"
+    )
+    appended = compiled + b"\n## [12:50:16] second\nwritten after the compile\n"
+    path = vault / "knowledge" / "daily" / "2026-01-03.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(appended)
+    quote = b"the line the page quoted"
+    start = compiled.index(quote)
+
+    result = EvidenceResolver(vault).resolve(
+        EvidenceRef.parse(
+            _reference("2026-01-03", compiled, "09:20:13", start, start + len(quote))
+        )
+    )
+
+    assert (result.bytes, result.source_sha256) == (quote, _sha(compiled))
+    assert result.location == "flat-part"

@@ -259,18 +259,30 @@ def _require_not_submodule(root: Path) -> None:
         )
 
 
-def _require_not_the_vault(root: Path, state_root: Path) -> None:
-    """The vault builds its own generation nightly, and activates it."""
+MEMORY_ROOT = "knowledge"
+
+
+def _is_the_vault(root: Path, state_root: Path) -> bool:
+    """True when this checkout is the installed vault, which is also a repository."""
     from memory_state import ROOT
 
-    vault = Path(ROOT).resolve()
-    if root in {vault, state_root}:
-        raise _refuse(
-            "repository_is_the_vault",
-            "this is the vault itself; its generation is built and activated by "
-            "the nightly pass",
-            directory=str(root),
-        )
+    return root in {Path(ROOT).resolve(), state_root}
+
+
+def _require_not_the_memory_tree(root: Path, requested: Iterable[str]) -> None:
+    """`knowledge/` belongs to the memory generation; a code index refuses it by name.
+
+    Refused rather than pruned: asking for the memory tree in a code index is a
+    mistake worth naming, and silence about a dropped root is what NEW-67 was.
+    """
+    if MEMORY_ROOT not in set(requested):
+        return
+    raise _refuse(
+        "repository_root_is_the_memory_tree",
+        f"{MEMORY_ROOT}/ is held by the vault's own generation, never by a code "
+        "index; ask for the code roots instead",
+        directory=str(root),
+    )
 
 
 def admit_repository(
@@ -282,7 +294,6 @@ def admit_repository(
 ) -> Admission:
     """Every safety gate, in the order that makes each refusal nameable."""
     root = _require_unsymlinked(_require_directory(directory))
-    _require_not_the_vault(root, state_root_path(state_root))
     ownership_checked = _require_owned_by_caller(root)
     scope = _resolved_scope(root, deadline, cancelled)
     _require_git_checkout_root(root, scope)
@@ -482,11 +493,38 @@ def _discovered_code_roots(root: Path) -> CodeRoots:
     return CodeRoots(selected=selected, excluded=excluded)
 
 
-def selected_code_roots(root: Path, requested: Iterable[str] | None) -> CodeRoots:
-    """Explicit roots when given, otherwise every tracked top-level entry."""
+def _without_memory_root(roots: CodeRoots) -> CodeRoots:
+    """The vault's memory tree, named as excluded rather than quietly dropped.
+
+    The knowledge tree is reached twice on a vault — once as a tracked top-level
+    entry and once by the memory walk — which is why the collector refused a
+    vault-shaped repository with `duplicate corpus source path` until
+    2026-09-12. It belongs to one generation, and that is the memory one.
+    """
+    if MEMORY_ROOT not in roots.selected:
+        return roots
+    return CodeRoots(
+        selected=tuple(name for name in roots.selected if name != MEMORY_ROOT),
+        excluded=tuple(sorted({*roots.excluded, MEMORY_ROOT})),
+    )
+
+
+def selected_code_roots(
+    root: Path, requested: Iterable[str] | None, *, memory_owner: bool = False
+) -> CodeRoots:
+    """Explicit roots when given, otherwise every tracked top-level entry.
+
+    `memory_owner` says this checkout is the installed vault, whose knowledge
+    tree its own generation holds: see
+    `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+    """
     if requested is not None:
+        _require_not_the_memory_tree(root, requested)
         return _requested_code_roots(root, requested)
-    return _discovered_code_roots(root)
+    discovered = _discovered_code_roots(root)
+    if not memory_owner:
+        return discovered
+    return _without_memory_root(discovered)
 
 
 # --------------------------------------------------------------------------
@@ -677,7 +715,11 @@ def index_repository(
         directory, state_root=state_root, deadline=deadline, cancelled=cancelled
     )
     require_indexing_wanted(admission.root)
-    selected = selected_code_roots(admission.root, roots)
+    selected = selected_code_roots(
+        admission.root,
+        roots,
+        memory_owner=_is_the_vault(admission.root, state_root_path(state_root)),
+    )
     snapshot = _collect(admission.root, selected.selected, deadline)
     catalog = _open_catalog(state_root_path(state_root), read_only=False)
     parent_id, _parent = _newest_generation_for(catalog, admission.scope, deadline)
@@ -1138,6 +1180,36 @@ def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict
         return {"checkout_root": checkout, **refusal.as_dict()}
 
 
+def _vault_checkout(state_root: Path | None) -> Path:
+    from memory_state import ROOT
+
+    del state_root
+    return Path(ROOT).resolve()
+
+
+def _indexed_already(directory: Path, state_root: Path | None, deadline: float) -> bool:
+    detected = detect_repository_changes(
+        directory, state_root=state_root, deadline=deadline
+    )
+    return detected.get("status") != "not_indexed"
+
+
+def _adopted_vault(state_root: Path | None, deadline: float) -> dict:
+    """Index the vault's own checkout once, so the timer keeps it fresh after.
+
+    The vault is a repository too (decision 2026-09-12), and the owner's standing
+    requirement is that this needs no operator action. A checkout that already
+    has a generation is left to the ordinary refresh below.
+    """
+    directory = _vault_checkout(state_root)
+    try:
+        if _indexed_already(directory, state_root, deadline):
+            return {"status": "current", "directory": str(directory)}
+        return index_repository(directory, state_root=state_root, deadline=deadline)
+    except RepositoryIndexRefused as refusal:
+        return refusal.as_dict()
+
+
 def refresh_all_repositories(
     *,
     state_root: Path | None = None,
@@ -1153,12 +1225,14 @@ def refresh_all_repositories(
     from repository_worktrees import follow_worktrees
 
     deadline = time.monotonic() + budget_seconds
+    adopted = _adopted_vault(state_root, deadline)
     rows = list_repositories(state_root=state_root, deadline=deadline)["repositories"]
     followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
     outcomes = [_refresh_row(row, state_root, deadline) for row in rows]
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ok",
+        "adopted_vault": adopted,
         "followed": followed,
         "repositories": outcomes,
     }

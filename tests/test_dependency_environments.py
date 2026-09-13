@@ -95,12 +95,19 @@ def test_reinstall_is_locked_inexact_and_preserves_selected_extras(
     ]
 
 
-def _hook_commands(document: dict) -> list[str]:
+def _group_hooks(document: dict) -> list[dict]:
     return [
-        command
+        hook
         for groups in document["hooks"].values()
         for group in groups
         for hook in group["hooks"]
+    ]
+
+
+def _hook_commands(document: dict) -> list[str]:
+    return [
+        command
+        for hook in _group_hooks(document)
         for key in ("command", "commandWindows")
         if (command := hook.get(key))
     ]

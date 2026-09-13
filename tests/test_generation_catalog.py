@@ -3166,3 +3166,49 @@ def test_a_generation_stays_eligible_after_the_repository_moves_to_a_new_commit(
 
     assert selected is not None
     assert selected["generation_id"] == "gen-1"
+
+
+def test_a_read_trusts_the_digest_and_the_deep_check_still_derives(tmp_path, monkeypatch):
+    """The 2026-09-12 boundary: writers derive, readers check the commitment.
+
+    Re-deriving every chunk cost 1.68 s of a 4.9 s cold answer on the installed
+    vault, and it proves a property of our own chunker rather than a property of
+    the bytes. It now runs where the rows are created and in `doctor`; a read is
+    served by the artifact digest, the manifest versions and the entry seal.
+    """
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "read-trusts-the-digest")
+    catalog.register("read-trusts-the-digest")
+    depths = []
+    real = search_memory.validate_generation_fts_artifact
+
+    def record(*args, **kwargs):
+        depths.append(bool(kwargs.get("deep", True)))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(search_memory, "validate_generation_fts_artifact", record)
+    # A fresh reader, as a new process is: the registration's deep verdict is
+    # remembered per process, so this asks the disk for itself.
+    reader = _catalog(tmp_path)
+
+    reader._registered_generation("read-trusts-the-digest")  # noqa: SLF001
+
+    assert depths == [False]
+
+
+def test_a_deep_verdict_answers_a_shallow_question_and_not_the_reverse(tmp_path):
+    """Depth is in the memo key, and the implication runs one way only."""
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "depth-implication")
+    catalog.register("depth-implication")
+    identifier = "depth-implication"
+    seal = catalog._validated[(identifier, True)][0]  # noqa: SLF001
+
+    assert catalog._remembered_validation((identifier, False), seal) is not None  # noqa: SLF001
+    shallow_only = {key: value for key, value in catalog._validated.items() if key[1] is False}  # noqa: SLF001
+    catalog._validated.clear()  # noqa: SLF001
+    catalog._validated.update(shallow_only)  # noqa: SLF001
+
+    assert catalog._remembered_validation((identifier, True), seal) is None  # noqa: SLF001

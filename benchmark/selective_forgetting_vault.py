@@ -41,7 +41,18 @@ REPO = BENCHMARK.parent
 
 BUILD_DEADLINE_SECONDS = 900.0
 PROBE_DEADLINE_SECONDS = 120.0
-PROBE_LIMIT = 10
+# Presence is what the gates ask about, and a probe is a verbatim phrase from the
+# page itself, so a page still in the corpus is returned by its own words. The
+# window has to be wide enough that the question is presence and not rank:
+# measured 2026-09-13, six pages this stand called forgotten came back at ranks
+# 11 to 13 after 59 unrelated pages were archived, and archiving reorders the edge
+# of a narrow window. `VISIBLE_LIMIT` stays as the reported window — the share of
+# retained pages that keep a place in the first ten rows is a number worth
+# watching, not a gate a corpus change can fail. Research:
+# `docs/research/2026-09-13-one-argument-one-slot.md`.
+PRESENCE_LIMIT = 200
+VISIBLE_LIMIT = 10
+PROBE_LIMIT = PRESENCE_LIMIT
 PROBE_WORDS = 12
 PROBE_MIN_CHARS = 40
 
@@ -270,6 +281,7 @@ def probe_result(slug: str, query: str) -> dict:
         "query": query,
         "rank": rank,
         "surfaced": rank is not None,
+        "visible": rank is not None and rank <= VISIBLE_LIMIT,
         "probe_usable": True,
         "top": paths[:3],
     }

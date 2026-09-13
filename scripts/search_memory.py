@@ -2622,6 +2622,7 @@ def _valid_generation_fts(
     connection: sqlite3.Connection,
     manifest: dict[str, object],
     *,
+    check_rows: bool = True,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     authoritative_sources: dict[str, dict[str, object]] | None = None,
@@ -2630,6 +2631,7 @@ def _valid_generation_fts(
         return _valid_generation_fts_contents(
             connection,
             manifest,
+            check_rows=check_rows,
             deadline=deadline,
             cancelled=cancelled,
             authoritative_sources=authoritative_sources,
@@ -2868,18 +2870,60 @@ def _reproducible_by_this_extractor(manifest: Mapping[str, object]) -> bool:
     return manifest.get("extractor_version") == corpus_snapshot.EXTRACTOR_VERSION
 
 
+_FTS_ROWS_VERDICT = "fts-chunks"
+
+
+def _fts_rows_digest(manifest: dict[str, object]) -> str | None:
+    """The declared digest of the FTS artifact: the identity of its rows."""
+    descriptors = _artifact_descriptors(manifest) or {}
+    digest = descriptors.get(GENERATION_FTS_ARTIFACT, {}).get("sha256")
+    return digest if isinstance(digest, str) else None
+
+
+def _fts_rows_need_walking(
+    state_root: Path, manifest: dict[str, object], deep: bool
+) -> tuple[object, str | None, bool]:
+    """The verdict cache, the rows' digest, and whether to walk them now."""
+    from verified_artifacts import VerifiedArtifacts
+
+    digest = _fts_rows_digest(manifest)
+    cache = VerifiedArtifacts(state_root)
+    return cache, digest, deep or cache.verdict(_FTS_ROWS_VERDICT, digest) is None
+
+
+def _remember_walked_rows(cache: object, digest: str | None, walked: bool) -> None:
+    """A walk that accepted these bytes is not repeated in the next process."""
+    if not walked:
+        return
+    cache.remember_verdict(_FTS_ROWS_VERDICT, digest)
+    cache.save()
+
+
 def validate_generation_fts_artifact(
     generation_path: Path,
     manifest: dict[str, object],
     *,
     state_root: Path,
+    deep: bool = True,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Fail closed unless a generation-local FTS artifact is semantically valid.
 
-    The content check re-derives every chunk from the stored sources and
-    compares; it can only be asked of a generation this extractor built.
+    `deep` re-derives every chunk from the stored sources and compares it row by
+    row. That is a determinism check of our own chunker, so since 2026-09-12 it
+    runs where the rows are created — publication and registration — and in
+    `doctor`, not on every cold read: the read path is served by the artifact
+    digest, the manifest's versions and the entry seal, which already pin every
+    input. It cost 1.68 s of a 4.9 s cold answer on the installed vault. See
+    `docs/research/2026-09-12-a-reader-checks-the-digest-a-writer-derives.md`.
+
+    The rows' own invariants are a separate matter: a digest recomputed over
+    damaged bytes cannot catch them, so a read still walks the rows — once per
+    distinct artifact digest, after which the verdict is remembered. See
+    `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+
+    The content check can only be asked of a generation this extractor built.
     An older extractor's rows are not reproducible here — the 2026-09-07
     generation checked by the v3 chunker failed at row 9,272 and the vault
     answered lexical-only for two days — so for those the artifact is
@@ -2890,8 +2934,9 @@ def validate_generation_fts_artifact(
     _check_generation_stop(deadline, cancelled)
     generation_path = Path(generation_path)
     state_root = Path(state_root)
+    cache, digest, check_rows = _fts_rows_need_walking(state_root, manifest, deep)
     authoritative_sources = None
-    if _reproducible_by_this_extractor(manifest):
+    if deep and _reproducible_by_this_extractor(manifest):
         authoritative_sources = _generation_authoritative_sources(
             generation_path,
             manifest,
@@ -2906,11 +2951,13 @@ def validate_generation_fts_artifact(
         if not _valid_generation_fts(
             connection,
             manifest,
+            check_rows=check_rows,
             deadline=deadline,
             cancelled=cancelled,
             authoritative_sources=authoritative_sources,
         ):
             raise ValueError("generation FTS search artifact is semantically invalid")
+    _remember_walked_rows(cache, digest, check_rows)
     _check_generation_stop(deadline, cancelled)
 
 
@@ -3196,9 +3243,23 @@ def _stored_chunks_match(
     expected_chunks: list[tuple[object, ...]] | None,
     *,
     count: int,
+    check_rows: bool = True,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
+    """Every row, unless these exact bytes were already walked once.
+
+    The row invariants — sha256 ids, contiguous order, a heading ancestry that is
+    a JSON list, non-blank content, unique ids — are what a reader needs to hold
+    for rows it is about to serve, and a manifest digest recomputed over damaged
+    bytes cannot catch them. Walking 3 405 rows costs 0.38 s, so the walk is paid
+    once per distinct artifact digest and its verdict is remembered; the caller
+    decides with `check_rows`. Comparing each row against a freshly chunked
+    source stays with the re-derivation that asks for it. See
+    `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+    """
+    if not check_rows:
+        return True
     seen: set[str] = set()
     for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)
@@ -3249,6 +3310,7 @@ def _valid_generation_fts_contents(
     connection: sqlite3.Connection,
     manifest: dict[str, object],
     *,
+    check_rows: bool = True,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     authoritative_sources: dict[str, dict[str, object]] | None = None,
@@ -3266,6 +3328,7 @@ def _valid_generation_fts_contents(
         connection,
         metadata,
         expected_chunks,
+        check_rows=check_rows,
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -3276,6 +3339,7 @@ def _fts_counts_and_chunks_match(
     metadata: object,
     expected_chunks: object,
     *,
+    check_rows: bool = True,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
@@ -3287,6 +3351,7 @@ def _fts_counts_and_chunks_match(
         connection,
         expected_chunks,
         count=count,
+        check_rows=check_rows,
         deadline=deadline,
         cancelled=cancelled,
     )

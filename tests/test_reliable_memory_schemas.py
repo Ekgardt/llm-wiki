@@ -931,55 +931,97 @@ def test_schemas_reject_unknown_top_level_properties(name, tmp_path):
         validate_schema(instance, SCHEMA_DIR / name)
 
 
-def _minimal_value(rule: dict, *, root: dict | None = None):
-    if root is None:
-        root = rule
-    if "$ref" in rule:
-        target = root
-        for raw_part in rule["$ref"][2:].split("/"):
-            part = raw_part.replace("~1", "/").replace("~0", "~")
-            target = target[part]
-        return _minimal_value(target, root=root)
-    if "const" in rule:
-        return rule["const"]
+# The smallest value a closed schema rule accepts, one rule shape per function
+# so the walk stays inside the complexity law instead of one long if-chain.
+_NO_MINIMUM = object()
+_SCALAR_MINIMA = {"null": None, "boolean": False}
+_NUMERIC_TYPES = ("integer", "number")
+_STRING_CANDIDATES = ("", "0" * 64, "compile:" + "0" * 64, "2026-08-05T12:00:00Z")
+
+
+def _ref_target(rule: dict, root: dict):
+    target = root
+    for raw_part in rule["$ref"][2:].split("/"):
+        target = target[raw_part.replace("~1", "/").replace("~0", "~")]
+    return target
+
+
+def _minimal_choice(rule: dict, root: dict):
     if "enum" in rule:
         return rule["enum"][0]
     if "oneOf" in rule:
         return _minimal_value(rule["oneOf"][0], root=root)
-    rule_type = rule.get("type")
-    if rule_type == "string":
-        minimum = rule.get("minLength", 0)
-        pattern = rule.get("pattern")
-        candidates = (
-            "",
-            "x" * max(1, minimum),
-            "0" * 64,
-            "compile:" + "0" * 64,
-            "2026-08-05T12:00:00Z",
-        )
-        for candidate in candidates:
-            if len(candidate) >= minimum and (pattern is None or re.search(pattern, candidate)):
-                return candidate
-        raise AssertionError(f"No minimal string for {rule}")
-    if rule_type == "null":
-        return None
-    if rule_type == "integer":
-        return rule.get("minimum", 0)
-    if rule_type == "number":
-        return rule.get("minimum", 0)
-    if rule_type == "boolean":
+    return _NO_MINIMUM
+
+
+def _minimal_shortcut(rule: dict, root: dict):
+    """What a rule names directly, or `_NO_MINIMUM` when it names a type."""
+    if "$ref" in rule:
+        return _minimal_value(_ref_target(rule, root), root=root)
+    if "const" in rule:
+        return rule["const"]
+    return _minimal_choice(rule, root)
+
+
+def _string_fits(candidate: str, minimum: int, pattern: str | None) -> bool:
+    if len(candidate) < minimum:
         return False
-    if rule_type == "array":
-        return [
-            _minimal_value(rule["items"], root=root)
-            for _ in range(rule.get("minItems", 0))
-        ]
-    if rule_type == "object":
-        return {
-            key: _minimal_value(rule["properties"][key], root=root)
-            for key in rule.get("required", [])
-        }
-    raise AssertionError(f"No minimal value for {rule}")
+    return pattern is None or bool(re.search(pattern, candidate))
+
+
+def _minimal_string(rule: dict) -> str:
+    minimum = rule.get("minLength", 0)
+    pattern = rule.get("pattern")
+    for candidate in ("x" * max(1, minimum), *_STRING_CANDIDATES):
+        if _string_fits(candidate, minimum, pattern):
+            return candidate
+    raise AssertionError(f"No minimal string for {rule}")
+
+
+def _minimal_array(rule: dict, root: dict) -> list:
+    return [
+        _minimal_value(rule["items"], root=root)
+        for _ in range(rule.get("minItems", 0))
+    ]
+
+
+def _minimal_object(rule: dict, root: dict) -> dict:
+    return {
+        key: _minimal_value(rule["properties"][key], root=root)
+        for key in rule.get("required", [])
+    }
+
+
+def _minimal_scalar(rule: dict, rule_type: object):
+    if rule_type in _SCALAR_MINIMA:
+        return _SCALAR_MINIMA[rule_type]
+    if rule_type in _NUMERIC_TYPES:
+        return rule.get("minimum", 0)
+    return _NO_MINIMUM
+
+
+def _minimal_typed(rule: dict, root: dict):
+    rule_type = rule.get("type")
+    builders = {
+        "string": lambda: _minimal_string(rule),
+        "array": lambda: _minimal_array(rule, root),
+        "object": lambda: _minimal_object(rule, root),
+    }
+    build = builders.get(str(rule_type))
+    if build is None:
+        return _minimal_scalar(rule, rule_type)
+    return build()
+
+
+def _minimal_value(rule: dict, *, root: dict | None = None):
+    resolved_root = rule if root is None else root
+    shortcut = _minimal_shortcut(rule, resolved_root)
+    if shortcut is not _NO_MINIMUM:
+        return shortcut
+    value = _minimal_typed(rule, resolved_root)
+    if value is _NO_MINIMUM:
+        raise AssertionError(f"No minimal value for {rule}")
+    return value
 
 
 def test_validate_schema_supports_the_committed_closed_subset(tmp_path):

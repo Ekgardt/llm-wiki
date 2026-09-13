@@ -57,22 +57,79 @@ def _runner():
     return module
 
 
+_EXACT_METRICS = {
+    "latency_ms": 1.0,
+    "build_ms": 1.0,
+    "recall_at_10": 1.0,
+    "recall_at_50": 1.0,
+    "batch_throughput_qps": 1.0,
+}
+_LATENCY_PROFILE = {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0}
+_ANN_ADAPTERS = {"usearch", "lancedb-ann"}
+
+
+def _fixture_metrics(exact: bool) -> dict:
+    metrics = {key: None for key in METRIC_KEYS}
+    metrics.update(_EXACT_METRICS if exact else {})
+    return metrics
+
+
+def _fixture_provenance(metrics: dict, reason: str | None) -> dict:
+    return {key: _provenance_entry(value, reason) for key, value in metrics.items()}
+
+
+def _provenance_entry(value: object, reason: str | None) -> dict:
+    if value is None:
+        return {
+            "status": "unavailable",
+            "source": None,
+            "reason": reason or "not_measured",
+        }
+    return {"status": "measured", "source": "unit_test_exact_fixture", "reason": None}
+
+
+def _fixture_profiles(exact: bool) -> dict:
+    measured = dict(_LATENCY_PROFILE) if exact else dict.fromkeys(_LATENCY_PROFILE)
+    return {"cold": dict(measured), "warm": dict(measured)}
+
+
+def _fixture_filter(adapter: str, size: int, fraction: float, exact: bool) -> dict:
+    return {
+        "indexed_corpus_size": size,
+        "selected_corpus_size": max(1, round(size * fraction)),
+        "application": "query_time",
+        "equivalent_predicate": "selected = true",
+        "implementation": _filter_implementation(adapter, exact),
+    }
+
+
+def _filter_implementation(adapter: str, exact: bool) -> str:
+    if adapter.startswith("lancedb"):
+        return "lancedb-prefilter"
+    return "numpy-mask" if exact else "postfilter"
+
+
+def _requested_index(adapter: str, exact: bool) -> str:
+    if exact:
+        return "exact"
+    return "ann" if adapter in _ANN_ADAPTERS else "flat"
+
+
+def _fixture_index(adapter: str, exact: bool, reason: str | None) -> dict:
+    return {
+        "requested": _requested_index(adapter, exact),
+        "status": "flat" if exact else "unavailable",
+        "type": "exact-numpy" if exact else None,
+        "verified_by": "unit_test_fixture" if exact else None,
+        "reason": reason,
+    }
+
+
 def _fake_full_cell(adapter: str, size: int, fraction: float) -> dict:
     """Internally consistent schema fixture; it does not claim optional measurements."""
     exact = adapter == "exact-numpy"
-    metrics = {key: None for key in METRIC_KEYS}
-    if exact:
-        metrics.update(
-            {
-                "latency_ms": 1.0,
-                "build_ms": 1.0,
-                "recall_at_10": 1.0,
-                "recall_at_50": 1.0,
-                "batch_throughput_qps": 1.0,
-            }
-        )
     reason = None if exact else "unit_test_dependency_unavailable"
-    profile = {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0}
+    metrics = _fixture_metrics(exact)
     cell = {
         "adapter": adapter,
         "corpus_size": size,
@@ -80,53 +137,18 @@ def _fake_full_cell(adapter: str, size: int, fraction: float) -> dict:
         "status": "ok" if exact else "skipped",
         "reason": reason,
         "metrics": metrics,
-        "metric_provenance": {
-            key: {
-                "status": "measured" if value is not None else "unavailable",
-                "source": "unit_test_exact_fixture" if value is not None else None,
-                "reason": None if value is not None else (reason or "not_measured"),
-            }
-            for key, value in metrics.items()
-        },
-        "latency_profiles": {
-            "cold": dict(profile) if exact else dict.fromkeys(profile),
-            "warm": dict(profile) if exact else dict.fromkeys(profile),
-        },
+        "metric_provenance": _fixture_provenance(metrics, reason),
+        "latency_profiles": _fixture_profiles(exact),
         "adoption": {
             "adopt": False,
             "becomes_default": False,
             "requires_measurement": True,
             "reasons": ["exact ground truth" if exact else reason],
         },
-        "filter_methodology": {
-            "indexed_corpus_size": size,
-            "selected_corpus_size": max(1, round(size * fraction)),
-            "application": "query_time",
-            "equivalent_predicate": "selected = true",
-            "implementation": (
-                "lancedb-prefilter"
-                if adapter.startswith("lancedb")
-                else "numpy-mask"
-                if exact
-                else "postfilter"
-            ),
-        },
-        "index": {
-            "requested": (
-                "exact"
-                if exact
-                else "ann"
-                if adapter in {"usearch", "lancedb-ann"}
-                else "flat"
-            ),
-            "status": "flat" if exact else "unavailable",
-            "type": "exact-numpy" if exact else None,
-            "verified_by": "unit_test_fixture" if exact else None,
-            "reason": reason,
-        },
+        "filter_methodology": _fixture_filter(adapter, size, fraction, exact),
+        "index": _fixture_index(adapter, exact, reason),
     }
-    if exact:
-        cell["_exact_p95_ms"] = 1.0
+    cell.update({"_exact_p95_ms": 1.0} if exact else {})
     return cell
 
 
@@ -456,6 +478,29 @@ def test_smoke_report_validates_against_schema() -> None:
         validate_schema(report, REPORT_SCHEMA)
 
 
+_INTERNAL_CELL_FIELDS = ("_exact_p95_ms", "adopted", "is_default")
+
+
+def _full_matrix_cells() -> list:
+    """One cell per adapter, corpus size and selectivity fraction."""
+    return [
+        _fake_full_cell(adapter, size, fraction)
+        for size in CORPUS_SIZES
+        for fraction in SELECTIVITY
+        for adapter in ADAPTER_IDS
+    ]
+
+
+def _leaked_cell_fields(cells: list) -> list:
+    """Internal bookkeeping a published report must not carry."""
+    return [
+        (index, name)
+        for index, cell in enumerate(cells)
+        for name in _INTERNAL_CELL_FIELDS
+        if name in cell
+    ]
+
+
 def test_full_report_has_separate_closed_schema(tmp_path) -> None:
     from reliable_memory import SchemaValidationError, validate_schema
 
@@ -473,11 +518,7 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
     with pytest.raises(SchemaValidationError):
         validate_schema(incomplete, FULL_REPORT_SCHEMA)
 
-    cells = []
-    for size in CORPUS_SIZES:
-        for fraction in SELECTIVITY:
-            for adapter in ADAPTER_IDS:
-                cells.append(_fake_full_cell(adapter, size, fraction))
+    cells = _full_matrix_cells()
     report = runner.build_report(
         mode="full",
         executed_corpus_sizes=CORPUS_SIZES,
@@ -487,8 +528,7 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
         cells=cells,
         crash_matrix=runner.unavailable_crash_matrix("not_run_in_unit_test"),
     )
-    assert all("_exact_p95_ms" not in cell for cell in report["cells"])
-    assert all("adopted" not in cell and "is_default" not in cell for cell in report["cells"])
+    assert _leaked_cell_fields(report["cells"]) == []
     validate_schema(report, FULL_REPORT_SCHEMA)
     output = tmp_path / "full.json"
     runner.write_report_atomic(report, output, mode="full")
@@ -506,11 +546,7 @@ def test_full_report_has_separate_closed_schema(tmp_path) -> None:
 
 def test_full_atomic_report_rejects_duplicate_matrix_cells(tmp_path) -> None:
     runner = _runner()
-    cells = []
-    for size in CORPUS_SIZES:
-        for fraction in SELECTIVITY:
-            for adapter in ADAPTER_IDS:
-                cells.append(_fake_full_cell(adapter, size, fraction))
+    cells = _full_matrix_cells()
     cells[-1] = json.loads(json.dumps(cells[0]))
     report = runner.build_report(
         mode="full",
@@ -537,6 +573,36 @@ def test_smoke_atomic_report_rejects_duplicate_adapter_cells(tmp_path) -> None:
     with pytest.raises(ValueError, match="smoke matrix cells"):
         runner.write_report_atomic(report, tmp_path / "smoke.json", mode="smoke")
     assert not (tmp_path / "smoke.json").exists()
+
+
+_JITTERY_METRICS = (
+    "rss_bytes",
+    "disk_bytes",
+    "startup_ms",
+    "build_ms",
+    "update_ms",
+    "delete_ms",
+    "concurrent_reader_p95_ms",
+    "batch_throughput_qps",
+    "latency_ms",
+)
+
+_FLAT_LATENCY_PROFILE = {
+    "cold": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
+    "warm": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
+}
+
+
+def _normalize_jittery_cell(cell: dict) -> None:
+    """Drop the wall-clock fields that jitter between two identical runs."""
+    metrics = cell.get("metrics", {})
+    for name in _JITTERY_METRICS:
+        metrics.pop(name, None)
+    # Adoption reasons include the measured p95 values normalized above.
+    cell.pop("adoption", None)
+    if "latency_profiles" not in cell:
+        return
+    cell["latency_profiles"] = json.loads(json.dumps(_FLAT_LATENCY_PROFILE))
 
 
 def test_cli_smoke_json_is_deterministic(tmp_path) -> None:
@@ -574,22 +640,7 @@ def test_cli_smoke_json_is_deterministic(tmp_path) -> None:
     for report in (a, b):
         report.pop("generated_at", None)
         for cell in report.get("cells", []):
-            cell.get("metrics", {}).pop("rss_bytes", None)
-            cell.get("metrics", {}).pop("disk_bytes", None)
-            cell.get("metrics", {}).pop("startup_ms", None)
-            cell.get("metrics", {}).pop("build_ms", None)
-            cell.get("metrics", {}).pop("update_ms", None)
-            cell.get("metrics", {}).pop("delete_ms", None)
-            cell.get("metrics", {}).pop("concurrent_reader_p95_ms", None)
-            cell.get("metrics", {}).pop("batch_throughput_qps", None)
-            cell.get("metrics", {}).pop("latency_ms", None)
-            # Adoption reasons include the measured p95 values normalized above.
-            cell.pop("adoption", None)
-            if "latency_profiles" in cell:
-                cell["latency_profiles"] = {
-                    "cold": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
-                    "warm": {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0},
-                }
+            _normalize_jittery_cell(cell)
     assert a == b
 
 

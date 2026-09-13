@@ -6,7 +6,97 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The test tree comes under the complexity law.** `lizard -C 5` reported 88
+  functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
+  in the navigation tests become tables of runners and builders, the
+  121-line AST walk over the benchmark fixture becomes one function per module
+  and per block, the fake LSP server's two 300-line loops become
+  `_SemanticServer` and `_LifecycleServer` with one method per protocol
+  request, and the runtime-deletion guard resolves paths through a dispatch on
+  node type. No test lost an assertion: each file was run before and after.
+
+### Added
+
+- **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
+  records all of them on `694991b`: the parity stand at 16 of 16 against the
+  other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the
+  14 both answered; code navigation 200/200 definitions and F1 1.0 on references
+  and calls with 0 orphan processes; durability 0 silent losses over 108 killed
+  trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
+  at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
+  last one is open and unexplained.
+- **A killed test names itself on Windows.** `PYTHONFAULTHANDLER=1` on every
+  shard and `-v` on the Windows shards, after a job died with no summary, no
+  junit and no traceback (run 34727708815, after 2 058 of the shard's 2 080
+  collected items).
+
 ### Fixed
+
+- **A graded line number is read from the tree, not frozen in the gold.** T04
+  asks where `_page_diverse` is defined and graded on the literal `3030`; the
+  slot fix moved that definition to 3054, so every side would have graded wrong
+  whatever it answered, and CI said so on shard 2. The term is now
+  `{line:scripts/retrieval.py:_page_diverse}`, resolved when the answer is
+  graded, and a guard test fails if it resolves to nothing.
+
+- **One argument, one slot.** A compiled note could take three of ten visible
+  rows with three headings of the same page, because since 2026-09-08 a slot
+  belonged to a page *and* heading — right for a daily log, whose headings are
+  separate sessions, wrong for a note, whose headings are sections of one
+  argument. The unit of a repeat is now the episode under `knowledge/daily/**`
+  and `knowledge/raw/**` and the page everywhere else; nothing is dropped, the
+  repeats still follow. Measured on the live vault's notes: pages surfacing in a
+  ten-row window rose from 70 to 80 of 100. The selective-forgetting stand, which
+  found this, now decides presence over a window of 200 — every page it called
+  forgotten was retrievable at rank 11 to 13 — and reports the ten-row share
+  instead of gating on it. All nine of its gates pass. See
+  `docs/research/2026-09-13-one-argument-one-slot.md`.
+
+- **A definition's line number is not a fact worth storing.** The parity gold
+  cited `scripts/search_memory.py:5038 (def _legacy_vector_source_membership)`,
+  and the guard test turned the suite red twice in one day because edits above
+  that definition moved it — while the gold's claim stayed true. Eleven anchors
+  that name a definition now name the file and the definition and leave the line
+  to be resolved from the tree; the guard still fails loudly when a definition
+  leaves its file, and every *graded* line number keeps its exact check, because
+  those numbers are the measurement. See
+  `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.
+
+- **A digest recomputed over damaged rows cannot catch them.** Moving the chunk
+  walk off the read path took the corruption fallback with it: five kinds of row
+  damage — a heading ancestry that is not a JSON list, a broken `chunk_order`, a
+  `source_sha256` or `chunk_id` that is not a sha256, blank content — were served
+  from the generation instead of falling back to lexical search, because the test
+  that damages a row also refreshes the manifest descriptor. The walk is back on
+  the read path and its verdict is now remembered by the artifact's content
+  digest, so it is paid once per distinct bytes instead of once per process; a
+  deep check still walks and still re-derives. Two fake catalogs in the code-graph
+  tests learned to answer the code-generation question the reader now asks first,
+  and the autonomous-bootstrap LSP test no longer uses one 0.8 s number for both
+  a real server start and the replacement budget it measures — a Windows runner
+  failed the start. See
+  `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+
+- **The parity gold described the tree of 2026-08-28, and graded on it.** Eight
+  of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
+  that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when
+  `fuse_rrf` sat at 1568 in the very commit whose message says the gold was read
+  by hand from the working tree. A nested `must` entry is alternatives, not a
+  conjunction, so most of those stale numbers cost no grade; two tasks were
+  genuinely unsatisfiable — T04 requires the line `_page_diverse` no longer
+  occupies as a separate term, and T10 requires a caller this tree does not
+  have. The two-hop task named `retrieve` as the only
+  second-hop caller of `_fused_candidates`; the callers are
+  `_partial_candidates` and `_executed_plan`. T07 asked whether
+  `_search_backends` is dead code after the H1 deletion had removed it from the
+  tree; it is retired with its reason recorded in the file and replaced by the
+  same question about `_legacy_vector_source_membership`, whose name occurs
+  exactly once in the repository — its own `def`. Every number is re-read from
+  the tree on 2026-09-12, and `tests/test_parity_gold_resolves.py` fails when a
+  citation stops resolving or a graded line number is one no citation names. A
+  stale benchmark does not crash; it publishes.
 
 - **A replay over a committed transaction is a duplicate, not a quarantine.**
   A project checkpoint row and its transaction do not change in the same
@@ -20,6 +110,88 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   Windows job of CI run 34655557302, which is where the window is widest.
 
 ### Added
+
+- **A verified digest is remembered across processes, and the warm-up it would
+  have hidden is gone.** Hashing every artifact of a generation against its
+  manifest is what a cold open paid, in every new process, to learn what the
+  previous process already knew about an immutable file. It is now remembered by
+  stat identity — generation, path, device, inode, size, mtime — in the disposable
+  `cache/evidence-graph/verified-artifacts.json`, with Git's racily-clean rule:
+  an artifact whose mtime is not strictly older than the cache's own is hashed
+  anyway, and an unreadable cache is an empty cache. Cold open on the installed
+  vault 2.22 s → 1.71 s, and 4.9 s → 1.71 s across the evening. The graph warm-up
+  added earlier the same day is deleted: it moved the cost rather than removing
+  it, which is what the owner called it. What remains of the 1.71 s is measured
+  and named in
+  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`, and
+  two of its three parts were the same waste elsewhere: the format receipt hashed
+  241 MB to key a verdict it already had, and the index check walked all 3 405
+  rows on a read that already has the digest. Both fixed, cold open **1.23 s** —
+  4.9 s this morning. What remains is the seal's own read after the open, which is
+  the fence itself and stays.
+- **A reader checks the digest, a writer derives.** A cold code answer on the
+  installed vault re-derived all 3 405 chunks of the search index before
+  answering — 1.68 s of it spent inferring the language of each chunk — to prove
+  that our own chunker is deterministic, when the artifact digest, the manifest's
+  versions and the entry seal already pin every input. That re-derivation now runs
+  where the rows are created and in `doctor`; a read trusts the digest. Depth is
+  part of the memo keys, and a deep verdict answers a shallow question while the
+  reverse never does. Cold 4.9 s → 2.22 s, warm 0.31 s.
+- **The vault is a repository too, and answers about its own code.** The
+  decision left open this morning, taken on the owner's instruction to decide by
+  rules 2 and 4: the vault's checkout gets a code generation beside its memory
+  one, because current practice keeps one index per data lifecycle and code apart
+  from documents, and because mixing them re-derives 240 MB of code index for a
+  knowledge edit. `admit_repository` no longer refuses the vault; a vault's code
+  roots exclude `knowledge/` and say so; a generation that holds code names its
+  roots in its manifest, so one checkout can carry both and a reader can tell
+  them apart; the graph opener asks for the code generation first; and
+  `refresh-all` adopts the vault once so the nightly keeps it fresh with no
+  operator action. Measured after indexing the installed vault:
+  `get_architecture mode=query` for `fuse_rrf` answers in 4.4 s where it
+  returned `"nodes": []` this morning. Reasons, sources and costs:
+  `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+- **The decision rule is satisfied.** Three runs, every condition met on the
+  surface an agent actually reaches: 16 correct answers of 16 against
+  codebase-memory-mcp's 15, zero confident-wrong answers against their one, no
+  non-answers on either side, tokens 1.45× against a 1.5× ceiling and p95 per
+  task 1.58× against a 2× ceiling. The rule was written before the first number
+  was read and has not been touched since; by it, llm-wiki can now replace the
+  other tool, and removing it is the owner's call. What moved the numbers is in
+  `docs/research/2026-09-12-the-rule-is-satisfied.md`: six changes, of which one
+  added a capability and five removed waste — two wrong answers and four repeats
+  of work already done. Measured on the worktree checkout, because the installed
+  vault still holds no code generation of its own.
+- **Sixteen of sixteen, against fifteen.** After the two defect fixes and the
+  three changes the owner approved on 2026-09-12, three runs of the parity set
+  give our two surfaces 16 correct answers of 16 against codebase-memory-mcp's
+  15, with zero confident-wrong answers against their one and no non-answers on
+  either side; every grade repeated exactly across the three runs. The
+  cross-service route question is ours too: correct in 0.6 s against their
+  partial in 2.0 s. Cost is the one condition of the decision rule still unmet
+  on the default surface — tokens 1.57× and p95 2.74× against ceilings of 1.5×
+  and 2× — while the `query` surface passes all four at 1.18× and 1.36×. The
+  other tool stays installed until the default surface passes too, and what the
+  remaining gap is made of is measured in
+  `docs/research/2026-09-12-sixteen-of-sixteen.md`: two `find_dead_code` calls at
+  11 s carry the whole p95, and a quarter of the largest answer is one absolute
+  path prefix repeated 110 times.
+
+- **The parity numbers exist, and they say keep the other tool.** Three runs of
+  the sixteen-task set and three of the cross-service pair, llm-wiki against
+  codebase-memory-mcp, both sides indexing the same checkout, graded by a rule
+  written before the numbers were read. Correct answers: 13 and 14 of 16 for our
+  two columns against 15; tokens 9 869 / 7 685 against 5 565; p95 per task
+  12.7 s / 10.2 s against 4.2 s; one confident-wrong answer each and no
+  non-answers on either side. Every grade repeated exactly in all three runs. We
+  win "which tests exercise this function" outright and the cross-service route
+  question in 0.6 s against 2.0 s; we lose "where is this constant defined" in
+  every run, because the generation holds no module-level constant node. Two of
+  the rule's four conditions fail, so codebase-memory-mcp stays installed and
+  the four things that would close the gap are named in
+  `docs/research/2026-09-12-the-first-honest-parity-numbers.md`. Runs are in
+  `benchmark/code-parity-v2-2026-09-12-run{1,2,3}.json` and
+  `benchmark/code-parity-cross-service-2026-09-12-run{1,2,3}.json`.
 
 - **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
   `definition`, `references`, `implementations`, `type`, `callers`/`callees`

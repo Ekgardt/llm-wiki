@@ -110,12 +110,19 @@ def cohort_summary(targets: list[dict]) -> dict:
     """How a cohort answered: how many probes worked, how many surfaced."""
     usable = len(_usable(targets))
     surfaced = _counted(_usable(targets), "surfaced")
+    visible = _counted(_usable(targets), "visible")
     return {
         "n": len(targets),
         "probes_usable": usable,
         "surfaced": surfaced,
         "in_corpus": _counted(targets, "in_corpus"),
         "surfaced_rate": _rate(surfaced, usable),
+        # Reported, never gated: how many of them keep a place in the first ten
+        # rows. Archiving 59 pages reorders the edge of a narrow window, and a
+        # page one place past it is not a page forgotten — see
+        # docs/research/2026-09-13-one-argument-one-slot.md.
+        "visible": visible,
+        "visible_rate": _rate(visible, usable),
     }
 
 

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -96,32 +97,45 @@ def _pwsh() -> str | None:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
+@dataclass
+class _ShellScan:
+    """Where a shell-function scan is: brace depth, open quote, pending escape."""
+
+    depth: int = 0
+    quoted: str | None = None
+    escaped: bool = False
+
+
+_BRACE_DEPTH = {"{": 1, "}": -1}
+
+
+def _scan_unquoted(state: _ShellScan, char: str) -> bool:
+    """Advance outside quotes; True when the function's closing brace was read."""
+    if char in "'\"":
+        state.quoted = char
+        return False
+    state.depth += _BRACE_DEPTH.get(char, 0)
+    return char == "}" and state.depth == 0
+
+
+def _scan_char(state: _ShellScan, char: str) -> bool:
+    """Advance one character; True when the function ends here."""
+    if state.escaped or char == "\\":
+        state.escaped = char == "\\"
+        return False
+    if state.quoted:
+        state.quoted = None if char == state.quoted else state.quoted
+        return False
+    return _scan_unquoted(state, char)
+
+
 def _shell_function(source: str, name: str) -> str:
     match = re.search(rf"^{re.escape(name)}\(\) \{{", source, re.MULTILINE)
     assert match is not None, f"missing shell function {name}"
-    depth = 0
-    quoted: str | None = None
-    escaped = False
+    state = _ShellScan()
     for index in range(match.start(), len(source)):
-        char = source[index]
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if quoted:
-            if char == quoted:
-                quoted = None
-            continue
-        if char in "'\"":
-            quoted = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start() : index + 1]
+        if _scan_char(state, source[index]):
+            return source[match.start() : index + 1]
     raise AssertionError(f"unterminated shell function {name}")
 
 

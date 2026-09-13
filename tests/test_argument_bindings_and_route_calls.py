@@ -42,6 +42,18 @@ def call_local(limit, offset):
     return requests.post("/unknown", json=offset)
 """
 
+ANNOTATED = b"""\
+from typing import Any
+
+
+def receive(first: list[dict[str, Any]] | None, second: int = 0) -> None:
+    return (first, second)
+
+
+def send(alpha, beta):
+    return receive(alpha, beta)
+"""
+
 CALLER = b"""\
 def receive(first, second=None):
     return (first, second)
@@ -162,3 +174,62 @@ def test_bindings_are_bounded_in_count_and_bytes():
         True,
     )
     assert _bounded_bindings(long_pairs).endswith("+1 more")
+
+
+def test_an_annotation_with_a_comma_does_not_invent_a_parameter():
+    """`dict[str, Any]` is one annotation, not two parameters.
+
+    Splitting the whole signature on `,` named the second parameter
+    `Any]] | None` and misaligned every parameter after it; the parity run of
+    2026-09-12 caught it as `dense_hits->Any]] | None`.
+    """
+    result = _extract(caller=ANNOTATED)
+    literals = sorted(str(item["literal"]) for item in _edges(result, "BINDS_ARGUMENTS"))
+
+    assert literals == ["alpha->first,beta->second"]
+
+
+CONSTANTS = b"""\
+from typing import Final
+
+EDITORIAL_NAMES: Final[frozenset[str]] = frozenset({"index.md"})
+MAX_ROWS = 10
+lower_case = 1
+
+
+class Holder:
+    INSIDE = 2
+
+
+def scoped():
+    LOCAL = 3
+    return LOCAL
+"""
+
+
+def _nodes_of_kind(result, kind: str) -> list[str]:
+    return sorted(
+        str(node["metadata"]["name"]) for node in result.nodes if node["kind"] == kind
+    )
+
+
+def test_a_module_level_upper_case_name_is_a_constant_node():
+    """The parity set asked where a constant is defined and nothing answered.
+
+    Module level and upper case only: a lower-case module variable, a class
+    attribute and a function local stay out
+    (`docs/research/2026-09-12-three-changes-to-pass-them.md`).
+    """
+    result = _extract(pkg_settings=CONSTANTS)
+
+    assert _nodes_of_kind(result, "constant") == ["EDITORIAL_NAMES", "MAX_ROWS"]
+
+
+def test_a_constant_carries_the_definition_occurrence_that_answers_where():
+    result = _extract(pkg_settings=CONSTANTS)
+    node = next(item for item in result.nodes if item["kind"] == "constant")
+    roles = [
+        row["role"] for row in result.occurrences if row["node_id"] == node["node_id"]
+    ]
+
+    assert roles == ["definition"]

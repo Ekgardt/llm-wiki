@@ -86,6 +86,35 @@ def _swallow_or_report(
     ) from error
 
 
+def _completion_landed(project: str, claim) -> bool:
+    """Did this exact claim's completion land? The record is keyed by claim id.
+
+    A lock error says the outcome is unknown, not that nothing happened, and the
+    refusal that follows it — `resource epochs changed` — is the fence reporting
+    that this claim is no longer current. Replaying it can never succeed, so the
+    honest move is to read back whether the work is already published. Research:
+    `docs/research/2026-09-12-a-lock-error-then-a-fence-error-is-a-question-not-a-retry.md`.
+    """
+    path = blackboard._bb_dir(blackboard._sanitize_project(project)) / "completed.jsonl"
+    try:
+        records = blackboard._read_jsonl(path)
+    except (OSError, ValueError):
+        return False
+    return any(str(record.get("id")) == claim.claim_id for record in records)
+
+
+def _completed_or_already(project: str, claim, label: str) -> bool:
+    """Complete the claim, or accept a completion that already landed."""
+    try:
+        return _under_contention(
+            blackboard.complete_task, project, claim, label=label
+        )
+    except AssertionError:
+        if _completion_landed(project, claim):
+            return True
+        raise
+
+
 def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int) -> int:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
@@ -106,11 +135,8 @@ def _write_blackboard_batch(vault: str, state_root: str, worker: int, count: int
             # run for contention rather than for incoherence.
             ttl_seconds=600,
         )
-        if _under_contention(
-            blackboard.complete_task,
-            "demo",
-            claim,
-            label=f"completion of worker/{worker}/task/{index}",
+        if _completed_or_already(
+            "demo", claim, f"completion of worker/{worker}/task/{index}"
         ):
             completed += 1
     return completed

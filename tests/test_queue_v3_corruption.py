@@ -43,6 +43,47 @@ def _insert_corrupt_task(queue, task_id: str) -> None:
         )
 
 
+def _redrive_child_row(child: dict, parent_task_id: str) -> tuple:
+    """One synthetic redrive child, with the defaults this fixture implies."""
+    child_time = str(child.get("updated_at", "2000-01-01T00:00:00+00:00"))
+    return (
+        str(child["id"]),
+        b"{}",
+        sha256_bytes(b"{}"),
+        str(child.get("state", "succeeded")),
+        child_time,
+        child_time,
+        child_time,
+        str(child.get("redrive_of", parent_task_id)),
+    )
+
+
+def _insert_redrive_children(
+    db_path, children: list[dict[str, object]] | None, parent_task_id: str
+) -> None:
+    rows = [_redrive_child_row(child, parent_task_id) for child in children or []]
+    with sqlite3.connect(db_path) as database:
+        database.executemany(
+            """INSERT INTO tasks(
+                   id,kind,handler_version,payload_blob,input_hash,state,
+                   priority,created_at,updated_at,available_at,redrive_of
+               ) VALUES (?,'query',1,?,?,?,0,?,?,?,?)""",
+            rows,
+        )
+
+
+def _quarantine_until_settled(queue, task_id: str, owner) -> str:
+    """Quarantine is a progress loop; drive it to its terminal state."""
+    progress = queue.quarantine_corrupt(
+        task_id, reason="Retain and disposition.", owner=owner
+    )
+    while progress.state == "quarantine_pending":
+        progress = queue.quarantine_corrupt(
+            task_id, reason="Retain and disposition.", owner=owner
+        )
+    return progress.state
+
+
 def _quarantined_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -85,28 +126,7 @@ def _quarantined_task(
     )
     coordinator.release_intent_fence(capture_fence)
     registry.release(capture_owner)
-    with sqlite3.connect(queue.db_path) as database:
-        for child in children or []:
-            child_id = str(child["id"])
-            child_state = str(child.get("state", "succeeded"))
-            child_time = str(child.get("updated_at", "2000-01-01T00:00:00+00:00"))
-            parent_id = str(child.get("redrive_of", binding.task_id))
-            database.execute(
-                """INSERT INTO tasks(
-                       id,kind,handler_version,payload_blob,input_hash,state,
-                       priority,created_at,updated_at,available_at,redrive_of
-                   ) VALUES (?,'query',1,?,?,?,0,?,?,?,?)""",
-                (
-                    child_id,
-                    b"{}",
-                    sha256_bytes(b"{}"),
-                    child_state,
-                    child_time,
-                    child_time,
-                    child_time,
-                    parent_id,
-                ),
-            )
+    _insert_redrive_children(queue.db_path, children, binding.task_id)
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
             """UPDATE tasks SET payload_blob=?,state='dead',
@@ -120,14 +140,7 @@ def _quarantined_task(
         scope=f"repair:{sha256_bytes(task_id.encode('utf-8'))}",
         actor_id=f"repair-{task_id}",
     )
-    progress = queue.quarantine_corrupt(
-        binding.task_id, reason="Retain and disposition.", owner=owner
-    )
-    while progress.state == "quarantine_pending":
-        progress = queue.quarantine_corrupt(
-            binding.task_id, reason="Retain and disposition.", owner=owner
-        )
-    assert progress.state == "quarantined"
+    assert _quarantine_until_settled(queue, binding.task_id, owner) == "quarantined"
     if resolve_intent:
         terminal = {
             "schema_version": "capture-terminal/v1",
@@ -641,6 +654,22 @@ def test_task_and_evidence_deletes_require_live_operation_authorization(
     registry.release(owner)
 
 
+_BLOCKER_CHILD_STATES = {"nonterminal": "ready", "dead-retained": "dead"}
+_GRANDCHILD = {"id": "grandchild", "state": "succeeded", "redrive_of": "blocked-child"}
+
+
+def _blocked_children(blocker: str, old: datetime) -> list[dict[str, object]]:
+    """The child rows each blocker case needs, and the grandchild only one does."""
+    child_time = datetime.now(timezone.utc) if blocker == "young" else old
+    child = {
+        "id": "blocked-child",
+        "state": _BLOCKER_CHILD_STATES.get(blocker, "succeeded"),
+        "updated_at": child_time.isoformat(),
+    }
+    descendants = [{**_GRANDCHILD, "updated_at": old.isoformat()}]
+    return [child, *(descendants if blocker == "descendant" else [])]
+
+
 @pytest.mark.parametrize(
     "blocker", ["descendant", "nonterminal", "young", "dead-retained"]
 )
@@ -648,31 +677,7 @@ def test_purge_deletes_only_terminal_retention_eligible_leaves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocker: str
 ) -> None:
     old = datetime(2000, 1, 1, tzinfo=timezone.utc)
-    child_time = (
-        datetime.now(timezone.utc).isoformat()
-        if blocker == "young"
-        else old.isoformat()
-    )
-    child_state = {
-        "nonterminal": "ready",
-        "dead-retained": "dead",
-    }.get(blocker, "succeeded")
-    children = [
-        {
-            "id": "blocked-child",
-            "state": child_state,
-            "updated_at": child_time,
-        }
-    ]
-    if blocker == "descendant":
-        children.append(
-            {
-                "id": "grandchild",
-                "state": "succeeded",
-                "updated_at": old.isoformat(),
-                "redrive_of": "blocked-child",
-            }
-        )
+    children = _blocked_children(blocker, old)
     queue, registry, owner, task_id, _ = _quarantined_task(
         tmp_path,
         monkeypatch,

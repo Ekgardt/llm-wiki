@@ -599,6 +599,14 @@ def test_graph_expansion_honors_cancellation_before_query() -> None:
         )
 
 
+def _candidate(candidates, candidate_id: str):
+    return next(item for item in candidates if item.candidate_id == candidate_id)
+
+
+def _legacy_row(rows, candidate_id: str) -> dict:
+    return next(item for item in rows if item["candidate_id"] == candidate_id)
+
+
 def test_multiple_paths_to_one_node_merge_evidence_without_multiple_rrf_votes() -> None:
     first = _expansion("target", content="target")
     second = _expansion("target", content="target")
@@ -618,12 +626,12 @@ def test_multiple_paths_to_one_node_merge_evidence_without_multiple_rrf_votes() 
         graph_backend=lambda **_filters: (first, second),
         rerank_enabled=False,
     )
-    target = next(item for item in result.candidates if item.candidate_id == "target")
-    row = next(item for item in candidates_to_legacy(result) if item["candidate_id"] == "target")
+    target = _candidate(result.candidates, "target")
+    row = _legacy_row(candidates_to_legacy(result), "target")
+    path = [step["assertion_id"] for step in row["assertion_path"]]
 
     assert target.rrf_score == round(0.5 / 61, 6)
-    assert [step["assertion_id"] for step in row["assertion_path"]] == [
-        "assertion:target",
-        "assertion:target:second",
-    ]
-    assert row["evidence_ids"] == ["evidence:target", "evidence:target:second"]
+    assert (path, row["evidence_ids"]) == (
+        ["assertion:target", "assertion:target:second"],
+        ["evidence:target", "evidence:target:second"],
+    )

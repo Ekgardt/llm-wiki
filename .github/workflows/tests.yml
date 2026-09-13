@@ -131,6 +131,10 @@ jobs:
       LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-state-${{ matrix.class }}-py${{ matrix.python }}-s${{ matrix.shard }}
       LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
       MEMORY_LLM_PROVIDER: fake
+      # A native crash then prints the Python stack it died on. On 2026-09-13
+      # windows_full py3.11-s2 died after 2 058 of 2 080 tests with no summary,
+      # no junit.xml and no traceback (run 34727708815), which named nothing.
+      PYTHONFAULTHANDLER: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -152,10 +156,14 @@ jobs:
           "import os, pathlib;
           print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
           >> "$GITHUB_ENV"
+      # `-v` on Windows only: a test whose process is killed prints its name
+      # before it runs, so the log's last line names it. `-q` prints one dot
+      # after the fact, which is why the 2026-09-13 death named nothing.
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
           --shard ${{ matrix.shard }} --of 4 --
-          -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
+          ${{ matrix.class == 'windows_full' && '-v' || '-q' }}
+          --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

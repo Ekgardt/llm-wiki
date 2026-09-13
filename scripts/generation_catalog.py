@@ -222,11 +222,16 @@ _MANIFEST_KEYS = {
     "vector_state",
     "repository_scope",
     "code_capture",
+    # A generation that holds code names its roots; a memory generation has no
+    # such key, which is how one checkout can carry both and a reader can tell
+    # them apart (decision 2026-09-12, the vault is a repository too).
+    "code_roots",
 }
 _REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {
     "parent_generation_id",
     "repository_scope",
     "code_capture",
+    "code_roots",
 }
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
 _VECTOR_FILES = {"vectors.npy", "vectors.json"}
@@ -1469,10 +1474,20 @@ def _normalized_capture_section(value: dict[str, object], _parent: str | None) -
 
 # Insertion order is the manifest's own section order and is load-bearing only
 # for readability; canonical JSON sorts keys before anything is hashed.
+def _normalized_code_roots_section(value: dict[str, object], _parent: str | None) -> object:
+    roots = value["code_roots"]
+    if not isinstance(roots, list) or not all(isinstance(name, str) for name in roots):
+        raise ValueError("code_roots must be an array of strings")
+    if not roots:
+        raise ValueError("code_roots must name at least one root when present")
+    return list(roots)
+
+
 _OPTIONAL_MANIFEST_SECTIONS = {
     "parent_generation_id": _normalized_parent_section,
     "repository_scope": _normalized_scope_section,
     "code_capture": _normalized_capture_section,
+    "code_roots": _normalized_code_roots_section,
 }
 
 
@@ -1508,12 +1523,15 @@ class _ArtifactScan:
     """Every artifact hashed against the manifest, under the generation bounds."""
 
     def __init__(self, generation_path: Path, state_root: Path) -> None:
+        from verified_artifacts import VerifiedArtifacts
+
         self.generation_path = generation_path
         self.state_root = state_root
         self.seen: set[str] = set()
         self.normalized: list[dict[str, object]] = []
         self.digests: dict[str, str] = {}
         self.total = 0
+        self.verified = VerifiedArtifacts(state_root)
 
     def add(self, artifact: object, **stop: object) -> None:
         if not isinstance(artifact, dict) or set(artifact) != _ARTIFACT_KEYS:
@@ -1532,13 +1550,42 @@ class _ArtifactScan:
             raise ValueError("generation artifact bytes exceed the supported bound")
         return size
 
-    def _verify(self, path_text: str, size: int, digest: str, **stop: object) -> None:
-        artifact_path = self.generation_path.joinpath(*PurePosixPath(path_text).parts)
+    def _remembered(self, artifact_path: Path, path_text: str, size: int) -> str | None:
+        """The digest already verified for these exact bytes, if any.
+
+        The stat identity is taken through the same runtime validation the hash
+        path uses, so a link, a wrong owner or an oversized file is refused here
+        exactly as it would be there.
+        """
+        metadata = validate_runtime_file(artifact_path, self.state_root, max_bytes=size)
+        return self.verified.remembered(
+            self.generation_path.name, path_text, metadata
+        )
+
+    def _hashed(self, artifact_path: Path, path_text: str, size: int, **stop: object) -> str:
         actual_size, actual_digest = _hash_artifact(
             artifact_path, self.state_root, size, **stop
         )
         if actual_size != size:
             raise ValueError(f"artifact has wrong size: {path_text}")
+        return actual_digest
+
+    def _verified_digest(
+        self, artifact_path: Path, path_text: str, size: int, **stop: object
+    ) -> str:
+        remembered = self._remembered(artifact_path, path_text, size)
+        if remembered is not None:
+            return remembered
+        actual_digest = self._hashed(artifact_path, path_text, size, **stop)
+        metadata = validate_runtime_file(artifact_path, self.state_root, max_bytes=size)
+        self.verified.remember(
+            self.generation_path.name, path_text, metadata, actual_digest
+        )
+        return actual_digest
+
+    def _verify(self, path_text: str, size: int, digest: str, **stop: object) -> None:
+        artifact_path = self.generation_path.joinpath(*PurePosixPath(path_text).parts)
+        actual_digest = self._verified_digest(artifact_path, path_text, size, **stop)
         if actual_digest != digest:
             raise ValueError(f"artifact has wrong hash: {path_text}")
         self.digests[path_text] = actual_digest
@@ -1555,6 +1602,7 @@ def _scan_artifacts(
     scan.normalized.sort(key=lambda item: str(item["path"]))
     if artifacts != scan.normalized:
         raise ValueError("artifacts must be normalized and sorted by path")
+    scan.verified.save()
     return scan
 
 
@@ -1663,6 +1711,7 @@ def _validate_artifact_databases(
     graph_schema: str | None,
     state_root: Path,
     *,
+    deep: bool = True,
     deadline: float | None,
     monotonic: Callable[[], float],
     cancelled: Callable[[], bool] | None,
@@ -1684,6 +1733,7 @@ def _validate_artifact_databases(
             generation_path,
             normalized,
             state_root=state_root,
+            deep=deep,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1814,6 +1864,7 @@ def _validation_key(
     generation_id: str,
     manifest_digest: str,
     digests: dict[str, str],
+    deep: bool = False,
 ) -> tuple:
     """Identity earned by hashing, not assumed: id, manifest, every artifact.
 
@@ -1825,6 +1876,9 @@ def _validation_key(
         generation_id,
         manifest_digest,
         tuple(sorted(digests.items())),
+        # The depth is part of the identity: a shallow read must never satisfy a
+        # later deep registration (2026-09-12).
+        bool(deep),
     )
 
 
@@ -1861,6 +1915,7 @@ def _validate_databases_once(
     graph_schema: str | None,
     state_root: Path,
     *,
+    deep: bool,
     deadline: float | None,
     monotonic: Callable[[], float],
     cancelled: Callable[[], bool] | None,
@@ -1879,6 +1934,7 @@ def _validate_databases_once(
             normalized,
             graph_schema,
             state_root,
+            deep=deep,
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
@@ -1895,6 +1951,7 @@ def _validate_generation(
     generation_path: Path,
     state_root: Path,
     *,
+    deep: bool = False,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -1923,11 +1980,14 @@ def _validate_generation(
     )
     _require_schema_contract(normalized, graph_schema, scan.seen)
     _validate_databases_once(
-        _validation_key(generation_path, expected_id, sha256_bytes(raw), scan.digests),
+        _validation_key(
+            generation_path, expected_id, sha256_bytes(raw), scan.digests, deep
+        ),
         generation_path,
         normalized,
         graph_schema,
         state_root,
+        deep=deep,
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,
@@ -1938,6 +1998,13 @@ def _validate_generation(
     _check_deadline(deadline, monotonic)
     digests = {"manifest.json": sha256_bytes(raw), **scan.digests}
     return normalized, _content_seal(final_seal, digests)
+
+
+def _holds_code_for(manifest: dict[str, object], scope: RepositoryScope) -> bool:
+    """True when this manifest is a code generation of exactly this repository."""
+    if not manifest.get("code_roots"):
+        return False
+    return _manifest_belongs_to(manifest, scope)
 
 
 class GenerationCatalog:
@@ -1969,6 +2036,9 @@ class GenerationCatalog:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self._candidate_issuer = object()
+        # One validation per generation per process, re-checked by its cheap
+        # entry seal. See `_validate` below for what that trades away.
+        self._validated: dict[str, tuple[tuple[_EntrySeal, ...], tuple]] = {}
         self._read_only = False
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
@@ -2010,6 +2080,7 @@ class GenerationCatalog:
         catalog.generations_path = catalog.catalog_path.parent / "generations"
         catalog._clock = clock or (lambda: datetime.now(timezone.utc))
         catalog._candidate_issuer = object()
+        catalog._validated = {}
         catalog._read_only = True
         check_stop()
         with closing(catalog._readonly()):
@@ -2102,22 +2173,82 @@ class GenerationCatalog:
             """
         )
 
-    def _validate(
+    def _validated_generation(
         self,
-        generation_id: str,
+        identifier: str,
         *,
-        deadline: float | None = None,
-        cancelled: Callable[[], bool] | None = None,
+        deep: bool,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
-        identifier = _generation_id(generation_id)
         manifest, seal = _validate_generation(
             self.generations_path / identifier,
             state_root=self.state_root,
+            deep=deep,
             deadline=deadline,
             monotonic=self._monotonic,
             cancelled=cancelled,
         )
         return manifest, canonical_json_bytes(manifest), seal
+
+    def _validate(
+        self,
+        generation_id: str,
+        *,
+        deep: bool = False,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
+        """Validate one generation, at most once per process while it holds still.
+
+        One answer opened the same generation three times and hashed its 295 MB
+        of artifacts three times for it — 3.3 s of a 4.2 s cold call, measured
+        2026-09-12. A generation is immutable after activation, so the repeat
+        asks a question whose answer cannot have changed unless the directory
+        moved; the cheap entry scan — device, inode, mode, size, mtime — says
+        whether it moved, and only then is the hash paid again.
+
+        What this gives up, stated plainly: a swap that leaves every entry's
+        size, mtime and inode identical is no longer caught by *this* check
+        inside one process. The manifest equality against the catalog row, the
+        seal re-check at the end of an open, and the database validation still
+        stand. Approved by the owner on 2026-09-12 with that trade named; the
+        same memoisation already existed one level down, in
+        `_validate_databases_once`. Research:
+        `docs/research/2026-09-12-three-changes-to-pass-them.md`.
+        """
+        identifier = _generation_id(generation_id)
+        seal, _files = _scan_generation(
+            self.generations_path / identifier,
+            deadline=deadline,
+            monotonic=self._monotonic,
+            cancelled=cancelled,
+        )
+        remembered = self._remembered_validation((identifier, deep), seal)
+        if remembered is not None:
+            return remembered
+        validated = self._validated_generation(
+            identifier, deep=deep, deadline=deadline, cancelled=cancelled
+        )
+        self._validated[(identifier, deep)] = (seal, validated)
+        return validated
+
+    def _remembered_validation(
+        self, identity: tuple[str, bool], seal: tuple[_EntrySeal, ...]
+    ) -> tuple | None:
+        """The stored result, when the directory has not moved since it was taken.
+
+        A deep verdict answers a shallow question: it checked everything the
+        shallow one would and more. The reverse is never true, which is why the
+        depth is in the key at all.
+        """
+        identifier, deep = identity
+        stored = self._validated.get((identifier, True))
+        if stored is None or deep:
+            stored = self._validated.get(identity)
+        if stored is None or stored[0] != seal:
+            return None
+        return stored[1]
 
     def _catalog_identity(self) -> _EntrySeal:
         validate_runtime_file(
@@ -2158,7 +2289,7 @@ class GenerationCatalog:
             raise TypeError("expected_repository_scope must be a RepositoryScope or None")
         identifier = _generation_id(generation_id)
         manifest, encoded, seal = self._validate(
-            identifier, deadline=deadline, cancelled=cancelled
+            identifier, deep=True, deadline=deadline, cancelled=cancelled
         )
         scope = _manifest_scope(manifest)
         _require_publication_scope(scope, expected_repository_scope)
@@ -2310,7 +2441,7 @@ class GenerationCatalog:
         self._check_deadline(deadline)
         _check_cancelled(cancelled)
         manifest, encoded, seal = self._validate(
-            generation_id, deadline=deadline, cancelled=cancelled
+            generation_id, deep=True, deadline=deadline, cancelled=cancelled
         )
         timestamp = _utc_timestamp(self._clock)
         capability = self._acquire_seal_capability(
@@ -2910,6 +3041,30 @@ class GenerationCatalog:
             _check_deadline(deadline, time.monotonic)
             _append_ancestors(ordered, seen, parents, identifier, deadline, cancelled)
         return ordered
+
+    def code_generation_for_repository(
+        self,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, dict[str, object]] | tuple[None, None]:
+        """The newest registered generation of this repository that holds code.
+
+        The vault carries two generations of one checkout — memory, which the
+        active pointer names, and code, which is only ever registered — so a code
+        question cannot use the pointer. A generation that holds code says so with
+        `code_roots`; this returns the newest such registration for the scope, or
+        (None, None) when the repository has none yet. Decision:
+        `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+        """
+        expected = RepositoryScope.from_dict(repository_scope.as_dict())
+        for identifier, _registered_at, manifest in self.registered_manifests(
+            deadline=deadline, cancelled=cancelled
+        ):
+            if _holds_code_for(manifest, expected):
+                return identifier, manifest
+        return None, None
 
     def registered_manifests(
         self,

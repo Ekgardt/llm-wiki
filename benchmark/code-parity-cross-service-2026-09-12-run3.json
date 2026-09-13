@@ -1,0 +1,116 @@
+{
+  "version": "code-parity-cross-service-v1",
+  "directory": "/home/user/.claude/jobs/80be9db9/tmp/parity-cs/client-repo",
+  "cbm_project": "home-user-.claude-jobs-80be9db9-tmp-parity-cs-client-repo",
+  "budget_seconds": 60.0,
+  "tasks": [
+    {
+      "id": "X01",
+      "kind": "cross-service",
+      "question": "Which service function handles the request shop.checkout.submit sends?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 0.584,
+        "tokens": 279,
+        "answer_excerpt": "{\"hops\": [{\"depth\": 1, \"from\": \"shop.checkout.submit\", \"to\": \"orders.api.create_order\", \"relation\": \"handled_by_repository\", \"symbol_id\": \"\", \"route\": \"POST /orders\", \"repository_id\": \"repository:bf9447b1bd5b82d23800ab5507afa6e95f57ad632dcbdc25c711b5043186dd49\", \"checkout_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/service-repo\", \"file\": \"orders/api.py\", \"line\": 9}], \"source_generation\": \"generation-18d4aa8c2ecfe696-48fb0df4\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/client-repo\", \"graph_complete\": false, \"unresolved_count\": 5, \"fallback\": false, \"symbol\": \"submit\", \"symbol_resolved\": true, \"resolved_symbol_nodes\": 1, \"note\": \"calls and literal-path HTTP client calls: a route is crossed into the handler that exposes it, never into a caller the graph cannot prove. A route this repository does not serve is matched against the exported routes of every other indexed checkout, and such a hop names the repository it lands in but is not walked further\", \"routes_crossed\": 0, \"repositories_crossed\": 1, \"depth_applied\": 2, \"depth_frontier_open\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "correct",
+        "seconds": 0.574,
+        "tokens": 279,
+        "answer_excerpt": "{\"hops\": [{\"depth\": 1, \"from\": \"shop.checkout.submit\", \"to\": \"orders.api.create_order\", \"relation\": \"handled_by_repository\", \"symbol_id\": \"\", \"route\": \"POST /orders\", \"repository_id\": \"repository:bf9447b1bd5b82d23800ab5507afa6e95f57ad632dcbdc25c711b5043186dd49\", \"checkout_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/service-repo\", \"file\": \"orders/api.py\", \"line\": 9}], \"source_generation\": \"generation-18d4aa8c2ecfe696-48fb0df4\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/client-repo\", \"graph_complete\": false, \"unresolved_count\": 5, \"fallback\": false, \"symbol\": \"submit\", \"symbol_resolved\": true, \"resolved_symbol_nodes\": 1, \"note\": \"calls and literal-path HTTP client calls: a route is crossed into the handler that exposes it, never into a caller the graph cannot prove. A route this repository does not serve is matched against the exported routes of every other indexed checkout, and such a hop names the repository it lands in but is not walked further\", \"routes_crossed\": 0, \"repositories_crossed\": 1, \"depth_applied\": 2, \"depth_frontier_open\": false}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "partial",
+        "seconds": 1.921,
+        "tokens": 65,
+        "answer_excerpt": "function: submit\ndirection: both\nmode: cross_service\ncallees_total: 1\ncallees: 1  (rows: name hop; qn = group prefix + \".\" + name)\n__route__POST__https://orders:\n  internal/orders 1\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    },
+    {
+      "id": "X02",
+      "kind": "cross-service",
+      "question": "Following the request shop.checkout.submit sends, which function stores the order?",
+      "llm_wiki": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 0.668,
+        "tokens": 279,
+        "answer_excerpt": "{\"hops\": [{\"depth\": 1, \"from\": \"shop.checkout.submit\", \"to\": \"orders.api.create_order\", \"relation\": \"handled_by_repository\", \"symbol_id\": \"\", \"route\": \"POST /orders\", \"repository_id\": \"repository:bf9447b1bd5b82d23800ab5507afa6e95f57ad632dcbdc25c711b5043186dd49\", \"checkout_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/service-repo\", \"file\": \"orders/api.py\", \"line\": 9}], \"source_generation\": \"generation-18d4aa8c2ecfe696-48fb0df4\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/client-repo\", \"graph_complete\": false, \"unresolved_count\": 5, \"fallback\": false, \"symbol\": \"submit\", \"symbol_resolved\": true, \"resolved_symbol_nodes\": 1, \"note\": \"calls and literal-path HTTP client calls: a route is crossed into the handler that exposes it, never into a caller the graph cannot prove. A route this repository does not serve is matched against the exported routes of every other indexed checkout, and such a hop names the repository it lands in but is not walked further\", \"routes_crossed\": 0, \"repositories_crossed\": 1, \"depth_applied\": 3, \"depth_frontier_open\": false}"
+      },
+      "llm_wiki_best": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 0.649,
+        "tokens": 279,
+        "answer_excerpt": "{\"hops\": [{\"depth\": 1, \"from\": \"shop.checkout.submit\", \"to\": \"orders.api.create_order\", \"relation\": \"handled_by_repository\", \"symbol_id\": \"\", \"route\": \"POST /orders\", \"repository_id\": \"repository:bf9447b1bd5b82d23800ab5507afa6e95f57ad632dcbdc25c711b5043186dd49\", \"checkout_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/service-repo\", \"file\": \"orders/api.py\", \"line\": 9}], \"source_generation\": \"generation-18d4aa8c2ecfe696-48fb0df4\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/.claude/jobs/80be9db9/tmp/parity-cs/client-repo\", \"graph_complete\": false, \"unresolved_count\": 5, \"fallback\": false, \"symbol\": \"submit\", \"symbol_resolved\": true, \"resolved_symbol_nodes\": 1, \"note\": \"calls and literal-path HTTP client calls: a route is crossed into the handler that exposes it, never into a caller the graph cannot prove. A route this repository does not serve is matched against the exported routes of every other indexed checkout, and such a hop names the repository it lands in but is not walked further\", \"routes_crossed\": 0, \"repositories_crossed\": 1, \"depth_applied\": 3, \"depth_frontier_open\": false}"
+      },
+      "cbm": {
+        "status": "answered",
+        "call_statuses": [
+          "answered"
+        ],
+        "grade": "wrong",
+        "seconds": 2.014,
+        "tokens": 65,
+        "answer_excerpt": "function: submit\ndirection: both\nmode: cross_service\ncallees_total: 1\ncallees: 1  (rows: name hop; qn = group prefix + \".\" + name)\n__route__POST__https://orders:\n  internal/orders 1\ncallers_total: 0\ncallers: 0  (rows: name hop; qn = group prefix + \".\" + name)\n"
+      }
+    }
+  ],
+  "summary": {
+    "llm_wiki": {
+      "correct": 1,
+      "partial": 0,
+      "wrong": 1,
+      "statuses": {
+        "answered": 2
+      },
+      "total_seconds": 1.25,
+      "total_tokens": 558,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    },
+    "llm_wiki_best": {
+      "correct": 1,
+      "partial": 0,
+      "wrong": 1,
+      "statuses": {
+        "answered": 2
+      },
+      "total_seconds": 1.22,
+      "total_tokens": 558,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    },
+    "cbm": {
+      "correct": 0,
+      "partial": 1,
+      "wrong": 1,
+      "statuses": {
+        "answered": 2
+      },
+      "total_seconds": 3.93,
+      "total_tokens": 130,
+      "wrong_but_confident": 1,
+      "operator_attention_events": 0
+    }
+  }
+}
