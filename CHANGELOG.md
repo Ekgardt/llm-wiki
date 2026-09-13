@@ -29,7 +29,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   last one is open and unexplained.
 - **A killed test names itself on Windows.** `PYTHONFAULTHANDLER=1` on every
   shard and `-v` on the Windows shards, after a job died with no summary, no
-  junit and no traceback (run 34727708815, 2 058 of 2 080 tests).
+  junit and no traceback (run 34727708815, after 2 058 of the shard's 2 080
+  collected items).
 
 ### Fixed
 
