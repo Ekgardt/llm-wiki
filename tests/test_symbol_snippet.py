@@ -59,3 +59,35 @@ def test_a_long_block_is_cut_and_says_so(tmp_path: Path) -> None:
     found = symbol_snippet._file_snippets(tmp_path, "big.py", "long_one")
     assert found[0]["truncated"] is True
     assert found[0]["end_line"] - found[0]["start_line"] + 1 <= 121
+
+
+def test_a_stale_snippet_is_read_from_the_file(tmp_path):
+    """A moved definition must not answer with the text that used to be there."""
+    import symbol_snippet
+
+    path = tmp_path / "module.py"
+    path.write_text("\n\ndef target():\n    return 'now'\n", encoding="utf-8")
+    stored = ["def target():", "    return 'before'"]
+    occurrence = {"line_start": 1, "line_end": 2, "source_sha256": "a" * 64}
+    node = {"metadata": {"name": "target", "path": "module.py"}}
+
+    block = symbol_snippet._block_for(
+        tmp_path, "module.py", stored, occurrence, node, "stale"
+    )
+
+    assert (block["start_line"], block["end_line"]) == (3, 4)
+    assert "now" in block["source"]
+
+
+def test_a_fresh_snippet_keeps_the_stored_block(tmp_path):
+    import symbol_snippet
+
+    stored = ["def target():", "    return 'before'"]
+    occurrence = {"line_start": 1, "line_end": 2, "source_sha256": "a" * 64}
+    node = {"metadata": {"name": "target", "path": "module.py"}}
+
+    block = symbol_snippet._block_for(
+        tmp_path, "module.py", stored, occurrence, node, "fresh"
+    )
+
+    assert "before" in block["source"]

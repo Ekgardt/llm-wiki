@@ -123,39 +123,42 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
             "timeout": 20,
             "class": "linux_full",
         },
+        # 60, not 40: the measured Windows range is 22-30 minutes and one shard
+        # took 45 on a slow runner, which the cap turned into a cancelled job
+        # nobody can re-run — docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
         {
             "target": "windows-py3.10",
             "os": "windows-2025",
             "python": "3.10",
-            "timeout": 40,
+            "timeout": 60,
             "class": "windows_full",
         },
         {
             "target": "windows-py3.11",
             "os": "windows-2025",
             "python": "3.11",
-            "timeout": 40,
+            "timeout": 60,
             "class": "windows_full",
         },
         {
             "target": "windows-py3.12",
             "os": "windows-2025",
             "python": "3.12",
-            "timeout": 40,
+            "timeout": 60,
             "class": "windows_full",
         },
         {
             "target": "windows-py3.13",
             "os": "windows-2025",
             "python": "3.13",
-            "timeout": 40,
+            "timeout": 60,
             "class": "windows_full",
         },
         {
             "target": "windows-py3.14",
             "os": "windows-2025",
             "python": "3.14",
-            "timeout": 40,
+            "timeout": 60,
             "class": "windows_full",
         },
         {

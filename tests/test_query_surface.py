@@ -502,9 +502,11 @@ def _rows(answer: dict, key: str) -> list[dict]:
 
 def test_get_architecture_serves_search_and_snippet(indexed):
     search = _architecture(str(indexed), mode="search", symbol="top", limit=5)
+    # The row carries the file, so the module is not spelled twice:
+    # docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
     assert [row["qualified_name"] for row in _rows(search, "results")] == [
-        "pkg.core.top",
-        "pkg.core.top_level",
+        "top",
+        "top_level",
     ]
     snippet = _architecture(str(indexed), mode="snippet", symbol="pkg.core.helper")
     assert snippet["snippets"][0]["precision"] == "exact"

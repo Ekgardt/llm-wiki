@@ -136,6 +136,7 @@ def shape_code_answer(
     if not isinstance(data, dict):
         return data
     answer, omitted = _without_opaque_identifiers(data, include_node_ids)
+    answer = _without_repeated_modules(answer, 0)
     answer = _with_row_constants(answer, 0)
     return _as_columnar(_shaped_to_budget(answer, omitted, budget_tokens), 0)
 
@@ -518,6 +519,84 @@ def _columnar_dict(mapping: dict, depth: int) -> dict:
     for key, value in mapping.items():
         compacted.update(_columnar_entry(key, value, depth))
     return compacted
+
+
+_PATH_KEYS = ("relative_path", "path", "file")
+_NAME_KEYS = ("qualified_name", "name")
+
+
+def _dotted_path(path: str) -> str:
+    """A file path as a dotted trail: scripts/retrieval.py → scripts.retrieval."""
+    stripped = str(path).replace("\\", "/").removesuffix(".py")
+    return stripped.strip("/").replace("/", ".")
+
+
+def _name_without_its_path(path: str, name: str) -> str:
+    """The part of a qualified name the path does not already spell.
+
+    The longest match wins, so `scripts.retrieval._fused_candidates` beside a
+    path ending `scripts/retrieval.py` becomes `_fused_candidates`, while
+    `pkg.mod.Class.method` keeps `Class.method` — the class is not in the path.
+    An absolute path is fine: what matters is that the trail *ends* with the
+    module.
+    """
+    dotted = _dotted_path(path)
+    parts = name.split(".")
+    for index in range(len(parts) - 1, 0, -1):
+        if dotted.endswith(".".join(parts[:index])):
+            return ".".join(parts[index:])
+    return name
+
+
+def _first_present(mapping: dict, keys) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return key
+    return None
+
+
+def _shortened_name(mapping: dict, path_key: str, name_key: str) -> dict:
+    name = mapping[name_key]
+    shorter = _name_without_its_path(mapping[path_key], name)
+    if shorter == name:
+        return mapping
+    return {**mapping, name_key: shorter}
+
+
+def _row_without_its_module(mapping: dict) -> dict:
+    """A row that carries its file path spells the module twice; drop one.
+
+    `["scripts/retrieval.py", 3113, "scripts.retrieval._fused_candidates"]` says
+    `scripts.retrieval` in two shapes, and the path is the one a reader opens.
+    What is left of the name — a bare symbol, or `Class.method` — is what the
+    path cannot say. Measured 2026-09-13: 608 tokens to 558 on one `callers`
+    answer. Research:
+    `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+    """
+    path_key = _first_present(mapping, _PATH_KEYS)
+    name_key = _first_present(mapping, _NAME_KEYS)
+    if path_key is None or name_key is None:
+        return mapping
+    return _shortened_name(mapping, path_key, name_key)
+
+
+def _without_repeated_modules(value, depth: int):
+    if depth > _MAX_DEPTH:
+        return value
+    if isinstance(value, dict):
+        return _module_free_dict(value, depth)
+    if isinstance(value, list):
+        return [_without_repeated_modules(item, depth + 1) for item in value]
+    return value
+
+
+def _module_free_dict(mapping: dict, depth: int) -> dict:
+    shortened = _row_without_its_module(mapping)
+    return {
+        key: _without_repeated_modules(item, depth + 1)
+        for key, item in shortened.items()
+    }
 
 
 def _as_columnar(value, depth: int):

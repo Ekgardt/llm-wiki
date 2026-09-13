@@ -158,14 +158,52 @@ def _exact_snippet(graph, directory: Path, node: dict, occurrence: dict, deadlin
     if lines is None:
         return {"path": relative, "error": "stored source unavailable or over 1 MiB", **_node_fields(node)}
     recorded = str(occurrence["source_sha256"])
+    freshness = _freshness(recorded, _current_sha(directory, relative))
     return {
         "path": relative,
-        **_exact_block(lines, occurrence),
+        **_block_for(directory, relative, lines, occurrence, node, freshness),
         **_node_fields(node),
         "precision": "exact",
         "source_sha256": recorded,
-        "freshness": _freshness(recorded, _current_sha(directory, relative)),
+        "freshness": freshness,
     }
+
+
+def _file_block(directory: Path, relative: str, name: str) -> dict | None:
+    """The block the file holds now, when the stored one is out of date."""
+    from fresh_positions import span_of
+
+    path = Path(directory) / relative
+    span = span_of(path, name)
+    lines = None if span is None else _read_bounded(path)
+    if lines is None:
+        return None
+    start, end = span
+    cut = min(end, start + MAX_SNIPPET_LINES - 1)
+    return {
+        "start_line": start,
+        "end_line": end,
+        "source": "\n".join(lines[start - 1 : cut]),
+        "truncated": cut < end,
+        "lines_read_from": "file",
+    }
+
+
+def _block_for(
+    directory: Path, relative: str, lines: list[str], occurrence: dict, node: dict, freshness: str
+) -> dict:
+    """The stored block while it still matches the file, the file's own after that.
+
+    A stale generation used to answer with the line the definition sat on when it
+    was indexed, and the text that used to be there. Measured 2026-09-13:
+    `_page_diverse` had moved from 3030 to 3054 and both were wrong until the
+    nightly pass. Research:
+    `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+    """
+    if freshness != "stale":
+        return _exact_block(lines, occurrence)
+    fresh = _file_block(directory, relative, str(node["metadata"].get("name") or ""))
+    return fresh or _exact_block(lines, occurrence)
 
 
 def _heuristic_snippets(directory: Path, node: dict, name: str) -> list[dict]:

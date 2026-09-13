@@ -34,6 +34,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
+  minutes above the measured 22-30 minute range, and one shard that took 45 on a
+  slow runner was cancelled at the cap — which GitHub reports as `cancelled`, not
+  `failure`, and refuses to re-run, so a branch could not go green without a new
+  commit. The Windows class now has 60 minutes; Linux and macOS keep 20, where the
+  range is 6-12.
+
+- **An answer stops paying for whitespace and for a module name the path already
+  spells.** A tool answer is serialized compactly, and a row that carries
+  `scripts/retrieval.py` no longer repeats `scripts.retrieval` inside its
+  qualified name. One `callers` question on the installed vault: 836 tokens
+  before, 561 after. Nothing is dropped, and the test callers the other tool
+  filters out stay.
+- **A line the file has moved on from is read from the file.** The generation is
+  rebuilt by the nightly pass, so a definition edited today used to answer with
+  yesterday's line — measured, 3030 against the 3054 it had moved to. Every file
+  an answer names is now parsed when its digest no longer matches, at most 20 per
+  answer, inside the caller's deadline, and nothing is written: no generation, no
+  catalog row, no active pointer. A stale code snippet is read from the file the
+  same way, so its text is the text that is there. On the same tree the parity
+  stand goes from 15 of 16 to 16 of 16 on both our columns, and the other tool is
+  the one answering T04 with a stale line. See
+  `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+
 - **A graded line number is read from the tree, not frozen in the gold.** T04
   asks where `_page_diverse` is defined and graded on the literal `3030`; the
   slot fix moved that definition to 3054, so every side would have graded wrong
