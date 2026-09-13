@@ -2998,16 +2998,40 @@ def _backend_limit(limit: int, max_candidates: int | None) -> int:
     return min(pool, int(max_candidates))
 
 
+# Files that hold independent episodes rather than one argument: a daily log
+# holds every session of its day, a raw source every excerpt of its import.
+_EPISODIC_ROOTS = ("knowledge/daily/", "knowledge/raw/")
+
+
+def _is_episodic(relative_path: str) -> bool:
+    return str(relative_path).replace("\\", "/").startswith(_EPISODIC_ROOTS)
+
+
+def _repeat_unit(candidate: RetrievalCandidate) -> tuple:
+    """What a visible slot belongs to: an episode, or a page.
+
+    Since 2026-09-08 the unit was the entry — the page and the heading the chunk
+    sits under — because a daily file holds every session of its day and by page
+    two sessions of one day took one slot between them. That is right for a file
+    of episodes and wrong for a compiled page, whose headings are sections of one
+    argument: measured 2026-09-13 on the installed vault, ten visible rows held
+    six pages, one workflow note taking ranks 3, 4 and 5, and the page that
+    should have been tenth was pushed to twelfth — which the selective-forgetting
+    stand reported as a page forgotten. Research:
+    `docs/research/2026-09-13-one-argument-one-slot.md`.
+    """
+    if _is_episodic(candidate.relative_path):
+        return (candidate.relative_path, tuple(candidate.heading_path))
+    return (candidate.relative_path,)
+
+
 def _place_by_page(
     candidate: RetrievalCandidate,
     seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
-    # The unit of a repeat is the entry — the page and the heading the chunk
-    # sits under — since 2026-09-08: a daily file holds every session of its
-    # day, and by page two sessions of one day took one slot between them.
-    entry = (candidate.relative_path, tuple(candidate.heading_path))
+    entry = _repeat_unit(candidate)
     if entry in seen:
         extras.append(candidate)
         return

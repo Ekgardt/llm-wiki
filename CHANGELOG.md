@@ -34,6 +34,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **One argument, one slot.** A compiled note could take three of ten visible
+  rows with three headings of the same page, because since 2026-09-08 a slot
+  belonged to a page *and* heading — right for a daily log, whose headings are
+  separate sessions, wrong for a note, whose headings are sections of one
+  argument. The unit of a repeat is now the episode under `knowledge/daily/**`
+  and `knowledge/raw/**` and the page everywhere else; nothing is dropped, the
+  repeats still follow. Measured on the live vault's notes: pages surfacing in a
+  ten-row window rose from 70 to 80 of 100. The selective-forgetting stand, which
+  found this, now decides presence over a window of 200 — every page it called
+  forgotten was retrievable at rank 11 to 13 — and reports the ten-row share
+  instead of gating on it. All nine of its gates pass. See
+  `docs/research/2026-09-13-one-argument-one-slot.md`.
+
 - **A definition's line number is not a fact worth storing.** The parity gold
   cited `scripts/search_memory.py:5038 (def _legacy_vector_source_membership)`,
   and the guard test turned the suite red twice in one day because edits above

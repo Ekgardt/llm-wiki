@@ -686,3 +686,81 @@ def test_a_gap_stub_does_not_answer_ahead_of_a_written_page() -> None:
     assert provenance.trust_weight("user", "decision") > provenance.trust_weight(
         "user", "code"
     )
+
+
+def _slot_candidate(path: str, heading: tuple[str, ...]):
+    """One candidate, only the fields a visible slot is decided by."""
+    import retrieval
+
+    return retrieval.RetrievalCandidate(
+        candidate_id=f"{path}:{heading}",
+        parent_id=path,
+        relative_path=path,
+        heading_path=heading,
+        source_sha256="a" * 64,
+        byte_start=0,
+        byte_end=10,
+        bm25_rank=1,
+        bm25_score=1.0,
+        vector_rank=None,
+        vector_score=None,
+        graph_rank=None,
+        graph_score=None,
+        rrf_score=1.0,
+        rerank_score=None,
+        final_score=1.0,
+        evidence_ids=(),
+    )
+
+
+def test_a_compiled_page_takes_one_visible_slot() -> None:
+    """Three headings of one note are one argument, not three answers."""
+    import retrieval
+
+    hits = [
+        _hit(
+            candidate_id=f"c-{index}",
+            path="knowledge/notes/workflow.md",
+            score=5.0 - index / 10,
+            heading_path=(f"Section {index}",),
+        )
+        for index in range(3)
+    ]
+    hits.append(
+        _hit(candidate_id="c-9", path="knowledge/notes/answer.md", score=1.0)
+    )
+
+    result = retrieval.retrieve(
+        "needle",
+        requested_profile="BASE",
+        limit=2,
+        lexical_backend=lambda **_kwargs: hits,
+        corpus_generation="gen-one-slot",
+    )
+
+    assert [item.relative_path for item in result.candidates] == [
+        "knowledge/notes/workflow.md",
+        "knowledge/notes/answer.md",
+    ]
+
+
+def test_two_sessions_of_one_day_still_take_two_slots() -> None:
+    """A daily holds episodes, so its headings keep their own slots (2026-09-08)."""
+    import retrieval
+
+    candidates = [
+        _slot_candidate("knowledge/daily/2026-09-13.md", ("Session one",)),
+        _slot_candidate("knowledge/daily/2026-09-13.md", ("Session two",)),
+        _slot_candidate("knowledge/notes/page.md", ("First",)),
+        _slot_candidate("knowledge/notes/page.md", ("Second",)),
+    ]
+
+    ordered = retrieval._page_diverse(candidates)
+    visible = [(item.relative_path, item.heading_path) for item in ordered[:3]]
+
+    assert visible == [
+        ("knowledge/daily/2026-09-13.md", ("Session one",)),
+        ("knowledge/daily/2026-09-13.md", ("Session two",)),
+        ("knowledge/notes/page.md", ("First",)),
+    ]
+    assert len(ordered) == len(candidates)

@@ -87,7 +87,7 @@ fence doing its job.
   observations unavailable" — the comparative claim is gated off by design until
   a real paired run exists.
 
-## One stand fails: selective forgetting
+## Selective forgetting: what failed, and what it found
 
 `run_selective_forgetting.py` over the live vault's notes, verdict **FAIL** on
 one gate of nine:
@@ -103,9 +103,27 @@ one gate of nine:
 - Supersession, legacy-leak and session-window gates all pass; 0 leaked, aged
   session record moved, archived bytes identical.
 
-That is a real finding, it is not caused by today's changes, and it is not yet
-explained: archiving 59 unrelated pages should not remove eight others from what
-a probe surfaces. It needs its own dated research before anything is changed.
+That was a real finding, and it was two defects, both now fixed and re-measured
+(`docs/research/2026-09-13-one-argument-one-slot.md`):
+
+1. **The product spent visible slots on repeats.** Since 2026-09-08 a slot
+   belonged to a page *and heading*, which is right for a daily log (its headings
+   are separate sessions) and wrong for a compiled note (its headings are sections
+   of one argument). Ten rows held six pages: one workflow note took ranks 3, 4
+   and 5. The unit of a repeat is now the episode for `knowledge/daily/**` and
+   `knowledge/raw/**` and the page for everything else. Measured on the same live
+   notes: pages surfacing in a ten-row window rose from **70 to 80 of 100**, and
+   nothing is dropped — the repeats still follow the distinct pages.
+2. **The gate measured rank, not presence, against its own docstring.** Every
+   page it called forgotten came back at rank 11, 11, 12, 11, 12 or 13 once asked
+   for a wider window. Presence is now decided over a documented window of 200,
+   and the share of retained pages that keep a place in the first ten rows is
+   reported (`visible_rate`) rather than gated.
+
+Re-run after both, all phases, 74 s, exit 0: supersession 1.0/1.0, ageing
+1.0/1.0/1.0, restore fidelity 1.0, no archive leak, session window applied,
+archived bytes identical — **verdict PASS**, with `visible_rate` 0.75 recorded as
+the window fact it is.
 
 ## Not run, and why
 
