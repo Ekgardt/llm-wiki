@@ -144,3 +144,22 @@ def _no_writes_into_the_live_vault():
 
 # Default fake provider for any accidental live LLM calls in unit tests.
 os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")
+
+
+# Which test was running when a process died, written to a file instead of the
+# console. `-v` on the Windows shards cost two runs: 40 and then 60 minutes of cap
+# on jobs that normally take 22-26, while a silent death still needs the name of
+# the test it happened in. One short append per test costs nothing and survives a
+# kill. Research:
+# docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
+_PROGRESS_FILE = os.environ.get("LLM_WIKI_TEST_PROGRESS_FILE")
+
+
+def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
+    if not _PROGRESS_FILE:
+        return
+    try:
+        with open(_PROGRESS_FILE, "a", encoding="utf-8") as progress:
+            progress.write(f"{nodeid}\n")
+    except OSError:
+        return

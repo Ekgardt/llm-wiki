@@ -124,12 +124,24 @@ took 45 minutes on a slow runner and was cancelled at the cap; GitHub reports
 that as `cancelled`, not `failure`, and refuses to re-run it, so the branch could
 not go green without a new commit.
 
-The cap is now **60 minutes** for the Windows class only. That is the same defect
+**And `-v` turned out to cost the runs it was meant to explain.** On PR 34 the
+same class of shard ran 65 minutes and was cancelled at the new cap:
+`windows_full py3.14-s2`, 15:11:16 to 16:16:16, against the 22-26 minutes these
+shards take. Two caps in two runs, both on the biggest shards, both while the job
+was printing ~2 000 lines it never printed before — that is enough to stop paying
+for it. The name of a test a killed process was running now comes from
+`LLM_WIKI_TEST_PROGRESS_FILE`: `tests/conftest.py` appends one line per test when
+the variable is set, the workflow sets it beside the junit file and uploads the
+whole directory. One short append per test costs nothing, survives a kill, and is
+read only when something died.
+
+The cap stays **60 minutes** for the Windows class only. That is the same defect
 class as commit `9c88bbf`: a bound has to measure the hang it was written for, not
 the runner's speed. Linux and macOS keep 20 minutes, where the measured range is
 6-12.
 
-Files: `.github/workflows/tests.yml`, `scripts/mcp_server.py`, `scripts/answer_budget.py`,
+Files: `.github/workflows/tests.yml`, `tests/conftest.py`,
+`scripts/mcp_server.py`, `scripts/answer_budget.py`,
 `scripts/fresh_positions.py` (new), `scripts/code_graph.py`,
 `tests/test_answer_budget.py`, `tests/test_fresh_positions.py` (new),
 `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.

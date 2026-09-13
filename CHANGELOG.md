@@ -27,10 +27,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
   at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
   last one is open and unexplained.
-- **A killed test names itself on Windows.** `PYTHONFAULTHANDLER=1` on every
-  shard and `-v` on the Windows shards, after a job died with no summary, no
-  junit and no traceback (run 34727708815, after 2 058 of the shard's 2 080
-  collected items).
+- **A killed test names itself, without paying for it.** `PYTHONFAULTHANDLER=1`
+  on every shard, and the name of the running test appended to
+  `LLM_WIKI_TEST_PROGRESS_FILE` — one line per test, uploaded with the timings.
+  `-v` was tried first and cost two runs: a 40-minute and then a 65-minute cap on
+  Windows shards that normally take 22-26 minutes.
 
 ### Changed
 
