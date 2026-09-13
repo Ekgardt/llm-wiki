@@ -132,12 +132,43 @@ the window fact it is.
 stands that spend model tokens, and they are left for an explicit decision about
 sample size rather than started silently inside this pass.
 
+## Re-measured after the slot fix, and what that exposed
+
+The parity stand run again on the changed tree (258 s, exit 0): our two columns
+15 of 16 correct with one partial, the other tool 14 correct, 1 partial, 1 wrong.
+The one partial is **T04 on all five sides at once** — "where is `_page_diverse`
+defined?" — because the slot fix moved that definition and no index had caught up
+when the stand ran. The gold now resolves that number from the tree while it
+grades, so the stand asks for the truth.
+
+Checked afterwards, and it does not flatter us: the other tool's graph already
+answers **3054**, the line the definition sits on now; ours still answers
+**3030**, the line it sat on before the edit. Their index watches the tree and
+refreshes itself in the background; ours refreshes on the nightly pass, and a
+forced refresh inside a live session is refused by the maintenance fence — which
+is correct as a fence and still leaves us answering a stale line for up to a day.
+That is a real gap, it is named in the superset contract as "optional bounded
+watching" and it is not implemented. It is the next thing worth doing.
+
+Nothing about the counted standing changed — 15 against 14, 0 confident-wrong
+against 1 — and on this one question, today, they were right and we were stale.
+
 ## Evidence
 
 Commit `694991b`. Full local suite in a clean detached worktree with an external
 state root: **8 415 passed, 371 skipped, 1 xfailed, exit 0, 16 min 15 s**. CI run
-34727708815 on that commit: 45 checks green, one job red —
+34727708815 on `694991b`: 45 checks green, one job red —
 `timing::windows_full::py3.11-s2` died after 2 058 of 2 080 tests with no
 summary, no junit.xml and no traceback, 14 minutes into a 40-minute budget. That
 one is open and named in the changelog; `PYTHONFAULTHANDLER=1` and `-v` on the
 Windows shards are in place so the next occurrence names its test.
+
+Final state, commit `150f928`: the full suite in a clean detached worktree with an
+external state root, with nothing else running on the machine — **8 434 passed,
+371 skipped, 1 xfailed, exit 0, 16 min 29 s**. An earlier run of the same commit
+reported two failures, `test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree`
+and `test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner`; both
+pass alone in 0.79 s, and both are process-and-deadline tests that were sharing
+four cores with a parity stand and an index rebuild I had started beside them.
+That was a method error of mine, not a defect, and the rule it breaks is the
+vault's own: do not run maintenance or stands while a run is in flight.
