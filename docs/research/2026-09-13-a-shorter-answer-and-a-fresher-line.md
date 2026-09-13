@@ -135,12 +135,23 @@ the variable is set, the workflow sets it beside the junit file and uploads the
 whole directory. One short append per test costs nothing, survives a kill, and is
 read only when something died.
 
-The cap stays **60 minutes** for the Windows class only. That is the same defect
+The cap stays **60 minutes** for the Windows class only.
+
+**And the same class of bound, one level down.** The next run failed
+`tests/test_code_navigation.py::test_public_navigation_paths_require_canonical_nfc_posix_relative_text`
+on `windows_full py3.10-s1` with `TimeoutError: repository scope deadline reached
+during Git probe` — nothing wrong with the repository, just `git rev-parse` taking
+longer than `repository_scope.GIT_TIMEOUT_SECONDS = 2.0` on a loaded Windows
+runner, where process creation alone is slow. `repository_index` gives the same
+probe **ten** seconds. Two budgets for one operation, and the smaller one was a
+Linux figure. It is ten now, and a test pins the two together so they cannot drift
+apart again. That is the same defect
 class as commit `9c88bbf`: a bound has to measure the hang it was written for, not
 the runner's speed. Linux and macOS keep 20 minutes, where the measured range is
 6-12.
 
 Files: `.github/workflows/tests.yml`, `tests/conftest.py`,
+`scripts/repository_scope.py`, `tests/test_repository_scope.py`,
 `scripts/mcp_server.py`, `scripts/answer_budget.py`,
 `scripts/fresh_positions.py` (new), `scripts/code_graph.py`,
 `tests/test_answer_budget.py`, `tests/test_fresh_positions.py` (new),

@@ -14,7 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA_VERSION = "repository-scope/v1"
-GIT_TIMEOUT_SECONDS = 2.0
+# Ten, not two, and the same ten `repository_index` gives the same operation. Two
+# seconds is a Linux figure: on a hosted Windows runner spawning git and reading
+# `rev-parse` crossed it, and a navigation test failed with "repository scope
+# deadline reached during Git probe" (PR 34, windows_full py3.10-s1, 2026-09-13)
+# while nothing was wrong with the repository. A bound measures the hang it was
+# written for, not the machine's speed. Research:
+# `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+GIT_TIMEOUT_SECONDS = 10.0
 MAX_GIT_OUTPUT_BYTES = 8192
 MAX_PATH_LENGTH = 4096
 

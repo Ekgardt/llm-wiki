@@ -46,6 +46,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Two seconds for a Git probe was a Linux figure.**
+  `repository_scope.GIT_TIMEOUT_SECONDS` was 2.0 while `repository_index` gives the
+  same probe 10.0, and on a hosted Windows runner `git rev-parse` crossed it: a
+  navigation test failed with "repository scope deadline reached during Git probe"
+  with nothing wrong with the repository. One operation, one bound — it is ten now,
+  and a test pins the two constants together.
+
 - **A retry of a completion must replay its own request.** `complete_task` built
   its record with a fresh clock reading, so a completion interrupted by
   `database is locked` could never be finished: the operation id was the claim's,
