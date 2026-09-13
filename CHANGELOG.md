@@ -34,15 +34,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **The pipeline reads with Sonnet by default.** The claude CLI provider passed no
-  `--model` flag, so every compile, classification and grounded answer used
-  whatever the operator's own session was set to — on this machine Opus, which
-  refused the grounded-QA prompt outright and failed 18 of 19 LongMemEval
-  questions. `MEMORY_CLAUDE_MODEL` still overrides; silence now means
-  `claude-sonnet-5`, which is where background classification and summarization
-  belong anyway. Verified on the installed vault with no environment variable set:
-  answered in 59 s where it refused before. See
-  `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
+- **The reader is named by configuration, and this machine names Sonnet.** With
+  `MEMORY_CLAUDE_MODEL` unset the claude CLI call carries no `--model` flag, so the
+  pipeline read with whatever the operator's own session was set to — on this
+  machine Opus, which refused the grounded-QA prompt and failed 18 of 19
+  LongMemEval questions. The code still invents no model; the docstring says why,
+  and the machine is configured instead (agent sessions and both maintenance
+  units). Verified on the installed vault: answered in 59.1 s where it refused
+  before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
 ### Fixed
 

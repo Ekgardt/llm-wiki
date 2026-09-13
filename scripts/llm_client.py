@@ -664,30 +664,23 @@ def _base_capabilities(provider: str) -> dict[str, object]:
     return {"structured_output": "native" if native else "prompt"}
 
 
-# The reader of every compile, classification and grounded answer. Without it the
-# call carries no `--model` flag and the CLI answers with whatever the operator's
-# session is set to: on 2026-09-13 that was Opus, which refused the grounded-QA
-# prompt outright — 18 of 19 LongMemEval questions failed with
-# `API Error: ... safeguards flagged this message`, and the same prompts answered
-# on Sonnet. Background work belongs on the mid tier anyway. Research:
-# `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-5"
-
-
 def _cli_configuration(
-    provider: str,
-    model_variable: str,
-    extra: Mapping[str, object] | None = None,
-    *,
-    default_model: str | None = None,
+    provider: str, model_variable: str, extra: Mapping[str, object] | None = None
 ) -> ProviderConfiguration:
-    """A subscription CLI: the backend decides the token ceiling, not us."""
+    """A subscription CLI: the backend decides the token ceiling, not us.
+
+    The model is the operator's choice and nothing here supplies one. With
+    `MEMORY_CLAUDE_MODEL` unset the call carries no `--model` flag and the CLI
+    answers with the session's own model — which on 2026-09-13 was Opus, and Opus
+    refused the grounded-QA prompt for 18 of 19 LongMemEval questions. The fix for
+    that is a configured model on the machine, not a default hidden in this file.
+    Research: `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
+    """
     capabilities = _base_capabilities(provider)
     capabilities["max_tokens_enforced"] = False
     settings: dict[str, object] = {"max_tokens": "backend_default"}
     settings.update(extra or {})
-    model = os.environ.get(model_variable) or default_model
-    return model or None, capabilities, settings, None
+    return os.environ.get(model_variable) or None, capabilities, settings, None
 
 
 def _http_configuration(
@@ -727,9 +720,7 @@ _PROVIDER_CONFIGURATIONS = {
         "MEMORY_CODEX_MODEL",
         {"reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low")},
     ),
-    "claude": lambda max_tokens: _cli_configuration(
-        "claude", "MEMORY_CLAUDE_MODEL", default_model=DEFAULT_CLAUDE_MODEL
-    ),
+    "claude": lambda max_tokens: _cli_configuration("claude", "MEMORY_CLAUDE_MODEL"),
     "openai": lambda max_tokens: _http_configuration(
         "openai", "https://api.openai.com/v1", "gpt-4o-mini", max_tokens
     ),

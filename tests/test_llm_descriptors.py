@@ -1213,14 +1213,14 @@ def _claude_descriptor(monkeypatch) -> object:
     return _descriptor_for("claude")
 
 
-def test_the_claude_provider_reads_with_sonnet_by_default(monkeypatch):
-    """Silence must not mean "whatever the operator's CLI is set to".
+def test_no_model_is_invented_when_the_operator_named_none(monkeypatch):
+    """The reader is the operator's choice; this file supplies no default.
 
     Research: docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md.
     """
     descriptor = _claude_descriptor(monkeypatch)
 
-    assert descriptor.model == llm_client.DEFAULT_CLAUDE_MODEL
+    assert descriptor.model is None
 
 
 def test_the_environment_still_chooses_the_reader(monkeypatch):
@@ -1231,8 +1231,14 @@ def test_the_environment_still_chooses_the_reader(monkeypatch):
     assert descriptor.model == "claude-haiku-4-5-20251001"
 
 
-def test_the_command_carries_the_model_flag(monkeypatch):
-    command = llm_client._claude_command("/bin/claude", llm_client.DEFAULT_CLAUDE_MODEL, "")
+def test_the_command_carries_the_model_the_operator_named():
+    command = llm_client._claude_command("/bin/claude", "claude-sonnet-5", "")
 
     assert "--model" in command
-    assert llm_client.DEFAULT_CLAUDE_MODEL in command
+    assert "claude-sonnet-5" in command
+
+
+def test_the_command_names_no_model_when_none_was_configured():
+    command = llm_client._claude_command("/bin/claude", None, "")
+
+    assert "--model" not in command

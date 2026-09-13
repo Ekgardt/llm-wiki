@@ -36,34 +36,38 @@ be Sonnet, not whatever model the operator's CLI happens to be set to.
 
 ## The decision
 
-**The claude CLI provider defaults to `claude-sonnet-5`.** `MEMORY_CLAUDE_MODEL`
-still overrides it, so an operator who wants another reader says so; what changes
-is that silence now means Sonnet instead of "whatever the CLI is set to".
+**The reader stays the operator's choice, and this machine is configured to
+Sonnet.** The owner's words: the user decides which model to use; put Sonnet 5 on
+the local machine. So no default goes into `scripts/llm_client.py` — with
+`MEMORY_CLAUDE_MODEL` unset the call still carries no `--model` flag, and the
+docstring now says why that is a configuration question rather than a code one.
 
-- One constant, `DEFAULT_CLAUDE_MODEL`, beside the provider table.
-- The model reaches the call through the existing `--model` flag; nothing else in
-  the call shape changes.
-- A published memory number must still name its reader, because the number moves
-  with it: Supermemory's own LongMemEval score falls from 0.95 to 0.846 between
-  readers.
+Configured on this machine, outside the repository:
 
-Why not the alternatives:
+- `~/.claude/settings.json`, `env.MEMORY_CLAUDE_MODEL = claude-sonnet-5` — every
+  agent session and the MCP server it launches;
+- `~/.config/systemd/user/llm-wiki-nightly.service` and `llm-wiki-weekly.service`,
+  one `Environment="MEMORY_CLAUDE_MODEL=claude-sonnet-5"` line each — the nightly
+  and weekly passes, which is where compilation and classification actually run.
 
-- **Leave it to the environment.** That is what produced 18 failures out of 19 and
-  a stand that measured the operator's editor setting.
-- **Default to Haiku.** Cheaper, and the pipeline's grounded answers have to hold
-  a closed schema and refuse without evidence; that is the work Sonnet is named
-  for, and no measurement here says Haiku holds it.
-- **Pin a dated snapshot id.** It would freeze the reader against improvements and
-  break whenever the alias is retired; the alias is what the CLI documents.
+`systemctl --user daemon-reload` has no bus in this container; the owner's own
+session needs to run it once for the units to be re-read.
+
+Why not a default in the code:
+
+- It would decide for every install what only the operator can know, and it would
+  hide the choice in a file nobody reads when a number moves.
+- A published memory number must name its reader anyway — Supermemory's own
+  LongMemEval score falls from 0.95 to 0.846 between readers — so the reader
+  belongs in the configuration that produced the number, visible beside it.
 
 ## What must be true after the change
 
-- With no `MEMORY_CLAUDE_MODEL` set, the provider's configuration reports
-  `claude-sonnet-5`, and the CLI command carries `--model claude-sonnet-5`.
-- With the variable set, the variable wins.
-- The grounded-QA path answers on this machine without any environment variable,
-  where it refused before.
+- With no `MEMORY_CLAUDE_MODEL` set, the provider reports no model and the CLI
+  command carries no `--model` flag: the code invents nothing.
+- With the variable set — as it now is on this machine — the CLI carries that
+  model, and the grounded-QA path answers where it refused before (59.1 s,
+  status=answered).
 
 Files: `scripts/llm_client.py`, `tests/test_llm_client.py`,
 `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
