@@ -47,6 +47,9 @@ def _joined(count: int) -> str:
     return "".join(_token(index) + _separator(index) for index in range(count))
 
 
+from tests.timing_floor import noise_floor_seconds  # noqa: E402
+
+
 def _process_clock_tick() -> float:
     """The real granularity of `process_time`, not the figure the OS reports."""
     reported = time.get_clock_info("process_time").resolution
@@ -84,9 +87,10 @@ def test_the_scanner_redacts_every_shape_it_is_asked_to():
 
 def test_the_scanner_scales_near_linearly_for_200_400_800_tokens():
     timings = tuple(_cheapest(count) for count in (200, 400, 800))
-    # A ratio cannot be measured with a clock coarser than the quantity: the
-    # floor is several ticks of whatever clock this machine actually has.
-    floor = max(0.05, 8 * _process_clock_tick())
+    # A ratio cannot be measured with a clock coarser than the quantity, nor
+    # against a scheduler that adds more than the work costs: `timing_floor`
+    # carries both bounds and the measurement behind them.
+    floor = noise_floor_seconds()
 
     assert timings[1] <= max(floor, timings[0] * 3.25)
     assert timings[2] <= max(floor, timings[1] * 3.25)

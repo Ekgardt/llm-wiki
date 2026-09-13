@@ -500,6 +500,9 @@ def _token_separator(index: int) -> str:
     return ";"
 
 
+from tests.timing_floor import noise_floor_seconds  # noqa: E402
+
+
 def _best_measurement(measure, count: int, attempts: int = 5):
     """The fastest of several attempts, so scheduler noise cannot fail a gate.
 
@@ -1332,8 +1335,8 @@ def test_posix_scanner_does_not_rescan_overlapping_dot_candidates(
     assert calls[1] <= calls[0] * 2 + 8
     assert calls[2] <= calls[1] * 2 + 8
     assert calls[3] <= calls[2] * 4
-    assert timings[1] <= max(0.05, timings[0] * 3.0)
-    assert timings[2] <= max(0.05, timings[1] * 3.0)
+    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.0)
+    assert timings[2] <= max(noise_floor_seconds(), timings[1] * 3.0)
     assert timings[3] <= max(0.20, timings[2] * 5.0)
     assert sum(timings) < 1.0
 
@@ -1473,7 +1476,7 @@ def test_oversized_redaction_time_is_independent_of_attacker_suffix_length() -> 
 
     timings = tuple(measure(value) for value in values)
 
-    assert timings[1] <= max(0.05, timings[0] * 3.0)
+    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.0)
     assert sum(timings) < 0.2
 
 
@@ -2240,8 +2243,8 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     assert semantic_counts == (160, 320, 640)
     assert component_counts[1] <= component_counts[0] * 2 + 4
     assert component_counts[2] <= component_counts[1] * 2 + 4
-    assert timings[1] <= max(0.05, timings[0] * 3.25)
-    assert timings[2] <= max(0.05, timings[1] * 3.25)
+    assert timings[1] <= max(noise_floor_seconds(), timings[0] * 3.25)
+    assert timings[2] <= max(noise_floor_seconds(), timings[1] * 3.25)
     assert sum(timings) < 5.0
 
 

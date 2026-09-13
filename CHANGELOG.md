@@ -46,6 +46,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A timing ratio under a tenth of a second measured the machine.** Five ratio
+  gates used a 0.05 s floor and a sixth derived one from the process clock tick;
+  a macOS shard failed `0.0946 <= 0.0714` on a step whose quiet time is 22 ms,
+  after already taking the best of five attempts. They now share
+  `tests/timing_floor.noise_floor_seconds()` — `max(0.25 s, 8 clock ticks)` — and
+  the deterministic half of those tests, the counted scanner calls that double
+  exactly, is what still proves the linearity claim.
+
 - **Two seconds for a Git probe was a Linux figure.**
   `repository_scope.GIT_TIMEOUT_SECONDS` was 2.0 while `repository_index` gives the
   same probe 10.0, and on a hosted Windows runner `git rev-parse` crossed it: a
