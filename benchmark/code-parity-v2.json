@@ -240,12 +240,12 @@
       "question": "Where is _page_diverse defined?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:3030 (def _page_diverse)",
+          "scripts/retrieval.py (def _page_diverse)",
           "graded on file and line together; the near-name distractor the 2026-08-28 gold named, _page_diverse_order in scripts/search_memory.py, no longer exists (grep -rn '_page_diverse_order' scripts/ on 2026-09-12 returns nothing)"
         ],
         "must": [
           "retrieval.py",
-          "3030"
+          "{line:scripts/retrieval.py:_page_diverse}"
         ],
         "must_not": []
       },

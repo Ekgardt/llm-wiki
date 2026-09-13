@@ -166,7 +166,41 @@ def _grade_side(outcome: dict, must: list, must_not: list) -> str:
     return _grade_text(outcome["text"], must, must_not)
 
 
+# A graded line number that is a definition's own line: written as
+# `{line:<path>:<symbol>}` and resolved from the tree at grading time. The gold
+# used to carry 3030 for `def _page_diverse`, and an edit above it made every
+# side grade wrong whatever it answered. Research:
+# docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md.
+_DEFINITION_TERM = re.compile(
+    r"^\{line:(?P<path>[^:{}]+):(?P<symbol>[A-Za-z_][A-Za-z0-9_]*)\}$"
+)
+
+
+def definition_line(path: str, symbol: str) -> str | None:
+    """The line `symbol` is defined on in this tree, as a string."""
+    pattern = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(symbol)}\b")
+    lines = (ROOT / path).read_text(encoding="utf-8").splitlines()
+    for number, line in enumerate(lines, start=1):
+        if pattern.match(line):
+            return str(number)
+    return None
+
+
+def resolved_term(entry: object) -> object:
+    """A `{line:path:symbol}` term becomes that symbol's line number."""
+    if not isinstance(entry, str):
+        return entry
+    match = _DEFINITION_TERM.match(entry)
+    if match is None:
+        return entry
+    return definition_line(match.group("path"), match.group("symbol")) or entry
+
+
 def _side_terms(task: dict, calls: list[dict], key: str) -> list:
+    return [resolved_term(entry) for entry in _declared_terms(task, calls, key)]
+
+
+def _declared_terms(task: dict, calls: list[dict], key: str) -> list:
     for call in calls:
         if key in call:
             return call[key]

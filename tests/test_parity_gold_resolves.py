@@ -212,3 +212,32 @@ def test_a_definition_that_left_the_file_still_fails():
 def test_a_numbered_anchor_is_still_checked_against_its_line():
     with pytest.raises(AssertionError):
         _assert_anchor_holds(("scripts/search_memory.py", 1, "def fuse_rrf"))
+
+
+def _line_terms(gold: dict) -> list[str]:
+    return [term for term in _flat_terms(gold["must"]) if term.startswith("{line:")]
+
+
+@pytest.mark.parametrize("task_id", _task_ids())
+def test_every_resolved_line_term_finds_its_definition(task_id: str) -> None:
+    """A graded line number that names a definition must resolve in this tree."""
+    import sys
+
+    sys.path.insert(0, str(ROOT / "benchmark"))
+    import run_code_parity
+
+    for term in _line_terms(_task(task_id)["gold"]):
+        resolved = run_code_parity.resolved_term(term)
+        assert resolved != term, f"{task_id} grades on {term}, which resolves to nothing"
+        assert resolved.isdigit()
+
+
+def test_a_line_term_for_a_symbol_that_left_resolves_to_nothing() -> None:
+    import sys
+
+    sys.path.insert(0, str(ROOT / "benchmark"))
+    import run_code_parity
+
+    term = "{line:scripts/retrieval.py:_gone_from_this_tree}"
+
+    assert run_code_parity.resolved_term(term) == term

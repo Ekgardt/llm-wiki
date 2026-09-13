@@ -34,6 +34,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A graded line number is read from the tree, not frozen in the gold.** T04
+  asks where `_page_diverse` is defined and graded on the literal `3030`; the
+  slot fix moved that definition to 3054, so every side would have graded wrong
+  whatever it answered, and CI said so on shard 2. The term is now
+  `{line:scripts/retrieval.py:_page_diverse}`, resolved when the answer is
+  graded, and a guard test fails if it resolves to nothing.
+
 - **One argument, one slot.** A compiled note could take three of ten visible
   rows with three headings of the same page, because since 2026-09-08 a slot
   belonged to a page *and* heading — right for a daily log, whose headings are
