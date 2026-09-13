@@ -259,6 +259,59 @@ def _judged_verdicts(path: Path) -> dict[str, object]:
     return verdicts
 
 
+DEGRADED_EXIT = 3
+
+
+def retrieval_path(rows: list[dict]) -> dict:
+    """Which legs of retrieval were live while this ran.
+
+    The 500-question run of 2026-09-13 was launched from a worktree whose
+    environment has no torch and no transformers, so `vector_state` came back
+    `absent` on 498 questions and the reranker was unavailable on 442 — and the
+    number it printed read like the product's while measuring lexical search
+    alone. A stand that can measure a degraded path has to say so. Research:
+    `docs/research/2026-09-13-why-we-lose-the-memory-questions.md`.
+    """
+    unavailable = sum(
+        1
+        for row in rows
+        if str(row.get("reranker_fallback_reason")) == "reranker_unavailable"
+    )
+    complete = sum(1 for row in rows if str(row.get("vector_state")) == "complete")
+    return {
+        "rows": len(rows),
+        "vectors_complete": complete,
+        "reranker_unavailable": unavailable,
+    }
+
+
+def degraded_reasons(path: dict) -> list[str]:
+    """Every reason this run measured less than the product offers."""
+    reasons = []
+    missing = int(path["rows"]) - int(path["vectors_complete"])
+    if path["rows"] and missing:
+        reasons.append(f"no vectors on {missing} of {path['rows']} questions")
+    if path["reranker_unavailable"]:
+        reasons.append(
+            f"reranker unavailable on {path['reranker_unavailable']} of {path['rows']}"
+        )
+    return reasons
+
+
+def _print_retrieval_path(path: dict, reasons: list[str]) -> None:
+    print(
+        f"retrieval path: vectors_complete={path['vectors_complete']}/{path['rows']} "
+        f"reranker_unavailable={path['reranker_unavailable']}"
+    )
+    for reason in reasons:
+        print(f"DEGRADED: {reason}")
+    if reasons:
+        print(
+            "DEGRADED: this number is a floor, not the product's - run from a "
+            "checkout whose environment carries the optional model extras"
+        )
+
+
 def _print_summary(report: dict) -> None:
     columns = (
         "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
@@ -329,12 +382,26 @@ def main() -> int:
     sample_ids = {str(question["question_id"]) for question in sample}
     scoped = [row for row in rows if str(row.get("question_id")) in sample_ids]
     scoped = _with_judgements(scoped, results_path)
+    return _published(scoped, args)
+
+
+def _published(scoped: list[dict], args) -> int:
+    """Write the report, print it, and say plainly what the run measured."""
     report = longmemeval_score.aggregate(scoped)
+    report["retrieval_path"] = retrieval_path(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"report: {_report_path(args)}")
     _print_summary(report)
+    reasons = degraded_reasons(report["retrieval_path"])
+    _print_retrieval_path(report["retrieval_path"], reasons)
+    return _exit_code(reasons)
+
+
+def _exit_code(reasons: list[str]) -> int:
+    if reasons:
+        return DEGRADED_EXIT
     return 0
 
 
