@@ -20,7 +20,11 @@ ROOT = Path(__file__).resolve().parent.parent
 TASKS_PATH = ROOT / "benchmark" / "code-parity-v2.json"
 # `scripts/retrieval.py:3107 (def _fused_candidates)` and the bare `:3113` that
 # follows it in the same citation, which continues the previous path.
-ANCHOR = re.compile(r"(?:(?P<path>[\w/.\-]+\.py))?:(?P<line>\d+)(?:\s*\((?P<note>[^)]*)\))?")
+ANCHOR = re.compile(
+    r"(?:(?P<path>[\w/.\-]+\.py))?"
+    r"(?::(?P<line>\d+))?"
+    r"(?:\s*\((?P<note>[^)]*)\))?"
+)
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -53,15 +57,46 @@ def _carried_path(match: re.Match[str], current: str) -> str:
     return match.group("path") or current
 
 
+def _anchor_line(match: re.Match[str]) -> int:
+    """0 for an anchor that names a definition instead of a line."""
+    line = match.group("line")
+    return int(line) if line else 0
+
+
 def _anchor_fact(match: re.Match[str], path: str) -> tuple[str, int, str]:
-    return (path, int(match.group("line")), match.group("note") or "")
+    return (path, _anchor_line(match), match.group("note") or "")
+
+
+def _is_a_definition_anchor(match: re.Match[str]) -> bool:
+    """`path (def name)`: the one anchor shape allowed to carry no line."""
+    return (match.group("note") or "").startswith("def ")
+
+
+def _is_an_anchor(match: re.Match[str]) -> bool:
+    """A line, or a definition named instead of one.
+
+    Prose in a citation mentions paths freely — "grep -rn x scripts/ (on this
+    date)" — so a match with neither a line nor a `def` note is not an anchor.
+    """
+    if match.group("line"):
+        return True
+    return _is_a_definition_anchor(match)
 
 
 def _anchor_facts(citation: str) -> list[tuple[str, int, str]]:
-    """Every (path, line, note) a citation names, carrying the path forward."""
+    """Every (path, line, note) a citation names, carrying the path forward.
+
+    A line number is optional. A definition's line moves whenever anything above
+    it is edited, and on 2026-09-12 and again on 2026-09-13 that alone turned the
+    suite red while the gold was still true — so a citation may name the file and
+    the definition and leave the line to be resolved here. See
+    `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.
+    """
     facts: list[tuple[str, int, str]] = []
     current = ""
     for match in ANCHOR.finditer(citation):
+        if not _is_an_anchor(match):
+            continue
         current = _carried_path(match, current)
         facts.append(_anchor_fact(match, current))
     return [fact for fact in facts if fact[0]]
@@ -73,15 +108,41 @@ def _resolved_line(path: str, line: int) -> str:
     return lines[line - 1]
 
 
+def _defining_lines(path: str, name: str) -> list[int]:
+    """Every line of `path` that defines `name`, 1-based."""
+    pattern = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b")
+    return [
+        number
+        for number, text in enumerate(_file_lines(path), start=1)
+        if pattern.match(text)
+    ]
+
+
+def _assert_definition_resolves(path: str, name: str) -> None:
+    if _defining_lines(path, name):
+        return
+    matches = [text for text in _file_lines(path) if name in text]
+    assert matches, f"{path} no longer names {name} at all"
+
+
+def _assert_named_line_holds(fact: tuple[str, int, str], name: str) -> None:
+    path, line, _note = fact
+    text = _resolved_line(path, line)
+    assert name in text, f"{path}:{line} does not name {name}: {text.strip()!r}"
+
+
 def _assert_anchor_holds(fact: tuple[str, int, str]) -> None:
     path, line, note = fact
     if not (ROOT / path).is_file():
         pytest.fail(f"the gold cites {path}, which does not exist")
-    text = _resolved_line(path, line)
     name = _expected_name(note)
-    if name is None:
+    if line == 0:
+        _assert_definition_resolves(path, name or "")
         return
-    assert name in text, f"{path}:{line} does not name {name}: {text.strip()!r}"
+    if name is None:
+        _resolved_line(path, line)
+        return
+    _assert_named_line_holds(fact, name)
 
 
 def _terms_of(entry: object) -> list[str]:
@@ -101,7 +162,7 @@ def _numeric_terms(must: list) -> list[str]:
 
 def _cited_lines(citations: list[str]) -> set[str]:
     facts = [fact for citation in citations for fact in _anchor_facts(citation)]
-    return {str(line) for _, line, _ in facts}
+    return {str(line) for _, line, _ in facts if line}
 
 
 def _unbacked_terms(gold: dict) -> list[str]:
@@ -133,3 +194,21 @@ def test_a_retired_task_states_why_it_left():
     retired = document.get("retired", [])
     stated = [entry for entry in retired if entry.get("reason") and entry.get("retired_on")]
     assert len(stated) == len(retired)
+
+
+def test_a_definition_anchor_needs_no_line_number():
+    """The name is the fact; the line is resolved here, so edits cannot rot it."""
+    facts = _anchor_facts("scripts/search_memory.py (def _legacy_vector_source_membership)")
+
+    assert facts == [("scripts/search_memory.py", 0, "def _legacy_vector_source_membership")]
+    _assert_anchor_holds(facts[0])
+
+
+def test_a_definition_that_left_the_file_still_fails():
+    with pytest.raises(AssertionError):
+        _assert_anchor_holds(("scripts/search_memory.py", 0, "def _gone_from_this_tree"))
+
+
+def test_a_numbered_anchor_is_still_checked_against_its_line():
+    with pytest.raises(AssertionError):
+        _assert_anchor_holds(("scripts/search_memory.py", 1, "def fuse_rrf"))

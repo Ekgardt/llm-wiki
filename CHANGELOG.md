@@ -19,6 +19,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A definition's line number is not a fact worth storing.** The parity gold
+  cited `scripts/search_memory.py:5038 (def _legacy_vector_source_membership)`,
+  and the guard test turned the suite red twice in one day because edits above
+  that definition moved it — while the gold's claim stayed true. Eleven anchors
+  that name a definition now name the file and the definition and leave the line
+  to be resolved from the tree; the guard still fails loudly when a definition
+  leaves its file, and every *graded* line number keeps its exact check, because
+  those numbers are the measurement. See
+  `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.
+
 - **A digest recomputed over damaged rows cannot catch them.** Moving the chunk
   walk off the read path took the corruption fallback with it: five kinds of row
   damage — a heading ancestry that is not a JSON list, a broken `chunk_order`, a

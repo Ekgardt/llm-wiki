@@ -35,8 +35,8 @@
       "question": "Which production functions call fuse_rrf?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:1568 (def fuse_rrf)",
-          "scripts/retrieval.py:3107 (def _fused_candidates), call at scripts/retrieval.py:3113 — the only call site in scripts/ (grep -rn 'fuse_rrf(' scripts/ on 2026-09-12)"
+          "scripts/retrieval.py (def fuse_rrf)",
+          "scripts/retrieval.py (def _fused_candidates), call at scripts/retrieval.py:3113 — the only call site in scripts/ (grep -rn 'fuse_rrf(' scripts/ on 2026-09-12)"
         ],
         "must": [
           [
@@ -98,10 +98,10 @@
       "question": "Which functions call write_session_evidence?",
       "gold": {
         "citations": [
-          "scripts/session_evidence.py:247 (def write_session_evidence)",
-          "scripts/flush_memory.py:1285 (def _keep_session_record), call at :1304",
-          "scripts/flush_memory.py:1320 (def _keep_transcript_record), call at :1340",
-          "scripts/backfill_sessions.py:131 (def _write_one), call at :132"
+          "scripts/session_evidence.py (def write_session_evidence)",
+          "scripts/flush_memory.py (def _keep_session_record), call at scripts/flush_memory.py:1304",
+          "scripts/flush_memory.py (def _keep_transcript_record), call at scripts/flush_memory.py:1340",
+          "scripts/backfill_sessions.py (def _write_one), call at scripts/backfill_sessions.py:132"
         ],
         "must": [
           [
@@ -372,7 +372,7 @@
       "question": "Is _flush_started (scripts/integration_adapter.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/integration_adapter.py:2124 (def _flush_started)",
+          "scripts/integration_adapter.py (def _flush_started)",
           "no production reference outside its def: grep -rn _flush_started scripts/ integrations/ on 2026-09-12 returns the definition alone; tests and older benchmark artifacts name it only as a string"
         ],
         "must": [
@@ -453,7 +453,7 @@
       "question": "Is _legacy_vector_source_membership (scripts/search_memory.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/search_memory.py:5038 (def _legacy_vector_source_membership)",
+          "scripts/search_memory.py (def _legacy_vector_source_membership)",
           "zero references anywhere in the repository outside its def: grep -rn _legacy_vector_source_membership . on 2026-09-12 returns that one line"
         ],
         "must": [
@@ -755,8 +755,8 @@
       "question": "Which retrieval-path function calls source_type_weight?",
       "gold": {
         "citations": [
-          "scripts/provenance.py:106 (def source_type_weight)",
-          "scripts/retrieval.py:1305 (def _weigh_by_trust), call at scripts/retrieval.py:1324 — the only call site in scripts/ outside the import at line 17, by grep -rn source_type_weight scripts/ on 2026-09-12"
+          "scripts/provenance.py (def source_type_weight)",
+          "scripts/retrieval.py (def _weigh_by_trust), call at scripts/retrieval.py:1324 — the only call site in scripts/ outside the import at line 17, by grep -rn source_type_weight scripts/ on 2026-09-12"
         ],
         "must": [
           [
@@ -868,7 +868,7 @@
       "question": "Which module community does fuse_rrf belong to?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:1568 (def fuse_rrf) — a correct community answer names the retrieval cluster"
+          "scripts/retrieval.py (def fuse_rrf) — a correct community answer names the retrieval cluster"
         ],
         "must": [
           "retrieval"
