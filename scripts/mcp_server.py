@@ -364,7 +364,6 @@ async def _run_bounded(function, *args, deadline: float):
 
 
 def _timeout_envelope_text() -> str:
-    import json
 
     error = "operation_timeout"
     envelope = {
@@ -381,7 +380,22 @@ def _timeout_envelope_text() -> str:
         "components": {},
         "data": {"error": error},
     }
-    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+    return _rendered_envelope(envelope)
+
+
+def _rendered_envelope(envelope: dict) -> str:
+    """One answer, as compactly as JSON allows.
+
+    Indentation is billed like content and read by nobody: measured 2026-09-13,
+    `mode=callers` for one symbol cost 836 tokens with `indent=2` and 608 without
+    it, the same facts either way. Research:
+    `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+    """
+    import json
+
+    return json.dumps(
+        envelope, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
 
 
 def _navigation_failure_from_arguments(
@@ -409,7 +423,6 @@ def _navigation_failure_from_arguments(
 
 
 def _tool_timeout_envelope_text(name: str, arguments: object) -> str:
-    import json
 
     data = (
         _navigation_failure_from_arguments(
@@ -438,7 +451,7 @@ def _tool_timeout_envelope_text(name: str, arguments: object) -> str:
         "components": {},
         "data": data,
     }
-    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+    return _rendered_envelope(envelope)
 
 
 def _doctor_branch(
@@ -1711,18 +1724,22 @@ def _architecture_callers(request: dict):
         with_report=True,
         max_depth=request.get("depth"),
     )
-    return with_trace_callers(answer, request["symbol"], request["resolved"])
+    traced = with_trace_callers(answer, request["symbol"], request["resolved"])
+    return _with_lines_from_disk(traced, request)
 
 
 def _architecture_callees(request: dict):
     from code_graph import find_callees
 
-    return find_callees(
-        request["symbol"],
-        request["resolved"],
-        live=request["live"],
-        with_report=True,
-        max_depth=request.get("depth"),
+    return _with_lines_from_disk(
+        find_callees(
+            request["symbol"],
+            request["resolved"],
+            live=request["live"],
+            with_report=True,
+            max_depth=request.get("depth"),
+        ),
+        request,
     )
 
 
@@ -1783,12 +1800,33 @@ def _architecture_symbol_dependencies(request: dict):
     )
 
 
+# The row keys whose lines a file can contradict. A summary's counts, a
+# community's roster and a path's hops carry no line of their own.
+_POSITION_KEYS = ("callers", "callees", "definition", "unresolved_callers")
+
+
+def _with_lines_from_disk(answer, request: dict):
+    """Correct any line the file itself has moved on from.
+
+    The generation is rebuilt nightly, so a definition edited today answers with
+    yesterday's line until then. One parse of each file the answer names is
+    cheaper than being wrong, and nothing is written. Research:
+    `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+    """
+    from fresh_positions import refreshed_answer, refreshed_rows
+
+    if isinstance(answer, list):
+        return refreshed_rows(answer, request["resolved"])
+    return refreshed_answer(answer, request["resolved"], _POSITION_KEYS)
+
+
 def _architecture_definition(request: dict) -> list:
     """Where the symbol is defined, from the generation's definition occurrence."""
     from symbol_snippet import definition_sites
 
-    return definition_sites(
-        request["resolved"], request["symbol"], request["deadline"]
+    return _with_lines_from_disk(
+        definition_sites(request["resolved"], request["symbol"], request["deadline"]),
+        request,
     )
 
 
@@ -5594,7 +5632,6 @@ def _record_answer_cost(envelope: dict, started: float, operation_deadline: floa
 
 def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     """Execute one tool under the absolute deadline created by its async handler."""
-    import json
 
     started = time.monotonic()
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
@@ -5606,7 +5643,7 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
         )
         _check_deadline(operation_deadline)
         _record_answer_cost(envelope, started, operation_deadline)
-        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+        return _rendered_envelope(envelope)
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
 
@@ -5645,7 +5682,6 @@ def _build_resource_definitions() -> list:
 
 def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
     """Return one resource as a JSON text envelope."""
-    import json
 
     operation_deadline = _operation_deadline(deadline)
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
@@ -5669,7 +5705,7 @@ def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
         data = {"error": _safe_exception_text(error, f"mcp.resource:{uri}")}
     try:
         envelope = _build_operation_envelope(data, _resource_quality(data))
-        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+        return _rendered_envelope(envelope)
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
 

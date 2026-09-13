@@ -147,8 +147,11 @@ answers **3054**, the line the definition sits on now; ours still answers
 refreshes itself in the background; ours refreshes on the nightly pass, and a
 forced refresh inside a live session is refused by the maintenance fence — which
 is correct as a fence and still leaves us answering a stale line for up to a day.
-That is a real gap, it is named in the superset contract as "optional bounded
-watching" and it is not implemented. It is the next thing worth doing.
+That gap is closed the same day, and not by a watcher: an answer that names a
+file now reads that file when its digest has moved, and reports the line and the
+block the file holds. Measured after: T04 correct on both our columns, 16 of 16,
+and the other tool partial on it. See
+`docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
 
 Nothing about the counted standing changed — 15 against 14, 0 confident-wrong
 against 1 — and on this one question, today, they were right and we were stale.
