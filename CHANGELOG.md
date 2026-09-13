@@ -32,6 +32,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   junit and no traceback (run 34727708815, after 2 058 of the shard's 2 080
   collected items).
 
+### Changed
+
+- **The pipeline reads with Sonnet by default.** The claude CLI provider passed no
+  `--model` flag, so every compile, classification and grounded answer used
+  whatever the operator's own session was set to — on this machine Opus, which
+  refused the grounded-QA prompt outright and failed 18 of 19 LongMemEval
+  questions. `MEMORY_CLAUDE_MODEL` still overrides; silence now means
+  `claude-sonnet-5`, which is where background classification and summarization
+  belong anyway. Verified on the installed vault with no environment variable set:
+  answered in 59 s where it refused before. See
+  `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
+
 ### Fixed
 
 - **A retry of a completion must replay its own request.** `complete_task` built

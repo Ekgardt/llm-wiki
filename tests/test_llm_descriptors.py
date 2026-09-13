@@ -1197,3 +1197,42 @@ def test_an_older_claude_cli_still_gets_the_system_text(monkeypatch):
 
     assert "--system-prompt" not in command
     assert "<system>BE A COMPILER</system>" in llm_client._claude_stdin("BE A COMPILER", "work")
+
+
+def _descriptor_for(provider: str) -> object:
+    """The one candidate for a provider, whatever order the list is in."""
+    return next(
+        item
+        for item in llm_client.provider_candidates(max_tokens=2000)
+        if item.provider == provider
+    )
+
+
+def _claude_descriptor(monkeypatch) -> object:
+    monkeypatch.delenv("MEMORY_CLAUDE_MODEL", raising=False)
+    return _descriptor_for("claude")
+
+
+def test_the_claude_provider_reads_with_sonnet_by_default(monkeypatch):
+    """Silence must not mean "whatever the operator's CLI is set to".
+
+    Research: docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md.
+    """
+    descriptor = _claude_descriptor(monkeypatch)
+
+    assert descriptor.model == llm_client.DEFAULT_CLAUDE_MODEL
+
+
+def test_the_environment_still_chooses_the_reader(monkeypatch):
+    monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+    descriptor = _descriptor_for("claude")
+
+    assert descriptor.model == "claude-haiku-4-5-20251001"
+
+
+def test_the_command_carries_the_model_flag(monkeypatch):
+    command = llm_client._claude_command("/bin/claude", llm_client.DEFAULT_CLAUDE_MODEL, "")
+
+    assert "--model" in command
+    assert llm_client.DEFAULT_CLAUDE_MODEL in command
