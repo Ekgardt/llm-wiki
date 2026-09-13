@@ -114,7 +114,22 @@ Why not the alternatives:
 - A repository whose files are unchanged pays one stat and one hash per file named
   in the answer, and no answer becomes slower than its deadline allows.
 
-Files: `scripts/mcp_server.py`, `scripts/answer_budget.py`,
+## A bound with no headroom, measured
+
+The Windows shards carried `timeout-minutes: 40`. Measured on run 34753755498
+(with `-v`) and run 34725227244 (without it), the slowest Windows shards take
+22-26 and 23-30 minutes respectively — so `-v` costs about nothing, and the cap
+sat a few minutes above the normal run. One shard, `windows_full py3.12-s1`,
+took 45 minutes on a slow runner and was cancelled at the cap; GitHub reports
+that as `cancelled`, not `failure`, and refuses to re-run it, so the branch could
+not go green without a new commit.
+
+The cap is now **60 minutes** for the Windows class only. That is the same defect
+class as commit `9c88bbf`: a bound has to measure the hang it was written for, not
+the runner's speed. Linux and macOS keep 20 minutes, where the measured range is
+6-12.
+
+Files: `.github/workflows/tests.yml`, `scripts/mcp_server.py`, `scripts/answer_budget.py`,
 `scripts/fresh_positions.py` (new), `scripts/code_graph.py`,
 `tests/test_answer_budget.py`, `tests/test_fresh_positions.py` (new),
 `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.

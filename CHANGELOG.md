@@ -34,6 +34,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
+  minutes above the measured 22-30 minute range, and one shard that took 45 on a
+  slow runner was cancelled at the cap — which GitHub reports as `cancelled`, not
+  `failure`, and refuses to re-run, so a branch could not go green without a new
+  commit. The Windows class now has 60 minutes; Linux and macOS keep 20, where the
+  range is 6-12.
+
 - **An answer stops paying for whitespace and for a module name the path already
   spells.** A tool answer is serialized compactly, and a row that carries
   `scripts/retrieval.py` no longer repeats `scripts.retrieval` inside its
