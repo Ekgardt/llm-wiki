@@ -331,6 +331,14 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     assert invalid["details"]["catalog"] == "invalid"
 
 
+def _age_past_orphan_grace(*paths: Path) -> None:
+    import doctor
+
+    aged = time.time() - doctor.GENERATION_ORPHAN_GRACE_SECONDS - 60
+    for path in paths:
+        os.utime(path, (aged, aged))
+
+
 def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(tmp_path):
     import doctor
     from evidence_graph_builder import KillPointError, build_full_generation
@@ -361,9 +369,7 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
     partial.mkdir()
     (partial / "partial.tmp").write_text("incomplete", encoding="utf-8")
     # Older than the grace a build in flight is given (2026-09-14).
-    aged = time.time() - doctor.GENERATION_ORPHAN_GRACE_SECONDS - 60
-    for path in (partial / "partial.tmp", partial):
-        os.utime(path, (aged, aged))
+    _age_past_orphan_grace(partial / "partial.tmp", partial)
 
     second = _empty_generation(state, "gen-2", parent="gen-1")
     (second.generation_path / "evidence.sqlite3").write_bytes(b"corrupt")
