@@ -3191,10 +3191,11 @@ def _record_cli_capture_failure(
         return
     try:
         from capture_diagnostics import record_capture_failure
+        from secret_redact import describe_error_chain
 
         record_capture_failure(
             f"adapter_{_failed_operation(args)}",
-            f"{type(error).__name__}: {error}",
+            describe_error_chain(error),
             error=error,
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session
