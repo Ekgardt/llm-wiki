@@ -179,10 +179,10 @@ def _require_owned_by_caller(root: Path) -> bool:
 
 def _git_text(root: Path, *arguments: str) -> str:
     """One bounded, non-interactive Git read inside `root`. Never writes."""
-    from repository_scope import sanitized_git_environment
+    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", "-C", str(root), *arguments],
+        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         shell=False,

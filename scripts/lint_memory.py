@@ -211,7 +211,7 @@ def _git_tracked_paths() -> set[str] | None:
     """
     try:
         out = subprocess.check_output(
-            ["git", "ls-files", "-z"],
+            ["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
             cwd=str(ROOT),
             stderr=subprocess.DEVNULL,
         )

@@ -91,10 +91,10 @@ def _indexable(worktree: Worktree) -> bool:
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
-    from repository_scope import sanitized_git_environment
+    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
     return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", "-C", str(root), *arguments],
+        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         shell=False,

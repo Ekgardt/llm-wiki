@@ -65,9 +65,20 @@ class WorktreeInfo:
         return self._git_permits_removal and self.is_clean and self.is_merged
 
 
+# A worktree's config may name a program for `core.fsmonitor`, which `git status` and
+# `git worktree remove` run. See
+# `docs/research/2026-09-14-a-repository-read-runs-no-config-command.md`.
+GIT_NO_CONFIG_COMMANDS = ("-c", "core.fsmonitor=false")
+
+
+def _argv(cmd: list[str]) -> list[str]:
+    """Every command this script runs is git; each runs with no config-named program."""
+    return [cmd[0], *GIT_NO_CONFIG_COMMANDS, *cmd[1:]]
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(
-        cmd,
+        _argv(cmd),
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
@@ -83,7 +94,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 
 def _run_bytes(cmd: list[str], cwd: Path | None = None) -> bytes:
     result = subprocess.run(
-        cmd,
+        _argv(cmd),
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         check=False,

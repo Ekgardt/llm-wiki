@@ -77,6 +77,10 @@ _LOCAL_GIT_ENVIRONMENT = {
     "GIT_WORK_TREE",
 }
 _LOCAL_GIT_ENVIRONMENT_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+# A repository's own config may name a program for `core.fsmonitor`, which Git runs on
+# every index refresh (`status`, `ls-files`, `worktree remove`). See
+# `docs/research/2026-09-14-a-repository-read-runs-no-config-command.md`.
+GIT_NO_CONFIG_COMMANDS = ("-c", "core.fsmonitor=false")
 
 
 def sanitized_git_environment() -> dict[str, str]:
