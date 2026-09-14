@@ -6,6 +6,7 @@ build before the fix. Research:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -86,6 +87,7 @@ def test_a_note_with_raw_yaml_values_is_written(tmp_path, name):
     assert _written(tmp_path, {f"knowledge/notes/{name}.md": NOTES[name].encode()}, _knowledge) == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot create a file name with a line break or backslash")
 def test_a_file_the_graph_cannot_name_is_left_out_not_fatal(tmp_path):
     files = {"src/good.py": b"x = 1\n", "src/bad\nname.py": b"y = 2\n", "src/back\\slash.py": b"z = 3\n"}
 
