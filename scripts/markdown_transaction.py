@@ -7681,6 +7681,7 @@ class MarkdownCoordinator:
             lambda: self._renew_canonical_writer_gate(registry, owner),
             interval=owner.heartbeat_seconds,
             lease_seconds=owner.ttl_seconds,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
             stop=stop,
         )
         if ended is not None:

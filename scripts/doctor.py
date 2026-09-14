@@ -7122,6 +7122,7 @@ class _MaintenanceHeartbeat:
             self._renew,
             interval=self.interval,
             lease_seconds=_lease_seconds(self.lease),
+            attempt_seconds=reliable_memory.DEFAULTS.markdown_busy_ms / 1_000,
             stop=self._stop,
             transient=_transient_beat_failure,
         )

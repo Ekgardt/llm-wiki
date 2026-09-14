@@ -13989,6 +13989,7 @@ class _SourceFenceHeartbeat:
             self._renew,
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
+            attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )
@@ -14044,6 +14045,7 @@ class _LeaseHeartbeat:
             self._renew,
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
+            attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )

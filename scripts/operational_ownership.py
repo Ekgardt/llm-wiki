@@ -1554,6 +1554,7 @@ def heartbeat_owner(
             lambda: registry.heartbeat(lease),
             interval=lease.heartbeat_seconds,
             lease_seconds=lease.ttl_seconds,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
             stop=stop,
             wait=lambda seconds: _wait_for_owner_heartbeat(stop, seconds),
         )

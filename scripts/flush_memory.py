@@ -793,13 +793,16 @@ class _CaptureKeepAlive:
     def _run(self) -> None:
         from lease_renewal import renew_until_stopped
         from markdown_transaction import INTENT_FENCE_SECONDS
+        from reliable_memory import DEFAULTS
 
         # The ending error needs no handling here: publication stays fenced, so a
-        # claim that ran out refuses to publish on its own.
+        # claim that ran out refuses to publish on its own. One round renews the
+        # queue and the coordinator; the coordinator's busy wait is the longer.
         renew_until_stopped(
             self._renew,
             interval=CAPTURE_KEEPALIVE_SECONDS,
             lease_seconds=INTENT_FENCE_SECONDS,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
             stop=self._stop,
         )
 

@@ -1,8 +1,10 @@
 """A held lease survives a busy database until it expires, and a lost fence ends it at once.
 
 Seven renewers gave up at the first or second failure; a 30-second lease was
-declared lost at t=30 s behind one slow, locked renewal. Research:
-`docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+declared lost at t=30 s behind one slow, locked renewal. Then a retry that could not
+finish before the expiry was still started, and the loss was known up to one busy wait
+late. Research: `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`,
+`docs/research/2026-09-14-a-lost-lease-is-known-by-its-expiry.md`.
 """
 from __future__ import annotations
 
@@ -48,11 +50,12 @@ class _Renewal:
             raise outcome
 
 
-def _run(clock: _Clock, renewal: _Renewal, lease_seconds: float = 30.0):
+def _run(clock: _Clock, renewal: _Renewal, lease_seconds: float = 30.0, attempt_seconds: float = 0.0):
     return renew_until_stopped(
         renewal,
         interval=10.0,
         lease_seconds=lease_seconds,
+        attempt_seconds=attempt_seconds,
         stop=threading.Event(),
         wait=clock.wait,
         monotonic=clock.monotonic,
@@ -87,3 +90,23 @@ def test_a_fence_taken_by_someone_else_ends_the_lease_at_once():
     ended = _run(clock, _Renewal(clock, [RuntimeError("owner_fence_lost")]))
 
     assert (str(ended), clock.now) == ("owner_fence_lost", 10.0)
+
+
+def test_a_lock_that_outlasts_the_lease_is_known_lost_by_its_expiry():
+    """Each renewal blocks the database's full busy wait; no retry is started past the expiry."""
+    clock = _Clock(stop_after=600.0)
+    locked = sqlite3.OperationalError("database is locked")
+
+    ended = _run(clock, _Renewal(clock, [locked] * 100, cost=10.0), attempt_seconds=10.0)
+
+    assert (isinstance(ended, sqlite3.OperationalError), clock.now) == (True, 30.0)
+
+
+def test_the_measured_lock_still_lets_the_retry_that_fits_renew():
+    """One beat blocked its whole busy wait; the retry that still fits before expiry succeeds."""
+    clock = _Clock(stop_after=60.0)
+    locked = sqlite3.OperationalError("database is locked")
+
+    ended = _run(clock, _Renewal(clock, [locked, None], cost=10.0), attempt_seconds=10.0)
+
+    assert ended is None
