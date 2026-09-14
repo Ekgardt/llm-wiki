@@ -20,6 +20,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import flush_memory  # noqa: E402
 import operational_ownership  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 from tests.test_queue_v3_capture_links import _capture_binding, _coordinator, _queue  # noqa: E402
 
 SCOPE = "worker:capture-keepalive"
@@ -94,7 +95,7 @@ def test_the_classifier_call_runs_under_renewals_of_every_claim(monkeypatch):
     monkeypatch.setattr(flush_memory, "CAPTURE_KEEPALIVE_SECONDS", 0.01)
 
     with flush_memory._CaptureKeepAlive(recorder, recorder, "lease", "task", "intent", "owner"):
-        assert beats.wait(timeout=5)
+        assert beats.wait(timeout=SHORT_TIMEOUT)
 
     assert recorder.calls[:4] == ["owner", "lease", "task", "intent"]
 

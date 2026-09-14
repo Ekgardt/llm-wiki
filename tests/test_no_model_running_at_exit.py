@@ -15,23 +15,25 @@ if str(SCRIPTS) not in sys.path:
 
 import inference_threads  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def test_settle_stops_inference_at_its_safe_point_and_waits_for_it():
     reached = threading.Event()
 
     def inference() -> None:
         reached.set()
-        inference_threads.stopping.wait(timeout=5)
+        inference_threads.stopping.wait(timeout=SHORT_TIMEOUT)
 
     inference_threads.start(inference, name="test-inference")
-    reached.wait(timeout=5)
+    reached.wait(timeout=SHORT_TIMEOUT)
 
     assert (inference_threads.settle(5.0), inference_threads.running()) == ([], [])
 
 
 def test_a_thread_that_will_not_stop_is_named_and_the_next_server_still_warms():
     release = threading.Event()
-    inference_threads.start(lambda: release.wait(timeout=5), name="stuck-inference")
+    inference_threads.start(lambda: release.wait(timeout=SHORT_TIMEOUT), name="stuck-inference")
 
     left = inference_threads.settle(0.05)
     release.set()
