@@ -904,11 +904,10 @@ def _unpublished_notes(paths: set[str]) -> set[str]:
 
 
 def _linked_note_paths(text: str) -> set[str]:
-    """The note pages this file links to by path."""
-    return {
-        f"knowledge/notes/{name}.md"
-        for name in re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
-    }
+    """The note pages this file names by path: a wikilink, or a back-quoted path."""
+    linked = re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
+    quoted = re.findall(r"`knowledge/notes/([^`]+?)\.md`", text)
+    return {f"knowledge/notes/{name}.md" for name in [*linked, *quoted]}
 
 
 def test_the_vault_index_and_log_name_only_published_notes() -> None:

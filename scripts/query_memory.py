@@ -2426,6 +2426,20 @@ def append_log(entry: str) -> None:
     append_knowledge(None, LOG, block)
 
 
+def _filed_page_phrase(out: Path) -> str:
+    """The filed page by path when this repository publishes it, else counted.
+
+    `knowledge/log.md` is tracked and the slug is the question's own words. See
+    `docs/research/2026-09-14-a-filed-answer-is-counted-not-named.md`.
+    """
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(ROOT, [out.relative_to(ROOT).as_posix()])
+    if named:
+        return f"`{named[0]}`"
+    return f"{hidden} unpublished page"
+
+
 def main() -> int:
     args = parse_args()
     answer_text = answer(args.question, profile=args.profile)
@@ -2439,7 +2453,7 @@ def main() -> int:
         index_ok = rebuild_index()
         suffix = "" if index_ok else " (WARN: knowledge/index.md rebuild failed — page written, index stale)"
         append_log(
-            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A `{out.relative_to(ROOT).as_posix()}` via `query_memory.py --file-back`.{suffix}"
+            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A {_filed_page_phrase(out)} via `query_memory.py --file-back`.{suffix}"
         )
         print(f"\n[filed] {out.relative_to(ROOT).as_posix()}")
     return 0
