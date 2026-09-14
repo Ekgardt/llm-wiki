@@ -1636,32 +1636,46 @@ def _flush_operation_id(args: argparse.Namespace) -> str | None:
     return f"flush:{source_event_id}"
 
 
-def _append_flush_state(
-    state: dict,
-    args: argparse.Namespace,
-    day: str,
-    block: str,
-    tier: str,
-    deferred: list[tuple[Path, str]],
-) -> None:
+def _claim_flush(state: dict, args: argparse.Namespace, claimed: list[bool]) -> None:
+    """Record the flush now, so a concurrent one of the same session and event skips."""
     if should_skip(state, args.session_id, args.event):
         return
-    daily_path = append_daily(day, block, operation_id=_flush_operation_id(args))
     record_flush(state, args.session_id, args.event)
+    claimed.append(True)
+
+
+def _release_flush_claim(state: dict, args: argparse.Namespace) -> None:
+    state.get("flush_dedupe", {}).pop(dedupe_key(args.session_id, args.event), None)
+
+
+def _count_flush_tier(state: dict, tier: str) -> None:
     counts = state.setdefault("flush_tier_counts", {})
     counts[tier] = int(counts.get(tier, 0)) + 1
-    if tier == "major":
-        deferred.append((daily_path, tier))
 
 
 def _persist_flush(
     args: argparse.Namespace, tier: str, block: str, day: str
 ) -> list[tuple[Path, str]]:
-    deferred: list[tuple[Path, str]] = []
-    update_state(
-        lambda state: _append_flush_state(state, args, day, block, tier, deferred)
-    )
-    return deferred
+    """Claim under the state lock, append outside it, then count.
+
+    The append used to run inside the lock, so a busy Markdown writer held every hook's
+    0.1 s state lock. See `docs/research/2026-09-14-no-markdown-write-under-the-state-lock.md`.
+    """
+    claimed: list[bool] = []
+    update_state(lambda state: _claim_flush(state, args, claimed))
+    if not claimed:
+        return []
+    daily_path = _append_claimed_flush(args, day, block)
+    update_state(lambda state: _count_flush_tier(state, tier))
+    return [(daily_path, tier)] if tier == "major" else []
+
+
+def _append_claimed_flush(args: argparse.Namespace, day: str, block: str) -> Path:
+    try:
+        return append_daily(day, block, operation_id=_flush_operation_id(args))
+    except BaseException:
+        update_state(lambda state: _release_flush_claim(state, args))
+        raise
 
 
 def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:
