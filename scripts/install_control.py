@@ -608,6 +608,12 @@ def _scheduled_path(uv_path: Path) -> str:
     return scheduled_path(uv_path, _SYSTEMD_USER_PATH)
 
 
+# A oneshot service has no start timeout by default, so a hung pass would hold its
+# lease forever. The limits match the Windows tasks and sit above each pass's own worst
+# case. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
+SYSTEMD_START_LIMITS = {"nightly": "3h", "weekly": "5h"}
+
+
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
     arguments = " ".join(
         _systemd_quote(argument) for argument in _scheduled_arguments(root, uv_path, kind)
@@ -618,6 +624,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "",
         "[Service]",
         "Type=oneshot",
+        f"TimeoutStartSec={SYSTEMD_START_LIMITS[kind]}",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
         *(f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in _provider_items()),
