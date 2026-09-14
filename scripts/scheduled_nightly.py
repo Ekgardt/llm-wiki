@@ -483,6 +483,21 @@ def _post_compile_pass(run_step, log) -> int:
 # every morning. The night has the time; the morning reads what it wrote.
 HEALTH_REPORT_NAME = "doctor-report.json"
 HEALTH_REPORT_BUDGET_SECONDS = 60
+# `maintenance_helpers.wait_for_compile_idle`: three tries, ten seconds each.
+COMPILE_IDLE_WAIT_SECONDS = 30
+
+
+def worst_case_seconds() -> float:
+    """The longest a pass can run by its own bounds: every step's timeout and every wait.
+
+    The Windows scheduler's limit must sit above it. See
+    `docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md`.
+    """
+    steps = [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()]
+    steps += [_compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    waits = COMPILE_IDLE_WAIT_SECONDS + COMPILE_WAIT_SECONDS
+    budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
+    return float(sum(step.timeout for step in steps) + waits + budgets)
 
 
 def _write_health_report(log) -> None:

@@ -229,11 +229,14 @@ $nightlyAction = New-LLMWikiScheduledAction `
 
 $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
 
+# The pass's own bounds add up to about 2.4 hours (scheduled_nightly.worst_case_seconds);
+# a one-hour limit killed it before it could release its lease or record a result.
+# See docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md.
 $nightlySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 15)
 
