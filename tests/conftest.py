@@ -32,6 +32,11 @@ if str(SCRIPTS) not in sys.path:
 
 # 1. Vault root — always pin to this checkout for hermetic subprocess hooks.
 os.environ["LLM_WIKI_ROOT"] = str(VAULT_ROOT)
+# A test that starts a server must not load models in the background by accident:
+# a closing server now waits for inference, and an unwaited one aborted the test
+# process at exit. Tests of the warm-up call it directly. See
+# `docs/research/2026-09-14-no-model-running-at-exit.md`.
+os.environ.setdefault("LLMWIKI_NO_ENCODER_WARMUP", "1")
 
 _USE_EXTERNAL_STATE = os.environ.get(
     "LLM_WIKI_TEST_USE_EXTERNAL_STATE", ""
