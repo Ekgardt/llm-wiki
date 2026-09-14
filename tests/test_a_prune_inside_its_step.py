@@ -52,24 +52,33 @@ def test_every_step_that_prunes_gives_it_a_budget_below_its_kill_timeout():
     assert all(budget < timeout for budget, timeout in pairs)
 
 
-def _budgeted_steps() -> list[tuple[list[str], int]]:
+BUDGET_FLAGS = ("--budget-seconds", "--max-seconds")
+
+
+def _budget_flag(command: list[str]) -> str | None:
+    return next((flag for flag in BUDGET_FLAGS if flag in command), None)
+
+
+def _all_steps() -> list[tuple[list[str], int]]:
     import scheduled_nightly
     import scheduled_weekly
 
-    nightly = [scheduled_nightly._episode_step(), *scheduled_nightly._post_compile_steps()]
+    nightly = [scheduled_nightly._queue_step(), scheduled_nightly._episode_step(), *scheduled_nightly._post_compile_steps()]
     weekly = [(command, timeout) for _m, _l, command, timeout in scheduled_weekly._script_steps()]
-    pairs = [(step.command, step.timeout) for step in nightly] + weekly
-    return [(command, timeout) for command, timeout in pairs if "--budget-seconds" in command]
+    return [(step.command, step.timeout) for step in nightly] + weekly
+
+
+def _budgeted_steps() -> list[tuple[list[str], int, float]]:
+    """(command, kill timeout, the budget it hands its child) for every budgeted step."""
+    flagged = [(command, timeout, _budget_flag(command)) for command, timeout in _all_steps()]
+    return [(command, timeout, float(command[command.index(flag) + 1])) for command, timeout, flag in flagged if flag]
 
 
 def test_every_budgeted_step_leaves_the_start_margin_before_its_kill():
     import scheduled_nightly
 
     margin = scheduled_nightly.STEP_START_MARGIN_SECONDS
-    short = [
-        command[1]
-        for command, timeout in _budgeted_steps()
-        if _budget_and_timeout(command, timeout)[0] + margin > timeout
-    ]
+    steps = _budgeted_steps()
+    short = [command[1] for command, timeout, budget in steps if budget + margin > timeout]
 
-    assert (len(_budgeted_steps()), short) == (4, [])
+    assert (len(steps), short) == (5, [])

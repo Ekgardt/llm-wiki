@@ -8384,57 +8384,6 @@ def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
     return _unblock_capabilities(root, state_root, repaired)
 
 
-def _worker_state_root_matches(state_root: Path) -> bool:
-    configured = Path(
-        os.environ.get(
-            "LLM_WIKI_STATE_ROOT",
-            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent),
-        )
-    ).resolve()
-    return configured == Path(state_root).resolve()
-
-
-def _worker_should_stop(remaining: int, cancelled) -> bool:
-    return remaining <= 0 or bool(cancelled and cancelled())
-
-
-def _run_bounded_worker(
-    root: Path,
-    state_root: Path,
-    *,
-    deadline: float = float("inf"),
-    cancelled=None,
-) -> int:
-    from memory_queue import (
-        _acquire_queue_owner,
-        _manual_processor,
-        _release_queue_owner,
-        active_or_legacy_memory_queue,
-        run_worker,
-    )
-
-    active_or_legacy_memory_queue(root, state_root)
-    if not _worker_state_root_matches(state_root):
-        return 0
-    remaining = max(0, min(1, int(deadline - time.monotonic() + 0.999)))
-    if _worker_should_stop(remaining, cancelled):
-        return 0
-    owner = _acquire_queue_owner(
-        state_root, "worker", "worker_busy", ttl_seconds=MAINTENANCE_LEASE_SECONDS
-    )
-    try:
-        summary = run_worker(
-            _manual_processor,
-            max_tasks=20,
-            max_seconds=remaining,
-            idle_seconds=0,
-            cancelled=cancelled,
-        )
-        return summary.processed
-    finally:
-        _release_queue_owner(owner)
-
-
 _DEFERRED_BY_ACTION = {
     "runtime": {"runtime"},
     "transactions": {"transactions"},
@@ -8737,19 +8686,6 @@ def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
     context.repaired.append({"action": "rebuild_claim_index"})
 
 
-def _record_bounded_worker_run(guard: Any, context: _RepairContext) -> None:
-    """Run the bounded worker and record how much of the queue it processed."""
-    processed = guard.run(
-        _run_bounded_worker,
-        context.root_path,
-        context.state_path,
-        deadline=context.deadline,
-        cancelled=guard.cancelled,
-    )
-    if processed:
-        context.repaired.append({"action": "run_bounded_worker", "count": processed})
-
-
 def _repair_queue_followups(
     guard: Any, context: _RepairContext, queue_v2_ready: bool
 ) -> None:
@@ -8762,7 +8698,9 @@ def _repair_queue_followups(
         context.repaired.append(
             {"action": "unblock_capabilities", "count": unblocked}
         )
-    _record_bounded_worker_run(guard, context)
+    # No worker runs here: within a repair's budget it could only claim a task and
+    # kill it, costing an attempt. See
+    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
 
 
 def _run_selected_repairs(selected: set[str], ordered: tuple) -> None:

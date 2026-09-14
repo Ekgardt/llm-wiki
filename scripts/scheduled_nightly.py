@@ -205,12 +205,18 @@ def _reclaim_step() -> _Step:
     )
 
 
+# The queue worker's wall time ends a margin before this step is killed. See
+# `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
+QUEUE_STEP_SECONDS = 600
+
+
 def _queue_step() -> _Step:
     return _Step(
         "Step 1: working deferred memory queue...",
         "work",
-        _script("memory_queue.py") + ["work"],
-        600,
+        _script("memory_queue.py")
+        + ["work", "--max-seconds", str(QUEUE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
+        QUEUE_STEP_SECONDS,
     )
 
 

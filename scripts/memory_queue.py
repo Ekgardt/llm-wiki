@@ -15111,6 +15111,13 @@ class _WorkerProgress:
         return "halted" if counts.get("halted") else "worked"
 
 
+# A worker claims no task with less than this left: one provider call (90 s by default)
+# plus the child's start and settle. A task claimed later is killed by the worker's own
+# deadline and loses an attempt. See
+# `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
+WORKER_MIN_CLAIM_SECONDS = 120
+
+
 def _worker_exhausted(
     *,
     cancelled: Callable[[], bool] | None,
@@ -15222,13 +15229,14 @@ def _drive_worker(
     sleep: Callable[[float], None],
     cancelled: Callable[[], bool] | None,
     policy: Mapping[str, int],
+    min_claim_seconds: float = 0,
 ) -> None:
     while progress.processed < max_tasks:
         now = monotonic()
         if _worker_exhausted(
             cancelled=cancelled,
             now=now,
-            deadline=deadline,
+            deadline=deadline - min_claim_seconds,
             idle_started=progress.idle_started,
             idle_seconds=idle_seconds,
         ):
@@ -15267,8 +15275,12 @@ def run_worker(
         bool | DeferredResult,
     ] = _run_processor_child,
     cancelled: Callable[[], bool] | None = None,
+    min_claim_seconds: float = 0,
 ) -> WorkerSummary:
-    """Run a short-lived worker bounded by tasks, wall time, and idle time."""
+    """Run a short-lived worker bounded by tasks, wall time, and idle time.
+
+    No task is claimed with less than `min_claim_seconds` of the wall time left.
+    """
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
         raise ValueError("worker limits must be non-negative")
     policy = {
@@ -15304,6 +15316,7 @@ def run_worker(
         sleep=sleep,
         cancelled=cancelled,
         policy=policy,
+        min_claim_seconds=min_claim_seconds,
     )
     return WorkerSummary(
         progress.processed,
@@ -15597,6 +15610,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
     parser.add_argument("task_id", nargs="?")
     parser.add_argument("--max-tasks", type=int, default=DEFAULTS.worker_max_tasks)
     parser.add_argument("--max-seconds", type=int, default=DEFAULTS.worker_max_seconds)
+    parser.add_argument("--min-claim-seconds", type=int, default=WORKER_MIN_CLAIM_SECONDS)
     parser.add_argument("--idle-seconds", type=int, default=DEFAULTS.worker_idle_seconds)
     parser.add_argument("--lease-seconds", type=int, default=DEFAULTS.queue_lease_seconds)
     parser.add_argument(
@@ -15652,6 +15666,7 @@ def _cli_work(args, parser) -> int:
         max_attempts=args.max_attempts,
         retry_base_seconds=args.retry_base_seconds,
         retry_cap_seconds=args.retry_cap_seconds,
+        min_claim_seconds=args.min_claim_seconds,
     )
     counts = {
         "dead": summary.dead,
