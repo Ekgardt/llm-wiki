@@ -224,37 +224,70 @@ def _owner_alive(payload: bytes | None) -> bool:
         return False
 
 
-def _put_back(aside: Path, path: Path) -> None:
-    """Return a lock we moved aside; refused when the name was taken meanwhile."""
-    try:
-        os.link(aside, path)
-        aside.unlink()
-    except OSError:
+# How long a stealer waits for another stealer to finish judging the same lock.
+STEAL_GUARD_SECONDS = 5.0
+
+
+def _lock_descriptor_exclusively(descriptor: int) -> None:
+    """One non-blocking exclusive OS lock attempt; the kernel drops it if we die."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
         return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _await_guard(descriptor: int, guard: Path) -> None:
+    deadline = time.monotonic() + STEAL_GUARD_SECONDS
+    while True:
+        try:
+            _lock_descriptor_exclusively(descriptor)
+            return
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise StateLockTimeout(f"Could not acquire steal guard: {guard}") from exc
+            time.sleep(0.01)
+
+
+@contextmanager
+def _steal_guard(path: Path) -> Iterator[None]:
+    """One stealer at a time for this lock: check and removal under one OS lock.
+
+    See `docs/research/2026-09-14-one-stealer-at-a-time.md`.
+    """
+    guard = path.with_name(f"{path.name}.steal")
+    descriptor = os.open(str(guard), os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        _await_guard(descriptor, guard)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _current_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 def retire_stale_lock(path: Path, judged: bytes) -> bool:
     """Remove `path` only while it still holds the bytes the caller judged stale.
 
-    The lock is renamed aside first — one winner among concurrent stealers —
-    and deleted only when the moved bytes match; a fresh owner's lock moved by
-    mistake is put back. Research:
-    docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md
+    Under the steal guard the bytes are checked before anything moves: while the judged
+    file exists no creator can make a lock (`O_EXCL`) and its dead owner cannot release
+    it, so the file checked is the file removed. Research:
+    docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md,
+    docs/research/2026-09-14-one-stealer-at-a-time.md
     """
-    aside = path.with_name(f"{path.name}.stale-{os.getpid()}-{secrets.token_hex(4)}")
-    try:
-        os.replace(path, aside)
-    except OSError:
-        return False
-    try:
-        current = aside.read_bytes()
-    except OSError:
-        return False
-    if current != judged:
-        _put_back(aside, path)
-        return False
-    aside.unlink(missing_ok=True)
-    return True
+    with _steal_guard(path):
+        if _current_bytes(path) != judged:
+            return False
+        path.unlink(missing_ok=True)
+        return True
 
 
 class StateLockTimeout(TimeoutError):

@@ -180,12 +180,13 @@ def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
 
     assert memory_state.retire_stale_lock(lock, b"4242") is True
     assert not lock.exists()
-    assert list(tmp_path.iterdir()) == []
+    # The steal guard's sidecar stays; nothing else is left (2026-09-14).
+    assert [path.name for path in tmp_path.iterdir()] == ["state.json.lock.steal"]
 
     lock.write_bytes(b"9999")
     assert memory_state.retire_stale_lock(lock, b"4242") is False
     assert lock.read_bytes() == b"9999"
-    assert [path.name for path in tmp_path.iterdir()] == ["state.json.lock"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["state.json.lock", "state.json.lock.steal"]
 
     assert memory_state.retire_stale_lock(tmp_path / "absent.lock", b"1") is False
 
