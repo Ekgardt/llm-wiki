@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource, read_frontmatter
+from graph_storable import storable_identity_key, storable_metadata
 from reliable_memory import canonical_json_bytes
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
@@ -114,12 +115,16 @@ def _evidence(
 
 
 def _node(node_id: str, kind: str, scheme: str, key: str, **metadata: object) -> dict[str, object]:
+    """A node the writer stores: raw YAML values and over-long keys made storable.
+
+    See `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
+    """
     return {
         "node_id": node_id,
         "kind": kind,
         "identity_scheme": scheme,
-        "identity_key": key,
-        "metadata": metadata,
+        "identity_key": storable_identity_key(key),
+        "metadata": storable_metadata(metadata),
     }
 
 

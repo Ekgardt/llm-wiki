@@ -18,6 +18,12 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from code_intelligence import AnalysisIdentity, Capability, PositionEncoding, VerifiedAnalysisBatch
+from graph_storable import (  # noqa: F401 - the writer's rules, shared with its readers
+    MAX_IDENTITY_KEY_CHARS,
+    storable_identity_key,
+    storable_metadata,
+)
+from graph_storable import valid_graph_text as _valid_text
 from reliable_memory import canonical_json_bytes, validate_runtime_file
 from repository_scope import RepositoryScope
 
@@ -1011,15 +1017,6 @@ def _closed(record: Mapping[str, object], expected: frozenset[str], label: str) 
         raise TypeError(f"{label} must be an object")
     if set(record) != expected:
         raise ValueError(f"{label} must be a closed object with no missing or unknown fields")
-
-
-def _valid_text(value: object, maximum: int) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value) <= maximum
-        and not any(character in value for character in "\x00\r\n")
-    )
 
 
 def _text(value: object, label: str, *, maximum: int = 4096, optional: bool = False) -> str | None:

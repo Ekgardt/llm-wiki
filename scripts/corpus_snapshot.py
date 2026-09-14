@@ -1209,6 +1209,8 @@ class _Discovery:
         content: bytes | None,
     ) -> None:
         relative = unicodedata.normalize("NFC", path.relative_to(self.vault).as_posix())
+        if not _storable_source_path(relative):
+            return
         self._require_unseen(relative)
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
@@ -1510,6 +1512,20 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
     _add_daily_paths(discovery, vault, policy, deadline)
     _add_code_roots(discovery, vault, policy, deadline)
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
+
+
+# The graph names a source `source:<relative path>` in at most 512 characters,
+# without control characters or backslashes. A file it cannot name is not a
+# source, exactly as a binary file is not. See
+# `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
+_MAX_SOURCE_PATH_CHARS = 512 - len("source:")
+_UNNAMEABLE_PATH = re.compile(r"[\x00-\x1f\x7f\\]")
+
+
+def _storable_source_path(relative: str) -> bool:
+    if len(relative) > _MAX_SOURCE_PATH_CHARS:
+        return False
+    return _UNNAMEABLE_PATH.search(relative) is None
 
 
 def _decodes_as_utf8(content: bytes) -> bool:

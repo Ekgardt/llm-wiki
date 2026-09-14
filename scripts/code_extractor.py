@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
 
+try:
+    from .graph_storable import storable_identity_key, storable_metadata
+except ImportError:
+    from graph_storable import storable_identity_key, storable_metadata
+
 
 class _SourceRecord(Protocol):
     logical_id: str
@@ -285,10 +290,22 @@ def _module_name(path: str) -> str:
     return ".".join(parts)
 
 
+_PYTHON_LINE_BREAK = re.compile(rb"\r\n|\r|\n")
+
+
 def _line_offsets(content: bytes) -> tuple[int, ...]:
-    offsets = [0]
-    offsets.extend(index + 1 for index, byte in enumerate(content) if byte == 10)
-    return tuple(offsets)
+    """Where each line starts, split the way Python's parser splits them.
+
+    `ast` counts `\r\n`, `\r` and `\n` as line breaks; counting only `\n` sent a
+    file with old Mac line endings past the end of this table. See
+    `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
+    """
+    return (0, *(match.end() for match in _PYTHON_LINE_BREAK.finditer(content)))
+
+
+def _written_line(content: bytes, index: int) -> int:
+    """The line the writer records for a byte: one plus the `\n` before it."""
+    return content.count(b"\n", 0, index) + 1
 
 
 def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int, int, int, int]:
@@ -297,8 +314,8 @@ def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int,
     column = getattr(node, "col_offset", 0)
     end_column = getattr(node, "end_col_offset", column)
     start = offsets[min(line - 1, len(offsets) - 1)] + column
-    end = offsets[min(end_line - 1, len(offsets) - 1)] + end_column
-    return start, min(end, len(content)), line, end_line
+    end = min(offsets[min(end_line - 1, len(offsets) - 1)] + end_column, len(content))
+    return start, end, _written_line(content, start), _written_line(content, end)
 
 
 def _python_name_span(
@@ -906,8 +923,10 @@ class _Collector:
             "node_id": node_id,
             "kind": kind,
             "identity_scheme": scheme,
-            "identity_key": key,
-            "metadata": dict(metadata),
+            # What the writer stores: a key it would refuse is its digest, and
+            # the node id above still comes from the key itself.
+            "identity_key": storable_identity_key(key),
+            "metadata": storable_metadata(dict(metadata)),
         })
         self.check(self.nodes, self.limits.max_nodes, "node")
         return node_id
