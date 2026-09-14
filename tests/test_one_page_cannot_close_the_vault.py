@@ -80,3 +80,12 @@ def test_compile_cannot_write_a_character_yaml_refuses():
     title = _escape_yaml("bell \x07 escape \x1b del \x7f end")
 
     assert yaml.safe_load(f'title: "{title}"') == {"title": "bell  escape  del  end"}
+
+
+def test_an_unreadable_bound_is_stored_as_written_so_old_rows_still_match(vault):
+    """Dropping it changed stored chunk rows. See `docs/research/2026-09-14-a-bound-kept-as-written.md`."""
+    from corpus_snapshot import collect_corpus
+
+    write(vault / "knowledge/notes/when.md", "---\ntype: concept\nvalid_from: someday\n---\n# When\n")
+
+    assert [source.metadata.valid_from for source in collect_corpus(vault).sources] == ["someday"]

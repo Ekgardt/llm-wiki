@@ -1791,9 +1791,9 @@ def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> Sourc
         ),
         confidence=_metadata_value(frontmatter.get("confidence")),
         status=_metadata_status(frontmatter),
-        valid_from=_metadata_instant(frontmatter.get("valid_from", validity.get("from")))
+        valid_from=_metadata_value(frontmatter.get("valid_from", validity.get("from")))
         or _dated_by_name(candidate),
-        valid_to=_metadata_instant(frontmatter.get("valid_to", validity.get("to"))),
+        valid_to=_metadata_value(frontmatter.get("valid_to", validity.get("to"))),
         language=_metadata_language(frontmatter),
     )
 
@@ -1831,9 +1831,20 @@ def _as_datetime(value: str | date | datetime | None) -> datetime | None:
     return result.astimezone(timezone.utc)
 
 
+def _readable_bound(value: str | None) -> datetime | None:
+    """A validity bound as an instant; one that does not parse is no bound.
+
+    The text stays stored as written, so chunk rows do not change; only the
+    reading tolerates it. See `docs/research/2026-09-14-a-bound-kept-as-written.md`.
+    """
+    if value is None or not _iso_parses(str(value)):
+        return None
+    return _as_datetime(value)
+
+
 def _within_validity(metadata: SourceMetadata, instant: datetime) -> bool:
-    start = _as_datetime(metadata.valid_from)
-    end = _as_datetime(metadata.valid_to)
+    start = _readable_bound(metadata.valid_from)
+    end = _readable_bound(metadata.valid_to)
     if start is not None and start > instant:
         return False
     return end is None or instant < end
