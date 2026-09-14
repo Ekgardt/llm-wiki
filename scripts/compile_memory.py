@@ -3972,6 +3972,21 @@ def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:
     return compile_outcome(outcomes)
 
 
+def _mark_refused(trigger: str, reason: str) -> None:
+    """A run that did not get the lock records its refusal, not the holder's status.
+
+    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    """
+    refused_iso = datetime.now().isoformat(timespec="seconds")
+
+    def _mutate(s: dict) -> None:
+        s["last_compile_refused_at"] = refused_iso
+        s["last_compile_refused_trigger"] = trigger
+        s["last_compile_refused_reason"] = reason[:500]
+
+    update_state(_mutate)
+
+
 def _mark_finished(
     trigger: str,
     status: str,
@@ -4069,12 +4084,12 @@ def main() -> int:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
-    _mark_started(args.trigger)
     lock_token, refusal = _acquire_compile_lock()
     if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
-        _mark_finished(args.trigger, "error", refusal)
+        _mark_refused(args.trigger, refusal)
         return 1
+    _mark_started(args.trigger)
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
             return _run(args)

@@ -4538,6 +4538,7 @@ def _apply_failure_state(
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
     state, attempts = _failure_state(row, failure, attempt_limit)
+    available_at = _retry_available_at(state, attempts, now)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -4550,13 +4551,27 @@ def _apply_failure_state(
             failure.error_code,
             failure.blocked_capability,
             _timestamp(now),
-            _timestamp(now),
+            _timestamp(available_at),
             lease.id,
             lease.token,
         ),
     ).rowcount
     if changed != 1:
         raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+
+_RETRY_RANDOM = random.SystemRandom()
+
+
+def _retry_available_at(state: str, attempts: int, now: datetime) -> datetime:
+    """A task going back to ready waits a full-jitter backoff, as the legacy queue's do.
+
+    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    """
+    if state != "ready":
+        return now
+    ceiling = min(DEFAULTS.retry_cap_seconds, DEFAULTS.retry_base_seconds * (2 ** max(0, attempts - 1)))
+    return now + timedelta(seconds=_RETRY_RANDOM.uniform(0, ceiling))
 
 
 def _failure_is_terminal(

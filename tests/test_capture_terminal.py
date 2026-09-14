@@ -301,10 +301,16 @@ def _expire_capture_lease(queue, task_id: str) -> None:
     that: recovery had to find exactly one expired lease. Since 2026-08-27 the
     worker settles its claim on failure (`processor_failed`, immediate retry),
     so a crashed task is usually already `ready` and recovery finds nothing.
+    Since 2026-09-14 a `ready` retry waits a backoff
+    (`docs/research/2026-09-14-the-small-integrity-gaps.md`); the wait is moved to the past.
     """
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
             "UPDATE tasks SET lease_expires_at=? WHERE id=? AND state='leased'",
+            ("2000-01-01T00:00:00+00:00", task_id),
+        )
+        database.execute(
+            "UPDATE tasks SET available_at=? WHERE id=? AND state='ready'",
             ("2000-01-01T00:00:00+00:00", task_id),
         )
     queue.recover_expired_leases()
