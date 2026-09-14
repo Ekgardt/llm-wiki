@@ -14,7 +14,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from tests.test_claims import ledger_page, pipeline, raw_claim, source_bytes  # noqa: E402,F401
+from tests.test_claims import ledger_page, raw_claim, source_bytes  # noqa: E402
+
+
+@pytest.fixture
+def pipeline(tmp_path: Path):
+    from claims import ClaimPipeline
+    from evidence_resolver import EvidenceResolver
+
+    daily = tmp_path / "knowledge/daily/2026-01-02.md"
+    daily.parent.mkdir(parents=True)
+    daily.write_bytes(source_bytes())
+    return ClaimPipeline(EvidenceResolver(tmp_path))
+
 
 UPDATE = {"body_markdown": "The service moved.", "evidence": [{"claim": "moved"}]}
 

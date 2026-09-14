@@ -9,15 +9,13 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-import yaml
-from corpus_snapshot import CapturedSource
+from corpus_snapshot import CapturedSource, read_frontmatter
 from reliable_memory import canonical_json_bytes
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
 MAX_SOURCES = 10_000
 MAX_RECORDS = 100_000
 
-_FRONTMATTER = re.compile(rb"\A---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n", re.MULTILINE | re.DOTALL)
 # A wikilink lives on one line. Without the line breaks in the classes, `[[` in a
 # quoted pandas `df[["Latitude", ...` and a `]]` several turns later were read as
 # one link whose target was a page of transcript, and the writer refused it.
@@ -138,17 +136,13 @@ def _occurrence(source: CapturedSource, node_id: str, role: str, start: int, end
     }
 
 
-def _frontmatter(source: CapturedSource) -> tuple[dict[str, object], re.Match[bytes] | None]:
-    match = _FRONTMATTER.search(source.content)
-    if match is None:
-        return {}, None
-    try:
-        value = yaml.safe_load(match.group(1).decode("utf-8", errors="strict")) or {}
-    except (UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise ValueError(f"invalid knowledge frontmatter: {source.record.relative_path}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("knowledge frontmatter must be a mapping")
-    return value, match
+def _frontmatter(source: CapturedSource) -> dict[str, object]:
+    """The snapshot's own reading, so the two readers never disagree on a page.
+
+    Unreadable metadata costs the page its metadata, not the generation. See
+    `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
+    return read_frontmatter(source.content).mapping
 
 
 def _field_span(source: CapturedSource, field: str, fallback: tuple[int, int]) -> tuple[int, int]:
@@ -220,7 +214,7 @@ class _Extraction:
     def _index_pages(self) -> None:
         for source in self.ordered:
             _check_stop(self.deadline, self.monotonic, self.cancelled)
-            metadata, _match = _frontmatter(source)
+            metadata = _frontmatter(source)
             path = source.record.relative_path
             self.metadata_by_path[path] = metadata
             self.page_by_path[path] = _identifier("page", path)

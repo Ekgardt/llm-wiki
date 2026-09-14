@@ -541,6 +541,28 @@ def check_missing_frontmatter(pages: list[Path]) -> list[str]:
     return out
 
 
+def _page_frontmatter_problems(md: Path) -> list[str]:
+    from corpus_snapshot import frontmatter_problems
+
+    if md.name in EDITORIAL_NAMES:
+        return []
+    try:
+        return frontmatter_problems(md.read_bytes())
+    except OSError:
+        return []
+
+
+def check_unreadable_frontmatter(pages: list[Path]) -> list[str]:
+    """Pages whose metadata the corpus cannot read; each is indexed without it.
+
+    The snapshot no longer refuses the whole vault over one such page, so this is
+    where the owner learns which fields were dropped. See
+    `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
+    named = ((md, _page_frontmatter_problems(md)) for md in pages)
+    return [f"{_rel(md)}: {'; '.join(problems)}" for md, problems in named if problems]
+
+
 def _frontmatter_of(md: Path) -> str | None:
     """The frontmatter block, or None when the page has none or cannot be read."""
     if md.name in EDITORIAL_NAMES:
@@ -961,6 +983,7 @@ CHECK_NAMES = (
     "sparse_pages",
     # Phase 2 OKF conformance checks.
     "missing_frontmatter",
+    "unreadable_frontmatter",
     "missing_required_type",
     "invalid_type_value",
     "missing_sources_section",
@@ -1023,6 +1046,7 @@ def _page_checks(
         "missing_backlinks": check_missing_backlinks(pages, search_roots),
         "sparse_pages": check_sparse_pages(pages, sparse_words),
         "missing_frontmatter": check_missing_frontmatter(pages),
+        "unreadable_frontmatter": check_unreadable_frontmatter(pages),
         "missing_required_type": check_missing_required_type(pages),
         "invalid_type_value": check_invalid_type_value(pages),
         "missing_sources_section": check_missing_sources_section(pages),

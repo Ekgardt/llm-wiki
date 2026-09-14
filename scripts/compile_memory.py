@@ -1620,9 +1620,16 @@ def _require_normalized_body(
         raise ValueError("compile operation content is not normalized")
 
 
+# What PyYAML refuses to read anywhere in a document: C0 controls other than tab
+# and line breaks, DEL and C1 controls other than NEL, surrogates, U+FFFE/U+FFFF.
+# One such character in a title made the page's whole frontmatter unreadable. See
+# `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+_YAML_REFUSED = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ud800-\udfff\ufffe\uffff]")
+
+
 def _escape_yaml(value: object) -> str:
     return (
-        str(value)
+        _YAML_REFUSED.sub("", str(value))
         .replace(chr(92), chr(92) + chr(92))
         .replace(chr(34), chr(92) + chr(34))
         .replace(chr(10), " ")
