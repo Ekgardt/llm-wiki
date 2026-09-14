@@ -151,9 +151,19 @@ def _conflicting_paths(root: Path, head: str, fetched: str) -> dict | None:
     return _outcome("skipped", "local_changes_conflict", paths=sorted(conflicts)[:20])
 
 
-def _fast_forward(root: Path, head: str, fetched: str) -> dict | None:
+def _outside_default_branch(root: Path, fetched: str, default_tip: str) -> dict | None:
+    """Only what the default branch holds has passed its checks (a merged pull request).
+
+    See `docs/research/2026-09-14-an-update-only-to-what-main-holds.md`.
+    """
+    if _is_ancestor(root, fetched, default_tip):
+        return None
+    return _outcome("skipped", "not_in_default_branch", commit=fetched)
+
+
+def _fast_forward(root: Path, head: str, fetched: str, default_tip: str) -> dict | None:
     """The outcome that stops a fast-forward, or None when it may proceed."""
-    blocked = _fast_forward_block(root, head, fetched)
+    blocked = _fast_forward_block(root, head, fetched) or _outside_default_branch(root, fetched, default_tip)
     if blocked is not None:
         return blocked
     return _conflicting_paths(root, head, fetched)
@@ -173,16 +183,44 @@ def update_checkout(root: Path | str) -> dict:
         return _outcome("error", describe_error(error))
 
 
-def _prepared_update(root: Path) -> tuple[str, str] | dict:
-    """The current and fetched heads, or the outcome that stops us first."""
-    target = _update_target(root)
-    if isinstance(target, dict):
-        return target
-    branch, remote = target
+def _default_branch(root: Path, remote: str) -> str:
+    """The remote's default branch as `refs/remotes/<remote>/HEAD` names it, else `main`."""
+    completed = _run(
+        ("git", "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"),
+        cwd=root,
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+    name = completed.stdout.strip()
+    if completed.returncode != 0 or not name.startswith(f"{remote}/"):
+        return "main"
+    return name[len(remote) + 1 :]
+
+
+def _fetched_tip(root: Path, remote: str, branch: str) -> str | dict:
+    """The fetched commit of one remote branch, or the outcome that stops us."""
     failure = _fetch_failure(root, remote, branch)
     if failure is not None:
         return _outcome("skipped", "fetch_failed", detail=failure)
-    return _git(root, "rev-parse", "HEAD"), _git(root, "rev-parse", "FETCH_HEAD")
+    return _git(root, "rev-parse", "FETCH_HEAD")
+
+
+def _prepared_update(root: Path) -> tuple[str, str, str] | dict:
+    """The current head, the fetched head and the default branch's tip, or what stops us."""
+    target = _update_target(root)
+    if isinstance(target, dict):
+        return target
+    return _fetched_heads(root, *target)
+
+
+def _fetched_heads(root: Path, branch: str, remote: str) -> tuple[str, str, str] | dict:
+    """The default branch is fetched first, so the tracked branch is what FETCH_HEAD names last."""
+    default_tip = _fetched_tip(root, remote, _default_branch(root, remote))
+    if isinstance(default_tip, dict):
+        return default_tip
+    fetched = _fetched_tip(root, remote, branch)
+    if isinstance(fetched, dict):
+        return fetched
+    return _git(root, "rev-parse", "HEAD"), fetched, default_tip
 
 
 def _dependency_state(root: Path) -> str:
@@ -191,8 +229,8 @@ def _dependency_state(root: Path) -> str:
     return "stale"
 
 
-def _merged_update(root: Path, head: str) -> dict:
-    _git(root, "merge", "--ff-only", "FETCH_HEAD")
+def _merged_update(root: Path, head: str, fetched: str) -> dict:
+    _git(root, "merge", "--ff-only", fetched)
     return _outcome(
         "updated",
         None,
@@ -206,8 +244,8 @@ def _attempted_update(root: Path) -> dict:
     prepared = _prepared_update(root)
     if isinstance(prepared, dict):
         return prepared
-    head, fetched = prepared
-    stopped = _fast_forward(root, head, fetched)
+    head, fetched, default_tip = prepared
+    stopped = _fast_forward(root, head, fetched, default_tip)
     if stopped is not None:
         return stopped
-    return _merged_update(root, head)
+    return _merged_update(root, head, fetched)
