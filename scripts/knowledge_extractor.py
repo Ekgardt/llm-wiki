@@ -18,7 +18,10 @@ MAX_SOURCES = 10_000
 MAX_RECORDS = 100_000
 
 _FRONTMATTER = re.compile(rb"\A---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n", re.MULTILINE | re.DOTALL)
-_WIKILINK = re.compile(rb"\[\[([^\]|#]+?)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+# A wikilink lives on one line. Without the line breaks in the classes, `[[` in a
+# quoted pandas `df[["Latitude", ...` and a `]]` several turns later were read as
+# one link whose target was a page of transcript, and the writer refused it.
+_WIKILINK = re.compile(rb"\[\[([^\]|#\r\n]+?)(?:#[^\]|\r\n]+)?(?:\|[^\]\r\n]+)?\]\]")
 _CODE_SPAN = re.compile(rb"`([^`\r\n]+)`")
 _BARE_SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
@@ -28,6 +31,17 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
 # the generation writer refused a target over 4096 characters, and the whole
 # nightly build died on one quoted line.
 MAX_SYMBOL_REFERENCE_CHARS = 512
+# What the generation writer stores as an observation's target
+# (`evidence_graph._text`). A reference it would refuse names no page, and
+# recording it would kill the whole build over one source.
+MAX_OBSERVED_TARGET_CHARS = 4096
+_UNSTORABLE_TARGET_CHARACTERS = frozenset("\x00\r\n")
+
+
+def _storable_target(target: str) -> bool:
+    if not target or len(target) > MAX_OBSERVED_TARGET_CHARS:
+        return False
+    return _UNSTORABLE_TARGET_CHARACTERS.isdisjoint(target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +278,8 @@ class _Extraction:
         start: int,
         end: int,
     ) -> None:
+        if not _storable_target(target):
+            return
         key = (
             f"{source.record.logical_id}:{source_node}:{edge}:{target}:{reason}"
             f":{start}:{end}"
