@@ -21,4 +21,7 @@ def test_the_legacy_maintenance_row_is_renewed_before_it_runs_out(tmp_path):
     guard = doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 60)
     doctor._release_maintenance_owner(coordinator, lease)
 
-    assert guard.interval * doctor.MAX_HEARTBEAT_FAILURES < doctor.MAINTENANCE_LEASE_SECONDS
+    assert (guard.interval, doctor._lease_seconds(lease)) == (
+        doctor.MAINTENANCE_HEARTBEAT_SECONDS,
+        doctor.MAINTENANCE_LEASE_SECONDS,
+    )

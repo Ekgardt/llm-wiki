@@ -157,10 +157,9 @@ def test_the_repository_fence_is_renewed_before_its_lease_runs_out(adopted_vault
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
 
     with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 60) as beat:
-        renewal = (beat.interval, beat.interval * doctor.MAX_HEARTBEAT_FAILURES)
+        renewal = (beat.interval, doctor._lease_seconds(lease))
 
-    assert renewal[0] == owner.heartbeat_seconds
-    assert renewal[1] < owner.ttl_seconds
+    assert renewal == (owner.heartbeat_seconds, owner.ttl_seconds)
 
 
 def test_the_cli_detect_verb_answers_json_and_exit_two_when_not_indexed(tmp_path):

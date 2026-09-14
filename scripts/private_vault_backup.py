@@ -545,13 +545,18 @@ def _maintain_heartbeat(
     stop: threading.Event,
     failures: list[BaseException],
 ) -> None:
-    current = lease
-    while not stop.wait(current.heartbeat_seconds):
-        try:
-            current = registry.heartbeat(current)
-        except BaseException as exc:
-            failures.append(exc)
-            return
+    # A busy database is retried until the lease expires; a lost fence is final.
+    # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+    from lease_renewal import renew_until_stopped
+
+    ended = renew_until_stopped(
+        lambda: registry.heartbeat(lease),
+        interval=lease.heartbeat_seconds,
+        lease_seconds=lease.ttl_seconds,
+        stop=stop,
+    )
+    if ended is not None:
+        failures.append(ended)
 
 
 def _verify_heartbeat(

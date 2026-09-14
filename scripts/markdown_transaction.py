@@ -7671,27 +7671,37 @@ class MarkdownCoordinator:
         stop: threading.Event,
         lost: threading.Event,
     ) -> None:
-        while not stop.wait(owner.heartbeat_seconds):
-            try:
-                with self._connect() as database, begin_immediate(database):
-                    renewed = registry._heartbeat_in_transaction(database, owner)
-                    updated = database.execute(
-                        """UPDATE writer_owners SET heartbeat_at=?,expires_at=?
-                           WHERE gate_name='global' AND owner_token=?
-                             AND fencing_epoch=?""",
-                        (
-                            _timestamp(renewed.heartbeat_at),
-                            _timestamp(renewed.expires_at),
-                            owner.token,
-                            owner.epoch,
-                        ),
-                    ).rowcount
-                    if updated != 1:
-                        raise RuntimeError("writer projection was lost")
-                owner = renewed
-            except BaseException:
-                lost.set()
-                return
+        """Renew the gate and its projection; a busy database is not a lost gate.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            lambda: self._renew_canonical_writer_gate(registry, owner),
+            interval=owner.heartbeat_seconds,
+            lease_seconds=owner.ttl_seconds,
+            stop=stop,
+        )
+        if ended is not None:
+            lost.set()
+
+    def _renew_canonical_writer_gate(self, registry: object, owner: OwnerLease) -> None:
+        with self._connect() as database, begin_immediate(database):
+            renewed = registry._heartbeat_in_transaction(database, owner)
+            updated = database.execute(
+                """UPDATE writer_owners SET heartbeat_at=?,expires_at=?
+                   WHERE gate_name='global' AND owner_token=?
+                     AND fencing_epoch=?""",
+                (
+                    _timestamp(renewed.heartbeat_at),
+                    _timestamp(renewed.expires_at),
+                    owner.token,
+                    owner.epoch,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("writer projection was lost")
 
     def _require_nested_gate_owner(self, owner: object) -> None:
         """The two refusals a nested gate makes before it touches any state."""

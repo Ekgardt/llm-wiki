@@ -13979,13 +13979,30 @@ class _SourceFenceHeartbeat:
             return self._fence
 
     def _run(self) -> None:
-        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
-            self._stop, self._heartbeat_seconds
-        ):
-            try:
-                self.refresh()
-            except QueueOperationError:
-                return
+        """A busy database is retried until the fence expires; a lost fence is final.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self._heartbeat_seconds,
+            lease_seconds=self._lease_seconds,
+            stop=self._stop,
+            wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
+        )
+        if ended is None:
+            return
+        with self._lock:
+            self.error = ended
+        self._stop.set()
+
+    def _renew(self) -> None:
+        with self._lock:
+            self._fence = self._queue.heartbeat_source_fence(
+                self._fence, lease_seconds=self._lease_seconds
+            )
 
 
 class _LeaseHeartbeat:
@@ -14017,17 +14034,25 @@ class _LeaseHeartbeat:
         _join_heartbeat_or_refuse(self._thread, self._heartbeat_seconds)
 
     def _run(self) -> None:
-        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
-            self._stop, self._heartbeat_seconds
-        ):
-            try:
-                self._lease = self._queue.heartbeat(
-                    self._lease, lease_seconds=self._lease_seconds
-                )
-            except Exception as exc:  # noqa: BLE001 - completion must remain fenced
-                self.error = exc
-                self._stop.set()
-                return
+        """A busy database is retried until the lease expires; completion stays fenced.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self._heartbeat_seconds,
+            lease_seconds=self._lease_seconds,
+            stop=self._stop,
+            wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
+        )
+        if ended is not None:
+            self.error = ended
+            self._stop.set()
+
+    def _renew(self) -> None:
+        self._lease = self._queue.heartbeat(self._lease, lease_seconds=self._lease_seconds)
 
 
 def drain_with(

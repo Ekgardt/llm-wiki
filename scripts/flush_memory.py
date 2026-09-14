@@ -758,11 +758,9 @@ def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
     return tier, _require_canonical_body(body)
 
 
-# A third of the shortest claim a capture holds (the intent fence's 30 s), so one
-# failed round still leaves the claims live. See
+# A third of the shortest claim a capture holds (the intent fence's 30 s). See
 # `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
 CAPTURE_KEEPALIVE_SECONDS = 10.0
-CAPTURE_KEEPALIVE_MISSES = 2
 
 
 class _CaptureKeepAlive:
@@ -770,8 +768,8 @@ class _CaptureKeepAlive:
 
     Owner and its queue projection, the queue lease, the task fence and the
     intent fence: nothing renewed them, and no capture over 30 seconds ever
-    succeeded. Two failed rounds in a row stop the renewals; publication stays
-    fenced, so a claim that was lost still refuses to publish.
+    succeeded. A busy database is retried until the shortest claim expires;
+    publication stays fenced, so a claim that was lost still refuses to publish.
     """
 
     def __init__(self, queue, coordinator, lease, task_fence, intent_fence, owner) -> None:
@@ -793,16 +791,17 @@ class _CaptureKeepAlive:
         self._thread.join(timeout=CAPTURE_KEEPALIVE_SECONDS * 2)
 
     def _run(self) -> None:
-        misses = 0
-        while misses < CAPTURE_KEEPALIVE_MISSES and not self._stop.wait(CAPTURE_KEEPALIVE_SECONDS):
-            misses = 0 if self._renewed() else misses + 1
+        from lease_renewal import renew_until_stopped
+        from markdown_transaction import INTENT_FENCE_SECONDS
 
-    def _renewed(self) -> bool:
-        try:
-            self._renew()
-        except Exception:  # noqa: BLE001 - publication stays fenced either way
-            return False
-        return True
+        # The ending error needs no handling here: publication stays fenced, so a
+        # claim that ran out refuses to publish on its own.
+        renew_until_stopped(
+            self._renew,
+            interval=CAPTURE_KEEPALIVE_SECONDS,
+            lease_seconds=INTENT_FENCE_SECONDS,
+            stop=self._stop,
+        )
 
     def _renew(self) -> None:
         self._owner = self._queue.heartbeat_queue_owner(self._owner)

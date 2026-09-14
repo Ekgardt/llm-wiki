@@ -104,8 +104,6 @@ from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
-# Two missed beats still leave the 120-second lease alive; the third would not.
-MAX_HEARTBEAT_FAILURES = 2
 FILESYSTEM_PROBE_SECONDS = 1.0
 TRANSACTION_REQUIRED_COLUMNS = {
     "id",
@@ -7065,6 +7063,19 @@ def _heartbeat_interval(lease: dict[str, object]) -> float:
     return float(owner.heartbeat_seconds)
 
 
+def _lease_seconds(lease: dict[str, object]) -> float:
+    """How long the held lease lasts from a renewal: its own TTL, or the legacy row's."""
+    owner = lease.get("owner")
+    if owner is None:
+        return float(MAINTENANCE_LEASE_SECONDS)
+    return float(owner.ttl_seconds)
+
+
+def _transient_beat_failure(error: BaseException) -> bool:
+    """Every lost fence is a RuntimeError; anything else may pass if tried again."""
+    return not isinstance(error, RuntimeError)
+
+
 class _MaintenanceHeartbeat:
     """Keep one fenced maintenance owner live through cancellable repair work."""
 
@@ -7100,24 +7111,33 @@ class _MaintenanceHeartbeat:
         _release_maintenance_owner(self.coordinator, self.lease)
 
     def _heartbeat_loop(self) -> None:
-        failures = 0
-        while not self._stop.wait(self.interval):
-            if self._beat_once():
-                failures = 0
-                continue
-            failures += 1
-            if failures >= MAX_HEARTBEAT_FAILURES:
-                self._lost.set()
-                return
+        """Renew on the lease's pace; a busy database is retried until the lease expires.
+
+        Counting two misses let a 30-second lease expire behind one slow failure.
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self.interval,
+            lease_seconds=_lease_seconds(self.lease),
+            stop=self._stop,
+            transient=_transient_beat_failure,
+        )
+        if ended is not None:
+            self._lost.set()
+
+    def _renew(self) -> None:
+        _heartbeat_maintenance_owner(self.coordinator, self.lease)
 
     def _beat_once(self) -> bool:
         """True when the lease was renewed; False on a transient failure.
 
         A fence genuinely taken by someone else ends the pass at once. Anything
-        else — a busy database, a lock held by a writer — is retried: the lease
-        outlives two missed beats, and treating a locked database as a lost fence
-        threw away whole seven-minute generation builds on this vault while its
-        own capture workers were writing.
+        else — a busy database, a lock held by a writer — is retried: treating a
+        locked database as a lost fence threw away whole seven-minute generation
+        builds on this vault while its own capture workers were writing.
         """
         try:
             _heartbeat_maintenance_owner(self.coordinator, self.lease)
