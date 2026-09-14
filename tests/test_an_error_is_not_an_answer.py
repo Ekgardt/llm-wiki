@@ -21,15 +21,21 @@ def test_a_plan_after_a_sentence_with_braces_is_the_plan():
 
     reply = "I checked the {slug} rules.\n" + json.dumps(PLAN) + "\nNote: nothing to {do}."
 
-    assert _parse_json_object(reply) == PLAN
+    assert _parse_json_object(reply, "operations") == PLAN
 
 
-def test_a_corrected_plan_wins_over_the_draft_before_it():
+def test_a_draft_followed_by_a_correction_is_ambiguous_and_refused():
+    """Two plans in one reply: guessing which was meant is refused since 2026-09-14.
+
+    See `docs/research/2026-09-14-one-answer-or-none.md`.
+    """
+    import pytest
     from compile_memory import _parse_json_object
 
     draft = {**PLAN, "operations": [{"kind": "draft"}]}
 
-    assert _parse_json_object(json.dumps(draft) + "\nCorrected:\n" + json.dumps(PLAN)) == PLAN
+    with pytest.raises(ValueError):
+        _parse_json_object(json.dumps(draft) + "\nCorrected:\n" + json.dumps(PLAN), "operations")
 
 
 def test_a_fenced_verdict_is_evaluated_not_quarantined():

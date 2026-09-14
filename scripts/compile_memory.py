@@ -1325,7 +1325,7 @@ def _claim_candidate_admitted(candidate: object, slug: str) -> bool:
 
 
 def _draft_operations(draft_text: str) -> list[object]:
-    raw_plan = _parse_json_object(draft_text)
+    raw_plan = _parse_json_object(draft_text, "operations")
     _prune_claim_candidates(raw_plan)
     _validate_rule(raw_plan, RAW_PLAN_SCHEMA, "$draft")
     if set(raw_plan) - {"operations", "audit"}:
@@ -1337,7 +1337,7 @@ def _draft_operations(draft_text: str) -> list[object]:
 
 
 def _dropped_slugs(critique_text: str) -> set[object]:
-    critique_plan = _parse_json_object(critique_text)
+    critique_plan = _parse_json_object(critique_text, "reviews")
     _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
     if set(critique_plan) != {"reviews"}:
         raise ValueError("critique output has unsupported fields")
@@ -1514,17 +1514,17 @@ def _require_bounded_response(text: str) -> None:
         raise ValueError("provider response exceeds byte limit")
 
 
-def _parse_json_object(text: str) -> dict[str, object]:
+def _parse_json_object(text: str, key: str) -> dict[str, object]:
     """The plan a provider replied with, read by the one JSON reply reader.
 
     First `{` to last `}` refused a plan with braces in a sentence around it, or
     a draft followed by its correction. See
     `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
     """
-    from reply_json import reply_document
+    from reply_json import object_with, reply_document
 
     _require_bounded_response(text)
-    value = reply_document(text)
+    value = reply_document(text, object_with(key))
     if not isinstance(value, dict):
         raise ValueError("provider output must be a JSON object")
     return value

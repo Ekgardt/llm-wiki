@@ -24,19 +24,19 @@ NOTES = 'Working: - E1 (2023-05-23): user says "a 10% discount {first purchase}"
 
 
 def test_a_document_after_notes_is_the_reply():
-    assert query_memory.reply_document(NOTES + json.dumps(DOCUMENT)) == DOCUMENT
+    assert query_memory._parsed_answer(NOTES + json.dumps(DOCUMENT)) == DOCUMENT
 
 
-def test_the_last_object_is_the_document_when_notes_quote_one():
+def test_an_object_quoted_in_the_notes_is_not_mistaken_for_the_answer():
     reply = 'E2 shows {"size": 3} in a config.\n' + json.dumps(DOCUMENT)
 
-    assert query_memory.reply_document(reply) == DOCUMENT
+    assert query_memory._parsed_answer(reply) == DOCUMENT
 
 
 def test_a_fenced_document_still_wins():
     fenced = "Here it is:\n```json\n" + json.dumps(DOCUMENT) + "\n```\nDone."
 
-    assert query_memory.reply_document(fenced) == DOCUMENT
+    assert query_memory._parsed_answer(fenced) == DOCUMENT
 
 
 def test_prose_without_a_document_is_still_refused_with_its_excerpt():

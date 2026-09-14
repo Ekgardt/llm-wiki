@@ -561,12 +561,12 @@ def _validated_evaluation_output(text: str) -> Mapping[str, object]:
     A bare `json.loads` sent a fenced verdict to quarantine as malformed. See
     `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
     """
-    from reply_json import reply_document
+    from reply_json import object_with, reply_document
 
     encoded = text.encode("utf-8", errors="strict")
     if len(encoded) > MAX_SEMANTIC_OUTPUT_BYTES:
         raise ValueError("output_too_large")
-    value = reply_document(text)
+    value = reply_document(text, object_with("label"))
     if not _well_formed_evaluation(value):
         raise ValueError("malformed_output")
     return value

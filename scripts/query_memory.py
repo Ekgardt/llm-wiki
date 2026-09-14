@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reply_json import reply_document  # noqa: E402
+from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -2337,7 +2337,7 @@ def _parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
-        return reply_document(raw)
+        return reply_document(raw, object_with("status"))
     except (TypeError, json.JSONDecodeError) as exc:
         raise GroundedQAError(
             "grounded QA provider returned invalid JSON "
