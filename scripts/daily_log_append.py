@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -106,9 +106,25 @@ def _unappended_marker(daily_path: Path, operation_id: str) -> str | None:
         raise ValueError("operation_id must be non-empty")
     marker_id = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
     marker = f"<!-- llm-wiki-operation:{marker_id} -->"
-    if daily_path.exists() and marker in daily_path.read_text(encoding="utf-8"):
+    if any(_carries(path, marker) for path in _logs_that_may_hold(daily_path)):
         return None
     return marker
+
+
+def _logs_that_may_hold(daily_path: Path) -> list[Path]:
+    """Today's log and the day before: a redelivery lands within one midnight of the first write.
+
+    See `docs/research/2026-09-14-a-redelivery-after-midnight-is-recognised.md`.
+    """
+    try:
+        day = date.fromisoformat(daily_path.stem)
+    except ValueError:
+        return [daily_path]
+    return [daily_path, daily_path.with_name(f"{day - timedelta(days=1)}.md")]
+
+
+def _carries(path: Path, marker: str) -> bool:
+    return path.exists() and marker in path.read_text(encoding="utf-8")
 
 
 def append_daily(
