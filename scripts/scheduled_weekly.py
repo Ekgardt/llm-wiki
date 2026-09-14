@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,11 @@ from operational_ownership import (  # noqa: E402
     OwnerLease,
     heartbeat_owner,
 )
+
+# Reflection calls the model once per page; the pass stops starting pages after this.
+# See `docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md`.
+REFLECTION_BUDGET_SECONDS = 1800
+CONTRADICTIONS_STEP_SECONDS = 1800
 
 
 def _script_steps() -> list[tuple[str, str, list[str], int]]:
@@ -111,7 +117,7 @@ def _run_contradictions(run_step, log) -> int:
         return 0
     log("Step 4: LLM contradiction check (opt-in)...")
     command = [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"]
-    return int(bool(run_step(command, log, "contradictions", timeout=1800)))
+    return int(bool(run_step(command, log, "contradictions", timeout=CONTRADICTIONS_STEP_SECONDS)))
 
 
 def _reflect(log) -> None:
@@ -131,8 +137,22 @@ def _reflect_candidates(log) -> None:
         log("  No reflection candidates found")
         return
     log(f"  Found {len(candidates)} reflection candidate(s)")
-    for candidate in candidates:
+    deadline = time.monotonic() + REFLECTION_BUDGET_SECONDS
+    for done, candidate in enumerate(candidates):
+        if time.monotonic() >= deadline:
+            log(f"  reflection budget spent: {len(candidates) - done} page(s) wait for next week")
+            return
         log(f"  {reflect_page(candidate['path'], apply=True)}")
+
+
+def worst_case_seconds() -> float:
+    """The longest the weekly pass can run by its own bounds; the scheduler's limit sits above it."""
+    from llm_client import DEFAULT_TIMEOUT_S
+
+    steps = sum(timeout for _message, _label, _command, timeout in _script_steps())
+    reflection = REFLECTION_BUDGET_SECONDS + DEFAULT_TIMEOUT_S
+    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS + scheduled_nightly.worst_case_seconds()
+    return float(waits + steps + CONTRADICTIONS_STEP_SECONDS + reflection)
 
 
 def _build_tiers(log) -> None:

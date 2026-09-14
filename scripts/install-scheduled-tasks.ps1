@@ -267,11 +267,14 @@ $weeklyAction = New-LLMWikiScheduledAction `
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am
 
+# The weekly pass runs the whole nightly one and more: about 3.9 hours by its own
+# bounds (scheduled_weekly.worst_case_seconds). See
+# docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md.
 $weeklySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 5) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 30)
 
