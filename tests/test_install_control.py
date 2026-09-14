@@ -755,6 +755,7 @@ def test_launchd_definitions_use_exact_arguments_and_login_scoped_calendars(
     assert nightly["EnvironmentVariables"] == {
         "LLM_WIKI_ROOT": str(root.resolve()),
         "LLM_WIKI_STATE_ROOT": str(state.resolve()),
+        "PATH": f"{uv_path.resolve().parent}:/usr/bin:/bin:/usr/sbin:/sbin",
     }
     assert nightly["StartCalendarInterval"] == {"Hour": 3, "Minute": 0}
     weekly = plistlib.loads(definitions["io.github.ekgardt.llm-wiki.weekly.plist"])

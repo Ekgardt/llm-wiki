@@ -179,6 +179,31 @@ def expected_opencode_entry(vault_root: Path) -> dict[str, Any]:
     }
 
 
+# The PATH cron gives a command when the crontab sets none (crontab(5)).
+CRON_DEFAULT_PATH = "/usr/bin:/bin"
+
+
+def scheduled_path(uv_path: Path, default_path: str) -> str:
+    """A scheduled run's PATH: the directory of the uv it calls, then the scheduler's default.
+
+    Provider CLIs live beside uv in a per-user directory no scheduler puts on PATH. See
+    `docs/research/2026-09-14-every-scheduler-gets-the-providers-path.md`.
+    """
+    return f"{Path(uv_path).resolve().parent}:{default_path}"
+
+
+def _cron_environment(root: Path, state_root: Path, uv_path: Path) -> list[str]:
+    from integration_hook_config import provider_environment
+
+    values = {
+        "LLM_WIKI_ROOT": str(root),
+        "LLM_WIKI_STATE_ROOT": str(state_root),
+        **dict(sorted(provider_environment().items())),
+        "PATH": scheduled_path(uv_path, CRON_DEFAULT_PATH),
+    }
+    return [f"{key}={shlex.quote(value)}" for key, value in values.items()]
+
+
 def build_cron_command(
     *,
     root: Path,
@@ -193,8 +218,7 @@ def build_cron_command(
     return " ".join(
         (
             "env",
-            f"LLM_WIKI_ROOT={shlex.quote(str(root))}",
-            f"LLM_WIKI_STATE_ROOT={shlex.quote(str(state_root))}",
+            *_cron_environment(root, state_root, uv_path),
             shlex.quote(str(uv_path)),
             "run",
             "--locked",
