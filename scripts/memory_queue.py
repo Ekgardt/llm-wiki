@@ -14676,9 +14676,13 @@ class _ChildRun:
     receiver: object
     deadline: float
     tracked_descendants: set[int] | None = None
+    lease_lost: Callable[[], bool] | None = None
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
+
+    def lost(self) -> bool:
+        return self.lease_lost is not None and self.lease_lost()
 
     def stop(self) -> None:
         """Terminate the child, discovering its tree when we never tracked it.
@@ -14696,10 +14700,22 @@ class _ChildRun:
         )
 
 
+# How often a waiting parent looks at its lease. See
+# `docs/research/2026-09-14-a-lost-lease-stops-its-child.md`.
+CHILD_LEASE_CHECK_SECONDS = 1.0
+
+
 def _await_child_message(run: _ChildRun) -> None:
-    """Wait for the child to say something before its deadline runs out."""
-    remaining = run.remaining()
-    if remaining <= 0 or not run.receiver.poll(remaining):
+    """Wait for the child to say something before its deadline runs out or its lease is lost."""
+    while not run.receiver.poll(max(0.0, min(run.remaining(), CHILD_LEASE_CHECK_SECONDS))):
+        _stop_child_if_done_waiting(run)
+
+
+def _stop_child_if_done_waiting(run: _ChildRun) -> None:
+    if run.lost():
+        run.stop()
+        raise QueueOperationError("lease_lost")
+    if run.remaining() <= 0:
         run.stop()
         raise TimeoutError
 
@@ -14760,6 +14776,7 @@ def _run_processor_child(
     processor: Callable[[dict], bool | DeferredResult],
     task: dict[str, Any],
     timeout: float,
+    lease_lost: Callable[[], bool] | None = None,
 ) -> bool | DeferredResult:
     if timeout <= 0:
         raise TimeoutError
@@ -14770,7 +14787,7 @@ def _run_processor_child(
         args=(sender, processor, task),
         daemon=False,
     )
-    run = _ChildRun(process, receiver, time.monotonic() + timeout)
+    run = _ChildRun(process, receiver, time.monotonic() + timeout, lease_lost=lease_lost)
     started = False
     try:
         process.start()
@@ -14862,6 +14879,13 @@ def _run_processor(
     return _ProcessorOutcome(outcome, False, False)
 
 
+def _interruptible(processor_runner, heartbeat: _LeaseHeartbeat):
+    """The child runner stops its child when the lease is lost; injected runners stay as they are."""
+    if processor_runner is not _run_processor_child:
+        return processor_runner
+    return partial(_run_processor_child, lease_lost=lambda: heartbeat.error is not None)
+
+
 def _processor_result(
     processor: Callable[[dict], bool | DeferredResult],
     processor_runner: Callable[
@@ -14878,7 +14902,7 @@ def _processor_result(
         remaining = deadline - monotonic()
         if remaining <= 0:
             return _ProcessorOutcome(False, True, False)
-        result = _run_processor(processor, processor_runner, lease, remaining)
+        result = _run_processor(processor, _interruptible(processor_runner, heartbeat), lease, remaining)
         if monotonic() >= deadline:
             return _ProcessorOutcome(result.outcome, True, result.cleanup_failed)
         return result
