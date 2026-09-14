@@ -134,15 +134,17 @@ def test_a_failed_tree_removal_rolls_the_registration_back(tmp_path, monkeypatch
     assert _footprint(catalog, "gen-1") == (True, 1, 1)
 
 
-def test_a_registration_without_a_tree_is_refused_not_deleted(tmp_path):
+def test_a_retained_registration_without_a_tree_is_refused_not_deleted(tmp_path):
+    """A superseded one is a discard whose commit was lost and is completed
+    (2026-09-14); a retained one proves nothing and stays."""
     catalog = _catalog(tmp_path)
     _chain(catalog, ["gen-1", "gen-2", "gen-3"])
-    shutil.rmtree(catalog.generations_path / "gen-1")
+    shutil.rmtree(catalog.generations_path / "gen-2")
 
-    with pytest.raises(ValueError, match="tree is missing"):
-        catalog.discard_superseded("gen-1")
+    with pytest.raises(ValueError, match="retained generation"):
+        catalog.discard_superseded("gen-2")
 
-    assert _rows(catalog, "generations", "gen-1") == 1
+    assert _rows(catalog, "generations", "gen-2") == 1
 
 
 def test_an_unregistered_tree_is_refused_not_deleted(tmp_path):

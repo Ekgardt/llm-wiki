@@ -111,6 +111,18 @@ def _prune_candidates(
     return (registered & on_disk) - set(retained)
 
 
+def _interrupted_discards(
+    retained: tuple[str, ...], registered: set[str], on_disk: set[str], activated: frozenset[str]
+) -> set[str]:
+    """Superseded registrations whose tree is gone: discards whose commit was lost.
+
+    See `docs/research/2026-09-14-a-removal-past-its-point-of-no-return-finishes.md`.
+    """
+    if not retained:
+        return set()
+    return ((registered - on_disk) & activated) - set(retained)
+
+
 def plan_prune(
     catalog: GenerationCatalog, *, retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS
 ) -> PrunePlan:
@@ -119,11 +131,12 @@ def plan_prune(
     registered = set(catalog.registered_generation_ids())
     activated = catalog.activated_generation_ids()
     on_disk = _generation_directories(catalog.generations_path)
-    unpaired = registered.symmetric_difference(on_disk)
+    interrupted = _interrupted_discards(retained, registered, on_disk, activated)
+    unpaired = registered.symmetric_difference(on_disk) - interrupted
     candidates = _prune_candidates(retained, registered, on_disk)
     return PrunePlan(
         retained,
-        tuple(sorted(candidates & activated)),
+        tuple(sorted((candidates & activated) | interrupted)),
         tuple(sorted(unpaired)),
         tuple(sorted(candidates - activated)),
     )
