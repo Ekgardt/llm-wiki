@@ -78,6 +78,11 @@ READ_BUSY_MS = 250
 DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
 DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
+# An unregistered, invalid generation directory touched this recently may be a build
+# in flight under another fence; the longest builder bound is 15 minutes. See
+# `docs/research/2026-09-14-a-build-in-flight-is-not-an-orphan.md`.
+GENERATION_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
+MAX_ORPHAN_ENTRIES_DATED = 256
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 # How long a probe that gave up waits for the peer it killed to be reaped.
@@ -7219,7 +7224,25 @@ def _cleanup_stop_reached(deadline: float, cancelled) -> bool:
 
 
 def _skip_generation_child(entry: os.DirEntry, registered: set[str]) -> bool:
-    return entry.name in registered or not entry.is_dir(follow_symlinks=False)
+    if entry.name in registered or not entry.is_dir(follow_symlinks=False):
+        return True
+    return _written_within_grace(Path(entry.path))
+
+
+def _written_within_grace(path: Path) -> bool:
+    """Whether a build could still be writing here; an unreadable directory is kept."""
+    return time.time() - _newest_write(path) < GENERATION_ORPHAN_GRACE_SECONDS
+
+
+def _newest_write(path: Path) -> float:
+    try:
+        stamps = [path.lstat().st_mtime]
+        with os.scandir(path) as entries:
+            for _index, entry in zip(range(MAX_ORPHAN_ENTRIES_DATED), entries):
+                stamps.append(entry.stat(follow_symlinks=False).st_mtime)
+    except OSError:
+        return time.time()
+    return max(stamps)
 
 
 def _removable_generation_orphan(

@@ -360,6 +360,10 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
     partial = catalog.generations_path / "partial-orphan"
     partial.mkdir()
     (partial / "partial.tmp").write_text("incomplete", encoding="utf-8")
+    # Older than the grace a build in flight is given (2026-09-14).
+    aged = time.time() - doctor.GENERATION_ORPHAN_GRACE_SECONDS - 60
+    for path in (partial / "partial.tmp", partial):
+        os.utime(path, (aged, aged))
 
     second = _empty_generation(state, "gen-2", parent="gen-1")
     (second.generation_path / "evidence.sqlite3").write_bytes(b"corrupt")
