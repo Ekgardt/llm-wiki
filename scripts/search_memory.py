@@ -936,6 +936,26 @@ def _lazy_generation_query_encoder():
     return encode
 
 
+class _EmbedderUnavailable(RuntimeError):
+    """The model could not be loaded when a chunk first needed a vector."""
+
+
+def _lazy_passage_encoder():
+    """Encode passages, loading the model only when a chunk is not reused.
+
+    A night with no changed page reuses every row and never loads it. See
+    `docs/research/2026-09-14-the-model-loads-only-for-new-chunks.md`.
+    """
+
+    def encode(texts) -> list[list[float]]:
+        loaded = _get_embedder()
+        if loaded is None:
+            raise _EmbedderUnavailable(str(_embedder_unavailable_reason))
+        return _generation_embedder(loaded, is_query=False)(texts)
+
+    return encode
+
+
 def _resolved_generation_embedder(
     semantic: bool,
     embedder: object | None,
@@ -980,16 +1000,13 @@ def build_generation_vectors_if_available(
     lexical search alone.
     """
     _check_generation_stop(deadline, cancelled)
-    if not snapshot.chunks:
-        return None
-    embedder = _get_embedder()
-    if embedder is None:
+    if not snapshot.chunks or not _have_sentence_transformers():
         return None
     try:
         artifacts, reused = _built_generation_vectors(
             snapshot,
             generation_directory,
-            embedder=_generation_embedder(embedder, is_query=False),
+            embedder=_lazy_passage_encoder(),
             model_id=EMBEDDING_MODEL,
             model_revision=EMBEDDING_MODEL_REVISION,
             dimensions=EMBEDDING_DIM,
