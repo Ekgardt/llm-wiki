@@ -2224,8 +2224,9 @@ def _qa_system_prompt() -> str:
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "
         "never authoritative. You have no shell, network, mutation, or arbitrary-file tools. "
-        "Write working first: one line per evidence span you will use, what it states that "
-        "bears on the question and its date; then the claims. "
+        "Write the working field first, inside the JSON document: one line per evidence span "
+        "you will use, what it states that bears on the question and its date; then the "
+        "claims. Write nothing outside the JSON document. "
         "Output only JSON matching this closed schema: " + schema_json
     )
 
@@ -2303,6 +2304,49 @@ def _unfenced(raw: str) -> str:
     return match.group("body")
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _object_at(text: str, start: int) -> tuple[object, int] | None:
+    try:
+        return _JSON_DECODER.raw_decode(text, start)
+    except json.JSONDecodeError:
+        return None
+
+
+def _last_object_in(text: str) -> dict | None:
+    """The last JSON object written into prose, or None when there is none."""
+    found = None
+    start = text.find("{")
+    while start != -1:
+        decoded = _object_at(text, start)
+        if decoded is None:
+            start = text.find("{", start + 1)
+            continue
+        found = decoded[0] if isinstance(decoded[0], dict) else found
+        start = text.find("{", decoded[1])
+    return found
+
+
+def reply_document(raw: str) -> object:
+    """The JSON document a provider replied with, wherever in the reply it sits.
+
+    A fence, or the whole reply, as before. Otherwise the last object written
+    after notes: of 34 LongMemEval replies refused as invalid JSON, 29 were the
+    model's reading as prose followed by one complete, schema-valid answer
+    document, bare. Taking it is not taking the provider's word: the document is
+    still validated and every claim still gated. Research:
+    `docs/research/2026-09-14-the-document-after-the-notes.md`.
+    """
+    try:
+        return json.loads(_unfenced(raw))
+    except json.JSONDecodeError as refused:
+        found = _last_object_in(raw)
+        if found is None:
+            raise refused
+        return found
+
+
 _UNPARSABLE_EXCERPT_CHARS = 200
 
 
@@ -2326,7 +2370,7 @@ def _parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
-        return json.loads(_unfenced(raw))
+        return reply_document(raw)
     except (TypeError, json.JSONDecodeError) as exc:
         raise GroundedQAError(
             "grounded QA provider returned invalid JSON "

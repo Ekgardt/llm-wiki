@@ -44,8 +44,9 @@ def test_the_schema_takes_a_working_note_or_none() -> None:
 def test_the_prompt_asks_for_the_working_first() -> None:
     prompt = _qa_system_prompt()
 
-    assert "Write working first" in prompt
-    assert prompt.index("Write working first") < prompt.index("Output only JSON")
+    asked = "Write the working field first, inside the JSON document"
+
+    assert prompt.index(asked) < prompt.index("Output only JSON")
 
 
 def _answer_with_working(prompt: str) -> str:

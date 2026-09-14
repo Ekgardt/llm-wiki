@@ -35,7 +35,6 @@ See `docs/research/2026-09-07-is-each-plan-item-the-best-known.md`.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 
 AGGREGATIONS = frozenset({"count", "sum"})
@@ -147,13 +146,7 @@ def _named(mentions: Sequence[str], group: Sequence[int]) -> list[str]:
 
 def _parsed_groups(raw: str | None, size: int) -> list[list[int]]:
     """The index groups in the reply, or none when the reply is not what was asked."""
-    from query_memory import _unfenced
-
-    try:
-        document = json.loads(_unfenced(raw or ""))
-    except ValueError:
-        return []
-    groups = _groups_field(document)
+    groups = _groups_field(_loaded(raw))
     return [group for group in groups if _is_index_group(group, size)]
 
 
@@ -208,10 +201,10 @@ def _is_new_query(item: str, asked: str) -> bool:
 
 
 def _loaded(raw: str | None) -> object:
-    from query_memory import _unfenced
+    from query_memory import reply_document
 
     try:
-        return json.loads(_unfenced(raw or ""))
+        return reply_document(raw or "")
     except ValueError:
         return None
 

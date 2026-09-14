@@ -19,7 +19,6 @@ See `docs/research/2026-09-09-fact-keys-beside-the-turn.md`.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sqlite3
 import sys
@@ -207,10 +206,10 @@ def _clean_keys(value: object) -> list[str]:
 
 
 def _loaded(raw: str | None) -> dict:
-    from query_memory import _unfenced
+    from query_memory import reply_document
 
     try:
-        document = json.loads(_unfenced(raw or ""))
+        document = reply_document(raw or "")
     except ValueError:
         return {}
     if not isinstance(document, dict):
