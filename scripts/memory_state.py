@@ -378,11 +378,16 @@ def _state_for_update() -> tuple[dict[str, Any], bool]:
     current = _parsed_state(STATE_FILE)
     if current is not None:
         return current, True
+    return _recovered_previous(), False
+
+
+def _recovered_previous() -> dict[str, Any]:
+    """The previous version of an unreadable state file, or `StateCorrupt`."""
     load_state()  # keeps the forensic copy and logs the corruption
     previous = _parsed_state(_previous_state_file())
     if previous is None:
         raise StateCorrupt(f"state file unreadable and no readable previous version: {STATE_FILE}")
-    return previous, False
+    return previous
 
 
 def _keep_previous(readable: bool) -> None:
