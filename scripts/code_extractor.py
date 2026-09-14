@@ -9,8 +9,10 @@ import json
 import math
 import re
 import time
+from bisect import bisect_left
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Protocol
 
@@ -303,9 +305,19 @@ def _line_offsets(content: bytes) -> tuple[int, ...]:
     return (0, *(match.end() for match in _PYTHON_LINE_BREAK.finditer(content)))
 
 
+@lru_cache(maxsize=16)
+def _newline_positions(content: bytes) -> tuple[int, ...]:
+    """Every `\n` of one source, found once; each span is then a binary search.
+
+    A count from byte zero per span made a 314 KB file 100 times slower. See
+    `docs/research/2026-09-14-line-numbers-at-the-old-speed.md`.
+    """
+    return tuple(match.start() for match in re.finditer(rb"\n", content))
+
+
 def _written_line(content: bytes, index: int) -> int:
     """The line the writer records for a byte: one plus the `\n` before it."""
-    return content.count(b"\n", 0, index) + 1
+    return bisect_left(_newline_positions(content), index) + 1
 
 
 def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int, int, int, int]:
