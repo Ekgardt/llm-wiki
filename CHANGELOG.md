@@ -27,12 +27,54 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
   at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
   last one is open and unexplained.
-- **A killed test names itself on Windows.** `PYTHONFAULTHANDLER=1` on every
-  shard and `-v` on the Windows shards, after a job died with no summary, no
-  junit and no traceback (run 34727708815, after 2 058 of the shard's 2 080
-  collected items).
+- **A killed test names itself, without paying for it.** `PYTHONFAULTHANDLER=1`
+  on every shard, and the name of the running test appended to
+  `LLM_WIKI_TEST_PROGRESS_FILE` — one line per test, uploaded with the timings.
+  `-v` was tried first and cost two runs: a 40-minute and then a 65-minute cap on
+  Windows shards that normally take 22-26 minutes.
+
+### Changed
+
+- **The reader is named by configuration, and this machine names Sonnet.** With
+  `MEMORY_CLAUDE_MODEL` unset the claude CLI call carries no `--model` flag, so the
+  pipeline read with whatever the operator's own session was set to — on this
+  machine Opus, which refused the grounded-QA prompt and failed 18 of 19
+  LongMemEval questions. The code still invents no model; the docstring says why,
+  and the machine is configured instead (agent sessions and both maintenance
+  units). Verified on the installed vault: answered in 59.1 s where it refused
+  before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
 ### Fixed
+
+- **A timing ratio under a tenth of a second measured the machine.** Five ratio
+  gates used a 0.05 s floor and a sixth derived one from the process clock tick;
+  a macOS shard failed `0.0946 <= 0.0714` on a step whose quiet time is 22 ms,
+  after already taking the best of five attempts. They now share
+  `tests/timing_floor.noise_floor_seconds()` — `max(0.25 s, 8 clock ticks)` — and
+  the deterministic half of those tests, the counted scanner calls that double
+  exactly, is what still proves the linearity claim.
+
+- **Two seconds for a Git probe was a Linux figure.**
+  `repository_scope.GIT_TIMEOUT_SECONDS` was 2.0 while `repository_index` gives the
+  same probe 10.0, and on a hosted Windows runner `git rev-parse` crossed it: a
+  navigation test failed with "repository scope deadline reached during Git probe"
+  with nothing wrong with the repository. One operation, one bound — it is ten now,
+  and a test pins the two constants together.
+
+- **A retry of a completion must replay its own request.** `complete_task` built
+  its record with a fresh clock reading, so a completion interrupted by
+  `database is locked` could never be finished: the operation id was the claim's,
+  the payload was not, and the transaction layer adopts a bound operation only
+  when the block matches. It takes `completed_at` now, defaulting to the moment it
+  runs, and a retry-aware caller replays the value it used first. Main run
+  34760092169 failed on exactly this. See
+  `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+- **A refusal says what the provider said.** Eighteen of nineteen rows of a
+  LongMemEval run carried only "grounded QA provider returned invalid JSON" while
+  the provider had answered `API Error: ... safeguards flagged this message`,
+  which named both the cause and the fix. The refusal now carries the response
+  length and its first 200 characters, whitespace collapsed and redacted. See
+  `docs/research/2026-09-13-an-unparsable-answer-must-say-what-it-said.md`.
 
 - **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
   minutes above the measured 22-30 minute range, and one shard that took 45 on a

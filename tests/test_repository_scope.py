@@ -702,3 +702,14 @@ def test_git_fixture_invocation_sets_hermetic_options_and_timeout(tmp_path, monk
     assert options["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
     assert options["env"]["GIT_CONFIG_SYSTEM"] == os.devnull
     assert not any(name.startswith("GIT_CONFIG_KEY_") for name in options["env"])
+
+
+def test_the_git_budget_matches_the_one_the_index_gives_the_same_probe():
+    """One operation, one bound. Two seconds was a Linux figure.
+
+    Research: docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
+    """
+    import repository_index
+    import repository_scope as scope_module
+
+    assert scope_module.GIT_TIMEOUT_SECONDS == repository_index.GIT_TIMEOUT_SECONDS

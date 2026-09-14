@@ -124,12 +124,48 @@ took 45 minutes on a slow runner and was cancelled at the cap; GitHub reports
 that as `cancelled`, not `failure`, and refuses to re-run it, so the branch could
 not go green without a new commit.
 
-The cap is now **60 minutes** for the Windows class only. That is the same defect
+**And `-v` turned out to cost the runs it was meant to explain.** On PR 34 the
+same class of shard ran 65 minutes and was cancelled at the new cap:
+`windows_full py3.14-s2`, 15:11:16 to 16:16:16, against the 22-26 minutes these
+shards take. Two caps in two runs, both on the biggest shards, both while the job
+was printing ~2 000 lines it never printed before — that is enough to stop paying
+for it. The name of a test a killed process was running now comes from
+`LLM_WIKI_TEST_PROGRESS_FILE`: `tests/conftest.py` appends one line per test when
+the variable is set, the workflow sets it beside the junit file and uploads the
+whole directory. One short append per test costs nothing, survives a kill, and is
+read only when something died.
+
+The cap stays **60 minutes** for the Windows class only.
+
+**And the same class of bound, one level down.** The next run failed
+`tests/test_code_navigation.py::test_public_navigation_paths_require_canonical_nfc_posix_relative_text`
+on `windows_full py3.10-s1` with `TimeoutError: repository scope deadline reached
+during Git probe` — nothing wrong with the repository, just `git rev-parse` taking
+longer than `repository_scope.GIT_TIMEOUT_SECONDS = 2.0` on a loaded Windows
+runner, where process creation alone is slow. `repository_index` gives the same
+probe **ten** seconds. Two budgets for one operation, and the smaller one was a
+Linux figure. It is ten now, and a test pins the two together so they cannot drift
+apart again.
+
+**And the same shape a third time: a noise floor of 0.05 s.** PR 34 then failed
+`tests/test_lsp_security.py::test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens`
+on a macOS shard: `0.0946 <= 0.0714`. The step's quiet time is about 22 ms and the
+scheduler added 70 ms — to the *best of five* attempts, which that test already
+takes. Five places carried `max(0.05, ratio)` and a sixth derived a floor from the
+process clock tick, which covers granularity but not a loaded runner. They now
+share `tests/timing_floor.noise_floor_seconds()`: `max(0.25, 8 ticks)`, with the
+measurement in the module. What proves linearity in those tests is deterministic
+and untouched — the counted scanner calls, which double exactly; below the floor a
+timing ratio was only ever measuring the machine. That is the same defect
 class as commit `9c88bbf`: a bound has to measure the hang it was written for, not
 the runner's speed. Linux and macOS keep 20 minutes, where the measured range is
 6-12.
 
-Files: `.github/workflows/tests.yml`, `scripts/mcp_server.py`, `scripts/answer_budget.py`,
+Files: `.github/workflows/tests.yml`, `tests/conftest.py`,
+`scripts/repository_scope.py`, `tests/test_repository_scope.py`,
+`tests/timing_floor.py`, `tests/test_lsp_security.py`,
+`tests/test_the_scanner_scales_on_a_coarse_clock.py`,
+`scripts/mcp_server.py`, `scripts/answer_budget.py`,
 `scripts/fresh_positions.py` (new), `scripts/code_graph.py`,
 `tests/test_answer_budget.py`, `tests/test_fresh_positions.py` (new),
 `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.

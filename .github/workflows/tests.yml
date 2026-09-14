@@ -156,19 +156,21 @@ jobs:
           "import os, pathlib;
           print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
           >> "$GITHUB_ENV"
-      # `-v` on Windows only: a test whose process is killed prints its name
-      # before it runs, so the log's last line names it. `-q` prints one dot
-      # after the fact, which is why the 2026-09-13 death named nothing.
+      # The name of the test a killed process was running comes from
+      # LLM_WIKI_TEST_PROGRESS_FILE, one line per test, uploaded below. `-v` was
+      # tried first and cost two runs: a 40-minute and then a 60-minute cap on
+      # Windows shards that normally take 22-26 minutes.
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
           --shard ${{ matrix.shard }} --of 4 --
-          ${{ matrix.class == 'windows_full' && '-v' || '-q' }}
-          --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
+          -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
+        env:
+          LLM_WIKI_TEST_PROGRESS_FILE: ${{ runner.temp }}/pytest-timings/progress.txt
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pytest-timings-${{ matrix.class }}-py${{ matrix.python }}-s${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pytest-timings/junit.xml
+          path: ${{ runner.temp }}/pytest-timings/
           if-no-files-found: error
 
   clean-production:

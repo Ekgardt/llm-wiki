@@ -667,7 +667,15 @@ def _base_capabilities(provider: str) -> dict[str, object]:
 def _cli_configuration(
     provider: str, model_variable: str, extra: Mapping[str, object] | None = None
 ) -> ProviderConfiguration:
-    """A subscription CLI: the backend decides the token ceiling, not us."""
+    """A subscription CLI: the backend decides the token ceiling, not us.
+
+    The model is the operator's choice and nothing here supplies one. With
+    `MEMORY_CLAUDE_MODEL` unset the call carries no `--model` flag and the CLI
+    answers with the session's own model — which on 2026-09-13 was Opus, and Opus
+    refused the grounded-QA prompt for 18 of 19 LongMemEval questions. The fix for
+    that is a configured model on the machine, not a default hidden in this file.
+    Research: `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
+    """
     capabilities = _base_capabilities(provider)
     capabilities["max_tokens_enforced"] = False
     settings: dict[str, object] = {"max_tokens": "backend_default"}
