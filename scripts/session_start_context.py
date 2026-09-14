@@ -600,6 +600,51 @@ def _audit_line(last_audit: dict) -> str:
     )
 
 
+# The most recent capture decisions the advisory reads, and each one's bound.
+MAX_DECISIONS_READ = 200
+MAX_DECISION_BYTES = 64 * 1024
+
+
+def _decision_tier(path: Path) -> str | None:
+    try:
+        if path.stat().st_size > MAX_DECISION_BYTES:
+            return None
+        return str(json.loads(path.read_text(encoding="utf-8")).get("tier"))
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _modified_or_zero(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _recent_decision_paths(results: Path) -> list[Path]:
+    try:
+        found = list(results.glob("capture-decision-*.json"))
+    except OSError:
+        return []
+    found.sort(key=_modified_or_zero, reverse=True)
+    return found[:MAX_DECISIONS_READ]
+
+
+def capture_tier_counts(state_root: Path) -> dict[str, int]:
+    """Tiers of the most recent capture decisions, read from the decisions themselves.
+
+    The line used to read `flush_tier_counts`, which only the retired hook path
+    wrote: it said 74/74 FLUSH_OK while the live decisions were 23 ok, 22 major,
+    11 minor. See `docs/research/2026-09-14-the-advice-reads-the-decisions.md`.
+    """
+    counts: dict[str, int] = {}
+    for path in _recent_decision_paths(Path(state_root) / "run" / "queue-results"):
+        tier = _decision_tier(path)
+        if tier is not None:
+            counts[tier] = counts.get(tier, 0) + 1
+    return counts
+
+
 def _flush_line(flush_counts: dict) -> str:
     """Flush-tier distribution — surfaces when the classifier is too strict."""
     ok = flush_counts.get("ok", 0)
@@ -639,7 +684,7 @@ def metacognitive_block() -> str:
             str(state.get("last_compile_status") or ""),
         ),
         _audit_line(_state_map(state, "last_compile_audit")),
-        _flush_line(_state_map(state, "flush_tier_counts")),
+        _flush_line(capture_tier_counts(STATE_ROOT)),
         _capture_line(state),
     )
     lines = ["## Your knowledge state (self-awareness)", ""]
