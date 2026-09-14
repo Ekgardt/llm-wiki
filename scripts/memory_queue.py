@@ -53,6 +53,9 @@ from reliable_memory import (
 )
 from secret_redact import redact_secrets
 
+# A task fence's own length; a holder doing slow work renews it
+# (`heartbeat_task_fence`).
+TASK_FENCE_SECONDS = 120
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
@@ -7900,7 +7903,7 @@ class _QueueV3CandidateReader:
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         now = _utc_now()
-        expires_at = min(owner.expires_at, now + timedelta(seconds=120))
+        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
         token = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
             self._require_owner_projection(database, owner, now)
@@ -7952,6 +7955,40 @@ class _QueueV3CandidateReader:
                 ),
             ).rowcount
             if deleted != 1:
+                raise QueueOperationError("task_fence_lost")
+
+    def heartbeat_task_fence(self, fence: TaskFence, owner: OwnerLease) -> None:
+        """Push a live task fence out by its own length, capped by its owner's lease.
+
+        `owner` is the fence's owner as last renewed. See
+        `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+        """
+        if not isinstance(fence, TaskFence):
+            raise TypeError("fence must be a TaskFence")
+        now = _utc_now()
+        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._require_owner_projection(database, owner, now)
+            renewed = database.execute(
+                """UPDATE task_fences SET heartbeat_at=?, expires_at=?
+                   WHERE task_id=? AND mode=? AND token=? AND fencing_epoch=?
+                     AND canonical_owner_token=? AND canonical_fencing_epoch=?
+                     AND process_id=? AND process_start_identity=? AND expires_at>?""",
+                (
+                    _timestamp(now),
+                    _timestamp(expires_at),
+                    fence.task_id,
+                    fence.mode,
+                    fence.token,
+                    fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    _timestamp(now),
+                ),
+            ).rowcount
+            if renewed != 1:
                 raise QueueOperationError("task_fence_lost")
 
     @contextmanager

@@ -37,6 +37,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -693,17 +694,34 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
 _TIER_EMPHASIS = "*_`# "
 
 
-def _declared_tier_line(raw: str) -> tuple[str, str]:
-    """The tier the first line declares, and everything after that line."""
-    head, _, rest = raw.partition("\n")
-    return head.strip().strip(_TIER_EMPHASIS).strip(), rest
+# What may follow a tier on its own line: the full stop, colon or exclamation a
+# model ends a declaration with. See
+# `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+_TIER_TRAILING = ".:!"
+_TIERS_BY_TOKEN = {"FLUSH_OK": "ok", "FLUSH_MAJOR": "major", "FLUSH_MINOR": "minor"}
 
 
-def _capture_wire_body(raw: str, token: str) -> str | None:
-    head, rest = _declared_tier_line(raw)
-    if head != token:
+def _line_tier(line: str) -> tuple[str, str] | None:
+    """(tier, text after the token on this line), or None when the line declares none."""
+    token, _, inline = line.strip().strip(_TIER_EMPHASIS).partition(":")
+    tier = _TIERS_BY_TOKEN.get(token.strip().strip(_TIER_EMPHASIS).rstrip(_TIER_TRAILING))
+    if tier is None:
         return None
-    return _require_canonical_body(rest)
+    return tier, inline.strip().strip(_TIER_EMPHASIS)
+
+
+def _declared_tier(raw: str) -> tuple[str, str] | None:
+    """The tier the first non-blank line declares, and the body it carries.
+
+    Only the first line may declare: the classifier reads untrusted transcripts,
+    and a tier token quoted from one further down must not decide. Text after
+    `FLUSH_OK` is the model saying why nothing is kept, and is not a body.
+    """
+    head, _, rest = raw.lstrip().partition("\n")
+    declared = _line_tier(head)
+    if declared is None:
+        return None
+    return declared[0], "\n".join([declared[1], rest])
 
 
 def _require_canonical_body(body: str) -> str:
@@ -715,8 +733,8 @@ def _require_canonical_body(body: str) -> str:
     its answer with a newline. Whitespace around a Markdown body carries
     nothing a reader or a later grep can use, so refusing it protects nothing
     and costs a session. Output that is not a flush body at all is still
-    refused — a body that is only whitespace here, and anything trailing
-    `FLUSH_OK` in `_parse_capture_wire_output`.
+    refused: a body that is only whitespace here, and a reply that declares no
+    tier anywhere in `_parse_capture_wire_output`.
     """
     stripped = body.strip()
     if not stripped:
@@ -724,31 +742,73 @@ def _require_canonical_body(body: str) -> str:
     return stripped
 
 
-_CAPTURE_WIRE_TIERS = (("major", "FLUSH_MAJOR"), ("minor", "FLUSH_MINOR"))
-
-
-def _capture_wire_tier(raw: str) -> tuple[str, str] | None:
-    """The tier this output declares, or None when it declares none."""
-    for tier, token in _CAPTURE_WIRE_TIERS:
-        body = _capture_wire_body(raw, token)
-        if body is not None:
-            return tier, body
-    return None
+def _required_tier(raw: object) -> tuple[str, str]:
+    if not isinstance(raw, str):
+        raise RuntimeError("capture provider returned no flush output")
+    declared = _declared_tier(raw)
+    if declared is None:
+        raise RuntimeError("capture provider returned invalid flush output")
+    return declared
 
 
 def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
-    if not isinstance(raw, str):
-        raise RuntimeError("capture provider returned no flush output")
-    head, rest = _declared_tier_line(raw)
-    if head == "FLUSH_OK" and not rest.strip():
+    tier, body = _required_tier(raw)
+    if tier == "ok":
         return "ok", ""
-    return _require_declared_tier(_capture_wire_tier(raw))
+    return tier, _require_canonical_body(body)
 
 
-def _require_declared_tier(tier: tuple[str, str] | None) -> tuple[str, str]:
-    if tier is None:
-        raise RuntimeError("capture provider returned invalid flush output")
-    return tier
+# A third of the shortest claim a capture holds (the intent fence's 30 s), so one
+# failed round still leaves the claims live. See
+# `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+CAPTURE_KEEPALIVE_SECONDS = 10.0
+CAPTURE_KEEPALIVE_MISSES = 2
+
+
+class _CaptureKeepAlive:
+    """Renew every claim a capture holds while its classifier runs.
+
+    Owner and its queue projection, the queue lease, the task fence and the
+    intent fence: nothing renewed them, and no capture over 30 seconds ever
+    succeeded. Two failed rounds in a row stop the renewals; publication stays
+    fenced, so a claim that was lost still refuses to publish.
+    """
+
+    def __init__(self, queue, coordinator, lease, task_fence, intent_fence, owner) -> None:
+        self._queue = queue
+        self._coordinator = coordinator
+        self._lease = lease
+        self._task_fence = task_fence
+        self._intent_fence = intent_fence
+        self._owner = owner
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
+
+    def __enter__(self) -> _CaptureKeepAlive:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=CAPTURE_KEEPALIVE_SECONDS * 2)
+
+    def _run(self) -> None:
+        misses = 0
+        while misses < CAPTURE_KEEPALIVE_MISSES and not self._stop.wait(CAPTURE_KEEPALIVE_SECONDS):
+            misses = 0 if self._renewed() else misses + 1
+
+    def _renewed(self) -> bool:
+        try:
+            self._renew()
+        except Exception:  # noqa: BLE001 - publication stays fenced either way
+            return False
+        return True
+
+    def _renew(self) -> None:
+        self._owner = self._queue.heartbeat_queue_owner(self._owner)
+        self._lease = self._queue.heartbeat(self._lease)
+        self._queue.heartbeat_task_fence(self._task_fence, self._owner)
+        self._coordinator.heartbeat_intent_fence(self._intent_fence, self._owner)
 
 
 def _call_capture_classifier(
@@ -1359,7 +1419,8 @@ def process_new_capture(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
     )
     if resolved is None:
-        result, tier, body = _call_capture_classifier(record, llm_call)
+        with _CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
+            result, tier, body = _call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
             chosen_at = _require_capture_time(now())
