@@ -749,7 +749,41 @@ def _parent_vector_metadata(reuse_from: Path) -> Mapping[str, object] | None:
         return None
     if metadata_path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
         return None
-    return _loaded_json_mapping(metadata_path)
+    return _json_mapping(_sealed_parent_bytes(reuse_from, "vectors.json"))
+
+
+def _parent_artifact_digest(reuse_from: Path, name: str) -> str | None:
+    """The SHA-256 the parent's sealed manifest records for one artifact."""
+    descriptors = _artifact_descriptors(_loaded_json_mapping(reuse_from / "manifest.json") or {})
+    sealed = (descriptors or {}).get(name, {}).get("sha256")
+    return sealed if isinstance(sealed, str) else None
+
+
+def _sealed_parent_bytes(reuse_from: Path, name: str) -> bytes | None:
+    """The artifact's bytes, only when they hash to the parent manifest's seal.
+
+    The builder used to trust whatever sat in the parent directory; a damaged matrix of
+    the right shape was copied and sealed again. See
+    `docs/research/2026-09-14-reused-vectors-match-their-seal.md`.
+    """
+    expected = _parent_artifact_digest(reuse_from, name)
+    if expected is None:
+        return None
+    try:
+        data = (reuse_from / name).read_bytes()
+    except OSError:
+        return None
+    return data if hashlib.sha256(data).hexdigest() == expected else None
+
+
+def _json_mapping(data: bytes | None) -> Mapping[str, object] | None:
+    if data is None:
+        return None
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, Mapping) else None
 
 
 def _loaded_json_mapping(path: Path) -> Mapping[str, object] | None:
@@ -775,10 +809,15 @@ def _vector_identity_matches(
 
 
 def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
+    import io
+
     import numpy as np
 
+    data = _sealed_parent_bytes(reuse_from, "vectors.npy")
+    if data is None:
+        return None
     try:
-        matrix = np.load(reuse_from / "vectors.npy", allow_pickle=False)
+        matrix = np.load(io.BytesIO(data), allow_pickle=False)
     except (OSError, ValueError):
         return None
     if matrix.shape != (rows, dimensions) or matrix.dtype != np.float32:

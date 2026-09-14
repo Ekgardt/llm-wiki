@@ -336,6 +336,18 @@ One-sentence summary: {title} exists so a chunk exists.
 """
 
 
+def _seal_like_a_published_generation(directory: Path) -> None:
+    """A published generation's manifest seals its vectors; reuse checks those seals (2026-09-14)."""
+    import hashlib
+    import json
+
+    artifacts = [
+        {"path": name, "sha256": hashlib.sha256((directory / name).read_bytes()).hexdigest(), "size": (directory / name).stat().st_size}
+        for name in ("vectors.json", "vectors.npy")
+    ]
+    (directory / "manifest.json").write_text(json.dumps({"artifacts": artifacts}), encoding="utf-8")
+
+
 def test_an_unchanged_chunk_is_not_embedded_again(tmp_path):
     import search_memory
 
@@ -356,6 +368,7 @@ def test_an_unchanged_chunk_is_not_embedded_again(tmp_path):
         dimensions=4,
     )
     assert embedder.encoded
+    _seal_like_a_published_generation(first_dir)
 
     second_dir = tmp_path / "gen-2"
     second_dir.mkdir()
@@ -392,6 +405,7 @@ def test_a_reused_matrix_is_byte_identical_to_a_full_build(tmp_path):
         model_revision="rev-1",
         dimensions=4,
     )
+    _seal_like_a_published_generation(parent)
 
     changed = _snapshot_from(
         tmp_path / "vault", {**pages, "b.md": _PAGE.format(title="Beta", body="new")}

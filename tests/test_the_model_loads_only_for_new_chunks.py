@@ -16,7 +16,11 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_generation_rebuild_reuse import _PAGE, _snapshot_from  # noqa: E402
+from test_generation_rebuild_reuse import (  # noqa: E402
+    _PAGE,
+    _seal_like_a_published_generation,
+    _snapshot_from,
+)
 
 
 def _wide_embedder(texts):
@@ -40,6 +44,7 @@ def _parent_generation(tmp_path: Path):
         model_revision=search_memory.EMBEDDING_MODEL_REVISION,
         dimensions=search_memory.EMBEDDING_DIM,
     )
+    _seal_like_a_published_generation(parent)
     return snapshot, parent
 
 
