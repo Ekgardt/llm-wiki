@@ -603,6 +603,10 @@ version = "4.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pyyaml" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
@@ -708,10 +712,12 @@ requires-dist = [
     { name = "jieba", marker = "extra == 'retrieval-benchmark'", specifier = "==0.42.1" },
     { name = "llm-wiki", extras = ["semantic", "hybrid", "code-graph", "mcp-server", "reranker"], marker = "extra == 'full'" },
     { name = "mcp", specifier = ">=1.29,<2" },
+    { name = "numpy", specifier = ">=2.2.6,<3" },
     { name = "numpy", marker = "extra == 'hybrid'", specifier = ">=2.2.6,<3" },
     { name = "onnxruntime", marker = "python_full_version >= '3.11' and extra == 'reranker'", specifier = ">=1.18,<2" },
     { name = "onnxruntime", marker = "python_full_version < '3.11' and extra == 'reranker'", specifier = ">=1.18,<1.24" },
     { name = "optimum", marker = "extra == 'reranker'", specifier = ">=1.20,<2" },
+    { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "sentence-transformers", marker = "extra == 'hybrid'", specifier = ">=2.7,<6" },
     { name = "sentence-transformers", marker = "extra == 'retrieval-benchmark'", specifier = ">=5.1,<6" },
     { name = "sentence-transformers", marker = "extra == 'semantic'", specifier = ">=2.7,<6" },
