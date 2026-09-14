@@ -59,7 +59,9 @@ def _script_steps() -> list[tuple[str, str, list[str], int]]:
         (
             "Step 3d: pruning superseded evidence-graph generations...",
             "generations",
-            [sys.executable, str(script / "prune_generations.py"), "--apply"],
+            # Its own budget ends two minutes before this step is killed. See
+            # `docs/research/2026-09-14-a-prune-inside-its-step.md`.
+            [sys.executable, str(script / "prune_generations.py"), "--apply", "--budget-seconds", "1080"],
             1200,
         ),
     ]

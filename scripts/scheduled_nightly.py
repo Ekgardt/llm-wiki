@@ -70,6 +70,9 @@ NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
 # the deferral report, so the child's graceful deferral runs before the
 # parent's kill (audit OPS-10).
 STEP_START_MARGIN_SECONDS = 120
+# The prune's kill timeout; its own budget ends a margin before it. See
+# `docs/research/2026-09-14-a-prune-inside-its-step.md`.
+PRUNE_STEP_SECONDS = 300
 
 
 def _generation_result() -> dict:
@@ -331,8 +334,9 @@ def _post_compile_steps() -> list[_Step]:
             # issue #29. The pruner keeps the active generation and one ancestor.
             "Step 3d: pruning superseded evidence generations...",
             "prune_generations",
-            _script("prune_generations.py") + ["--apply"],
-            300,
+            _script("prune_generations.py")
+            + ["--apply", "--budget-seconds", str(PRUNE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
+            PRUNE_STEP_SECONDS,
         ),
         _checkpoint_step(),
         _Step(

@@ -130,23 +130,25 @@ def plan_prune(
 
 
 def _discard_one(
-    catalog: GenerationCatalog, identifier: str, retained_ancestors: int
+    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
 ) -> tuple[str, int]:
     """Size the tree before it goes, so the report can say what was reclaimed."""
     reclaimed = _directory_bytes(catalog.generations_path / identifier)
     catalog.discard_superseded(
         identifier,
         retained_ancestors=retained_ancestors,
-        deadline=time.monotonic() + PRUNE_BUDGET_SECONDS,
+        deadline=deadline,
     )
     return f"removed {identifier} ({reclaimed} bytes)", reclaimed
 
 
 def _discard_reporting_failure(
-    catalog: GenerationCatalog, identifier: str, retained_ancestors: int
+    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
 ) -> tuple[str, int]:
+    if time.monotonic() >= deadline:
+        return f"DEFERRED: {identifier}: the pass's budget is spent", 0
     try:
-        return _discard_one(catalog, identifier, retained_ancestors)
+        return _discard_one(catalog, identifier, retained_ancestors, deadline)
     except (OSError, ValueError, TimeoutError, RuntimeError) as error:
         return f"ERROR: {identifier}: {error}", 0
 
@@ -156,12 +158,17 @@ def _planned(plan: PrunePlan) -> list[str]:
 
 
 def _applied(
-    catalog: GenerationCatalog, plan: PrunePlan, retained_ancestors: int
+    catalog: GenerationCatalog, plan: PrunePlan, retained_ancestors: int, deadline: float
 ) -> list[str]:
+    """Every removal shares one deadline: the pass's, not a fresh one each.
+
+    It used to re-arm 1 200 s per generation under a 300 s nightly kill. See
+    `docs/research/2026-09-14-a-prune-inside-its-step.md`.
+    """
     outcomes = []
     reclaimed = 0
     for identifier in plan.prunable:
-        line, freed = _discard_reporting_failure(catalog, identifier, retained_ancestors)
+        line, freed = _discard_reporting_failure(catalog, identifier, retained_ancestors, deadline)
         outcomes.append(line)
         reclaimed += freed
     outcomes.append(f"reclaimed {reclaimed} bytes")
@@ -194,13 +201,15 @@ def prune_generations(
     state_root: Path | None = None,
     retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS,
     apply: bool = False,
+    budget_seconds: float = PRUNE_BUDGET_SECONDS,
 ) -> list[str]:
     """Report the retention decision; only `apply` removes anything."""
+    deadline = time.monotonic() + budget_seconds
     catalog = GenerationCatalog(state_root or STATE_ROOT)
     plan = plan_prune(catalog, retained_ancestors=retained_ancestors)
     if not apply:
         return _retention_lines(plan) + _planned(plan)
-    return _retention_lines(plan) + _applied(catalog, plan, retained_ancestors)
+    return _retention_lines(plan) + _applied(catalog, plan, retained_ancestors, deadline)
 
 
 def _count_prefixed(outcomes: list[str], prefix: str) -> int:
@@ -232,12 +241,20 @@ def main(argv: list[str] | None = None) -> int:
         "--retained-ancestors", type=int, default=RETAINED_ANCESTOR_GENERATIONS
     )
     parser.add_argument("--apply", action="store_true", help="remove the generations")
+    parser.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=PRUNE_BUDGET_SECONDS,
+        help="start no removal after this many seconds",
+    )
     arguments = parser.parse_args(argv)
     if arguments.retained_ancestors < 0:
         parser.error("--retained-ancestors cannot be negative")
     return _report(
         prune_generations(
-            retained_ancestors=arguments.retained_ancestors, apply=arguments.apply
+            retained_ancestors=arguments.retained_ancestors,
+            apply=arguments.apply,
+            budget_seconds=arguments.budget_seconds,
         )
     )
 

@@ -155,7 +155,9 @@ def _post_compile_step(label: str):
 def _runs_after_with_apply(label: str, earlier: str, script: str) -> tuple[bool, str, bool]:
     labels = _post_compile_labels()
     command = _post_compile_step(label).command
-    return labels.index(label) > labels.index(earlier), command[-1], command[-2].endswith(script)
+    # The script is the second word; options such as a budget may follow it.
+    applied = "--apply" if "--apply" in command else command[-1]
+    return labels.index(label) > labels.index(earlier), applied, command[1].endswith(script)
 
 
 def test_the_nightly_pass_pays_the_backlinks_the_vault_owes():
