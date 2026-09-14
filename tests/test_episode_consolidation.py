@@ -124,7 +124,7 @@ def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatc
     monkeypatch.setattr(
         consolidation,
         "_write_block",
-        lambda day, lessons, moment: written.setdefault("day", day) or Path("daily.md"),
+        lambda day, lessons, moment, key: written.setdefault("day", day) or Path("daily.md"),
     )
     monkeypatch.setattr(
         consolidation,
@@ -349,7 +349,7 @@ def test_two_batches_of_one_day_get_distinct_timestamps(tmp_path, monkeypatch):
     monkeypatch.setattr(
         episode_consolidation,
         "_write_block",
-        lambda day, lessons, moment: moments.append(moment) or Path("daily.md"),
+        lambda day, lessons, moment, key: moments.append(moment) or Path("daily.md"),
     )
     monkeypatch.setattr(episode_consolidation, "_record_consolidation", lambda *a: None)
     monkeypatch.setattr(

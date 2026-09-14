@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -307,6 +308,11 @@ def _record_consolidation(day: str, count: int, records: int) -> None:
 # no longer paid for. See `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
 MAX_BATCH_ATTEMPTS = 3
 PROGRESS_KEY = "consolidation_progress"
+# The last line of a batch's block names the batch, so a run whose checkpoint was not
+# saved finds the block instead of asking the model again. See
+# `docs/research/2026-09-14-a-written-batch-is-found-not-asked-again.md`.
+BATCH_MARKER = "<!-- llm-wiki-episode-batch:{key} -->"
+_BATCH_MARKER_RE = re.compile(r"<!-- llm-wiki-episode-batch:([0-9a-f]{64}) -->")
 
 
 class ConsolidationUnavailable(RuntimeError):
@@ -396,19 +402,19 @@ def _call_provider(prompt: str) -> str | None:
     )
 
 
-def _write_block(day: str, lessons: list[Lesson], moment: datetime) -> Path:
+def _write_block(day: str, lessons: list[Lesson], moment: datetime, key: str) -> Path:
     from daily_log_append import append_daily
 
     return append_daily(
         "episodes",
         day,
-        render_block(day, lessons, moment),
+        render_block(day, lessons, moment) + BATCH_MARKER.format(key=key) + "\n",
         _operation_id(day, lessons),
     )
 
 
 def _consolidate_batch(
-    day: str, batch: list[Path], call, moment: datetime
+    day: str, batch: list[Path], call, moment: datetime, key: str
 ) -> tuple[int, str | None]:
     """(durable items written, path) for one prompt's worth of records."""
     reply = call(build_prompt(day, batch))
@@ -417,7 +423,26 @@ def _consolidate_batch(
     lessons = grounded_lessons(reply, batch)
     if not lessons:
         return 0, None
-    return len(lessons), str(_write_block(day, lessons, moment))
+    return len(lessons), str(_write_block(day, lessons, moment, key))
+
+
+def _logged_batches(vault: Path, day: str) -> frozenset[str]:
+    """Batch keys already written to a daily log dated from `day` on."""
+    directory = Path(vault) / "knowledge" / "daily"
+    if not directory.is_dir():
+        return frozenset()
+    logs = [path for path in directory.glob("*.md") if path.stem >= day]
+    found: set[str] = set()
+    for path in logs:
+        found.update(_BATCH_MARKER_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+    return frozenset(found)
+
+
+def _batches_to_find(vault: Path, day: str, keys: list[str], progress: _Progress) -> frozenset[str]:
+    """The logged batches, read only when the checkpoint leaves one unfinished."""
+    if set(keys) <= progress.done:
+        return frozenset()
+    return _logged_batches(vault, day)
 
 
 def consolidate_day(
@@ -441,7 +466,8 @@ def consolidate_day(
     batches = record_batches(paths)[:MAX_BATCHES_PER_DAY]
     keys = [_batch_key(vault, day, batch) for batch in batches]
     progress = _day_progress(state, day)
-    run = _BatchRun(day, call, moment or datetime.now(), progress, deadline)
+    logged = _batches_to_find(vault, day, keys, progress)
+    run = _BatchRun(day, call, moment or datetime.now(), progress, deadline, logged)
     run.all(batches, keys)
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
@@ -470,6 +496,7 @@ class _BatchRun:
     when: datetime
     progress: _Progress
     deadline: float | None
+    logged: frozenset[str] = frozenset()
 
     def all(self, batches: list[list[Path]], keys: list[str]) -> None:
         for index, (batch, key) in enumerate(zip(batches, keys)):
@@ -480,9 +507,13 @@ class _BatchRun:
     def one(self, index: int, batch: list[Path], key: str) -> None:
         if key in self.progress.done:
             return
+        if key in self.logged:
+            self.progress.finished(key, 0, None)
+            _save_progress(self.day, self.progress)
+            return
         try:
             count, path = _consolidate_batch(
-                self.day, batch, self.call, self.when + timedelta(seconds=index)
+                self.day, batch, self.call, self.when + timedelta(seconds=index), key
             )
         except ValueError:
             self.progress.failed_once(key)
