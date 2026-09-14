@@ -45,8 +45,10 @@ held exactly **one** JSON object; nothing measured needed choosing between sever
   draft (`operations`), a critique (`reviews`), a contradiction verdict (`label`),
   aggregation groups (`groups`) or queries (`queries`), fact keys (an object),
   consolidation lessons (an array of objects).
-- The reader takes a fenced block or the whole reply when it parses to that shape, as
-  before. Otherwise it collects every complete value of that shape in the reply:
+- The reader takes a fenced block or the whole reply when it parses to an object (or
+  an array), as before, so the caller's schema validation still names what a malformed
+  answer lacks (`tests/test_semantic_leg_reaches_the_answer.py` pins this for a fenced
+  answer). Otherwise it collects every complete value of the expected shape in the reply:
   **exactly one** is the answer; **none or more than one** is refused as unreadable, and
   each caller already retries or records an unreadable reply.
 - `RecursionError` while decoding counts as undecodable.

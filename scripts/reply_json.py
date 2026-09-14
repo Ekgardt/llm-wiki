@@ -1,8 +1,9 @@
 """One reader of the JSON a model replies with: one answer of the expected shape, or none.
 
-A fenced block or the whole reply when it parses to the shape the caller expects;
-otherwise every complete value of that shape written in the reply — exactly one is
-the answer, none or several is unreadable. Of 34 LongMemEval replies refused as
+A fenced block or the whole reply when it parses to an object (or an array): the
+caller's validation then names what is missing. Otherwise every complete value of
+the shape the caller expects written in the reply — exactly one is the answer, none
+or several is unreadable. Of 34 LongMemEval replies refused as
 invalid JSON, 29 held one schema-valid document after prose notes; taking "the last
 value" instead let a quoted verdict decide a contradiction check and an example array
 replace a day's lessons. Every caller still validates what it gets. See
@@ -73,16 +74,19 @@ def _parsed(text: str) -> tuple[object] | None:
         return None
 
 
-def _whole(raw: str, shape: Shape) -> object | None:
-    """The fenced block, or else the whole reply, when it is exactly one value of `shape`."""
+def _whole(raw: str, kind: type) -> object | None:
+    """The fenced block, or else the whole reply, when it is one JSON value of `kind`."""
     parsed = _parsed(unfenced(raw))
-    if parsed is None or not shape(parsed[0]):
+    if parsed is None or not isinstance(parsed[0], kind):
         return None
     return parsed[0]
 
 
+_KINDS = {"{": dict, "[": list}
+
+
 def _reply_value(raw: str, opener: str, shape: Shape) -> object:
-    whole = _whole(raw, shape)
+    whole = _whole(raw, _KINDS[opener])
     if whole is not None:
         return whole
     found = _shaped_values_in(raw, opener, shape)
