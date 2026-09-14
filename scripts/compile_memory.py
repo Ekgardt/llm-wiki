@@ -1515,8 +1515,16 @@ def _require_bounded_response(text: str) -> None:
 
 
 def _parse_json_object(text: str) -> dict[str, object]:
+    """The plan a provider replied with, read by the one JSON reply reader.
+
+    First `{` to last `}` refused a plan with braces in a sentence around it, or
+    a draft followed by its correction. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    from reply_json import reply_document
+
     _require_bounded_response(text)
-    value = json.loads(_extract_json_block(text))
+    value = reply_document(text)
     if not isinstance(value, dict):
         raise ValueError("provider output must be a JSON object")
     return value
@@ -3859,26 +3867,6 @@ def _dedup_entry(page: Path) -> str:
     if named and summary:
         return f"{head} — «{named}»: {summary}"
     return head + (f" — «{named}»" if named else _summary_tail(summary))
-
-
-def _without_fences(text: str) -> str:
-    """The body of a fenced block, or the text unchanged when it is not fenced."""
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
-def _extract_json_block(text: str) -> str:
-    """Pull the outermost JSON object out of a possibly-fenced response."""
-    body = _without_fences(text.strip())
-    start = body.find("{")
-    end = body.rfind("}")
-    if start < 0 or end <= start:
-        return ""
-    return body[start : end + 1]
 
 
 def parse_compile_audit(raw: str) -> dict:

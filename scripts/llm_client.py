@@ -1420,18 +1420,17 @@ def _claude_stdin(system_prompt: str, prompt: str) -> str:
 def _claude_answer(
     descriptor: ProviderDescriptor, result: subprocess.CompletedProcess
 ) -> str:
-    """What the finished process said, or the reason it never said anything.
+    """What the finished process said, or the failure it printed instead.
 
-    A usable answer is still an answer, whatever the exit status: nothing that
-    worked before is withdrawn here. Only a death with nothing to show for it
-    becomes a named failure instead of an anonymous empty string.
+    A non-zero exit is a failure whatever it printed: `claude -p` reports an API or
+    configuration error on stdout and exits 1, and that text used to reach the
+    parsers as the model's answer. What it printed is named in the error. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
     """
-    answer = result.stdout or ""
-    if result.returncode == 0 or answer.strip():
-        return answer
-    raise ProviderExited(
-        descriptor.provider, result.returncode, _stderr_excerpt(result.stderr)
-    )
+    if result.returncode == 0:
+        return result.stdout or ""
+    printed = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    raise ProviderExited(descriptor.provider, result.returncode, _stderr_excerpt(printed))
 
 
 def _call_claude(

@@ -268,10 +268,18 @@ def _past(deadline: float | None) -> bool:
 
 
 def _key_batch(store: KeyStore, batch: Sequence[Turn], found: Mapping[str, list[str]], encode) -> int:
-    for turn in batch:
-        keys = found.get(turn.span_sha256, [])
+    """Record the turns the reply named; a turn it did not cover is asked again.
+
+    Every turn of a batch used to be marked keyed, so a reply that failed or
+    skipped a turn left it keyless forever. An empty list is the model saying the
+    turn states nothing, and counts. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    answered = [turn for turn in batch if turn.span_sha256 in found]
+    for turn in answered:
+        keys = found[turn.span_sha256]
         store.add(turn, keys, _encoded(keys, encode))
-    return len(batch)
+    return len(answered)
 
 
 def search(store: KeyStore, question: str, limit: int, encode: Callable | None = None) -> list[dict]:

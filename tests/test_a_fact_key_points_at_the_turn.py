@@ -78,24 +78,28 @@ def test_keys_are_extracted_once_per_turn_and_found_by_word_and_by_vector(vault:
     keyed = fact_keys.key_turns(store, snapshot.chunks, _ask, _encode)
     again = fact_keys.key_turns(store, snapshot.chunks, _ask, _encode)
 
-    assert (keyed, again) == (1, 0)
-    assert store.count() == (1, 2)
     by_word = fact_keys.search(store, "Pearl Export drum", 5)
     by_vector = fact_keys.search(store, "musical instruments I own", 5, _encode)
     drum = next(turn for turn in fact_keys.user_turns(snapshot.chunks) if "drum" in turn.text)
-    assert by_word[0]["byte_start"] == drum.byte_start
-    assert by_vector[0]["byte_start"] == drum.byte_start
+    counts = (keyed, again, store.count())
     store.close()
 
+    assert counts == (1, 0, (1, 2))
+    assert (by_word[0]["byte_start"], by_vector[0]["byte_start"]) == (drum.byte_start, drum.byte_start)
 
-def test_an_unreadable_reply_keys_nothing_but_marks_the_turn_done(vault: Path, tmp_path: Path) -> None:
+
+def test_an_unreadable_reply_keys_nothing_and_leaves_the_turn_to_ask_again(vault: Path, tmp_path: Path) -> None:
+    """Since 2026-09-14 a turn the reply did not cover stays pending.
+
+    See `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
 
     fact_keys.key_turns(store, snapshot.chunks, lambda prompt, system_prompt: "not json", None)
+    retried = fact_keys.key_turns(store, snapshot.chunks, _ask, None)
 
-    assert store.count() == (1, 0)
-    assert fact_keys.search(store, "drum", 5) == []
+    assert (retried, store.count()[0]) == (1, 1)
 
 
 def test_the_keys_leg_resolves_to_the_turn_and_never_shows_the_key(vault: Path, tmp_path: Path, monkeypatch) -> None:

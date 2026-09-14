@@ -938,17 +938,34 @@ Output format: one finding per line, prefixed with "- ". Each line: "<page A> vs
 """
 
 
+# A finding line: `- `, `* `, `• ` or `1.`/`1)` before it. See
+# `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+_FINDING_LINE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+(?P<finding>\S.*)$")
+CONTRADICTIONS_NOT_RUN = "(contradiction check did not run: no provider answered)"
+CONTRADICTIONS_UNREADABLE = "(contradiction check answered in a form it could not read)"
+
+
 def _bulleted_findings(answer: str) -> list[str]:
-    return [line[2:].strip() for line in answer.splitlines() if line.startswith("- ")]
+    matches = (_FINDING_LINE.match(line) for line in answer.splitlines())
+    return [match.group("finding").strip() for match in matches if match]
+
+
+def _declares_none(answer: str) -> bool:
+    return answer.strip().strip("*_`.").upper() == "NO_CONTRADICTIONS"
 
 
 def _contradiction_findings(answer: str | None) -> list[str]:
-    if not answer or "NO_CONTRADICTIONS" in answer.upper():
-        return []
-    if answer.startswith("("):
-        # llm_client returns parenthesized error strings on failure.
-        return [answer]
-    return _bulleted_findings(answer)
+    """Findings, nothing when the reply says there are none, or why it said nothing usable.
+
+    No reply, and a reply that was neither findings nor the token, used to read as
+    "no contradictions".
+    """
+    if answer is None:
+        return [CONTRADICTIONS_NOT_RUN]
+    findings = _bulleted_findings(answer)
+    if findings or _declares_none(answer):
+        return findings
+    return [CONTRADICTIONS_UNREADABLE]
 
 
 def check_contradictions(pages: list[Path]) -> list[str]:
