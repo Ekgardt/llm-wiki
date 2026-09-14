@@ -27,6 +27,7 @@ BENCHMARK_DIR = Path(__file__).resolve().parent
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
 
+import longmemeval_coverage  # noqa: E402
 import longmemeval_data  # noqa: E402
 import longmemeval_score  # noqa: E402
 
@@ -53,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", default=None, help="aggregate report JSON")
     parser.add_argument("--workdir", default=None)
     parser.add_argument("--keep-vaults", action="store_true")
+    parser.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help="measure evidence coverage at 12/24/48 and skip the reader and the judge",
+    )
     parser.add_argument("--list-only", action="store_true", help="print the sample and exit")
     parser.add_argument(
         "--dataset",
@@ -67,9 +73,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def _run_tag(args: argparse.Namespace) -> str:
+    """The run's name; a retrieval-only run never shares staging with an answered one."""
+    suffix = "-retrieval" if getattr(args, "retrieval_only", False) else ""
     if args.full:
-        return "full"
-    return f"n{args.sample}-seed{args.seed}"
+        return f"full{suffix}"
+    return f"n{args.sample}-seed{args.seed}{suffix}"
 
 
 def _dataset(args: argparse.Namespace) -> list[dict]:
@@ -144,6 +152,8 @@ def _worker_environment(args: argparse.Namespace) -> dict[str, str]:
     environment["LLMWIKI_BENCH_POLICY"] = getattr(args, "policy", "refuse")
     environment["MEMORY_LLM_TIMEOUT_S"] = str(args.provider_timeout)
     environment.setdefault("OMP_NUM_THREADS", str(worker_threads(args.concurrency)))
+    if getattr(args, "retrieval_only", False):
+        environment["LLMWIKI_BENCH_RETRIEVAL_ONLY"] = "1"
     return environment
 
 
@@ -312,13 +322,22 @@ def _print_retrieval_path(path: dict, reasons: list[str]) -> None:
         )
 
 
+def _category_rows(report: dict) -> list[tuple[str, dict]]:
+    """The per-category score rows, not the run-level sections beside them."""
+    return [
+        (name, row)
+        for name, row in report.items()
+        if isinstance(row, dict) and "scored" in row
+    ]
+
+
 def _print_summary(report: dict) -> None:
     columns = (
         "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
         "per_1M_tok retrieve_s answer_s"
     )
     print(columns)
-    for name, row in report.items():
+    for name, row in _category_rows(report):
         print(
             f"{name} {row['n']} {row['scored']} {row['accuracy']} {row['em']} "
             f"{row.get('judge_accuracy')} "
@@ -389,6 +408,8 @@ def _published(scoped: list[dict], args) -> int:
     """Write the report, print it, and say plainly what the run measured."""
     report = longmemeval_score.aggregate(scoped)
     report["retrieval_path"] = retrieval_path(scoped)
+    report["coverage"] = longmemeval_coverage.aggregate(scoped)
+    report["failure_split"] = longmemeval_coverage.failure_split(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
