@@ -22,7 +22,7 @@ Procedure:
    - include a `Source:` section with file paths
    - add related wikilinks.
 5. Update `knowledge/index.md` so the page is discoverable.
-6. Append one concise line to `knowledge/log.md` with date + what changed.
+6. Append one concise line to `knowledge/log.local.md` with date + what changed.
 7. After the wiki writes succeed, refresh the search index so search stays current:
    - run `uv run python scripts/search_memory.py --rebuild` (rebuilds FTS5 + vector cache)
    - if the command fails, report the stderr in the summary but do not roll back the wiki edits.

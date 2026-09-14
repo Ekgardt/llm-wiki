@@ -5,7 +5,7 @@ Usage:
     uv run python scripts/query_memory.py "..." --file-back
 
 With --file-back, also writes the Q&A as `knowledge/notes/<slug>.md`,
-regenerates the memory index, and appends to knowledge/log.md.
+regenerates the memory index, and appends to the private vault log (`vault_log`).
 """
 from __future__ import annotations
 
@@ -30,10 +30,11 @@ from memory_state import ROOT  # noqa: E402
 from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+from vault_log import LOG_NAME  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
 INDEX = MEMORY / "index.md"
-LOG = MEMORY / "log.md"
+LOG = MEMORY / LOG_NAME  # private; `vault_log`
 QA_DIR = MEMORY / "notes"  # flat layout: all notes live directly under knowledge/notes/
 ANSWER_SCHEMA = Path(__file__).with_name("schemas") / "grounded-answer-v1.json"
 # Measured on this machine, not chosen: one provider round trip for a 4 KiB
@@ -2429,7 +2430,8 @@ def append_log(entry: str) -> None:
 def _filed_page_phrase(out: Path) -> str:
     """The filed page by path when this repository publishes it, else counted.
 
-    `knowledge/log.md` is tracked and the slug is the question's own words. See
+    The vault log is private, but the slug is the question's own words and the log may
+    be pasted somewhere public. See
     `docs/research/2026-09-14-a-filed-answer-is-counted-not-named.md`.
     """
     from rebuild_memory_index import published_paths

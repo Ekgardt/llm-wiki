@@ -31,7 +31,7 @@ Procedure:
    ```
    Then add the wiki page as the first entry in the memory page's `## Related` section.
 5. Confirm the links are reciprocal — the wiki page's `## Related` should contain a `[[knowledge/notes/<slug>]]` wikilink back. Both pages must mention each other; a one-way promotion marker is a bug.
-6. Register the new wiki page in `knowledge/index.md` under the correct section (Concepts / Decisions / Patterns / Debugging / Q&A) and append a dated entry to `knowledge/log.md` describing the promotion and citing the memory origin.
+6. Register the new wiki page in `knowledge/index.md` under the correct section (Concepts / Decisions / Patterns / Debugging / Q&A) and append a dated entry to `knowledge/log.local.md` describing the promotion and citing the memory origin.
 
 Return:
 - path of the created or updated wiki page

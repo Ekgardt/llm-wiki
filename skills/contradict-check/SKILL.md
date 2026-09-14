@@ -28,7 +28,7 @@ Only **concrete** contradictions — two pages giving different answers to the s
 2. Open the generated report at `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md` (default `$LLM_WIKI_STATE_ROOT/logs/`) and read the `## Contradictions` section.
 
 3. For each finding:
-   - If real: pick one page as canonical, update the other to defer to it, and add a `knowledge/log.md` entry noting the resolution.
+   - If real: pick one page as canonical, update the other to defer to it, and add a `knowledge/log.local.md` entry noting the resolution.
    - If false positive: record in the relevant knowledge page's `Related` section that the apparent conflict is scope-difference, not contradiction — this teaches future lints (by making the distinction explicit in-page).
 
 4. Re-run the structural lint (`python scripts/lint_memory.py`) to confirm no new breakage from your fix.

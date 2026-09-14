@@ -8,7 +8,7 @@ containing a trimmed view of project memory:
     block. Empty hook-trigger blocks, XML `<analysis>`/`<summary>` wrappers,
     and mojibake lines are stripped. If nothing clean remains, falls back to
     a one-line note.
-  - `knowledge/log.md` — last 3 dated entries, each clipped.
+  - the private vault log (`vault_log.LOG_RELATIVE`) — last 3 dated entries, each clipped.
 
 All complete sections are packed under the shared token budget. A debug dump
 of the payload is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
@@ -48,9 +48,10 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from reliable_memory import validate_runtime_file  # noqa: E402
+from vault_log import LOG_RELATIVE  # noqa: E402
 
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
-MEMORY_LOG = ROOT / "knowledge" / "log.md"
+MEMORY_LOG = ROOT / LOG_RELATIVE
 DAILY_DIR = ROOT / "knowledge" / "daily"
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 SKILLS_DIR = ROOT / "skills"
@@ -1013,7 +1014,7 @@ def _daily_section_text() -> str:
 
 def _log_section_text() -> str:
     tail = last_log_entries(3) or "(no log entries)"
-    return f"## Recent knowledge/log.md\n\n{tail}"
+    return f"## Recent {LOG_RELATIVE}\n\n{tail}"
 
 
 def build_context_items() -> list[ContextItem]:

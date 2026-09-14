@@ -98,6 +98,7 @@ from reliable_memory import (  # noqa: E402
     sha256_bytes,
     validate_schema,
 )
+from vault_log import LOG_NAME  # noqa: E402
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -109,7 +110,7 @@ KNOWLEDGE = MEMORY / "notes"
 _AGENTS_CANDIDATES = (ROOT / "docs" / "AGENTS.md", ROOT / "AGENTS.md")
 AGENTS = next((p for p in _AGENTS_CANDIDATES if p.exists()), _AGENTS_CANDIDATES[0])
 INDEX = MEMORY / "index.md"
-LOG = MEMORY / "log.md"
+LOG = MEMORY / LOG_NAME
 COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.json"
 # How many times a compile re-reads the notes tree after another writer moved
 # it under the assessment. Four, because the window is one model call wide and
@@ -3291,11 +3292,12 @@ class _ApplyPlan:
         self._append_vault_file(
             "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
         )
-        log_source = sources.get("knowledge/log.md")
+        log_relative = LOG.relative_to(ROOT).as_posix()
+        log_source = sources.get(log_relative)
         log_bytes = _append_log_bytes(_log_before(log_source), self._log_entry())
         if len(log_bytes) > MAX_LOG_BYTES:
             raise ValueError("knowledge log exceeds after-image limit")
-        self._append_vault_file("knowledge/log.md", log_bytes, sources, MAX_LOG_BYTES)
+        self._append_vault_file(log_relative, log_bytes, sources, MAX_LOG_BYTES)
 
     def _vault_sources(self) -> dict[str, object]:
         """What is on disk outranks what one prompt had room to carry.
@@ -3513,7 +3515,8 @@ def _require_unclaimed_path(known: set[str], path: str) -> None:
 def _touched_phrase(touched: Sequence[str]) -> str:
     """Name the pages this repository publishes and count the rest.
 
-    The line lands in `knowledge/log.md`, which is tracked. Where the vault is
+    The line lands in the vault log (`vault_log.LOG_RELATIVE`), private since
+    2026-09-14 but still filtered: it may be pasted somewhere public. Where the vault is
     also the public source, a private page's slug is itself personal content,
     so it is counted instead of named. A vault that publishes everything reads
     exactly as before.

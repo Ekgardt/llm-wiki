@@ -85,6 +85,9 @@ _ALLOWED_FILES = {
     "knowledge/guardrails.md",
     "knowledge/index.md",
     "knowledge/log.md",
+    # The vault log since 2026-09-14; the tracked `knowledge/log.md` stays a template
+    # (kept above for transactions written before). See `vault_log`.
+    "knowledge/log.local.md",
 }
 _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
 _PROJECT_CHECKPOINT_SCHEMA = (
