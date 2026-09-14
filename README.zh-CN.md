@@ -107,7 +107,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
 
 ### 基础设施
-- **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **5 个 LLM 后端**（自动检测）：OpenCode（需设置 `OPENCODE_SERVER_PASSWORD`）→ Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **本地且零 daemon**——安装基线包含 MCP 包；vector search 仍为可选项
 - **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10–3.14

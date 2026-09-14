@@ -107,7 +107,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
-- **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **5 LLM backends** (auto-detected): OpenCode (with `OPENCODE_SERVER_PASSWORD`) → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search remains optional
 - **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 through 3.14

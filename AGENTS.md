@@ -404,7 +404,8 @@ The memory pipeline needs an LLM for classification, compilation,
 contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
-Priority: OpenCode → Codex → Claude CLI → OpenAI → Ollama. If none available,
+Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
+Codex → Claude CLI → OpenAI → Ollama. If none available,
 the call is enqueued in `run/queue.sqlite3` and processed at the next active
 session. Legacy `run/queue/*.json` files are migration input only.
 
