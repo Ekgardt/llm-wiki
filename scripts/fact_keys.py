@@ -206,7 +206,7 @@ def _clean_keys(value: object) -> list[str]:
 
 
 def _loaded(raw: str | None) -> dict:
-    from query_memory import reply_document
+    from reply_json import reply_document
 
     try:
         document = reply_document(raw or "")

@@ -211,17 +211,25 @@ def _queue_step() -> _Step:
     )
 
 
+# The consolidation starts no new batch after this, inside the step's 300 s.
+EPISODE_BUDGET_SECONDS = 240
+
+
 def _episode_step() -> _Step:
-    """Consolidate yesterday's sessions before compile reads the daily log.
+    """Consolidate every day still pending before compile reads the daily log.
 
     Sessions are kept verbatim whatever the classifier thought of them; this is
     where a day of them becomes durable knowledge, in the window where nobody is
-    waiting. Every promoted item must quote the record it came from.
+    waiting. Every promoted item must quote the record it came from. It used to
+    take yesterday only, so a day that failed once was never read again; five
+    such days were found on 2026-09-14. See
+    `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
     """
     return _Step(
-        "Step 1b: consolidating yesterday's sessions...",
+        "Step 1b: consolidating pending sessions...",
         "episodes",
-        _script("episode_consolidation.py"),
+        _script("episode_consolidation.py")
+        + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
         300,
     )
 

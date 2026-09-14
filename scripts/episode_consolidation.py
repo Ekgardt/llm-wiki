@@ -150,11 +150,18 @@ def build_prompt(day: str, paths: list[Path]) -> str:
 
 
 def _json_array(raw: str) -> list:
-    start = raw.find("[")
-    end = raw.rfind("]")
-    if start < 0 or end <= start:
-        raise ValueError("consolidation did not answer with a JSON array")
-    value = json.loads(raw[start : end + 1])
+    """The array the model answered with, read by the one JSON reply reader.
+
+    First `[` to last `]` refused a reply that mentioned a `[[wikilink]]` before
+    the array or a `[2]` after it. See
+    `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
+    """
+    from reply_json import reply_array
+
+    try:
+        value = reply_array(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("consolidation did not answer with a JSON array") from exc
     if not isinstance(value, list):
         raise ValueError("consolidation did not answer with a JSON array")
     return value
@@ -289,8 +296,91 @@ def _record_consolidation(day: str, count: int, records: int) -> None:
             "records": records,
             "items": count,
         }
+        progress = state.get(PROGRESS_KEY)
+        if isinstance(progress, dict):
+            progress.pop(day, None)
 
     update_state(mutate)
+
+
+# A batch whose reply cannot be read this many times is recorded as failed and
+# no longer paid for. See `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
+MAX_BATCH_ATTEMPTS = 3
+PROGRESS_KEY = "consolidation_progress"
+
+
+class ConsolidationUnavailable(RuntimeError):
+    """The provider returned nothing: this day, and every other, stays pending."""
+
+
+@dataclass
+class _Progress:
+    """Which batches of a day are finished, so a rerun neither skips nor repeats one."""
+
+    done: set[str]
+    attempts: dict[str, int]
+    failed: list[str]
+    items: int = 0
+    written: str | None = None
+
+    def finished(self, key: str, count: int, path: str | None) -> None:
+        self.done.add(key)
+        self.items += count
+        self.written = path or self.written
+
+    def failed_once(self, key: str) -> None:
+        self.attempts[key] = self.attempts.get(key, 0) + 1
+        if self.attempts[key] >= MAX_BATCH_ATTEMPTS:
+            self.done.add(key)
+            self.failed.append(key)
+
+    def as_state(self) -> dict[str, object]:
+        return {
+            "done": sorted(self.done),
+            "attempts": dict(self.attempts),
+            "failed": list(self.failed),
+            "items": self.items,
+            "written": self.written,
+        }
+
+
+def _stored_progress(state: dict | None, day: str) -> dict:
+    """The day's checkpoint as stored, or an empty one."""
+    days = dict(state or {}).get(PROGRESS_KEY)
+    if not isinstance(days, dict):
+        return {}
+    stored = days.get(day)
+    if not isinstance(stored, dict):
+        return {}
+    return stored
+
+
+def _day_progress(state: dict | None, day: str) -> _Progress:
+    stored = {"done": (), "attempts": {}, "failed": (), "items": 0, "written": None}
+    stored.update(_stored_progress(state, day))
+    return _Progress(
+        set(stored["done"]),
+        dict(stored["attempts"]),
+        list(stored["failed"]),
+        int(stored["items"]),
+        stored["written"],
+    )
+
+
+def _save_progress(day: str, progress: _Progress) -> None:
+    def mutate(state: dict) -> None:
+        state.setdefault(PROGRESS_KEY, {})[day] = progress.as_state()
+
+    update_state(mutate)
+
+
+def _batch_key(vault: Path, day: str, batch: list[Path]) -> str:
+    """A batch's identity: its vault, its day and the bytes of every record in it."""
+    from reliable_memory import sha256_bytes
+
+    parts = [str(Path(vault).resolve()), day]
+    parts.extend(f"{path.name}:{sha256_bytes(path.read_bytes())}" for path in batch)
+    return sha256_bytes("\n".join(parts).encode("utf-8"))
 
 
 def _already_consolidated(state: dict, day: str) -> bool:
@@ -298,12 +388,12 @@ def _already_consolidated(state: dict, day: str) -> bool:
     return isinstance(days, dict) and day in days
 
 
-def _call_provider(prompt: str) -> str:
+def _call_provider(prompt: str) -> str | None:
     from llm_client import call_llm
 
     return call_llm(
         prompt, CONSOLIDATION_SYSTEM_PROMPT, max_tokens=CONSOLIDATION_MAX_TOKENS
-    ) or ""
+    )
 
 
 def _write_block(day: str, lessons: list[Lesson], moment: datetime) -> Path:
@@ -321,7 +411,10 @@ def _consolidate_batch(
     day: str, batch: list[Path], call, moment: datetime
 ) -> tuple[int, str | None]:
     """(durable items written, path) for one prompt's worth of records."""
-    lessons = grounded_lessons(call(build_prompt(day, batch)), batch)
+    reply = call(build_prompt(day, batch))
+    if not reply:
+        raise ConsolidationUnavailable("consolidation provider returned nothing")
+    lessons = grounded_lessons(reply, batch)
     if not lessons:
         return 0, None
     return len(lessons), str(_write_block(day, lessons, moment))
@@ -334,21 +427,36 @@ def consolidate_day(
     call=_call_provider,
     state: dict | None = None,
     moment: datetime | None = None,
+    deadline: float | None = None,
 ) -> dict[str, object]:
-    """Consolidate one day of session records; returns what happened and why."""
+    """Consolidate one day of session records; returns what happened and why.
+
+    Finished batches are checkpointed, so a day that stops part-way — out of time,
+    or a reply that could not be read — resumes where it stopped on the next run.
+    """
     skipped = _skip_reason(vault, day, state)
     if skipped is not None:
         return {"status": "skipped", "reason": skipped, "items": 0}
     paths = session_records(vault, day)
     batches = record_batches(paths)[:MAX_BATCHES_PER_DAY]
-    items, written = _consolidate_batches(day, batches, call, moment or datetime.now())
-    _record_consolidation(day, items, len(paths))
-    return _day_outcome(items, len(batches), written)
+    keys = [_batch_key(vault, day, batch) for batch in batches]
+    progress = _day_progress(state, day)
+    run = _BatchRun(day, call, moment or datetime.now(), progress, deadline)
+    run.all(batches, keys)
+    if not set(keys) <= progress.done:
+        return _day_outcome("partial", progress, len(batches))
+    _record_consolidation(day, progress.items, len(paths))
+    return _day_outcome(_finished_status(progress), progress, len(batches))
 
 
-def _consolidate_batches(
-    day: str, batches: list[list[Path]], call, when: datetime
-) -> tuple[int, str | None]:
+def _finished_status(progress: _Progress) -> str:
+    if progress.items:
+        return "written"
+    return "empty"
+
+
+@dataclass
+class _BatchRun:
     """Each batch gets its own moment: two entries in one second are ambiguous.
 
     A daily entry is located by its timestamp, and the compile refuses evidence
@@ -356,27 +464,50 @@ def _consolidate_batches(
     second, so a shared moment made twelve entries indistinguishable and no
     compile of that day could ever bind its evidence.
     """
-    items = 0
-    written: str | None = None
-    for index, batch in enumerate(batches):
-        count, path = _consolidate_batch(
-            day, batch, call, when + timedelta(seconds=index)
-        )
-        items += count
-        written = path or written
-    return items, written
+
+    day: str
+    call: object
+    when: datetime
+    progress: _Progress
+    deadline: float | None
+
+    def all(self, batches: list[list[Path]], keys: list[str]) -> None:
+        for index, (batch, key) in enumerate(zip(batches, keys)):
+            if _out_of_time(self.deadline):
+                return
+            self.one(index, batch, key)
+
+    def one(self, index: int, batch: list[Path], key: str) -> None:
+        if key in self.progress.done:
+            return
+        try:
+            count, path = _consolidate_batch(
+                self.day, batch, self.call, self.when + timedelta(seconds=index)
+            )
+        except ValueError:
+            self.progress.failed_once(key)
+        else:
+            self.progress.finished(key, count, path)
+        _save_progress(self.day, self.progress)
 
 
-def _day_outcome(items: int, batches: int, written: str | None) -> dict[str, object]:
-    if not items:
-        return {"status": "empty", "reason": None, "items": 0, "batches": batches}
-    return {
-        "status": "written",
+def _out_of_time(deadline: float | None) -> bool:
+    import time
+
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _day_outcome(status: str, progress: _Progress, batches: int) -> dict[str, object]:
+    outcome: dict[str, object] = {
+        "status": status,
         "reason": None,
-        "items": items,
+        "items": progress.items,
         "batches": batches,
-        "path": written,
+        "failed_batches": len(progress.failed),
     }
+    if progress.written:
+        outcome["path"] = progress.written
+    return outcome
 
 
 def _record_days(vault: Path) -> list[str]:
@@ -386,9 +517,24 @@ def _record_days(vault: Path) -> list[str]:
     return sorted(item.name for item in directory.iterdir() if item.is_dir())
 
 
-def pending_days(vault: Path, state: dict) -> list[str]:
-    """Days that have records and have never been consolidated, oldest first."""
-    return [day for day in _record_days(vault) if not _already_consolidated(state, day)]
+def pending_days(vault: Path, state: dict, today: str | None = None) -> list[str]:
+    """Days before today that have records and were never consolidated, oldest first.
+
+    Today is never pending: its sessions are still being written, and closing it
+    at noon would leave its evening unread.
+    """
+    before = _today_or(today)
+    return [day for day in _record_days(vault) if _pending(day, before, state)]
+
+
+def _today_or(today: str | None) -> str:
+    if today is not None:
+        return today
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _pending(day: str, before: str, state: dict) -> bool:
+    return day < before and not _already_consolidated(state, day)
 
 
 def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
@@ -416,6 +562,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--limit", type=int, default=0, help="With --all-pending: stop after N days"
     )
+    parser.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=0.0,
+        help="Start no new batch after this many seconds (0: no budget)",
+    )
     return parser.parse_args(argv)
 
 
@@ -428,14 +580,30 @@ def _safe_state() -> dict:
         return {}
 
 
-def _consolidate_reported(vault: Path, day: str) -> None:
-    """One day, with its outcome printed; a failure ends that day, not the run."""
+def _consolidate_reported(vault: Path, day: str, deadline: float | None = None) -> bool:
+    """One day, with its outcome printed; False when the run should stop.
+
+    A failure ends that day, not the run — except a provider that returned nothing,
+    which every other day would meet too.
+    """
     try:
-        outcome = consolidate_day(vault, day, state=_safe_state())
+        outcome = consolidate_day(vault, day, state=_safe_state(), deadline=deadline)
+    except ConsolidationUnavailable as error:
+        print(f"episode consolidation stopped: {error}", file=sys.stderr)
+        return False
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"episode consolidation skipped: {type(error).__name__}", file=sys.stderr)
-        return
+        return True
     print(json.dumps({"day": day, **outcome}, ensure_ascii=False))
+    return True
+
+
+def _budget_deadline(seconds: float) -> float | None:
+    import time
+
+    if seconds <= 0:
+        return None
+    return time.monotonic() + seconds
 
 
 def _selected_days(args: argparse.Namespace) -> list[str]:
@@ -449,8 +617,10 @@ def _selected_days(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    deadline = _budget_deadline(args.budget_seconds)
     for day in _selected_days(args):
-        _consolidate_reported(args.vault, day)
+        if _out_of_time(deadline) or not _consolidate_reported(args.vault, day, deadline):
+            break
     return 0
 
 

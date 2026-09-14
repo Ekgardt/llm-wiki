@@ -201,7 +201,7 @@ def _is_new_query(item: str, asked: str) -> bool:
 
 
 def _loaded(raw: str | None) -> object:
-    from query_memory import reply_document
+    from reply_json import reply_document
 
     try:
         return reply_document(raw or "")
