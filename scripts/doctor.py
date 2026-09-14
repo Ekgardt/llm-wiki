@@ -7050,6 +7050,21 @@ def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
         database.commit()
 
 
+def _heartbeat_interval(lease: dict[str, object]) -> float:
+    """The renewal pace the held lease was granted, not a constant of another schema.
+
+    A registry lease carries its own timing: `repair` is 120 s renewed every 40,
+    `doctor` is 30 s renewed every 10. Renewing a `doctor` lease every 40 s found
+    it expired at the first beat and cancelled every fenced build at 44 s, each
+    night from 2026-09-13. Research:
+    `docs/research/2026-09-14-a-heartbeat-beats-at-the-pace-of-its-own-lease.md`.
+    """
+    owner = lease.get("owner")
+    if owner is None:
+        return MAINTENANCE_HEARTBEAT_SECONDS
+    return float(owner.heartbeat_seconds)
+
+
 class _MaintenanceHeartbeat:
     """Keep one fenced maintenance owner live through cancellable repair work."""
 
@@ -7063,6 +7078,7 @@ class _MaintenanceHeartbeat:
         self.coordinator = coordinator
         self.lease = lease
         self.deadline = deadline
+        self.interval = _heartbeat_interval(lease)
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._thread: threading.Thread | None = None
@@ -7080,12 +7096,12 @@ class _MaintenanceHeartbeat:
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(1.0, MAINTENANCE_HEARTBEAT_SECONDS * 2))
+            self._thread.join(timeout=max(1.0, self.interval * 2))
         _release_maintenance_owner(self.coordinator, self.lease)
 
     def _heartbeat_loop(self) -> None:
         failures = 0
-        while not self._stop.wait(MAINTENANCE_HEARTBEAT_SECONDS):
+        while not self._stop.wait(self.interval):
             if self._beat_once():
                 failures = 0
                 continue

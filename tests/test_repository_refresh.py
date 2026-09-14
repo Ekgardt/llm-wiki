@@ -143,6 +143,26 @@ def test_refresh_without_an_adopted_coordinator_is_reported_not_run(tmp_path, mo
     assert (answer["status"], answer["reason"]) == ("refresh_unavailable", "coordinator_v3_required")
 
 
+def test_the_repository_fence_is_renewed_before_its_lease_runs_out(adopted_vault):
+    """A 30 s lease renewed every 40 s cancelled every nightly build at 44 s.
+
+    Research: `docs/research/2026-09-14-a-heartbeat-beats-at-the-pace-of-its-own-lease.md`.
+    """
+    import doctor
+    import repository_index
+
+    _root, state = adopted_vault
+    coordinator, registry = repository_index._refresh_fence(state)
+    owner = repository_index._held_lease(registry, "repository-under-test")
+    lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
+
+    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 60) as beat:
+        renewal = (beat.interval, beat.interval * doctor.MAX_HEARTBEAT_FAILURES)
+
+    assert renewal[0] == owner.heartbeat_seconds
+    assert renewal[1] < owner.ttl_seconds
+
+
 def test_the_cli_detect_verb_answers_json_and_exit_two_when_not_indexed(tmp_path):
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
     state = tmp_path / "state"
