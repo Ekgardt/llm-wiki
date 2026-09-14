@@ -214,8 +214,10 @@ def _queue_step() -> _Step:
     )
 
 
-# The consolidation starts no new batch after this, inside the step's 300 s.
-EPISODE_BUDGET_SECONDS = 240
+# The consolidation starts no new batch after this; one batch (a model call and its
+# write) fits in the margin before the step's kill. See
+# `docs/research/2026-09-14-every-budget-inside-its-step.md`.
+EPISODE_BUDGET_SECONDS = 180
 
 
 def _episode_step() -> _Step:
@@ -233,7 +235,7 @@ def _episode_step() -> _Step:
         "episodes",
         _script("episode_consolidation.py")
         + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
-        300,
+        EPISODE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
     )
 
 

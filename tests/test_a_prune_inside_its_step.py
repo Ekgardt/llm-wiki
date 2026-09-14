@@ -1,7 +1,9 @@
 """A prune pass has one deadline, and ends before the step that runs it is killed.
 
-Each removal used to get a fresh 1 200 s under a 300 s nightly kill. Research:
-`docs/research/2026-09-14-a-prune-inside-its-step.md`.
+Each removal used to get a fresh 1 200 s under a 300 s nightly kill, and the episode
+step left one minute for a model call of up to 90 s. Research:
+`docs/research/2026-09-14-a-prune-inside-its-step.md`,
+`docs/research/2026-09-14-every-budget-inside-its-step.md`.
 """
 from __future__ import annotations
 
@@ -48,3 +50,26 @@ def test_every_step_that_prunes_gives_it_a_budget_below_its_kill_timeout():
 
     assert len(pairs) == 2
     assert all(budget < timeout for budget, timeout in pairs)
+
+
+def _budgeted_steps() -> list[tuple[list[str], int]]:
+    import scheduled_nightly
+    import scheduled_weekly
+
+    nightly = [scheduled_nightly._episode_step(), *scheduled_nightly._post_compile_steps()]
+    weekly = [(command, timeout) for _m, _l, command, timeout in scheduled_weekly._script_steps()]
+    pairs = [(step.command, step.timeout) for step in nightly] + weekly
+    return [(command, timeout) for command, timeout in pairs if "--budget-seconds" in command]
+
+
+def test_every_budgeted_step_leaves_the_start_margin_before_its_kill():
+    import scheduled_nightly
+
+    margin = scheduled_nightly.STEP_START_MARGIN_SECONDS
+    short = [
+        command[1]
+        for command, timeout in _budgeted_steps()
+        if _budget_and_timeout(command, timeout)[0] + margin > timeout
+    ]
+
+    assert (len(_budgeted_steps()), short) == (4, [])

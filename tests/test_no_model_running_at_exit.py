@@ -33,12 +33,14 @@ def test_settle_stops_inference_at_its_safe_point_and_waits_for_it():
 
 def test_a_thread_that_will_not_stop_is_named_and_the_next_server_still_warms():
     release = threading.Event()
-    inference_threads.start(lambda: release.wait(timeout=SHORT_TIMEOUT), name="stuck-inference")
+    stuck = inference_threads.start(lambda: release.wait(timeout=SHORT_TIMEOUT), name="stuck-inference")
 
     left = inference_threads.settle(0.05)
+    still_asked = inference_threads.stopping.is_set()
     release.set()
+    stuck.join(timeout=SHORT_TIMEOUT)
 
-    assert (left, inference_threads.stopping.is_set()) == (["stuck-inference"], False)
+    assert (left, still_asked, inference_threads.stopping.is_set()) == (["stuck-inference"], True, False)
 
 
 def test_the_warm_up_does_not_start_a_stage_while_the_server_is_closing():

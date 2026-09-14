@@ -22,10 +22,17 @@ def _tracked(target: Callable[[], object]) -> Callable[[], None]:
         try:
             target()
         finally:
-            with _LOCK:
-                _RUNNING.discard(threading.current_thread())
+            _forget(threading.current_thread())
 
     return run
+
+
+def _forget(thread: threading.Thread) -> None:
+    """Stop tracking a thread; when it was the last, a drain in progress is over."""
+    with _LOCK:
+        _RUNNING.discard(thread)
+        if not _RUNNING:
+            stopping.clear()
 
 
 def start(target: Callable[[], object], *, name: str) -> threading.Thread:
@@ -36,8 +43,7 @@ def start(target: Callable[[], object], *, name: str) -> threading.Thread:
     try:
         thread.start()
     except BaseException:
-        with _LOCK:
-            _RUNNING.discard(thread)
+        _forget(thread)
         raise
     return thread
 
@@ -57,4 +63,12 @@ def settle(timeout_seconds: float) -> list[str]:
         return sorted(thread.name for thread in running())
     finally:
         # A drain is a moment, not a state: the next server in this process warms.
-        stopping.clear()
+        # A thread still running keeps being asked to stop; its end clears the flag.
+        # See `docs/research/2026-09-14-every-budget-inside-its-step.md`.
+        _clear_when_idle()
+
+
+def _clear_when_idle() -> None:
+    with _LOCK:
+        if not any(thread.is_alive() for thread in _RUNNING):
+            stopping.clear()
