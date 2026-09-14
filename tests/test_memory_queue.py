@@ -1759,7 +1759,7 @@ def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.M
     )
     assert captured[0][0] == tmp_path / "knowledge" / "daily" / "2026-07-14.md"
     assert "major body" in captured[0][1]
-    assert captured[0][2] == "flush-id"
+    assert captured[0][2].startswith("flush:")
 
 
 def test_deferred_flush_operation_is_appended_once_under_lock(

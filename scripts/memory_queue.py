@@ -15417,14 +15417,22 @@ def _daily_log_path(day: str) -> Path | None:
     return daily_path
 
 
+def _flush_operation_id(payload: Mapping[str, Any]) -> str:
+    """The same id for a flush and every redrive of it: the payload, not the task.
+
+    See `docs/research/2026-09-14-a-redriven-flush-appends-nothing-new.md`.
+    """
+    return f"flush:{sha256_bytes(canonical_json_bytes(dict(payload)))}"
+
+
 def _append_flush_block(
     daily_path: Path,
     payload: Mapping[str, Any],
-    task_id: str,
+    operation_id: str,
     result: str,
     now: datetime,
 ) -> None:
-    """Append what the classifier judged worth keeping, once per task."""
+    """Append what the classifier judged worth keeping, once per flush."""
     from daily_log_append import locked_append_once
     from flush_memory import _classify_response
 
@@ -15437,7 +15445,7 @@ def _append_flush_block(
         f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n"
         f"- Tier: `{tier}`\n\n{redact_secrets(body)}\n"
     )
-    locked_append_once(daily_path, block, task_id)
+    locked_append_once(daily_path, block, operation_id)
 
 
 def _flush_target_path(payload: Mapping[str, Any], now: datetime) -> Path | None:
@@ -15475,7 +15483,7 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     )
     if not result:
         return False
-    _append_flush_block(daily_path, payload, str(task["id"]), result, now)
+    _append_flush_block(daily_path, payload, _flush_operation_id(payload), result, now)
     return True
 
 
