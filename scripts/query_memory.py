@@ -1072,10 +1072,41 @@ def _require_surviving_overlap(claim_tokens: set[str], span_tokens: set[str]) ->
         )
 
 
+def _claimed_ids(claims: object) -> list[str] | None:
+    """Every citation id the claims carry, once, in order; None when malformed."""
+    if not isinstance(claims, list):
+        return None
+    ids: list[str] = []
+    for claim in claims:
+        named = claim.get("citation_ids") if isinstance(claim, dict) else None
+        if not isinstance(named, list):
+            return None
+        ids.extend(map(str, named))
+    return list(dict.fromkeys(ids))
+
+
+def _with_claimed_citations(document: object) -> object:
+    """An answer that left out its citation list gets the one its claims carry.
+
+    Only the id is the model's to give; every other citation field is filled from
+    the manifest. Measured 2026-09-14: `1da05512` was refused by the schema with
+    five cited claims and no list. A document that has a list, or claims that are
+    malformed, is returned untouched for the schema to judge. Research:
+    `docs/research/2026-09-14-a-list-the-claims-already-carry.md`.
+    """
+    if not isinstance(document, dict) or "citations" in document:
+        return document
+    ids = _claimed_ids(document.get("claims"))
+    if ids is None:
+        return document
+    return {**document, "citations": [{"citation_id": name} for name in ids]}
+
+
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
+    document = _with_claimed_citations(document)
     try:
         validate_schema(document, ANSWER_SCHEMA)
     except SchemaValidationError as exc:
@@ -1108,9 +1139,16 @@ def _require_answered_shape(document: Mapping[str, object]) -> None:
 
 
 def _require_abstention_shape(document: Mapping[str, object]) -> None:
+    """A claim or a missing reason makes it no abstention; citations beside it do not.
+
+    Four stand abstentions on 2026-09-14 had a reason, no claim, and cited the
+    spans that conflicted; they were refused as errors. `verify_grounded_answer`
+    drops those citations instead. Research:
+    `docs/research/2026-09-14-a-list-the-claims-already-carry.md`.
+    """
     reason = document["reason"]
     stated = isinstance(reason, str) and bool(reason.strip())
-    if document["claims"] or document["citations"] or not stated:
+    if document["claims"] or not stated:
         raise GroundedQAError("abstention statuses require a reason and no factual claims")
 
 
@@ -1362,10 +1400,10 @@ def verify_grounded_answer(
     """
     validated = _validated_answer_document(document)
     _require_status_shape(validated)
+    if validated["status"] != "answered":
+        return {**validated, "citations": []}
     supplied = {item.citation_id: asdict(item) for item in context.evidence}
     cited = _verified_citations(validated["citations"], supplied, vault=vault)
-    if validated["status"] != "answered":
-        return validated
     return _answer_of_surviving_claims(validated, cited, supplied)
 
 
