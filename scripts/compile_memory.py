@@ -41,6 +41,7 @@ import maybe_compile  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
+    CLAIM_LEDGER_RE,
     LEDGER_SCHEMA,
     RELATIONS,
     ClaimIndex,
@@ -2303,9 +2304,6 @@ def _related_section(related: object) -> str:
     return "\n\n## Related\n" + "\n".join(f"- {item}" for item in related)
 
 
-_CLAIM_LEDGER = re.compile(
-    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
-)
 
 
 def _ledger_bytes(claims: list) -> bytes:
@@ -2328,7 +2326,7 @@ def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> 
     if not records:
         return page
     additions = [json.loads(canonical_json_bytes(item)) for item in records]
-    match = _CLAIM_LEDGER.search(page)
+    match = CLAIM_LEDGER_RE.search(page)
     if match is None:
         opening = b"\n\n## Claims\n```json\n"
         return page.rstrip() + opening + _ledger_bytes(additions) + b"\n```\n"

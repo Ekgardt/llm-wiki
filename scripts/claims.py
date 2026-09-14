@@ -75,8 +75,14 @@ _NON_SUBSTANTIVE_RELATIONS = frozenset(
 # `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
 _DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
 _BLOCK_RE = re.compile(rb"(?m)^## \[(\d{2}:\d{2}:\d{2})\][^\r\n]*(?:\r?\n|$)")
-_CLAIMS_RE = re.compile(
-    r"(?ms)^## Claims[ \t]*\r?\n```json[ \t]*\r?\n([^\r\n]+)\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z)"
+# The one definition of a Claims ledger, for its readers and its writers alike:
+# opening, the canonical JSON line, closing fence — then only blank lines before
+# the next section or the end. Three copies of this once required exactly one
+# line break, and compile's own `## Update` after a blank line made every such
+# page unreadable. See `docs/research/2026-09-14-a-blank-line-before-the-next-section.md`.
+CLAIM_LEDGER_RE = re.compile(
+    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)"
+    rb"(\r?\n```[ \t]*(?=(?:\r?\n[ \t]*)*(?:\r?\n## |\Z)))"
 )
 _EXTRACTION_FIELDS = {
     "id",
@@ -751,10 +757,10 @@ def _has_claims_heading(text: str) -> bool:
 
 
 def _parsed_ledger(text: str) -> dict[str, object]:
-    match = _CLAIMS_RE.search(text)
+    match = CLAIM_LEDGER_RE.search(text.encode("utf-8"))
     if match is None:
         raise ValueError("Claims ledger must be one fenced canonical JSON object")
-    raw = match[1].encode("utf-8")
+    raw = match[2]
     try:
         ledger = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
