@@ -261,6 +261,10 @@ class StateLockTimeout(TimeoutError):
     """The state lock is held by a live writer; the caller's event is retried."""
 
 
+class StateCorrupt(OSError):
+    """`run/state.json` and its previous version are both unreadable; nothing was written."""
+
+
 def _wait_for_slow_owner(deadline: float, poll: float) -> None:
     """Sleep for the live owner, but never past the caller's deadline."""
     remaining = deadline - time.time()
@@ -345,10 +349,52 @@ def update_state(
     timeout for scheduled and other non-hook writers.
     """
     with _state_lock(timeout=lock_timeout):
-        state = load_state()
+        state, readable = _state_for_update()
         mutator(state)
+        _keep_previous(readable)
         save_state(state)
         return state
+
+
+# A writer never turns an unreadable state into an empty one: it recovers the
+# previous version or writes nothing. See
+# `docs/research/2026-09-14-a-corrupt-state-is-not-replaced-by-an-empty-one.md`.
+def _previous_state_file() -> Path:
+    return STATE_FILE.with_name(f"{STATE_FILE.name}.previous")
+
+
+def _parsed_state(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _state_for_update() -> tuple[dict[str, Any], bool]:
+    """(the state to mutate, whether the current file was readable)."""
+    if not STATE_FILE.exists():
+        return {}, False
+    current = _parsed_state(STATE_FILE)
+    if current is not None:
+        return current, True
+    load_state()  # keeps the forensic copy and logs the corruption
+    previous = _parsed_state(_previous_state_file())
+    if previous is None:
+        raise StateCorrupt(f"state file unreadable and no readable previous version: {STATE_FILE}")
+    return previous, False
+
+
+def _keep_previous(readable: bool) -> None:
+    """Hard-link the readable file about to be replaced to its `.previous` name."""
+    if not readable:
+        return
+    staged = STATE_FILE.with_name(f".{STATE_FILE.name}.previous.{secrets.token_hex(8)}.tmp")
+    try:
+        os.link(STATE_FILE, staged)
+        os.replace(staged, _previous_state_file())
+    except OSError:
+        staged.unlink(missing_ok=True)
 
 
 def file_hash(path: Path) -> str:
