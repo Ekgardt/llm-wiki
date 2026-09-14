@@ -2314,6 +2314,20 @@ def _ingest_result(slug: str | None, payload: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _write_session_start_debug(context: object) -> None:
+    """The payload the hook returned, where `logs/session-start-last.txt` promises it.
+
+    See `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    """
+    from session_start_context import latest_daily, write_debug
+
+    try:
+        daily = latest_daily()
+        write_debug(str(context or ""), getattr(daily, "name", "(none)"))
+    except Exception:  # noqa: BLE001 - a debug copy must never cost the session its context
+        return
+
+
 def _ingest_session_start(
     envelope: EventEnvelope,
     payload: dict[str, Any],
@@ -2334,6 +2348,7 @@ def _ingest_session_start(
         trailing_newline=True,
         code_graph=_code_graph_reminder(project_dir),
     )
+    _write_session_start_debug(result["context"])
 
 
 def _ingest_user_prompt(
