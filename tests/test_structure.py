@@ -608,11 +608,11 @@ SAFE_PUBLIC_EXAMPLES = (
 
 
 def _assert_pyyaml_stays_a_dev_dependency() -> None:
+    """PyYAML is a base dependency since 2026-09-14: the canonical frontmatter reader
+    needs it on every install (`docs/research/2026-09-14-a-base-install-can-search.md`)."""
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     project_dependencies, dev_dependencies = pyproject.split("[dependency-groups]", 1)
-    assert "pyyaml" not in project_dependencies.casefold(), (
-        "PyYAML must remain a test/dev dependency, not a project dependency"
-    )
+    assert '"pyyaml>=6.0.3,<7"' in project_dependencies.casefold()
     assert '"pyyaml>=6.0.3,<7"' in dev_dependencies.casefold()
 
 

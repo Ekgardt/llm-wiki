@@ -781,7 +781,7 @@ def test_no_untracked_imported_modules():
 
 @pytest.mark.parametrize("entry_point", ["install_smoke", "sync_memory", "doctor", "mcp_server"])
 def test_production_entry_points_import_without_pyyaml(entry_point):
-    """The production install carries no PyYAML (`_assert_pyyaml_stays_a_dev_dependency`).
+    """The entry points start without importing PyYAML, even though a base install now has it.
 
     A module-level import of `corpus_snapshot` from `doctor` pulled `yaml` into
     `install_smoke` and the clean production job failed in nine seconds
