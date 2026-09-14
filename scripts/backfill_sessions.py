@@ -18,6 +18,7 @@ See knowledge/notes/session-evidence-retention-decision.md (MEM-08).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from dataclasses import dataclass, field
@@ -41,6 +42,12 @@ DEFAULT_SOURCE_ROOTS = (
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 MAX_TRANSCRIPTS = 10_000
 TRANSCRIPT_SUFFIXES = (".jsonl", ".json")
+# A memory call runs from a temporary directory with this prefix
+# (`llm_client.provider_cwd`); its saved session is the vault's own prompt, not a
+# conversation. See `docs/research/2026-09-14-a-memory-call-leaves-no-session.md`.
+PROVIDER_CWD_MARKER = "llm-wiki-provider-"
+# How many leading records may be read to find the session's working directory.
+MAX_HEAD_RECORDS = 8
 
 
 @dataclass
@@ -76,11 +83,46 @@ def _transcripts(roots: tuple[Path, ...]) -> list[Path]:
 def _transcripts_under(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
-    return [
-        path
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.casefold() in TRANSCRIPT_SUFFIXES
-    ]
+    return [path for path in root.rglob("*") if _conversation_file(path)]
+
+
+def _conversation_file(path: Path) -> bool:
+    if not path.is_file() or path.suffix.casefold() not in TRANSCRIPT_SUFFIXES:
+        return False
+    return not _memory_call(path)
+
+
+def _memory_call(path: Path) -> bool:
+    """A session saved by a memory call: named for, or started in, a provider directory."""
+    if any(PROVIDER_CWD_MARKER in part for part in path.parts):
+        return True
+    return PROVIDER_CWD_MARKER in Path(_first_cwd(path)).name
+
+
+def _first_cwd(path: Path) -> str:
+    """The working directory the first records name (Claude `cwd`, Codex `payload.cwd`)."""
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            heads = [handle.readline(MAX_TRANSCRIPT_BYTES) for _ in range(MAX_HEAD_RECORDS)]
+    except OSError:
+        return ""
+    return next((cwd for cwd in map(_record_cwd, heads) if cwd), "")
+
+
+def _record_cwd(line: str) -> str:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return ""
+    return _text(_field(record, "cwd")) or _text(_field(_field(record, "payload"), "cwd"))
+
+
+def _field(record: object, key: str) -> object:
+    return record.get(key) if isinstance(record, dict) else None
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _session_day(path: Path) -> str:

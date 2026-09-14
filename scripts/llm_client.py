@@ -1392,7 +1392,12 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
     configured voice — "От вас ничего не нужно" — instead of the JSON plan the
     schema asked for, three times in a row. `--system-prompt` replaces the
     assistant persona with ours; `--setting-sources` with nothing after it loads
-    no settings files at all. Both are used only when this CLI has them.
+    no settings files at all. A memory call carries private vault text and uses no
+    tools: `--no-session-persistence` keeps the CLI from saving it as a session
+    outside the vault, and `--tools ""` with `--strict-mcp-config` drops about
+    13 000 input tokens of tool descriptions a call (measured 2026-09-14, see
+    `docs/research/2026-09-14-a-memory-call-leaves-no-session.md`). Each flag is
+    used only when this CLI has it.
     """
     flags = _claude_cli_flags()
     optional = (
@@ -1401,6 +1406,9 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
             ["--system-prompt", system_prompt],
         ),
         ("--setting-sources" in flags, ["--setting-sources", ""]),
+        ("--no-session-persistence" in flags, ["--no-session-persistence"]),
+        ("--tools" in flags, ["--tools", ""]),
+        ("--strict-mcp-config" in flags, ["--strict-mcp-config"]),
         (bool(model), ["--model", str(model)]),
     )
     command = [claude_bin, "-p", "--output-format", "text"]
