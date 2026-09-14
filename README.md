@@ -101,13 +101,13 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Agent timeline** — attribution: which agent decided what and when
 
 ### Maintenance
-- **16 lint checks (15 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, stale compiles, missing backlinks, sparse pages, missing frontmatter, missing or invalid type, missing sources, invalid supersede chains, orphan gaps, temporal validity, unresolvable evidence, invalid claim schema, contradictions
+- **17 lint checks (16 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, stale compiles, missing backlinks, sparse pages, missing frontmatter, unreadable frontmatter, missing or invalid type, missing sources, invalid supersede chains, orphan gaps, temporal validity, unresolvable evidence, invalid claim schema, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
 - **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, LaunchAgent on macOS, user systemd on Linux; cron is an explicit degraded fallback)
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
-- **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **5 LLM backends** (auto-detected): OpenCode (with `OPENCODE_SERVER_PASSWORD`) → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search remains optional
 - **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 through 3.14

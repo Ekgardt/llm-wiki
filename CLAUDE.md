@@ -248,9 +248,12 @@ a directory boundary.** Read that sentence again before you commit anything.
 | the `!` allowlist inside those denials | yes | the READMEs only — the repository ships no memory (2026-09-10) |
 | `cache/ logs/ run/` | never | runtime state |
 
-`knowledge/index.md` and `knowledge/log.md` are the exception: the runtime
-rewrites them and they are tracked. `tests/test_structure.py::test_the_vault_index_and_log_name_only_published_notes`
-holds the line — every page they name by path must be published.
+`knowledge/index.md` is the exception: the runtime rewrites it and it is tracked.
+`tests/test_structure.py::test_the_vault_index_and_log_name_only_published_notes`
+holds the line — every page it names by path must be published. The vault's
+editorial log is `knowledge/log.local.md`, private (denied in `.gitignore`); the
+tracked `knowledge/log.md` is only the template the repository ships, and nothing
+writes to it. See `docs/research/2026-09-14-the-vault-log-is-private.md`.
 
 ### What this changes in practice
 - Writing a knowledge page here is **normal runtime behaviour**, not a
@@ -290,7 +293,7 @@ holds the line — every page they name by path must be published.
 4. Every important update should touch:
    - the most relevant wiki page(s)
    - `knowledge/index.md`
-   - `knowledge/log.md`
+   - `knowledge/log.local.md` (the private vault log)
 5. Preserve provenance. When writing claims, include a `Source:` / Evidence
    line pointing to the relevant file(s).
 6. Mark uncertainty explicitly.
@@ -314,7 +317,7 @@ Every durable wiki page should try to include:
 ### Special files
 @knowledge/index.md
 
-`knowledge/log.md` is deliberately **not** imported. It is an append-only
+`knowledge/log.local.md` (the private vault log) is deliberately **not** imported. It is an append-only
 editorial changelog, not operating context, and it had grown to 304,980 bytes
 — about 76,000 tokens in every session before any work began, which killed
 three agent runs outright on 2026-08-29 with `Prompt is too long`. Rule 4
@@ -328,7 +331,7 @@ When asked to compile or ingest new material:
 1. Inspect `knowledge/inbox/` and/or the target source file.
 2. Decide whether to create or update pages under `knowledge/notes/`.
 3. Update `knowledge/index.md`.
-4. Append a concise entry to `knowledge/log.md`.
+4. Append a concise entry to `knowledge/log.local.md`.
 5. Summarize what changed.
 
 ---
@@ -401,7 +404,8 @@ The memory pipeline needs an LLM for classification, compilation,
 contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
-Priority: OpenCode → Codex → Claude CLI → OpenAI → Ollama. If none available,
+Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
+Codex → Claude CLI → OpenAI → Ollama. If none available,
 the call is enqueued in `run/queue.sqlite3` and processed at the next active
 session. Legacy `run/queue/*.json` files are migration input only.
 

@@ -5,7 +5,7 @@ Usage:
     uv run python scripts/query_memory.py "..." --file-back
 
 With --file-back, also writes the Q&A as `knowledge/notes/<slug>.md`,
-regenerates the memory index, and appends to knowledge/log.md.
+regenerates the memory index, and appends to the private vault log (`vault_log`).
 """
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+from vault_log import LOG_NAME  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
 INDEX = MEMORY / "index.md"
-LOG = MEMORY / "log.md"
+LOG = MEMORY / LOG_NAME  # private; `vault_log`
 QA_DIR = MEMORY / "notes"  # flat layout: all notes live directly under knowledge/notes/
 ANSWER_SCHEMA = Path(__file__).with_name("schemas") / "grounded-answer-v1.json"
 # Measured on this machine, not chosen: one provider round trip for a 4 KiB
@@ -1072,10 +1074,41 @@ def _require_surviving_overlap(claim_tokens: set[str], span_tokens: set[str]) ->
         )
 
 
+def _claimed_ids(claims: object) -> list[str] | None:
+    """Every citation id the claims carry, once, in order; None when malformed."""
+    if not isinstance(claims, list):
+        return None
+    ids: list[str] = []
+    for claim in claims:
+        named = claim.get("citation_ids") if isinstance(claim, dict) else None
+        if not isinstance(named, list):
+            return None
+        ids.extend(map(str, named))
+    return list(dict.fromkeys(ids))
+
+
+def _with_claimed_citations(document: object) -> object:
+    """An answer that left out its citation list gets the one its claims carry.
+
+    Only the id is the model's to give; every other citation field is filled from
+    the manifest. Measured 2026-09-14: `1da05512` was refused by the schema with
+    five cited claims and no list. A document that has a list, or claims that are
+    malformed, is returned untouched for the schema to judge. Research:
+    `docs/research/2026-09-14-a-list-the-claims-already-carry.md`.
+    """
+    if not isinstance(document, dict) or "citations" in document:
+        return document
+    ids = _claimed_ids(document.get("claims"))
+    if ids is None:
+        return document
+    return {**document, "citations": [{"citation_id": name} for name in ids]}
+
+
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
     from reliable_memory import SchemaValidationError, validate_schema
 
+    document = _with_claimed_citations(document)
     try:
         validate_schema(document, ANSWER_SCHEMA)
     except SchemaValidationError as exc:
@@ -1108,9 +1141,16 @@ def _require_answered_shape(document: Mapping[str, object]) -> None:
 
 
 def _require_abstention_shape(document: Mapping[str, object]) -> None:
+    """A claim or a missing reason makes it no abstention; citations beside it do not.
+
+    Four stand abstentions on 2026-09-14 had a reason, no claim, and cited the
+    spans that conflicted; they were refused as errors. `verify_grounded_answer`
+    drops those citations instead. Research:
+    `docs/research/2026-09-14-a-list-the-claims-already-carry.md`.
+    """
     reason = document["reason"]
     stated = isinstance(reason, str) and bool(reason.strip())
-    if document["claims"] or document["citations"] or not stated:
+    if document["claims"] or not stated:
         raise GroundedQAError("abstention statuses require a reason and no factual claims")
 
 
@@ -1362,10 +1402,10 @@ def verify_grounded_answer(
     """
     validated = _validated_answer_document(document)
     _require_status_shape(validated)
+    if validated["status"] != "answered":
+        return {**validated, "citations": []}
     supplied = {item.citation_id: asdict(item) for item in context.evidence}
     cited = _verified_citations(validated["citations"], supplied, vault=vault)
-    if validated["status"] != "answered":
-        return validated
     return _answer_of_surviving_claims(validated, cited, supplied)
 
 
@@ -2224,8 +2264,9 @@ def _qa_system_prompt() -> str:
         "refused outright and nothing you wrote reaches the reader. "
         "Generated summaries and the cached full index are orientation only and "
         "never authoritative. You have no shell, network, mutation, or arbitrary-file tools. "
-        "Write working first: one line per evidence span you will use, what it states that "
-        "bears on the question and its date; then the claims. "
+        "Write the working field first, inside the JSON document: one line per evidence span "
+        "you will use, what it states that bears on the question and its date; then the "
+        "claims. Write nothing outside the JSON document. "
         "Output only JSON matching this closed schema: " + schema_json
     )
 
@@ -2273,35 +2314,6 @@ def _provider_response(
     return raw
 
 
-_FENCED_JSON_RE = re.compile(r"```[^\n]*\n(?P<body>.*?)\n?\s*```", re.DOTALL)
-
-
-def _unfenced(raw: str) -> str:
-    """The first fenced block in the reply, or the text unchanged.
-
-    Providers answer a "reply with JSON" instruction either bare or wrapped in
-    a ```json fence, and which one they pick varies with the answer. Measured
-    on this vault: the abstention came back bare and parsed, and the first real
-    answer this path ever produced came back fenced and was thrown away as
-    invalid JSON — a correct answer lost to three backticks.
-
-    Unwrapping only a response that was *exactly* one fence turned out to cost
-    the same way. Measured over 200 questions on 2026-09-02, fifteen replies
-    were discarded as invalid JSON; every one of them carried a complete
-    document inside a fence, and what disqualified it was a sentence of
-    commentary before or after the backticks. Thirteen parse once the first
-    fence is taken wherever it sits.
-
-    Taking the fence is not taking the provider's word for anything. The
-    document still has to validate against the closed schema, and every claim
-    still has to survive its citation gates. The prose around it is discarded,
-    never shown.
-    """
-    match = _FENCED_JSON_RE.search(raw)
-    if not match:
-        return raw
-    return match.group("body")
-
 
 _UNPARSABLE_EXCERPT_CHARS = 200
 
@@ -2326,7 +2338,7 @@ def _parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
-        return json.loads(_unfenced(raw))
+        return reply_document(raw, object_with("status"))
     except (TypeError, json.JSONDecodeError) as exc:
         raise GroundedQAError(
             "grounded QA provider returned invalid JSON "
@@ -2415,6 +2427,21 @@ def append_log(entry: str) -> None:
     append_knowledge(None, LOG, block)
 
 
+def _filed_page_phrase(out: Path) -> str:
+    """The filed page by path when this repository publishes it, else counted.
+
+    The vault log is private, but the slug is the question's own words and the log may
+    be pasted somewhere public. See
+    `docs/research/2026-09-14-a-filed-answer-is-counted-not-named.md`.
+    """
+    from rebuild_memory_index import published_paths
+
+    named, hidden = published_paths(ROOT, [out.relative_to(ROOT).as_posix()])
+    if named:
+        return f"`{named[0]}`"
+    return f"{hidden} unpublished page"
+
+
 def main() -> int:
     args = parse_args()
     answer_text = answer(args.question, profile=args.profile)
@@ -2428,7 +2455,7 @@ def main() -> int:
         index_ok = rebuild_index()
         suffix = "" if index_ok else " (WARN: knowledge/index.md rebuild failed — page written, index stale)"
         append_log(
-            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A `{out.relative_to(ROOT).as_posix()}` via `query_memory.py --file-back`.{suffix}"
+            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A {_filed_page_phrase(out)} via `query_memory.py --file-back`.{suffix}"
         )
         print(f"\n[filed] {out.relative_to(ROOT).as_posix()}")
     return 0

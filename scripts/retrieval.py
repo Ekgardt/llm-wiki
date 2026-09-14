@@ -285,9 +285,12 @@ def _start_optional_worker(
             completed.set()
             slots.release()
 
-    worker = threading.Thread(target=run, name="llm-wiki-optional-retrieval", daemon=True)
+    # Registered, so a closing server waits for inference to finish rather than
+    # finalizing under it. See `docs/research/2026-09-14-no-model-running-at-exit.md`.
+    import inference_threads
+
     try:
-        worker.start()
+        inference_threads.start(run, name="llm-wiki-optional-retrieval")
     except BaseException:
         slots.release()
         raise

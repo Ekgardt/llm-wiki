@@ -37,6 +37,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -693,17 +694,34 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
 _TIER_EMPHASIS = "*_`# "
 
 
-def _declared_tier_line(raw: str) -> tuple[str, str]:
-    """The tier the first line declares, and everything after that line."""
-    head, _, rest = raw.partition("\n")
-    return head.strip().strip(_TIER_EMPHASIS).strip(), rest
+# What may follow a tier on its own line: the full stop, colon or exclamation a
+# model ends a declaration with. See
+# `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+_TIER_TRAILING = ".:!"
+_TIERS_BY_TOKEN = {"FLUSH_OK": "ok", "FLUSH_MAJOR": "major", "FLUSH_MINOR": "minor"}
 
 
-def _capture_wire_body(raw: str, token: str) -> str | None:
-    head, rest = _declared_tier_line(raw)
-    if head != token:
+def _line_tier(line: str) -> tuple[str, str] | None:
+    """(tier, text after the token on this line), or None when the line declares none."""
+    token, _, inline = line.strip().strip(_TIER_EMPHASIS).partition(":")
+    tier = _TIERS_BY_TOKEN.get(token.strip().strip(_TIER_EMPHASIS).rstrip(_TIER_TRAILING))
+    if tier is None:
         return None
-    return _require_canonical_body(rest)
+    return tier, inline.strip().strip(_TIER_EMPHASIS)
+
+
+def _declared_tier(raw: str) -> tuple[str, str] | None:
+    """The tier the first non-blank line declares, and the body it carries.
+
+    Only the first line may declare: the classifier reads untrusted transcripts,
+    and a tier token quoted from one further down must not decide. Text after
+    `FLUSH_OK` is the model saying why nothing is kept, and is not a body.
+    """
+    head, _, rest = raw.lstrip().partition("\n")
+    declared = _line_tier(head)
+    if declared is None:
+        return None
+    return declared[0], "\n".join([declared[1], rest])
 
 
 def _require_canonical_body(body: str) -> str:
@@ -715,8 +733,8 @@ def _require_canonical_body(body: str) -> str:
     its answer with a newline. Whitespace around a Markdown body carries
     nothing a reader or a later grep can use, so refusing it protects nothing
     and costs a session. Output that is not a flush body at all is still
-    refused — a body that is only whitespace here, and anything trailing
-    `FLUSH_OK` in `_parse_capture_wire_output`.
+    refused: a body that is only whitespace here, and a reply that declares no
+    tier anywhere in `_parse_capture_wire_output`.
     """
     stripped = body.strip()
     if not stripped:
@@ -724,31 +742,75 @@ def _require_canonical_body(body: str) -> str:
     return stripped
 
 
-_CAPTURE_WIRE_TIERS = (("major", "FLUSH_MAJOR"), ("minor", "FLUSH_MINOR"))
-
-
-def _capture_wire_tier(raw: str) -> tuple[str, str] | None:
-    """The tier this output declares, or None when it declares none."""
-    for tier, token in _CAPTURE_WIRE_TIERS:
-        body = _capture_wire_body(raw, token)
-        if body is not None:
-            return tier, body
-    return None
+def _required_tier(raw: object) -> tuple[str, str]:
+    if not isinstance(raw, str):
+        raise RuntimeError("capture provider returned no flush output")
+    declared = _declared_tier(raw)
+    if declared is None:
+        raise RuntimeError("capture provider returned invalid flush output")
+    return declared
 
 
 def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
-    if not isinstance(raw, str):
-        raise RuntimeError("capture provider returned no flush output")
-    head, rest = _declared_tier_line(raw)
-    if head == "FLUSH_OK" and not rest.strip():
+    tier, body = _required_tier(raw)
+    if tier == "ok":
         return "ok", ""
-    return _require_declared_tier(_capture_wire_tier(raw))
+    return tier, _require_canonical_body(body)
 
 
-def _require_declared_tier(tier: tuple[str, str] | None) -> tuple[str, str]:
-    if tier is None:
-        raise RuntimeError("capture provider returned invalid flush output")
-    return tier
+# A third of the shortest claim a capture holds (the intent fence's 30 s). See
+# `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+CAPTURE_KEEPALIVE_SECONDS = 10.0
+
+
+class _CaptureKeepAlive:
+    """Renew every claim a capture holds while its classifier runs.
+
+    Owner and its queue projection, the queue lease, the task fence and the
+    intent fence: nothing renewed them, and no capture over 30 seconds ever
+    succeeded. A busy database is retried until the shortest claim expires;
+    publication stays fenced, so a claim that was lost still refuses to publish.
+    """
+
+    def __init__(self, queue, coordinator, lease, task_fence, intent_fence, owner) -> None:
+        self._queue = queue
+        self._coordinator = coordinator
+        self._lease = lease
+        self._task_fence = task_fence
+        self._intent_fence = intent_fence
+        self._owner = owner
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
+
+    def __enter__(self) -> _CaptureKeepAlive:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=CAPTURE_KEEPALIVE_SECONDS * 2)
+
+    def _run(self) -> None:
+        from lease_renewal import renew_until_stopped
+        from markdown_transaction import INTENT_FENCE_SECONDS
+        from reliable_memory import DEFAULTS
+
+        # The ending error needs no handling here: publication stays fenced, so a
+        # claim that ran out refuses to publish on its own. One round renews the
+        # queue and the coordinator; the coordinator's busy wait is the longer.
+        renew_until_stopped(
+            self._renew,
+            interval=CAPTURE_KEEPALIVE_SECONDS,
+            lease_seconds=INTENT_FENCE_SECONDS,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            stop=self._stop,
+        )
+
+    def _renew(self) -> None:
+        self._owner = self._queue.heartbeat_queue_owner(self._owner)
+        self._lease = self._queue.heartbeat(self._lease)
+        self._queue.heartbeat_task_fence(self._task_fence, self._owner)
+        self._coordinator.heartbeat_intent_fence(self._intent_fence, self._owner)
 
 
 def _call_capture_classifier(
@@ -1334,7 +1396,9 @@ def _keep_transcript_record(args: argparse.Namespace) -> None:
         "session": args.session_id,
         "host": getattr(args, "agent", None),
         "event": args.event,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        # The queue path's clock: one day for a session whichever path records it.
+        # See `docs/research/2026-09-14-one-day-for-a-session-record.md`.
+        "captured_at": _capture_now().isoformat(),
         "source_event_id": getattr(args, "source_event_id", None),
     }
     write_session_evidence(ROOT, fields, transcript)
@@ -1359,7 +1423,8 @@ def process_new_capture(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
     )
     if resolved is None:
-        result, tier, body = _call_capture_classifier(record, llm_call)
+        with _CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
+            result, tier, body = _call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
             chosen_at = _require_capture_time(now())
@@ -1571,32 +1636,46 @@ def _flush_operation_id(args: argparse.Namespace) -> str | None:
     return f"flush:{source_event_id}"
 
 
-def _append_flush_state(
-    state: dict,
-    args: argparse.Namespace,
-    day: str,
-    block: str,
-    tier: str,
-    deferred: list[tuple[Path, str]],
-) -> None:
+def _claim_flush(state: dict, args: argparse.Namespace, claimed: list[bool]) -> None:
+    """Record the flush now, so a concurrent one of the same session and event skips."""
     if should_skip(state, args.session_id, args.event):
         return
-    daily_path = append_daily(day, block, operation_id=_flush_operation_id(args))
     record_flush(state, args.session_id, args.event)
+    claimed.append(True)
+
+
+def _release_flush_claim(state: dict, args: argparse.Namespace) -> None:
+    state.get("flush_dedupe", {}).pop(dedupe_key(args.session_id, args.event), None)
+
+
+def _count_flush_tier(state: dict, tier: str) -> None:
     counts = state.setdefault("flush_tier_counts", {})
     counts[tier] = int(counts.get(tier, 0)) + 1
-    if tier == "major":
-        deferred.append((daily_path, tier))
 
 
 def _persist_flush(
     args: argparse.Namespace, tier: str, block: str, day: str
 ) -> list[tuple[Path, str]]:
-    deferred: list[tuple[Path, str]] = []
-    update_state(
-        lambda state: _append_flush_state(state, args, day, block, tier, deferred)
-    )
-    return deferred
+    """Claim under the state lock, append outside it, then count.
+
+    The append used to run inside the lock, so a busy Markdown writer held every hook's
+    0.1 s state lock. See `docs/research/2026-09-14-no-markdown-write-under-the-state-lock.md`.
+    """
+    claimed: list[bool] = []
+    update_state(lambda state: _claim_flush(state, args, claimed))
+    if not claimed:
+        return []
+    daily_path = _append_claimed_flush(args, day, block)
+    update_state(lambda state: _count_flush_tier(state, tier))
+    return [(daily_path, tier)] if tier == "major" else []
+
+
+def _append_claimed_flush(args: argparse.Namespace, day: str, block: str) -> Path:
+    try:
+        return append_daily(day, block, operation_id=_flush_operation_id(args))
+    except BaseException:
+        update_state(lambda state: _release_flush_claim(state, args))
+        raise
 
 
 def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:

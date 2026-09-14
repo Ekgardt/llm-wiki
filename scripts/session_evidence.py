@@ -30,6 +30,11 @@ TRUNCATION_NOTE = "\n\n_(record truncated at the size limit)_\n"
 # less thing to reason about when it becomes a path.
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 _TOOL_INPUT_FIELDS = ("command", "file_path", "path", "pattern", "query", "url")
+# Every record is redacted where it is written, one line per header value; the body is
+# cut to the bound plus this much first, so a secret at the final cut was whole when
+# it was redacted. See `docs/research/2026-09-14-every-session-record-is-redacted.md`.
+REDACTION_SLACK_CHARS = 64 * 1024
+_LINE_BREAKING = re.compile(r"[\x00-\x1f\x7f\u0085\u2028\u2029]+")
 
 
 _NAME_LIMIT = 64
@@ -180,7 +185,7 @@ def _frontmatter(fields: Mapping[str, object]) -> str:
     for key in ("session", "project", "host", "event", "captured_at", "source_event_id"):
         value = fields.get(key)
         if value:
-            lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_header_value(value)}")
     lines.append("---")
     return "\n".join(lines) + "\n"
 
@@ -198,10 +203,23 @@ def render_session_document(fields: Mapping[str, object], transcript: str) -> st
     return _document_from_body(fields, render_transcript(transcript).strip())
 
 
+def _header_value(value: object) -> str:
+    """One redacted line: a line break in a value would write a header of its own."""
+    from secret_redact import redact_secrets
+
+    return redact_secrets(_LINE_BREAKING.sub(" ", str(value)).strip())
+
+
+def _redacted_body(body: str) -> str:
+    from secret_redact import redact_secrets
+
+    return redact_secrets(body[: MAX_EVIDENCE_BYTES + REDACTION_SLACK_CHARS])
+
+
 def _document_from_body(fields: Mapping[str, object], body: str) -> str:
-    session = str(fields.get("session") or "unknown session")
+    session = _header_value(fields.get("session") or "unknown session")
     title = f"# Session {session}"
-    return _bounded(f"{_frontmatter(fields)}\n{title}\n\n{body}\n")
+    return _bounded(f"{_frontmatter(fields)}\n{title}\n\n{_redacted_body(body)}\n")
 
 
 def _part_text(part: object) -> str | None:

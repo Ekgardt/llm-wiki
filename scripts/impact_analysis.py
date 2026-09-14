@@ -1283,17 +1283,29 @@ def _textual_fallback(
 
 
 def format_for_advisory(impact: dict, max_pages: int = 3) -> str:
-    """Format the compatibility textual fallback for SessionStart."""
-    stale = impact.get("stale_pages", [])
+    """Format the impact for SessionStart, without textual-name-match guesses.
+
+    A page that only contains a changed name as a word flagged three Karpathy pages for
+    the symbol `words` in every session. See
+    `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    """
+    stale = _advisory_pages(impact)
     if not stale:
         return ""
     lines = ["### Code-Knowledge Impact", impact["summary"], ""]
-    for page in stale[:max_pages]:
-        marker = "!!!" if page["confidence"] == "high" else "!"
-        lines.append(f"{marker} **{page['slug']}** - {page['reason']}")
+    lines.extend(_advisory_line(page) for page in stale[:max_pages])
     if len(stale) > max_pages:
         lines.append(f"... and {len(stale) - max_pages} more.")
     return "\n".join(lines)
+
+
+def _advisory_pages(impact: dict) -> list[dict]:
+    return [page for page in impact.get("stale_pages", []) if page.get("method") != "textual-name-match"]
+
+
+def _advisory_line(page: dict) -> str:
+    marker = "!!!" if page["confidence"] == "high" else "!"
+    return f"{marker} **{page['slug']}** - {page['reason']}"
 
 
 def main() -> int:

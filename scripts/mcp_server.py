@@ -5897,7 +5897,16 @@ def _record_warmup_failure(stage: str, error: Exception) -> None:
 
 
 def _warmup_stage(stage: str, run) -> bool:
-    """One stage of the warm-up; a failure is recorded, never raised."""
+    """One stage of the warm-up; a failure is recorded, never raised.
+
+    A server that is shutting down stops the warm-up here, between stages, so no
+    model is mid-inference when the interpreter finalizes. See
+    `docs/research/2026-09-14-no-model-running-at-exit.md`.
+    """
+    import inference_threads
+
+    if inference_threads.stopping.is_set():
+        return False
     try:
         run()
     except Exception as error:  # noqa: BLE001 - recorded in the health answer
@@ -5977,7 +5986,9 @@ def _start_encoder_warmup() -> None:
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return
 
-    threading.Thread(target=warmup_retrieval_path, name="encoder-warmup", daemon=True).start()
+    import inference_threads
+
+    inference_threads.start(warmup_retrieval_path, name="encoder-warmup")
 
 
 def build_server():
@@ -6025,7 +6036,21 @@ def run_server() -> int:
                 file=sys.stderr,
             )
             exit_code = 1
+        _settle_inference()
     return exit_code
+
+
+# How long a closing server waits for model inference to reach a safe point.
+SHUTDOWN_INFERENCE_SECONDS = 30.0
+
+
+def _settle_inference() -> None:
+    """No model may be mid-inference when the interpreter finalizes; say if one is."""
+    import inference_threads
+
+    left = inference_threads.settle(SHUTDOWN_INFERENCE_SECONDS)
+    if left:
+        print(f"inference still running at exit: {', '.join(left)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

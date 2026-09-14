@@ -545,13 +545,20 @@ def _maintain_heartbeat(
     stop: threading.Event,
     failures: list[BaseException],
 ) -> None:
-    current = lease
-    while not stop.wait(current.heartbeat_seconds):
-        try:
-            current = registry.heartbeat(current)
-        except BaseException as exc:
-            failures.append(exc)
-            return
+    # A busy database is retried until the lease expires; a lost fence is final.
+    # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+    from lease_renewal import renew_until_stopped
+    from reliable_memory import DEFAULTS
+
+    ended = renew_until_stopped(
+        lambda: registry.heartbeat(lease),
+        interval=lease.heartbeat_seconds,
+        lease_seconds=lease.ttl_seconds,
+        attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+        stop=stop,
+    )
+    if ended is not None:
+        failures.append(ended)
 
 
 def _verify_heartbeat(
@@ -1422,22 +1429,57 @@ def _same_bytes(source: Path, destination: Path) -> bool:
     return _hash_file(source, float("inf")) == _hash_file(destination, float("inf"))
 
 
-def _publish_one(source: Path, destination: Path) -> str:
-    """Create the destination exclusively; an identical file is not a conflict.
+def _destination_state(source: Path, destination: Path) -> str:
+    """`absent`, `identical`, or `conflict` for one destination."""
+    if not destination.exists() and not destination.is_symlink():
+        return "absent"
+    if destination.is_file() and _same_bytes(source, destination):
+        return "identical"
+    return "conflict"
 
-    The exclusive create is what makes this safe against anything that appeared
-    between the check and the write: it becomes the same refusal, never an
-    overwrite.
+
+def _planned_publication(pairs: list[tuple[Path, Path]]) -> tuple[list[tuple[Path, Path]], int]:
+    """(the files to write, how many are already identical); refused before any write.
+
+    See `docs/research/2026-09-14-a-publication-is-all-or-nothing.md`.
     """
+    grouped: dict[str, list[tuple[Path, Path]]] = {"absent": [], "identical": [], "conflict": []}
+    for source, destination in pairs:
+        grouped[_destination_state(source, destination)].append((source, destination))
+    _refuse_conflicts(grouped["conflict"])
+    return grouped["absent"], len(grouped["identical"])
+
+
+def _refuse_conflicts(conflicts: list[tuple[Path, Path]]) -> None:
+    if conflicts:
+        raise BackupError("publish_conflict", (str(conflicts[0][1]),))
+
+
+def _write_new(source: Path, destination: Path) -> None:
+    """Create exclusively and make it durable: the file and the entry that names it."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(destination, "xb") as handle:
             handle.write(source.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
     except FileExistsError:
-        if _same_bytes(source, destination):
-            return "identical"
         raise BackupError("publish_conflict", (str(destination),)) from None
-    return "published"
+    fsync_directory(destination.parent)
+
+
+def _write_all_or_none(pairs: list[tuple[Path, Path]], deadline: float) -> None:
+    """Every file, or none: a failure part-way removes what this run created."""
+    written: list[Path] = []
+    try:
+        for source, destination in pairs:
+            _deadline(deadline)
+            _write_new(source, destination)
+            written.append(destination)
+    except BaseException:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
 
 
 def publish_restored_image(
@@ -1453,25 +1495,20 @@ def publish_restored_image(
     This is the step that used to be a manual `cp -r`: the one part of moving
     memory to a new machine with no verification, no refusal and no record. The
     image is validated again here — an image edited between restore and publish
-    is refused — and every destination must be absent or byte-identical, so a
-    populated vault is refused by the first conflicting path rather than merged.
+    is refused — and every destination must be absent or byte-identical, checked for
+    all files before the first is written, so a populated vault is refused whole rather
+    than merged; a failure part-way removes what was written.
     """
     staged = Path(image).resolve(strict=True)
     _validate_restored_image(staged, expected_manifest_sha256, deadline=deadline)
-    published = identical = 0
-    for source, destination in _publication_targets(
-        staged, Path(vault_root).resolve(), Path(state_root).resolve()
-    ):
-        _deadline(deadline)
-        if _publish_one(source, destination) == "identical":
-            identical += 1
-        else:
-            published += 1
+    pairs = _publication_targets(staged, Path(vault_root).resolve(), Path(state_root).resolve())
+    to_write, identical = _planned_publication(pairs)
+    _write_all_or_none(to_write, deadline)
     _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
     return {
         "schema_version": "private-vault-publish-receipt/v1",
         "manifest_sha256": expected_manifest_sha256,
-        "published_files": published,
+        "published_files": len(to_write),
         "identical_files": identical,
     }
 

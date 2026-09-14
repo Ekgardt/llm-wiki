@@ -17,13 +17,13 @@ Procedure:
    - `--file knowledge/daily/YYYY-MM-DD.md` = compile one specific daily log
    - `--dry-run` = plan only, no writes, no state or log updates
 2. The script already:
-   - reads `docs/AGENTS.md`, `knowledge/index.md`, `knowledge/log.md`, existing knowledge pages
+   - reads `docs/AGENTS.md`, `knowledge/index.md`, `knowledge/log.local.md`, existing knowledge pages
     - writes/updates pages under `knowledge/notes/`
     - runs `scripts/rebuild_memory_index.py`
-    - appends a dated entry to `knowledge/log.md`
+    - appends a dated entry to `knowledge/log.local.md`
     - records compiled hashes in `$LLM_WIKI_STATE_ROOT/run/state.json` (gitignored, inside the vault)
 3. Read the script's `COMPILE_DONE:` line to see which pages were touched.
-4. If the result is unsatisfying (e.g. a daily log held material the script did not lift), make targeted Edit/Write changes manually, then re-run `uv run python scripts/rebuild_memory_index.py` and append a corrective entry to `knowledge/log.md`.
+4. If the result is unsatisfying (e.g. a daily log held material the script did not lift), make targeted Edit/Write changes manually, then re-run `uv run python scripts/rebuild_memory_index.py` and append a corrective entry to `knowledge/log.local.md`.
 
 Return:
 - which daily logs were processed

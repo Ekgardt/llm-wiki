@@ -78,6 +78,11 @@ READ_BUSY_MS = 250
 DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
 DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
+# An unregistered, invalid generation directory touched this recently may be a build
+# in flight under another fence; the longest builder bound is 15 minutes. See
+# `docs/research/2026-09-14-a-build-in-flight-is-not-an-orphan.md`; the rule itself is
+# `generation_catalog.untouched_for`, shared with the prune.
+GENERATION_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 # How long a probe that gave up waits for the peer it killed to be reaped.
@@ -104,8 +109,6 @@ from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
-# Two missed beats still leave the 120-second lease alive; the third would not.
-MAX_HEARTBEAT_FAILURES = 2
 FILESYSTEM_PROBE_SECONDS = 1.0
 TRANSACTION_REQUIRED_COLUMNS = {
     "id",
@@ -7050,6 +7053,34 @@ def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
         database.commit()
 
 
+def _heartbeat_interval(lease: dict[str, object]) -> float:
+    """The renewal pace the held lease was granted, not a constant of another schema.
+
+    A registry lease carries its own timing: `repair` is 120 s renewed every 40,
+    `doctor` is 30 s renewed every 10. Renewing a `doctor` lease every 40 s found
+    it expired at the first beat and cancelled every fenced build at 44 s, each
+    night from 2026-09-13. Research:
+    `docs/research/2026-09-14-a-heartbeat-beats-at-the-pace-of-its-own-lease.md`.
+    """
+    owner = lease.get("owner")
+    if owner is None:
+        return MAINTENANCE_HEARTBEAT_SECONDS
+    return float(owner.heartbeat_seconds)
+
+
+def _lease_seconds(lease: dict[str, object]) -> float:
+    """How long the held lease lasts from a renewal: its own TTL, or the legacy row's."""
+    owner = lease.get("owner")
+    if owner is None:
+        return float(MAINTENANCE_LEASE_SECONDS)
+    return float(owner.ttl_seconds)
+
+
+def _transient_beat_failure(error: BaseException) -> bool:
+    """Every lost fence is a RuntimeError; anything else may pass if tried again."""
+    return not isinstance(error, RuntimeError)
+
+
 class _MaintenanceHeartbeat:
     """Keep one fenced maintenance owner live through cancellable repair work."""
 
@@ -7063,6 +7094,7 @@ class _MaintenanceHeartbeat:
         self.coordinator = coordinator
         self.lease = lease
         self.deadline = deadline
+        self.interval = _heartbeat_interval(lease)
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._thread: threading.Thread | None = None
@@ -7080,28 +7112,38 @@ class _MaintenanceHeartbeat:
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=max(1.0, MAINTENANCE_HEARTBEAT_SECONDS * 2))
+            self._thread.join(timeout=max(1.0, self.interval * 2))
         _release_maintenance_owner(self.coordinator, self.lease)
 
     def _heartbeat_loop(self) -> None:
-        failures = 0
-        while not self._stop.wait(MAINTENANCE_HEARTBEAT_SECONDS):
-            if self._beat_once():
-                failures = 0
-                continue
-            failures += 1
-            if failures >= MAX_HEARTBEAT_FAILURES:
-                self._lost.set()
-                return
+        """Renew on the lease's pace; a busy database is retried until the lease expires.
+
+        Counting two misses let a 30-second lease expire behind one slow failure.
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self.interval,
+            lease_seconds=_lease_seconds(self.lease),
+            attempt_seconds=reliable_memory.DEFAULTS.markdown_busy_ms / 1_000,
+            stop=self._stop,
+            transient=_transient_beat_failure,
+        )
+        if ended is not None:
+            self._lost.set()
+
+    def _renew(self) -> None:
+        _heartbeat_maintenance_owner(self.coordinator, self.lease)
 
     def _beat_once(self) -> bool:
         """True when the lease was renewed; False on a transient failure.
 
         A fence genuinely taken by someone else ends the pass at once. Anything
-        else — a busy database, a lock held by a writer — is retried: the lease
-        outlives two missed beats, and treating a locked database as a lost fence
-        threw away whole seven-minute generation builds on this vault while its
-        own capture workers were writing.
+        else — a busy database, a lock held by a writer — is retried: treating a
+        locked database as a lost fence threw away whole seven-minute generation
+        builds on this vault while its own capture workers were writing.
         """
         try:
             _heartbeat_maintenance_owner(self.coordinator, self.lease)
@@ -7182,7 +7224,16 @@ def _cleanup_stop_reached(deadline: float, cancelled) -> bool:
 
 
 def _skip_generation_child(entry: os.DirEntry, registered: set[str]) -> bool:
-    return entry.name in registered or not entry.is_dir(follow_symlinks=False)
+    if entry.name in registered or not entry.is_dir(follow_symlinks=False):
+        return True
+    return _written_within_grace(Path(entry.path))
+
+
+def _written_within_grace(path: Path) -> bool:
+    """Whether a build could still be writing here; an unreadable directory is kept."""
+    from generation_catalog import untouched_for
+
+    return not untouched_for(path, GENERATION_ORPHAN_GRACE_SECONDS)
 
 
 def _removable_generation_orphan(
@@ -8324,57 +8375,6 @@ def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
     return _unblock_capabilities(root, state_root, repaired)
 
 
-def _worker_state_root_matches(state_root: Path) -> bool:
-    configured = Path(
-        os.environ.get(
-            "LLM_WIKI_STATE_ROOT",
-            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent),
-        )
-    ).resolve()
-    return configured == Path(state_root).resolve()
-
-
-def _worker_should_stop(remaining: int, cancelled) -> bool:
-    return remaining <= 0 or bool(cancelled and cancelled())
-
-
-def _run_bounded_worker(
-    root: Path,
-    state_root: Path,
-    *,
-    deadline: float = float("inf"),
-    cancelled=None,
-) -> int:
-    from memory_queue import (
-        _acquire_queue_owner,
-        _manual_processor,
-        _release_queue_owner,
-        active_or_legacy_memory_queue,
-        run_worker,
-    )
-
-    active_or_legacy_memory_queue(root, state_root)
-    if not _worker_state_root_matches(state_root):
-        return 0
-    remaining = max(0, min(1, int(deadline - time.monotonic() + 0.999)))
-    if _worker_should_stop(remaining, cancelled):
-        return 0
-    owner = _acquire_queue_owner(
-        state_root, "worker", "worker_busy", ttl_seconds=MAINTENANCE_LEASE_SECONDS
-    )
-    try:
-        summary = run_worker(
-            _manual_processor,
-            max_tasks=20,
-            max_seconds=remaining,
-            idle_seconds=0,
-            cancelled=cancelled,
-        )
-        return summary.processed
-    finally:
-        _release_queue_owner(owner)
-
-
 _DEFERRED_BY_ACTION = {
     "runtime": {"runtime"},
     "transactions": {"transactions"},
@@ -8677,19 +8677,6 @@ def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
     context.repaired.append({"action": "rebuild_claim_index"})
 
 
-def _record_bounded_worker_run(guard: Any, context: _RepairContext) -> None:
-    """Run the bounded worker and record how much of the queue it processed."""
-    processed = guard.run(
-        _run_bounded_worker,
-        context.root_path,
-        context.state_path,
-        deadline=context.deadline,
-        cancelled=guard.cancelled,
-    )
-    if processed:
-        context.repaired.append({"action": "run_bounded_worker", "count": processed})
-
-
 def _repair_queue_followups(
     guard: Any, context: _RepairContext, queue_v2_ready: bool
 ) -> None:
@@ -8702,7 +8689,9 @@ def _repair_queue_followups(
         context.repaired.append(
             {"action": "unblock_capabilities", "count": unblocked}
         )
-    _record_bounded_worker_run(guard, context)
+    # No worker runs here: within a repair's budget it could only claim a task and
+    # kill it, costing an attempt. See
+    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
 
 
 def _run_selected_repairs(selected: set[str], ordered: tuple) -> None:

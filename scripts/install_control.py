@@ -533,6 +533,12 @@ def _launchd_calendar(kind: str) -> dict[str, int]:
     return {"Hour": 4, "Minute": 0, "Weekday": 0}
 
 
+def _launchd_path(uv_path: Path) -> str:
+    from installer_config import scheduled_path
+
+    return scheduled_path(uv_path, _LAUNCHD_DEFAULT_PATH)
+
+
 def _launchd_job(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
     label = f"io.github.ekgardt.llm-wiki.{kind}"
     log_path = Path(state_root).resolve() / "logs" / f"scheduled-{kind}.log"
@@ -541,6 +547,7 @@ def _launchd_job(root: Path, state_root: Path, uv_path: Path, kind: str) -> byte
             "LLM_WIKI_ROOT": str(Path(root).resolve()),
             "LLM_WIKI_STATE_ROOT": str(Path(state_root).resolve()),
             **dict(_provider_items()),
+            "PATH": _launchd_path(uv_path),
         },
         "Label": label,
         "ProcessType": "Background",
@@ -583,6 +590,8 @@ def _systemd_literal(value: str) -> str:
 # The PATH a systemd user manager hands its services on Linux. It contains no
 # per-user directory, which is where the LLM provider CLIs are installed.
 _SYSTEMD_USER_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# The PATH launchd gives a job whose EnvironmentVariables set none (launchd.plist(5)).
+_LAUNCHD_DEFAULT_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def _scheduled_path(uv_path: Path) -> str:
@@ -594,7 +603,15 @@ def _scheduled_path(uv_path: Path) -> str:
     provider, finds none, and fails where the same command from a login shell
     succeeds.
     """
-    return f"{Path(uv_path).resolve().parent}:{_SYSTEMD_USER_PATH}"
+    from installer_config import scheduled_path
+
+    return scheduled_path(uv_path, _SYSTEMD_USER_PATH)
+
+
+# A oneshot service has no start timeout by default, so a hung pass would hold its
+# lease forever. The limits match the Windows tasks and sit above each pass's own worst
+# case. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
+SYSTEMD_START_LIMITS = {"nightly": "3h", "weekly": "5h"}
 
 
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
@@ -607,6 +624,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "",
         "[Service]",
         "Type=oneshot",
+        f"TimeoutStartSec={SYSTEMD_START_LIMITS[kind]}",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
         *(f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in _provider_items()),

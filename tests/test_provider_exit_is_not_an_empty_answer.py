@@ -112,8 +112,14 @@ def test_a_clean_exit_with_no_output_is_still_an_empty_answer(monkeypatch):
     assert llm_client._call_claude(descriptor, "prompt", "system") == ""
 
 
-def test_a_nonzero_exit_that_still_produced_an_answer_keeps_the_answer(monkeypatch):
-    """No product behaviour is withdrawn: a usable answer is still returned."""
-    descriptor = _claude_returning(monkeypatch, 1, "the answer", "warning: noisy")
+def test_what_a_failed_cli_printed_on_stdout_is_named_not_answered(monkeypatch):
+    """`claude -p` prints an API error on stdout and exits 1 (probed 2026-09-14).
 
-    assert llm_client._call_claude(descriptor, "prompt", "system") == "the answer"
+    That text used to reach the parsers as the model's answer. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    printed = "There's an issue with the selected model (no-such-model-xyz)."
+    descriptor = _claude_returning(monkeypatch, 1, printed, "warning: noisy")
+
+    with pytest.raises(llm_client.ProviderExited, match="issue with the selected model"):
+        llm_client._call_claude(descriptor, "prompt", "system")

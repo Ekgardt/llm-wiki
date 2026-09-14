@@ -211,7 +211,7 @@ def _git_tracked_paths() -> set[str] | None:
     """
     try:
         out = subprocess.check_output(
-            ["git", "ls-files", "-z"],
+            ["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
             cwd=str(ROOT),
             stderr=subprocess.DEVNULL,
         )
@@ -539,6 +539,28 @@ def check_missing_frontmatter(pages: list[Path]) -> list[str]:
         if not FRONTMATTER_RE.match(content):
             out.append(_rel(md))
     return out
+
+
+def _page_frontmatter_problems(md: Path) -> list[str]:
+    from corpus_snapshot import frontmatter_problems
+
+    if md.name in EDITORIAL_NAMES:
+        return []
+    try:
+        return frontmatter_problems(md.read_bytes())
+    except OSError:
+        return []
+
+
+def check_unreadable_frontmatter(pages: list[Path]) -> list[str]:
+    """Pages whose metadata the corpus cannot read; each is indexed without it.
+
+    The snapshot no longer refuses the whole vault over one such page, so this is
+    where the owner learns which fields were dropped. See
+    `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
+    named = ((md, _page_frontmatter_problems(md)) for md in pages)
+    return [f"{_rel(md)}: {'; '.join(problems)}" for md, problems in named if problems]
 
 
 def _frontmatter_of(md: Path) -> str | None:
@@ -916,17 +938,34 @@ Output format: one finding per line, prefixed with "- ". Each line: "<page A> vs
 """
 
 
+# A finding line: `- `, `* `, `• ` or `1.`/`1)` before it. See
+# `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+_FINDING_LINE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+(?P<finding>\S.*)$")
+CONTRADICTIONS_NOT_RUN = "(contradiction check did not run: no provider answered)"
+CONTRADICTIONS_UNREADABLE = "(contradiction check answered in a form it could not read)"
+
+
 def _bulleted_findings(answer: str) -> list[str]:
-    return [line[2:].strip() for line in answer.splitlines() if line.startswith("- ")]
+    matches = (_FINDING_LINE.match(line) for line in answer.splitlines())
+    return [match.group("finding").strip() for match in matches if match]
+
+
+def _declares_none(answer: str) -> bool:
+    return answer.strip().strip("*_`.").upper() == "NO_CONTRADICTIONS"
 
 
 def _contradiction_findings(answer: str | None) -> list[str]:
-    if not answer or "NO_CONTRADICTIONS" in answer.upper():
-        return []
-    if answer.startswith("("):
-        # llm_client returns parenthesized error strings on failure.
-        return [answer]
-    return _bulleted_findings(answer)
+    """Findings, nothing when the reply says there are none, or why it said nothing usable.
+
+    No reply, and a reply that was neither findings nor the token, used to read as
+    "no contradictions".
+    """
+    if answer is None:
+        return [CONTRADICTIONS_NOT_RUN]
+    findings = _bulleted_findings(answer)
+    if findings or _declares_none(answer):
+        return findings
+    return [CONTRADICTIONS_UNREADABLE]
 
 
 def check_contradictions(pages: list[Path]) -> list[str]:
@@ -961,6 +1000,7 @@ CHECK_NAMES = (
     "sparse_pages",
     # Phase 2 OKF conformance checks.
     "missing_frontmatter",
+    "unreadable_frontmatter",
     "missing_required_type",
     "invalid_type_value",
     "missing_sources_section",
@@ -1023,6 +1063,7 @@ def _page_checks(
         "missing_backlinks": check_missing_backlinks(pages, search_roots),
         "sparse_pages": check_sparse_pages(pages, sparse_words),
         "missing_frontmatter": check_missing_frontmatter(pages),
+        "unreadable_frontmatter": check_unreadable_frontmatter(pages),
         "missing_required_type": check_missing_required_type(pages),
         "invalid_type_value": check_invalid_type_value(pages),
         "missing_sources_section": check_missing_sources_section(pages),

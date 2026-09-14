@@ -19,7 +19,6 @@ See `docs/research/2026-09-09-fact-keys-beside-the-turn.md`.
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sqlite3
 import sys
@@ -28,7 +27,10 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
+# numpy (the hybrid profile) is imported where vectors are computed, so this module and
+# the answer path that imports it load on a base install. See
+# `docs/research/2026-09-14-a-base-install-can-search.md`.
+
 
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
@@ -175,6 +177,8 @@ class KeyStore:
         ).fetchall()
         if not rows:
             return []
+        import numpy as np
+
         matrix = np.stack([np.frombuffer(row[4], dtype=np.float32) for row in rows])
         query = np.asarray(vector, dtype=np.float32)
         scores = matrix @ query / (np.linalg.norm(matrix, axis=1) * (np.linalg.norm(query) or 1.0) + 1e-9)
@@ -185,6 +189,8 @@ class KeyStore:
 def _blob(vectors: Sequence[Sequence[float]] | None, index: int) -> bytes | None:
     if vectors is None or index >= len(vectors):
         return None
+    import numpy as np
+
     return np.asarray(vectors[index], dtype=np.float32).tobytes()
 
 
@@ -207,10 +213,10 @@ def _clean_keys(value: object) -> list[str]:
 
 
 def _loaded(raw: str | None) -> dict:
-    from query_memory import _unfenced
+    from reply_json import reply_document
 
     try:
-        document = json.loads(_unfenced(raw or ""))
+        document = reply_document(raw or "")
     except ValueError:
         return {}
     if not isinstance(document, dict):
@@ -242,6 +248,8 @@ def extract(turns: Sequence[Turn], ask: Callable[[str, str], str | None]) -> dic
 def _encoded(keys: Sequence[str], encode: Callable | None) -> Sequence[Sequence[float]] | None:
     if encode is None or not keys:
         return None
+    import numpy as np
+
     return np.asarray(encode(list(keys), False), dtype=np.float32).tolist()
 
 
@@ -269,10 +277,18 @@ def _past(deadline: float | None) -> bool:
 
 
 def _key_batch(store: KeyStore, batch: Sequence[Turn], found: Mapping[str, list[str]], encode) -> int:
-    for turn in batch:
-        keys = found.get(turn.span_sha256, [])
+    """Record the turns the reply named; a turn it did not cover is asked again.
+
+    Every turn of a batch used to be marked keyed, so a reply that failed or
+    skipped a turn left it keyless forever. An empty list is the model saying the
+    turn states nothing, and counts. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    answered = [turn for turn in batch if turn.span_sha256 in found]
+    for turn in answered:
+        keys = found[turn.span_sha256]
         store.add(turn, keys, _encoded(keys, encode))
-    return len(batch)
+    return len(answered)
 
 
 def search(store: KeyStore, question: str, limit: int, encode: Callable | None = None) -> list[dict]:
@@ -283,7 +299,7 @@ def search(store: KeyStore, question: str, limit: int, encode: Callable | None =
     """
     hits = list(store.lexical(question, limit))
     if encode is not None:
-        hits.extend(store.dense(np.asarray(encode([question], True))[0], limit))
+        hits.extend(store.dense(encode([question], True)[0], limit))
     votes: dict[tuple, int] = {}
     for source_path, byte_start, byte_end, _key in hits:
         votes[(source_path, byte_start, byte_end)] = votes.get((source_path, byte_start, byte_end), 0) + 1

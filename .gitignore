@@ -57,6 +57,9 @@ knowledge/inbox/**
 !knowledge/inbox/README.md
 knowledge/raw/**
 !knowledge/raw/README.md
+# The vault's editorial log. The tracked knowledge/log.md is the shipped template and
+# nothing writes it; see docs/research/2026-09-14-the-vault-log-is-private.md.
+knowledge/log.local.md
 
 # === Skills allowlist ===
 # Only the 9 public memory-system skills ship in this repo.

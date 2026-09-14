@@ -899,7 +899,8 @@ def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
     def update(mutator, **kwargs):
         nonlocal updates
         updates += 1
-        if updates == 3:
+        # claim, in-flight record (2026-09-14), journal, then this commit
+        if updates == 4:
             raise TimeoutError("commit state busy")
         mutator(state)
         return state

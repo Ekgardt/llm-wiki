@@ -138,6 +138,21 @@ def _in_scope(page_project: str | None, project: str | None) -> bool:
     return page_project.lower() == project.lower()
 
 
+SUMMARY_MAX_CHARS = 150
+
+
+def _clipped(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
+    """At most `limit` characters, cut at a word boundary with an ellipsis when cut.
+
+    See `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[: limit - 1]
+    cut = head.rsplit(" ", 1)[0] or head
+    return cut.rstrip(" ,;:—-") + "…"
+
+
 def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
     md = ROOT / relative
     title_m = H1_RE.search(content)
@@ -145,7 +160,7 @@ def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
     return {
         "type": page_type,
         "title": title_m.group(1).strip() if title_m else md.stem,
-        "summary": (summary_m.group(1).strip()[:150] if summary_m else ""),
+        "summary": _clipped(summary_m.group(1).strip() if summary_m else ""),
         "source": "knowledge",
         "path": md.relative_to(ROOT).as_posix(),
     }
@@ -162,7 +177,7 @@ def _feedback_correction(relative: str, source_bytes: bytes, project: str | None
     return {
         "type": candidate.get("type", "feedback"),
         "title": candidate.get("text", "")[:80],
-        "summary": candidate.get("text", "")[:150],
+        "summary": _clipped(candidate.get("text", "")),
         "source": "feedback",
         "path": candidate.get("promoted_to", ""),
     }

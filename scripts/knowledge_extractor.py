@@ -9,16 +9,18 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
-import yaml
-from corpus_snapshot import CapturedSource
+from corpus_snapshot import CapturedSource, read_frontmatter
+from graph_storable import storable_identity_key, storable_metadata
 from reliable_memory import canonical_json_bytes
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
 MAX_SOURCES = 10_000
 MAX_RECORDS = 100_000
 
-_FRONTMATTER = re.compile(rb"\A---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n", re.MULTILINE | re.DOTALL)
-_WIKILINK = re.compile(rb"\[\[([^\]|#]+?)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+# A wikilink lives on one line. Without the line breaks in the classes, `[[` in a
+# quoted pandas `df[["Latitude", ...` and a `]]` several turns later were read as
+# one link whose target was a page of transcript, and the writer refused it.
+_WIKILINK = re.compile(rb"\[\[([^\]|#\r\n]+?)(?:#[^\]|\r\n]+)?(?:\|[^\]\r\n]+)?\]\]")
 _CODE_SPAN = re.compile(rb"`([^`\r\n]+)`")
 _BARE_SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
@@ -28,6 +30,17 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
 # the generation writer refused a target over 4096 characters, and the whole
 # nightly build died on one quoted line.
 MAX_SYMBOL_REFERENCE_CHARS = 512
+# What the generation writer stores as an observation's target
+# (`evidence_graph._text`). A reference it would refuse names no page, and
+# recording it would kill the whole build over one source.
+MAX_OBSERVED_TARGET_CHARS = 4096
+_UNSTORABLE_TARGET_CHARACTERS = frozenset("\x00\r\n")
+
+
+def _storable_target(target: str) -> bool:
+    if not target or len(target) > MAX_OBSERVED_TARGET_CHARS:
+        return False
+    return _UNSTORABLE_TARGET_CHARACTERS.isdisjoint(target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +115,16 @@ def _evidence(
 
 
 def _node(node_id: str, kind: str, scheme: str, key: str, **metadata: object) -> dict[str, object]:
+    """A node the writer stores: raw YAML values and over-long keys made storable.
+
+    See `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
+    """
     return {
         "node_id": node_id,
         "kind": kind,
         "identity_scheme": scheme,
-        "identity_key": key,
-        "metadata": metadata,
+        "identity_key": storable_identity_key(key),
+        "metadata": storable_metadata(metadata),
     }
 
 
@@ -124,17 +141,13 @@ def _occurrence(source: CapturedSource, node_id: str, role: str, start: int, end
     }
 
 
-def _frontmatter(source: CapturedSource) -> tuple[dict[str, object], re.Match[bytes] | None]:
-    match = _FRONTMATTER.search(source.content)
-    if match is None:
-        return {}, None
-    try:
-        value = yaml.safe_load(match.group(1).decode("utf-8", errors="strict")) or {}
-    except (UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise ValueError(f"invalid knowledge frontmatter: {source.record.relative_path}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("knowledge frontmatter must be a mapping")
-    return value, match
+def _frontmatter(source: CapturedSource) -> dict[str, object]:
+    """The snapshot's own reading, so the two readers never disagree on a page.
+
+    Unreadable metadata costs the page its metadata, not the generation. See
+    `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
+    return read_frontmatter(source.content).mapping
 
 
 def _field_span(source: CapturedSource, field: str, fallback: tuple[int, int]) -> tuple[int, int]:
@@ -206,7 +219,7 @@ class _Extraction:
     def _index_pages(self) -> None:
         for source in self.ordered:
             _check_stop(self.deadline, self.monotonic, self.cancelled)
-            metadata, _match = _frontmatter(source)
+            metadata = _frontmatter(source)
             path = source.record.relative_path
             self.metadata_by_path[path] = metadata
             self.page_by_path[path] = _identifier("page", path)
@@ -264,6 +277,8 @@ class _Extraction:
         start: int,
         end: int,
     ) -> None:
+        if not _storable_target(target):
+            return
         key = (
             f"{source.record.logical_id}:{source_node}:{edge}:{target}:{reason}"
             f":{start}:{end}"

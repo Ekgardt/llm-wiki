@@ -91,10 +91,10 @@ def _indexable(worktree: Worktree) -> bool:
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
-    from repository_scope import sanitized_git_environment
+    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
     return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", "-C", str(root), *arguments],
+        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         shell=False,
@@ -300,6 +300,8 @@ def _followed(path: Path, roots, state_root, deadline) -> dict:
         return follow_worktree(path, roots=roots, state_root=state_root, deadline=deadline)
     except index.RepositoryIndexRefused as refusal:
         return {"directory": str(path), **refusal.as_dict()}
+    except TimeoutError as stopped:
+        return {"directory": str(path), **index.deferred(stopped)}
 
 
 def follow_worktrees(

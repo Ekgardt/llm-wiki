@@ -34,6 +34,7 @@ Design:
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import functools
 import hashlib
@@ -42,7 +43,6 @@ import math
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -799,16 +799,40 @@ def _is_literal_loopback_endpoint(endpoint: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# OpenCode's server listens unauthenticated unless OPENCODE_SERVER_PASSWORD is set, and
+# a loopback port proves nothing about who listens on it: without the password no
+# prompt is sent. See `docs/research/2026-09-14-opencode-only-with-its-password.md`.
+def _opencode_base() -> str:
+    return f"http://127.0.0.1:{int(os.environ.get('OPENCODE_PORT', '4096'))}"
+
+
+def _opencode_authorization() -> str | None:
+    password = os.environ.get("OPENCODE_SERVER_PASSWORD")
+    if not password:
+        return None
+    username = os.environ.get("OPENCODE_SERVER_USERNAME") or "opencode"
+    credentials = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+    return f"Basic {credentials}"
+
+
+def _opencode_request(url: str, *, method: str = "GET", body: bytes | None = None) -> urllib.request.Request:
+    headers = {"Authorization": _opencode_authorization() or "", "Content-Type": "application/json"}
+    return urllib.request.Request(url, data=body, headers=headers, method=method)
+
+
+def _opencode_healthy() -> bool:
+    with urllib.request.urlopen(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
+        payload = json.loads(resp.read().decode("utf-8") or "{}")
+    return isinstance(payload, dict) and payload.get("healthy") is True
+
+
 def _probe_opencode(descriptor: ProviderDescriptor) -> bool:
-    """Is OpenCode server alive on localhost:4096 (or OPENCODE_PORT)?"""
-    port = int(os.environ.get("OPENCODE_PORT", "4096"))
+    """Is an authenticated OpenCode server healthy on localhost:4096 (or OPENCODE_PORT)?"""
+    if _opencode_authorization() is None:
+        return False
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-            # Socket open — confirm it's actually OpenCode via /health.
-            req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
-                return resp.status == 200
-    except (OSError, urllib.error.URLError):
+        return _opencode_healthy()
+    except (OSError, urllib.error.URLError, ValueError):
         return False
 
 
@@ -1130,10 +1154,7 @@ def _parse_opencode_usage(data: object) -> TokenUsage:
 
 
 def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
-    )
+    request = _opencode_request(url, method="POST", body=json.dumps(payload).encode("utf-8"))
     with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
         raw = response.read().decode("utf-8")
     if not raw:
@@ -1186,24 +1207,17 @@ def _is_text_part(part: object) -> bool:
 
 def _opencode_delete(base: str, session_id: str) -> None:
     try:
-        request = urllib.request.Request(
-            f"{base}/session/{session_id}", method="DELETE"
-        )
+        request = _opencode_request(f"{base}/session/{session_id}", method="DELETE")
         urllib.request.urlopen(request, timeout=5.0)
     except (urllib.error.URLError, OSError):
         pass
 
 
 def _opencode_answer(base: str, session_id: str, prompt: str, system_prompt: str):
+    body: dict[str, object] = {"parts": [{"type": "text", "text": prompt}]}
     if system_prompt:
-        _opencode_post(
-            f"{base}/session/{session_id}/prompt",
-            {"noReply": True, "parts": [{"type": "text", "text": system_prompt}]},
-        )
-    data = _opencode_post(
-        f"{base}/session/{session_id}/prompt",
-        {"parts": [{"type": "text", "text": prompt}]},
-    )
+        body["system"] = system_prompt
+    data = _opencode_post(f"{base}/session/{session_id}/message", body)
     return BackendResponse(_opencode_text(data), _parse_opencode_usage(data))
 
 
@@ -1213,9 +1227,10 @@ def _call_opencode(
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
 ) -> str | BackendResponse:
-    """Call OpenCode's HTTP API: create session → prompt → read → delete."""
-    port = int(os.environ.get("OPENCODE_PORT", "4096"))
-    base = f"http://127.0.0.1:{port}"
+    """Call OpenCode's HTTP API: create session → message → read → delete."""
+    if _opencode_authorization() is None:
+        return ""
+    base = _opencode_base()
     session_id = _opencode_session_id(
         _opencode_post(f"{base}/session", {"title": "memory-pipeline-ephemeral"})
     )
@@ -1392,7 +1407,12 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
     configured voice — "От вас ничего не нужно" — instead of the JSON plan the
     schema asked for, three times in a row. `--system-prompt` replaces the
     assistant persona with ours; `--setting-sources` with nothing after it loads
-    no settings files at all. Both are used only when this CLI has them.
+    no settings files at all. A memory call carries private vault text and uses no
+    tools: `--no-session-persistence` keeps the CLI from saving it as a session
+    outside the vault, and `--tools ""` with `--strict-mcp-config` drops about
+    13 000 input tokens of tool descriptions a call (measured 2026-09-14, see
+    `docs/research/2026-09-14-a-memory-call-leaves-no-session.md`). Each flag is
+    used only when this CLI has it.
     """
     flags = _claude_cli_flags()
     optional = (
@@ -1401,6 +1421,9 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
             ["--system-prompt", system_prompt],
         ),
         ("--setting-sources" in flags, ["--setting-sources", ""]),
+        ("--no-session-persistence" in flags, ["--no-session-persistence"]),
+        ("--tools" in flags, ["--tools", ""]),
+        ("--strict-mcp-config" in flags, ["--strict-mcp-config"]),
         (bool(model), ["--model", str(model)]),
     )
     command = [claude_bin, "-p", "--output-format", "text"]
@@ -1420,18 +1443,17 @@ def _claude_stdin(system_prompt: str, prompt: str) -> str:
 def _claude_answer(
     descriptor: ProviderDescriptor, result: subprocess.CompletedProcess
 ) -> str:
-    """What the finished process said, or the reason it never said anything.
+    """What the finished process said, or the failure it printed instead.
 
-    A usable answer is still an answer, whatever the exit status: nothing that
-    worked before is withdrawn here. Only a death with nothing to show for it
-    becomes a named failure instead of an anonymous empty string.
+    A non-zero exit is a failure whatever it printed: `claude -p` reports an API or
+    configuration error on stdout and exits 1, and that text used to reach the
+    parsers as the model's answer. What it printed is named in the error. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
     """
-    answer = result.stdout or ""
-    if result.returncode == 0 or answer.strip():
-        return answer
-    raise ProviderExited(
-        descriptor.provider, result.returncode, _stderr_excerpt(result.stderr)
-    )
+    if result.returncode == 0:
+        return result.stdout or ""
+    printed = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    raise ProviderExited(descriptor.provider, result.returncode, _stderr_excerpt(printed))
 
 
 def _call_claude(

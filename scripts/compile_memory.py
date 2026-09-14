@@ -41,6 +41,7 @@ import maybe_compile  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
+    CLAIM_LEDGER_RE,
     LEDGER_SCHEMA,
     RELATIONS,
     ClaimIndex,
@@ -97,6 +98,7 @@ from reliable_memory import (  # noqa: E402
     sha256_bytes,
     validate_schema,
 )
+from vault_log import LOG_NAME  # noqa: E402
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -108,7 +110,7 @@ KNOWLEDGE = MEMORY / "notes"
 _AGENTS_CANDIDATES = (ROOT / "docs" / "AGENTS.md", ROOT / "AGENTS.md")
 AGENTS = next((p for p in _AGENTS_CANDIDATES if p.exists()), _AGENTS_CANDIDATES[0])
 INDEX = MEMORY / "index.md"
-LOG = MEMORY / "log.md"
+LOG = MEMORY / LOG_NAME
 COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.json"
 # How many times a compile re-reads the notes tree after another writer moved
 # it under the assessment. Four, because the window is one model call wide and
@@ -1324,7 +1326,7 @@ def _claim_candidate_admitted(candidate: object, slug: str) -> bool:
 
 
 def _draft_operations(draft_text: str) -> list[object]:
-    raw_plan = _parse_json_object(draft_text)
+    raw_plan = _parse_json_object(draft_text, "operations")
     _prune_claim_candidates(raw_plan)
     _validate_rule(raw_plan, RAW_PLAN_SCHEMA, "$draft")
     if set(raw_plan) - {"operations", "audit"}:
@@ -1336,7 +1338,7 @@ def _draft_operations(draft_text: str) -> list[object]:
 
 
 def _dropped_slugs(critique_text: str) -> set[object]:
-    critique_plan = _parse_json_object(critique_text)
+    critique_plan = _parse_json_object(critique_text, "reviews")
     _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
     if set(critique_plan) != {"reviews"}:
         raise ValueError("critique output has unsupported fields")
@@ -1513,9 +1515,17 @@ def _require_bounded_response(text: str) -> None:
         raise ValueError("provider response exceeds byte limit")
 
 
-def _parse_json_object(text: str) -> dict[str, object]:
+def _parse_json_object(text: str, key: str) -> dict[str, object]:
+    """The plan a provider replied with, read by the one JSON reply reader.
+
+    First `{` to last `}` refused a plan with braces in a sentence around it, or
+    a draft followed by its correction. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    from reply_json import object_with, reply_document
+
     _require_bounded_response(text)
-    value = json.loads(_extract_json_block(text))
+    value = reply_document(text, object_with(key))
     if not isinstance(value, dict):
         raise ValueError("provider output must be a JSON object")
     return value
@@ -1619,9 +1629,16 @@ def _require_normalized_body(
         raise ValueError("compile operation content is not normalized")
 
 
+# What PyYAML refuses to read anywhere in a document: C0 controls other than tab
+# and line breaks, DEL and C1 controls other than NEL, surrogates, U+FFFE/U+FFFF.
+# One such character in a title made the page's whole frontmatter unreadable. See
+# `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+_YAML_REFUSED = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f\ud800-\udfff\ufffe\uffff]")
+
+
 def _escape_yaml(value: object) -> str:
     return (
-        str(value)
+        _YAML_REFUSED.sub("", str(value))
         .replace(chr(92), chr(92) + chr(92))
         .replace(chr(34), chr(92) + chr(34))
         .replace(chr(10), " ")
@@ -2303,9 +2320,6 @@ def _related_section(related: object) -> str:
     return "\n\n## Related\n" + "\n".join(f"- {item}" for item in related)
 
 
-_CLAIM_LEDGER = re.compile(
-    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
-)
 
 
 def _ledger_bytes(claims: list) -> bytes:
@@ -2328,7 +2342,7 @@ def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> 
     if not records:
         return page
     additions = [json.loads(canonical_json_bytes(item)) for item in records]
-    match = _CLAIM_LEDGER.search(page)
+    match = CLAIM_LEDGER_RE.search(page)
     if match is None:
         opening = b"\n\n## Claims\n```json\n"
         return page.rstrip() + opening + _ledger_bytes(additions) + b"\n```\n"
@@ -3278,11 +3292,12 @@ class _ApplyPlan:
         self._append_vault_file(
             "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
         )
-        log_source = sources.get("knowledge/log.md")
+        log_relative = LOG.relative_to(ROOT).as_posix()
+        log_source = sources.get(log_relative)
         log_bytes = _append_log_bytes(_log_before(log_source), self._log_entry())
         if len(log_bytes) > MAX_LOG_BYTES:
             raise ValueError("knowledge log exceeds after-image limit")
-        self._append_vault_file("knowledge/log.md", log_bytes, sources, MAX_LOG_BYTES)
+        self._append_vault_file(log_relative, log_bytes, sources, MAX_LOG_BYTES)
 
     def _vault_sources(self) -> dict[str, object]:
         """What is on disk outranks what one prompt had room to carry.
@@ -3500,7 +3515,8 @@ def _require_unclaimed_path(known: set[str], path: str) -> None:
 def _touched_phrase(touched: Sequence[str]) -> str:
     """Name the pages this repository publishes and count the rest.
 
-    The line lands in `knowledge/log.md`, which is tracked. Where the vault is
+    The line lands in the vault log (`vault_log.LOG_RELATIVE`), private since
+    2026-09-14 but still filtered: it may be pasted somewhere public. Where the vault is
     also the public source, a private page's slug is itself personal content,
     so it is counted instead of named. A vault that publishes everything reads
     exactly as before.
@@ -3856,26 +3872,6 @@ def _dedup_entry(page: Path) -> str:
     return head + (f" — «{named}»" if named else _summary_tail(summary))
 
 
-def _without_fences(text: str) -> str:
-    """The body of a fenced block, or the text unchanged when it is not fenced."""
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
-def _extract_json_block(text: str) -> str:
-    """Pull the outermost JSON object out of a possibly-fenced response."""
-    body = _without_fences(text.strip())
-    start = body.find("{")
-    end = body.rfind("}")
-    if start < 0 or end <= start:
-        return ""
-    return body[start : end + 1]
-
-
 def parse_compile_audit(raw: str) -> dict:
     """Extract structured audit counts from a COMPILE_AUDIT line.
 
@@ -3976,6 +3972,21 @@ def _finished_outcome(status: str, outcomes: Sequence[BatchOutcome]) -> str:
     return compile_outcome(outcomes)
 
 
+def _mark_refused(trigger: str, reason: str) -> None:
+    """A run that did not get the lock records its refusal, not the holder's status.
+
+    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    """
+    refused_iso = datetime.now().isoformat(timespec="seconds")
+
+    def _mutate(s: dict) -> None:
+        s["last_compile_refused_at"] = refused_iso
+        s["last_compile_refused_trigger"] = trigger
+        s["last_compile_refused_reason"] = reason[:500]
+
+    update_state(_mutate)
+
+
 def _mark_finished(
     trigger: str,
     status: str,
@@ -4073,12 +4084,12 @@ def main() -> int:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
-    _mark_started(args.trigger)
     lock_token, refusal = _acquire_compile_lock()
     if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
-        _mark_finished(args.trigger, "error", refusal)
+        _mark_refused(args.trigger, refusal)
         return 1
+    _mark_started(args.trigger)
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
             return _run(args)

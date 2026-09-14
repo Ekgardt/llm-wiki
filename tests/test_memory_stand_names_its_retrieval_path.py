@@ -78,3 +78,22 @@ def test_an_empty_run_claims_nothing():
     path = run_longmemeval.retrieval_path([])
 
     assert run_longmemeval.degraded_reasons(path) == []
+
+
+def test_the_printed_summary_reads_only_category_rows():
+    """Run-level sections sit beside the categories and must not be printed as one."""
+    report = {
+        "overall": {"n": 1, "scored": 1},
+        "retrieval_path": {"rows": 1},
+        "coverage": {"k12": {}},
+    }
+
+    assert [name for name, _row in run_longmemeval._category_rows(report)] == ["overall"]
+
+
+def test_a_retrieval_only_run_has_its_own_name():
+    import argparse
+
+    args = argparse.Namespace(full=True, sample=50, seed=13, retrieval_only=True)
+
+    assert run_longmemeval._run_tag(args) == "full-retrieval"

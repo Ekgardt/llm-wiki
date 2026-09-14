@@ -700,6 +700,49 @@ def _answer_outcome(
     }
 
 
+RETRIEVAL_ONLY_VARIABLE = "LLMWIKI_BENCH_RETRIEVAL_ONLY"
+DEEPEST_DEPTH = 48
+
+
+def retrieval_only() -> bool:
+    """Measure retrieval and stop: no reader, no provider tokens, no judge.
+
+    Research: `docs/research/2026-09-14-a-memory-stand-that-measures-retrieval.md`.
+    """
+    return os.environ.get(RETRIEVAL_ONLY_VARIABLE, "").strip() == "1"
+
+
+def _retrieval_only_outcome(question: dict, searchable: str, profile: str) -> dict:
+    """Coverage at 12, 24 and 48 from one deeper ranking, and no answer."""
+    from longmemeval_coverage import coverage_at_depths
+
+    deep = _retrieved_rows(searchable, profile, DEEPEST_DEPTH)
+    return {
+        "status": "retrieval_only",
+        "coverage_depths": coverage_at_depths(question, deep),
+        "hypothesis": "",
+        "error": None,
+        "error_kind": None,
+    }
+
+
+def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
+    """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
+    if retrieval_only():
+        return _retrieval_only_outcome(question, searchable, profile)
+    return _answer_outcome(
+        dated_question(question), root, snapshot, rows, metrics, profile,
+        str(question.get("answer", "")),
+        # The second look's way of asking for more than the first twelve, and
+        # for what a fanned-out sub-query finds, without the cross-encoder.
+        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
+        search=lambda query, limit, **window: _retrieved_rows(
+            query, profile, limit, rerank=False, **window
+        ),
+        chosen=policy(),
+    )
+
+
 def run_question(question: dict, work: Path) -> dict:
     """The whole per-question pipeline; always returns a result record."""
     import longmemeval_data
@@ -720,16 +763,8 @@ def run_question(question: dict, work: Path) -> dict:
     rows = _retrieved_rows(searchable, profile)
     answer_started = time.monotonic()
     metrics: dict = {}
-    outcome = _answer_outcome(
-        dated_question(question), root, snapshot, rows, metrics, profile,
-        str(question.get("answer", "")),
-        # The second look's way of asking for more than the first twelve, and
-        # for what a fanned-out sub-query finds, without the cross-encoder.
-        retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
-        search=lambda query, limit, **window: _retrieved_rows(
-            query, profile, limit, rerank=False, **window
-        ),
-        chosen=policy(),
+    outcome = _answer_or_coverage(
+        question, root, snapshot, rows, metrics, profile, searchable
     )
     finished = time.monotonic()
     return {
@@ -748,6 +783,9 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_sessions_labelled": len(_labelled_sessions(question)),
         "gold_in_candidates": gold_in_candidates(question, rows),
         "answer_session_rank": answer_session_rank(question, rows),
+        # What the reader was handed, by the dataset's own evidence labels:
+        # distinct answer sessions and flagged evidence turns, not row counts.
+        "coverage": _coverage_of(question, rows),
         **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
@@ -760,6 +798,12 @@ def run_question(question: dict, work: Path) -> dict:
         "answer_seconds": round(finished - answer_started, 2),
         "total_seconds": round(finished - started, 2),
     }
+
+
+def _coverage_of(question: dict, rows: list[dict]) -> dict:
+    from longmemeval_coverage import coverage
+
+    return coverage(question, rows)
 
 
 def _prepared_workdir(requested: str | None) -> str | None:

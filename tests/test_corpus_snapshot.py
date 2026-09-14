@@ -160,7 +160,11 @@ def test_canonical_source_manifest_invalidates_on_every_field(vault: Path):
     assert all(value != digest for value in variants)
 
 
-def test_as_of_uses_validity_and_frontmatter_must_be_mapping(vault: Path):
+def test_as_of_uses_validity_and_an_unreadable_frontmatter_costs_only_its_page(vault: Path):
+    """Since 2026-09-14 a page whose metadata is not a mapping is indexed without it.
+
+    See `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
     write(
         vault / "knowledge/notes/old.md",
         page(
@@ -173,8 +177,8 @@ def test_as_of_uses_validity_and_frontmatter_must_be_mapping(vault: Path):
     )
     write(vault / "knowledge/notes/bad.md", "---\n- not\n- a mapping\n---\n# Bad\n")
 
-    with pytest.raises(ValueError, match="frontmatter must be a mapping"):
-        collect_corpus(vault, include_historical=True)
+    tolerated = collect_corpus(vault, include_historical=True)
+    assert "knowledge/notes/bad.md" in {source.record.relative_path for source in tolerated.sources}
 
     (vault / "knowledge/notes/bad.md").unlink()
     past = collect_corpus(vault, as_of=datetime(2025, 6, 1, tzinfo=timezone.utc))
@@ -627,7 +631,9 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
 def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
     vault: Path,
 ):
-    (vault / "knowledge/notes/bad.md").write_bytes(b"# Bad\n\xff")
+    # A corpus over its byte ceiling is still refused whole; a page that is not
+    # UTF-8 no longer is (2026-09-14-one-page-cannot-close-the-vault).
+    write(vault / "knowledge/notes/big.md", "# Big\n" + "x" * 64)
 
     class Coordinator:
         wait_seconds: float | None = None
@@ -642,8 +648,8 @@ def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
                 self.released = True
 
     coordinator = Coordinator()
-    with pytest.raises(UnicodeDecodeError):
-        collect_corpus(vault, coordinator=coordinator, deadline_seconds=5)
+    with pytest.raises(ValueError, match="total byte limit"):
+        collect_corpus(vault, coordinator=coordinator, deadline_seconds=5, max_total_bytes=16)
     assert coordinator.wait_seconds is not None
     assert 0 <= coordinator.wait_seconds <= 5
     assert coordinator.released is True
@@ -1004,10 +1010,9 @@ def test_scandir_deadline_is_enforced_during_iterator_consumption(
     assert consumed < 100
 
 
-def test_strict_utf8_and_symlink_escape_are_rejected(vault: Path):
+def test_a_page_that_is_not_utf8_is_left_out_and_symlink_escape_is_rejected(vault: Path):
     (vault / "knowledge/notes/bad.md").write_bytes(b"# Bad\n\xff")
-    with pytest.raises(UnicodeDecodeError):
-        collect_corpus(vault)
+    assert collect_corpus(vault).sources == ()
 
     (vault / "knowledge/notes/bad.md").unlink()
     outside = vault.parent / "outside.md"

@@ -179,10 +179,10 @@ def _require_owned_by_caller(root: Path) -> bool:
 
 def _git_text(root: Path, *arguments: str) -> str:
     """One bounded, non-interactive Git read inside `root`. Never writes."""
-    from repository_scope import sanitized_git_environment
+    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", "-C", str(root), *arguments],
+        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         shell=False,
@@ -1178,6 +1178,18 @@ def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict
         return refresh_repository(checkout, state_root=state_root, deadline=deadline)
     except RepositoryIndexRefused as refusal:
         return {"checkout_root": checkout, **refusal.as_dict()}
+    except TimeoutError as stopped:
+        return {"checkout_root": checkout, **deferred(stopped)}
+
+
+def deferred(stopped: TimeoutError) -> dict[str, str]:
+    """A checkout that did not fit this pass: named, left for the next one, never half-built.
+
+    One build that ran out of budget, or lost its fence, used to escape the whole
+    pass: no report, and every checkout after it skipped. See
+    `docs/research/2026-09-14-a-pass-that-keeps-its-budget.md`.
+    """
+    return {"status": "deferred", "reason": str(stopped) or "deadline"}
 
 
 def _vault_checkout(state_root: Path | None) -> Path:
@@ -1208,6 +1220,23 @@ def _adopted_vault(state_root: Path | None, deadline: float) -> dict:
         return index_repository(directory, state_root=state_root, deadline=deadline)
     except RepositoryIndexRefused as refusal:
         return refusal.as_dict()
+    except TimeoutError as stopped:
+        return {"directory": str(directory), **deferred(stopped)}
+
+
+def _registered_rows(state_root: Path | None, deadline: float) -> list:
+    """The registered checkouts, or none when the budget ran out before the list."""
+    try:
+        return list_repositories(state_root=state_root, deadline=deadline)["repositories"]
+    except TimeoutError:
+        return []
+
+
+def _pass_status(rows: list, adopted: Mapping) -> str:
+    """`deferred` when the budget ran out before anything registered could be read."""
+    if not rows and adopted.get("status") == "deferred":
+        return "deferred"
+    return "ok"
 
 
 def refresh_all_repositories(
@@ -1215,23 +1244,26 @@ def refresh_all_repositories(
     state_root: Path | None = None,
     budget_seconds: float = REFRESH_ALL_BUDGET_SECONDS,
 ) -> dict[str, object]:
-    """The timer's pass: new worktrees first, then every registered checkout.
+    """The timer's pass: every registered checkout, then new worktrees.
 
-    Worktrees of a registered repository that have no generation yet are
-    indexed (`repository_worktrees.follow_worktrees`, #24 D1), then every
-    registered checkout that still exists is refreshed. A checkout that is
-    gone is named here, not deleted: `retire` removes its generations.
+    Every registered checkout that still exists is refreshed, then worktrees of
+    a registered repository that have no generation yet are indexed
+    (`repository_worktrees.follow_worktrees`, #24 D1) with the budget that is
+    left: an incremental refresh is cheap and keeps answers current, a first
+    build is the expensive part. A checkout that does not fit is deferred and
+    named. A checkout that is gone is named here, not deleted: `retire` removes
+    its generations. See `docs/research/2026-09-14-a-pass-that-keeps-its-budget.md`.
     """
     from repository_worktrees import follow_worktrees
 
     deadline = time.monotonic() + budget_seconds
     adopted = _adopted_vault(state_root, deadline)
-    rows = list_repositories(state_root=state_root, deadline=deadline)["repositories"]
-    followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
+    rows = _registered_rows(state_root, deadline)
     outcomes = [_refresh_row(row, state_root, deadline) for row in rows]
+    followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
     return {
         "schema_version": SCHEMA_VERSION,
-        "status": "ok",
+        "status": _pass_status(rows, adopted),
         "adopted_vault": adopted,
         "followed": followed,
         "repositories": outcomes,

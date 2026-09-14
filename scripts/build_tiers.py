@@ -727,11 +727,14 @@ def _build_page_tiers(verbose: bool) -> dict:
 
 def _build_page_tier(md: Path, verbose: bool) -> str:
     """The stats bucket of one page: generated, skipped or errors."""
+    # One page that is not UTF-8, or whose name is unsafe (`aux.md`, `a:b.md`), is
+    # that page's error, not the whole weekly run's. See
+    # `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
     try:
         captured = md.read_bytes()
-    except OSError:
+        content = captured.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
         return "errors"
-    content = captured.decode("utf-8", errors="strict")
     if "status: superseded" in content or "status: archived" in content:
         return "skipped"
     return _refresh_page_tier(md, captured, content, verbose)
@@ -741,12 +744,12 @@ def _refresh_page_tier(md: Path, captured: bytes, content: str, verbose: bool) -
     slug = md.stem
     source_sha256 = hashlib.sha256(captured).hexdigest()
     logical_path = md.relative_to(KNOWLEDGE_DIR).as_posix()
-    if not _needs_l1_regeneration(slug, md, source_sha256, logical_path=logical_path):
-        return "skipped"
     try:
+        if not _needs_l1_regeneration(slug, md, source_sha256, logical_path=logical_path):
+            return "skipped"
         _write_page_l1(slug, content, source_sha256, logical_path)
         _announce_generated(slug, verbose)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one page's failure is counted, the run goes on
         return "errors"
     return "generated"
 

@@ -53,6 +53,9 @@ from reliable_memory import (
 )
 from secret_redact import redact_secrets
 
+# A task fence's own length; a holder doing slow work renews it
+# (`heartbeat_task_fence`).
+TASK_FENCE_SECONDS = 120
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
@@ -4535,6 +4538,7 @@ def _apply_failure_state(
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
     state, attempts = _failure_state(row, failure, attempt_limit)
+    available_at = _retry_available_at(state, attempts, now)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -4547,13 +4551,27 @@ def _apply_failure_state(
             failure.error_code,
             failure.blocked_capability,
             _timestamp(now),
-            _timestamp(now),
+            _timestamp(available_at),
             lease.id,
             lease.token,
         ),
     ).rowcount
     if changed != 1:
         raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
+
+
+_RETRY_RANDOM = random.SystemRandom()
+
+
+def _retry_available_at(state: str, attempts: int, now: datetime) -> datetime:
+    """A task going back to ready waits a full-jitter backoff, as the legacy queue's do.
+
+    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    """
+    if state != "ready":
+        return now
+    ceiling = min(DEFAULTS.retry_cap_seconds, DEFAULTS.retry_base_seconds * (2 ** max(0, attempts - 1)))
+    return now + timedelta(seconds=_RETRY_RANDOM.uniform(0, ceiling))
 
 
 def _failure_is_terminal(
@@ -4596,6 +4614,15 @@ def _retire_exhausted_history(
     if changed != 1:
         raise QueueOperationError("attempt_history_demotion_failed")
     return True
+
+
+def _retire_exhausted_ready(database: sqlite3.Connection, now: datetime) -> None:
+    """A ready task no claim can take any more is dead, so a redrive can reach it."""
+    database.execute(
+        """UPDATE tasks SET state='dead',error_code='attempts_exhausted',updated_at=?
+           WHERE state='ready' AND attempts>=?""",
+        (_timestamp(now), DEFAULTS.queue_max_attempts),
+    )
 
 
 def _take_task_lease(
@@ -5094,6 +5121,7 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     if row is None:
         raise KeyError(task_id)
     _require_redrivable(row)
+    _require_lineage_budget(database, row)
     return row
 
 
@@ -5101,6 +5129,31 @@ def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
     if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
+        raise QueueOperationError("redrive_generations_exhausted")
+
+
+def _redrive_depth(database: sqlite3.Connection, task_id: str) -> int:
+    """How many redrives deep this task is, counted to the bound and no further."""
+    row = database.execute(
+        """WITH RECURSIVE lineage(id, depth) AS (
+               SELECT redrive_of, 1 FROM tasks WHERE id=? AND redrive_of IS NOT NULL
+               UNION ALL
+               SELECT tasks.redrive_of, lineage.depth + 1 FROM tasks
+               JOIN lineage ON tasks.id=lineage.id
+               WHERE tasks.redrive_of IS NOT NULL AND lineage.depth < ?
+           )
+           SELECT COALESCE(MAX(depth), 0) FROM lineage""",
+        (task_id, MAX_REDRIVE_GENERATIONS),
+    ).fetchone()
+    return int(row[0])
+
+
+def _require_lineage_budget(database: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """A copy does not reset the bound: the lineage, not the dead row, gets one redrive.
+
+    See `docs/research/2026-09-14-one-second-chance-and-no-stuck-task.md`.
+    """
+    if _redrive_depth(database, str(row["id"])) >= MAX_REDRIVE_GENERATIONS:
         raise QueueOperationError("redrive_generations_exhausted")
 
 
@@ -6132,6 +6185,7 @@ class MemoryQueue:
                 raise KeyError(task_id)
             if row["state"] != "dead":
                 raise QueueOperationError("redrive_requires_dead")
+            _require_lineage_budget(connection, row)
             self._delete_stale_source_fences(connection)
             self._assert_payload_not_fenced(connection, str(row["payload_json"]))
             payload_bytes = str(row["payload_json"]).encode("utf-8")
@@ -7900,7 +7954,7 @@ class _QueueV3CandidateReader:
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
         now = _utc_now()
-        expires_at = min(owner.expires_at, now + timedelta(seconds=120))
+        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
         token = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
             self._require_owner_projection(database, owner, now)
@@ -7952,6 +8006,40 @@ class _QueueV3CandidateReader:
                 ),
             ).rowcount
             if deleted != 1:
+                raise QueueOperationError("task_fence_lost")
+
+    def heartbeat_task_fence(self, fence: TaskFence, owner: OwnerLease) -> None:
+        """Push a live task fence out by its own length, capped by its owner's lease.
+
+        `owner` is the fence's owner as last renewed. See
+        `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+        """
+        if not isinstance(fence, TaskFence):
+            raise TypeError("fence must be a TaskFence")
+        now = _utc_now()
+        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
+        with closing(self._connect()) as database, begin_immediate(database):
+            self._require_owner_projection(database, owner, now)
+            renewed = database.execute(
+                """UPDATE task_fences SET heartbeat_at=?, expires_at=?
+                   WHERE task_id=? AND mode=? AND token=? AND fencing_epoch=?
+                     AND canonical_owner_token=? AND canonical_fencing_epoch=?
+                     AND process_id=? AND process_start_identity=? AND expires_at>?""",
+                (
+                    _timestamp(now),
+                    _timestamp(expires_at),
+                    fence.task_id,
+                    fence.mode,
+                    fence.token,
+                    fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    _timestamp(now),
+                ),
+            ).rowcount
+            if renewed != 1:
                 raise QueueOperationError("task_fence_lost")
 
     @contextmanager
@@ -10759,6 +10847,7 @@ class _QueueV3CandidateReader:
             self._connect()
         ) as database, begin_immediate(database):
             self._delete_stale_source_fences(database)
+            self._recover_expired_in(database, now)
             claimable = self._next_claimable_task(database, now, max_attempts)
             if claimable is None:
                 return None
@@ -11228,39 +11317,52 @@ class _QueueV3CandidateReader:
     def recover_expired_leases(self) -> int:
         now = _utc_now()
         with closing(self._connect()) as database, begin_immediate(database):
-            rows = database.execute(
-                "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
-                (_timestamp(now),),
-            ).fetchall()
-            for row in rows:
-                validation = self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                if validation is None:
-                    continue
-                database.execute(
-                    """INSERT INTO attempt_history(
-                           task_id,attempt,started_at,finished_at,outcome,error_code
-                       ) VALUES (?,?,?,?,?,?)""",
-                    (
-                        row["id"],
-                        row["attempts"],
-                        row["attempt_started_at"] or _timestamp(now),
-                        _timestamp(now),
-                        "lease_expired",
-                        "lease_expired",
-                    ),
-                )
-                changed = database.execute(
-                    """UPDATE tasks SET state='ready',error_code='lease_expired',
-                           updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
-                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
-                           attempt_started_at=NULL WHERE id=? AND state='leased'""",
-                    (_timestamp(now), _timestamp(now), row["id"]),
-                ).rowcount
-                if changed != 1:
-                    raise QueueOperationError("lease_expiry_failed")
+            return self._recover_expired_in(database, now)
+
+    def _recover_expired_in(self, database: sqlite3.Connection, now: datetime) -> int:
+        """Settle every expired lease; a task out of attempts is dead, never stuck ready.
+
+        See `docs/research/2026-09-14-one-second-chance-and-no-stuck-task.md`.
+        """
+        rows = database.execute(
+            "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
+            (_timestamp(now),),
+        ).fetchall()
+        for row in rows:
+            self._settle_expired_lease(database, row, now)
+        _retire_exhausted_ready(database, now)
         return len(rows)
+
+    def _settle_expired_lease(
+        self, database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> None:
+        if self._require_valid_task_payload(database, row, now=now, parse=True) is None:
+            return
+        state, error_code = _EXPIRED_LEASE_OUTCOMES[
+            int(row["attempts"]) >= DEFAULTS.queue_max_attempts
+        ]
+        database.execute(
+            """INSERT INTO attempt_history(
+                   task_id,attempt,started_at,finished_at,outcome,error_code
+               ) VALUES (?,?,?,?,?,?)""",
+            (
+                row["id"],
+                row["attempts"],
+                row["attempt_started_at"] or _timestamp(now),
+                _timestamp(now),
+                "lease_expired",
+                error_code,
+            ),
+        )
+        changed = database.execute(
+            """UPDATE tasks SET state=?,error_code=?,
+                   updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
+                   lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL WHERE id=? AND state='leased'""",
+            (state, error_code, _timestamp(now), _timestamp(now), row["id"]),
+        ).rowcount
+        if changed != 1:
+            raise QueueOperationError("lease_expiry_failed")
 
     def cancel(
         self,
@@ -13942,13 +14044,31 @@ class _SourceFenceHeartbeat:
             return self._fence
 
     def _run(self) -> None:
-        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
-            self._stop, self._heartbeat_seconds
-        ):
-            try:
-                self.refresh()
-            except QueueOperationError:
-                return
+        """A busy database is retried until the fence expires; a lost fence is final.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self._heartbeat_seconds,
+            lease_seconds=self._lease_seconds,
+            attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            stop=self._stop,
+            wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
+        )
+        if ended is None:
+            return
+        with self._lock:
+            self.error = ended
+        self._stop.set()
+
+    def _renew(self) -> None:
+        with self._lock:
+            self._fence = self._queue.heartbeat_source_fence(
+                self._fence, lease_seconds=self._lease_seconds
+            )
 
 
 class _LeaseHeartbeat:
@@ -13980,17 +14100,26 @@ class _LeaseHeartbeat:
         _join_heartbeat_or_refuse(self._thread, self._heartbeat_seconds)
 
     def _run(self) -> None:
-        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
-            self._stop, self._heartbeat_seconds
-        ):
-            try:
-                self._lease = self._queue.heartbeat(
-                    self._lease, lease_seconds=self._lease_seconds
-                )
-            except Exception as exc:  # noqa: BLE001 - completion must remain fenced
-                self.error = exc
-                self._stop.set()
-                return
+        """A busy database is retried until the lease expires; completion stays fenced.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            self._renew,
+            interval=self._heartbeat_seconds,
+            lease_seconds=self._lease_seconds,
+            attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            stop=self._stop,
+            wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
+        )
+        if ended is not None:
+            self.error = ended
+            self._stop.set()
+
+    def _renew(self) -> None:
+        self._lease = self._queue.heartbeat(self._lease, lease_seconds=self._lease_seconds)
 
 
 def drain_with(
@@ -14547,9 +14676,13 @@ class _ChildRun:
     receiver: object
     deadline: float
     tracked_descendants: set[int] | None = None
+    lease_lost: Callable[[], bool] | None = None
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
+
+    def lost(self) -> bool:
+        return self.lease_lost is not None and self.lease_lost()
 
     def stop(self) -> None:
         """Terminate the child, discovering its tree when we never tracked it.
@@ -14567,10 +14700,22 @@ class _ChildRun:
         )
 
 
+# How often a waiting parent looks at its lease. See
+# `docs/research/2026-09-14-a-lost-lease-stops-its-child.md`.
+CHILD_LEASE_CHECK_SECONDS = 1.0
+
+
 def _await_child_message(run: _ChildRun) -> None:
-    """Wait for the child to say something before its deadline runs out."""
-    remaining = run.remaining()
-    if remaining <= 0 or not run.receiver.poll(remaining):
+    """Wait for the child to say something before its deadline runs out or its lease is lost."""
+    while not run.receiver.poll(max(0.0, min(run.remaining(), CHILD_LEASE_CHECK_SECONDS))):
+        _stop_child_if_done_waiting(run)
+
+
+def _stop_child_if_done_waiting(run: _ChildRun) -> None:
+    if run.lost():
+        run.stop()
+        raise QueueOperationError("lease_lost")
+    if run.remaining() <= 0:
         run.stop()
         raise TimeoutError
 
@@ -14631,6 +14776,7 @@ def _run_processor_child(
     processor: Callable[[dict], bool | DeferredResult],
     task: dict[str, Any],
     timeout: float,
+    lease_lost: Callable[[], bool] | None = None,
 ) -> bool | DeferredResult:
     if timeout <= 0:
         raise TimeoutError
@@ -14641,7 +14787,7 @@ def _run_processor_child(
         args=(sender, processor, task),
         daemon=False,
     )
-    run = _ChildRun(process, receiver, time.monotonic() + timeout)
+    run = _ChildRun(process, receiver, time.monotonic() + timeout, lease_lost=lease_lost)
     started = False
     try:
         process.start()
@@ -14733,6 +14879,13 @@ def _run_processor(
     return _ProcessorOutcome(outcome, False, False)
 
 
+def _interruptible(processor_runner, heartbeat: _LeaseHeartbeat):
+    """The child runner stops its child when the lease is lost; injected runners stay as they are."""
+    if processor_runner is not _run_processor_child:
+        return processor_runner
+    return partial(_run_processor_child, lease_lost=lambda: heartbeat.error is not None)
+
+
 def _processor_result(
     processor: Callable[[dict], bool | DeferredResult],
     processor_runner: Callable[
@@ -14749,7 +14902,7 @@ def _processor_result(
         remaining = deadline - monotonic()
         if remaining <= 0:
             return _ProcessorOutcome(False, True, False)
-        result = _run_processor(processor, processor_runner, lease, remaining)
+        result = _run_processor(processor, _interruptible(processor_runner, heartbeat), lease, remaining)
         if monotonic() >= deadline:
             return _ProcessorOutcome(result.outcome, True, result.cleanup_failed)
         return result
@@ -14997,6 +15150,13 @@ class _WorkerProgress:
         return "halted" if counts.get("halted") else "worked"
 
 
+# A worker claims no task with less than this left: one provider call (90 s by default)
+# plus the child's start and settle. A task claimed later is killed by the worker's own
+# deadline and loses an attempt. See
+# `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
+WORKER_MIN_CLAIM_SECONDS = 120
+
+
 def _worker_exhausted(
     *,
     cancelled: Callable[[], bool] | None,
@@ -15108,13 +15268,14 @@ def _drive_worker(
     sleep: Callable[[float], None],
     cancelled: Callable[[], bool] | None,
     policy: Mapping[str, int],
+    min_claim_seconds: float = 0,
 ) -> None:
     while progress.processed < max_tasks:
         now = monotonic()
         if _worker_exhausted(
             cancelled=cancelled,
             now=now,
-            deadline=deadline,
+            deadline=deadline - min_claim_seconds,
             idle_started=progress.idle_started,
             idle_seconds=idle_seconds,
         ):
@@ -15153,8 +15314,12 @@ def run_worker(
         bool | DeferredResult,
     ] = _run_processor_child,
     cancelled: Callable[[], bool] | None = None,
+    min_claim_seconds: float = 0,
 ) -> WorkerSummary:
-    """Run a short-lived worker bounded by tasks, wall time, and idle time."""
+    """Run a short-lived worker bounded by tasks, wall time, and idle time.
+
+    No task is claimed with less than `min_claim_seconds` of the wall time left.
+    """
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
         raise ValueError("worker limits must be non-negative")
     policy = {
@@ -15190,6 +15355,7 @@ def run_worker(
         sleep=sleep,
         cancelled=cancelled,
         policy=policy,
+        min_claim_seconds=min_claim_seconds,
     )
     return WorkerSummary(
         progress.processed,
@@ -15290,14 +15456,22 @@ def _daily_log_path(day: str) -> Path | None:
     return daily_path
 
 
+def _flush_operation_id(payload: Mapping[str, Any]) -> str:
+    """The same id for a flush and every redrive of it: the payload, not the task.
+
+    See `docs/research/2026-09-14-a-redriven-flush-appends-nothing-new.md`.
+    """
+    return f"flush:{sha256_bytes(canonical_json_bytes(dict(payload)))}"
+
+
 def _append_flush_block(
     daily_path: Path,
     payload: Mapping[str, Any],
-    task_id: str,
+    operation_id: str,
     result: str,
     now: datetime,
 ) -> None:
-    """Append what the classifier judged worth keeping, once per task."""
+    """Append what the classifier judged worth keeping, once per flush."""
     from daily_log_append import locked_append_once
     from flush_memory import _classify_response
 
@@ -15310,7 +15484,7 @@ def _append_flush_block(
         f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n"
         f"- Tier: `{tier}`\n\n{redact_secrets(body)}\n"
     )
-    locked_append_once(daily_path, block, task_id)
+    locked_append_once(daily_path, block, operation_id)
 
 
 def _flush_target_path(payload: Mapping[str, Any], now: datetime) -> Path | None:
@@ -15348,7 +15522,7 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     )
     if not result:
         return False
-    _append_flush_block(daily_path, payload, str(task["id"]), result, now)
+    _append_flush_block(daily_path, payload, _flush_operation_id(payload), result, now)
     return True
 
 
@@ -15483,6 +15657,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
     parser.add_argument("task_id", nargs="?")
     parser.add_argument("--max-tasks", type=int, default=DEFAULTS.worker_max_tasks)
     parser.add_argument("--max-seconds", type=int, default=DEFAULTS.worker_max_seconds)
+    parser.add_argument("--min-claim-seconds", type=int, default=WORKER_MIN_CLAIM_SECONDS)
     parser.add_argument("--idle-seconds", type=int, default=DEFAULTS.worker_idle_seconds)
     parser.add_argument("--lease-seconds", type=int, default=DEFAULTS.queue_lease_seconds)
     parser.add_argument(
@@ -15538,6 +15713,7 @@ def _cli_work(args, parser) -> int:
         max_attempts=args.max_attempts,
         retry_base_seconds=args.retry_base_seconds,
         retry_cap_seconds=args.retry_cap_seconds,
+        min_claim_seconds=args.min_claim_seconds,
     )
     counts = {
         "dead": summary.dead,

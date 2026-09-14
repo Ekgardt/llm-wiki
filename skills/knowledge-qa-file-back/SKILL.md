@@ -43,7 +43,7 @@ All knowledge pages live **flat** under `knowledge/notes/<slug>.md`. The `type: 
 2. **Write the page** at `knowledge/notes/<slug>.md` — follow wiki conventions (frontmatter with `type: qa`, `One-sentence summary:`, `## Question`, `## Answer`, `## Evidence` pointing to the daily log + timestamp, `## Related`).
 
 3. **Register and log**:
-   - Add the new page under the existing top-level `## Q&A` section in `knowledge/index.md`, then append a dated entry to `knowledge/log.md`.
+   - Add the new page under the existing top-level `## Q&A` section in `knowledge/index.md`, then append a dated entry to `knowledge/log.local.md`.
    - Or run `python scripts/rebuild_memory_index.py` if the index is auto-generated.
 
 4. **Cross-link**:

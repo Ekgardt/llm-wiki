@@ -91,7 +91,16 @@ def is_contention(error: BaseException) -> bool:
     return _typed_contention(error) or _sqlite_contention(error) or _queue_contention(error)
 
 
-def _outcome_of(error: BaseException | None) -> str:
+# A capture worker runs only over intents published durably before it starts, and
+# a worker that fails leaves them for the next worker or for adoption: its failure
+# is retried work, never a lost capture, whatever it raised. See
+# `docs/research/2026-09-14-a-worker-that-failed-lost-no-capture.md`.
+DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
+
+
+def _outcome_of(error: BaseException | None, kind: str = "") -> str:
+    if kind in DURABLE_WORK_KINDS:
+        return "deferred"
     if error is not None and is_contention(error):
         return "deferred"
     return "lost"
@@ -191,7 +200,7 @@ def record_capture_failure(
     With the exception in hand the record says whether the write was lost or
     deferred by a writer race; without it, a failure is a loss.
     """
-    record = _failure_record(kind, reason, slug, session_id, _outcome_of(error))
+    record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
     try:
         _append_failure_line(record)
     except Exception:  # noqa: BLE001 - the counter still records the loss

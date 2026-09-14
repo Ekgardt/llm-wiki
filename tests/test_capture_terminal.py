@@ -301,10 +301,16 @@ def _expire_capture_lease(queue, task_id: str) -> None:
     that: recovery had to find exactly one expired lease. Since 2026-08-27 the
     worker settles its claim on failure (`processor_failed`, immediate retry),
     so a crashed task is usually already `ready` and recovery finds nothing.
+    Since 2026-09-14 a `ready` retry waits a backoff
+    (`docs/research/2026-09-14-the-small-integrity-gaps.md`); the wait is moved to the past.
     """
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
             "UPDATE tasks SET lease_expires_at=? WHERE id=? AND state='leased'",
+            ("2000-01-01T00:00:00+00:00", task_id),
+        )
+        database.execute(
+            "UPDATE tasks SET available_at=? WHERE id=? AND state='ready'",
             ("2000-01-01T00:00:00+00:00", task_id),
         )
     queue.recover_expired_leases()
@@ -880,7 +886,9 @@ def test_capture_worker_rejects_noncanonical_provider_output(tmp_path: Path) -> 
     coordinator = _coordinator(tmp_path)
     registry = operational_ownership.OwnershipRegistry(tmp_path)
     binding = _ready_intent_binding(queue, coordinator, registry, "status only")
-    provider = _FakeNoContentProvider("FLUSH_OK\ntrailing content")
+    # Text after FLUSH_OK is an explanation since 2026-09-14; a reply that
+    # declares no tier at all is what is still refused.
+    provider = _FakeNoContentProvider("Nothing here declares a tier.")
     processor = _NoContentProcessor(queue, coordinator, provider)
 
     with pytest.raises(RuntimeError, match="invalid flush output"):
@@ -1110,11 +1118,8 @@ def test_a_tier_a_model_put_in_bold_is_still_that_tier() -> None:
         "minor",
         "kept",
     )
-    assert flush_memory._parse_capture_wire_output("**FLUSH_OK**") == ("ok", "")
-    assert flush_memory._parse_capture_wire_output("FLUSH_OK\n  ") == ("ok", "")
-
-    with pytest.raises(RuntimeError, match="invalid flush output"):
-        flush_memory._parse_capture_wire_output("FLUSH_OK\ntrailing content")
+    oks = ("**FLUSH_OK**", "FLUSH_OK\n  ", "FLUSH_OK\ntrailing content")
+    assert {flush_memory._parse_capture_wire_output(reply) for reply in oks} == {("ok", "")}
 
     with pytest.raises(RuntimeError, match="invalid flush output"):
         flush_memory._parse_capture_wire_output("Sure! Here is my answer\nFLUSH_MAJOR")

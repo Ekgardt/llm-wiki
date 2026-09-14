@@ -263,6 +263,32 @@ def describe_error(error: BaseException) -> str:
     return f"{name}: {message}" if message else name
 
 
+# How many causes of a wrapped error a failure record names.
+MAX_ERROR_CAUSES = 2
+
+
+def _cause_of(error: BaseException) -> BaseException | None:
+    if error.__cause__ is not None:
+        return error.__cause__
+    return error.__context__
+
+
+def describe_error_chain(error: BaseException) -> str:
+    """The error and up to two of its causes, `Class: message <- Cause: message`.
+
+    A wrapper such as `ReliabilityV3ValidationError("reliability_v3_record_invalid")`
+    raised `from` the real failure kept the only useful fact in `__cause__`, and the
+    trail dropped it. See
+    `docs/research/2026-09-14-a-worker-that-failed-lost-no-capture.md`.
+    """
+    parts = [describe_error(error)]
+    cause = _cause_of(error)
+    while cause is not None and len(parts) <= MAX_ERROR_CAUSES:
+        parts.append(describe_error(cause))
+        cause = _cause_of(cause)
+    return " <- ".join(parts)
+
+
 def redact_secrets(text: str) -> str:
     """Return text with common secret patterns replaced."""
     if not text or not isinstance(text, str):

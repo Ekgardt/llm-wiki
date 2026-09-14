@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
+
 
 TURN_PREFIXES = (b"**user:**", b"**assistant:**")
 # A turn no longer than this is delivered whole; pruning a short turn saves
@@ -34,7 +37,9 @@ KEEP_BYTES = 600
 # Sentence ends are ASCII, so a cut never lands inside a UTF-8 character.
 _BOUNDARY = re.compile(rb"(?<=[.!?])[ \t]+|\n+")
 
-Encoder = Callable[[Sequence[str], bool], np.ndarray]
+# numpy (the hybrid profile) is imported only where sentences are scored: an encoder
+# exists only with that profile. See `docs/research/2026-09-14-a-base-install-can-search.md`.
+Encoder = Callable[[Sequence[str], bool], "np.ndarray"]
 
 
 def sentence_spans(content: bytes, start: int, end: int) -> list[tuple[int, int]]:
@@ -60,6 +65,8 @@ def prunes(content: bytes, start: int, end: int) -> bool:
 
 
 def _scores(question: str, sentences: Sequence[str], encode: Encoder) -> np.ndarray:
+    import numpy as np
+
     query = np.asarray(encode([question], True), dtype=float)[0]
     passages = np.asarray(encode(sentences, False), dtype=float)
     norms = np.linalg.norm(passages, axis=1) * (np.linalg.norm(query) or 1.0)
@@ -87,9 +94,16 @@ def pruned_spans(
     """
     spans = sentence_spans(content, start, end)
     texts = [content[s:e].decode("utf-8", errors="replace") for s, e in spans]
-    ranked = [int(index) for index in np.argsort(-_scores(question, texts, encode), kind="stable")]
+    ranked = _ranked(_scores(question, texts, encode))
     chosen = _within_budget(spans, [0, *ranked])
     return _merged([spans[index] for index in sorted(chosen)])
+
+
+def _ranked(scores: np.ndarray) -> list[int]:
+    """Sentence indices, best score first; ties keep their order."""
+    import numpy as np
+
+    return [int(index) for index in np.argsort(-scores, kind="stable")]
 
 
 def _within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> set[int]:

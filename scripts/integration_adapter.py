@@ -1202,7 +1202,7 @@ def _claim_pending_state(
     state: dict[str, Any],
     queue_key: str,
     owner: str,
-    claimed: list[tuple[list[dict[str, object]], dict[str, object]]],
+    claimed: list[tuple[list[dict[str, object]], dict[str, object], dict[str, object]]],
 ) -> None:
     queue = _pending_queue(state, queue_key)
     if not queue:
@@ -1210,15 +1210,16 @@ def _claim_pending_state(
     window = queue[:PENDING_CLAIM_WINDOW]
     if not _claim_queue(window, owner, time.time()):
         return
-    claimed.append(([dict(item) for item in window], _copy_reducer_states(state)))
+    inflight = dict(state.get(INFLIGHT_STATE_KEY, {}).get(queue_key) or {})
+    claimed.append(([dict(item) for item in window], _copy_reducer_states(state), inflight))
 
 
 def _claim_pending(
     queue_key: str,
     owner: str,
     state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
-) -> tuple[list[dict[str, object]], dict[str, object]] | None:
-    claimed: list[tuple[list[dict[str, object]], dict[str, object]]] = []
+) -> tuple[list[dict[str, object]], dict[str, object], dict[str, object]] | None:
+    claimed: list[tuple[list[dict[str, object]], dict[str, object], dict[str, object]]] = []
 
     def claim(state: dict[str, Any]) -> None:
         _claim_pending_state(state, queue_key, owner, claimed)
@@ -1475,6 +1476,7 @@ def _commit_pending_state(
     reducers = state.setdefault("project_checkpoint_reducers", {})
     reducers.update(committed_reducers)
     del queue[: len(selected)]
+    state.get(INFLIGHT_STATE_KEY, {}).pop(queue_key, None)
     _release_claims(state, queue_key, owner)
     _trim_reducers(reducers)
 
@@ -1531,6 +1533,86 @@ def _commit_or_release(
         raise
 
 
+# The batch a drain is about to write, recorded before the journal write so a retry after
+# a failed commit replays that batch instead of planning a larger one. See
+# `docs/research/2026-09-14-a-retried-checkpoint-is-the-same-batch.md`.
+INFLIGHT_STATE_KEY = "project_checkpoint_inflight"
+
+
+def _checkpoint_plan(
+    items: list[dict[str, object]],
+    reducer_states: dict[str, object],
+    inflight: Mapping[str, object],
+):
+    """The batch to write: the in-flight one when it still heads the queue, else a fresh plan."""
+    replayed = _inflight_plan(items, reducer_states, inflight)
+    if replayed is not None:
+        return replayed
+    reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
+    index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
+    if waiting:
+        return None
+    return _batch_plan(items, reducer_states, reducers, decisions, index, decision)
+
+
+def _inflight_plan(
+    items: list[dict[str, object]],
+    reducer_states: dict[str, object],
+    inflight: Mapping[str, object],
+):
+    event_ids = inflight.get("event_ids")
+    if not isinstance(event_ids, list) or not event_ids:
+        return None
+    if [str(item.get("event_id")) for item in items[: len(event_ids)]] != event_ids:
+        return None
+    selected = list(items[: len(event_ids)])
+    reducers, decisions = _observe_all(selected, reducer_states)
+    decision = CheckpointDecision(str(inflight.get("reason")), checkpoint_at=_inflight_time(inflight))
+    return selected, reducers, decisions, decision
+
+
+def _inflight_time(inflight: Mapping[str, object]) -> datetime | None:
+    value = inflight.get("checkpoint_at")
+    if not isinstance(value, str):
+        return None
+    return datetime.fromisoformat(value)
+
+
+def _record_inflight_state(
+    state: dict[str, Any],
+    queue_key: str,
+    owner: str,
+    selected: Sequence[Mapping[str, object]],
+    decision: CheckpointDecision,
+) -> None:
+    _validate_pending_commit(state.setdefault("project_checkpoint_pending", {}).get(queue_key, []), selected, owner)
+    checkpoint_at = decision.checkpoint_at.isoformat() if decision.checkpoint_at is not None else None
+    state.setdefault(INFLIGHT_STATE_KEY, {})[queue_key] = {
+        "event_ids": [str(item["event_id"]) for item in selected],
+        "reason": decision.reason,
+        "checkpoint_at": checkpoint_at,
+    }
+
+
+def _record_inflight_or_release(
+    queue_key: str,
+    owner: str,
+    selected: Sequence[Mapping[str, object]],
+    decision: CheckpointDecision | None,
+    state_lock_seconds: float,
+) -> None:
+    if decision is None:
+        return
+    try:
+        update_state(
+            lambda state: _record_inflight_state(state, queue_key, owner, selected, decision),
+            lock_timeout=state_lock_seconds,
+        )
+    except Exception:
+        _release_pending_claims(queue_key, owner, state_lock_seconds)
+        raise
+
+
 def _drain_project_checkpoint_once(
     slug: str,
     queue_key: str,
@@ -1541,15 +1623,12 @@ def _drain_project_checkpoint_once(
     claimed = _claim_pending(queue_key, owner, state_lock_seconds)
     if claimed is None:
         return False
-    items, reducer_states = claimed
-    reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
-    index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
-    if waiting:
+    plan = _checkpoint_plan(*claimed)
+    if plan is None:
         _release_pending_claims(queue_key, owner, state_lock_seconds)
         return False
-    selected, reducers, decisions, decision = _batch_plan(
-        items, reducer_states, reducers, decisions, index, decision
-    )
+    selected, reducers, decisions, decision = plan
+    _record_inflight_or_release(queue_key, owner, selected, decision, state_lock_seconds)
     committed = _persist_or_release(
         slug,
         queue_key,
@@ -2314,6 +2393,20 @@ def _ingest_result(slug: str | None, payload: Mapping[str, Any]) -> dict[str, An
     }
 
 
+def _write_session_start_debug(context: object) -> None:
+    """The payload the hook returned, where `logs/session-start-last.txt` promises it.
+
+    See `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    """
+    from session_start_context import latest_daily, write_debug
+
+    try:
+        daily = latest_daily()
+        write_debug(str(context or ""), getattr(daily, "name", "(none)"))
+    except Exception:  # noqa: BLE001 - a debug copy must never cost the session its context
+        return
+
+
 def _ingest_session_start(
     envelope: EventEnvelope,
     payload: dict[str, Any],
@@ -2334,6 +2427,7 @@ def _ingest_session_start(
         trailing_newline=True,
         code_graph=_code_graph_reminder(project_dir),
     )
+    _write_session_start_debug(result["context"])
 
 
 def _ingest_user_prompt(
@@ -3191,10 +3285,11 @@ def _record_cli_capture_failure(
         return
     try:
         from capture_diagnostics import record_capture_failure
+        from secret_redact import describe_error_chain
 
         record_capture_failure(
             f"adapter_{_failed_operation(args)}",
-            f"{type(error).__name__}: {error}",
+            describe_error_chain(error),
             error=error,
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session

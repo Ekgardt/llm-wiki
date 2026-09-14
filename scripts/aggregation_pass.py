@@ -35,7 +35,6 @@ See `docs/research/2026-09-07-is-each-plan-item-the-best-known.md`.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 
 AGGREGATIONS = frozenset({"count", "sum"})
@@ -147,13 +146,7 @@ def _named(mentions: Sequence[str], group: Sequence[int]) -> list[str]:
 
 def _parsed_groups(raw: str | None, size: int) -> list[list[int]]:
     """The index groups in the reply, or none when the reply is not what was asked."""
-    from query_memory import _unfenced
-
-    try:
-        document = json.loads(_unfenced(raw or ""))
-    except ValueError:
-        return []
-    groups = _groups_field(document)
+    groups = _groups_field(_loaded(raw, "groups"))
     return [group for group in groups if _is_index_group(group, size)]
 
 
@@ -199,7 +192,7 @@ def _fanout_prompt(question: str, inputs: Sequence[str]) -> str:
 def parsed_queries(raw: str | None, question: str) -> list[str]:
     """The distinct non-empty queries in the reply, the question itself excluded."""
     asked = question.strip().casefold()
-    strings = (str(item).strip() for item in _queries_field(_loaded(raw)) if isinstance(item, str))
+    strings = (str(item).strip() for item in _queries_field(_loaded(raw, "queries")) if isinstance(item, str))
     return list(dict.fromkeys(item for item in strings if _is_new_query(item, asked)))
 
 
@@ -207,11 +200,12 @@ def _is_new_query(item: str, asked: str) -> bool:
     return bool(item) and item.casefold() != asked
 
 
-def _loaded(raw: str | None) -> object:
-    from query_memory import _unfenced
+def _loaded(raw: str | None, key: str) -> object:
+    """The one reply object that carries `key`, or None when there is not exactly one."""
+    from reply_json import object_with, reply_document
 
     try:
-        return json.loads(_unfenced(raw or ""))
+        return reply_document(raw or "", object_with(key))
     except ValueError:
         return None
 

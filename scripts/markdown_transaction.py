@@ -64,6 +64,9 @@ ChangeKind = Literal["create", "replace", "delete"]
 Validator = Callable[[Mapping[str, object]], object]
 ABSENT = "absent"
 _OVERSIZED_TARGET = "oversized"
+# An intent fence's own length; a holder doing slow work renews it
+# (`heartbeat_intent_fence`).
+INTENT_FENCE_SECONDS = 30
 _ALLOWED_DIRECTORIES = (
     "knowledge/daily",
     "knowledge/notes",
@@ -82,6 +85,9 @@ _ALLOWED_FILES = {
     "knowledge/guardrails.md",
     "knowledge/index.md",
     "knowledge/log.md",
+    # The vault log since 2026-09-14; the tracked `knowledge/log.md` stays a template
+    # (kept above for transactions written before). See `vault_log`.
+    "knowledge/log.local.md",
 }
 _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
 _PROJECT_CHECKPOINT_SCHEMA = (
@@ -4727,7 +4733,7 @@ class MarkdownCoordinator:
             raise ValueError("intent_id must be lowercase 64-hex")
         registry = self._ownership_registry()
         now = datetime.now(timezone.utc)
-        expires_at = min(owner.expires_at, now + timedelta(seconds=30))
+        expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
         token = uuid.uuid4().hex
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
@@ -4850,6 +4856,43 @@ class MarkdownCoordinator:
                 ),
             ).rowcount
             if deleted != 1:
+                raise RuntimeError("intent_fence_lost")
+
+    def heartbeat_intent_fence(self, fence: IntentFence, owner: OwnerLease) -> None:
+        """Push a live intent fence out by its own length, capped by its owner's lease.
+
+        A capture holds this fence while its classifier runs, and nothing renewed
+        it: no capture that took longer than 30 seconds ever succeeded. `owner` is
+        the fence's owner as last renewed. See
+        `docs/research/2026-09-14-a-capture-keeps-its-claim-while-it-asks.md`.
+        """
+        if not isinstance(fence, IntentFence):
+            raise TypeError("fence must be an IntentFence")
+        registry = self._ownership_registry()
+        now = datetime.now(timezone.utc)
+        expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
+        with self._connect() as database, begin_immediate(database):
+            registry.require(database, owner)
+            renewed = database.execute(
+                """UPDATE intent_fences SET heartbeat_at=?, expires_at=?
+                   WHERE intent_id=? AND mode=? AND token=? AND fencing_epoch=?
+                     AND canonical_owner_token=? AND canonical_fencing_epoch=?
+                     AND process_id=? AND process_start_identity=? AND expires_at>?""",
+                (
+                    now.isoformat().replace("+00:00", "Z"),
+                    expires_at.isoformat().replace("+00:00", "Z"),
+                    fence.intent_id,
+                    fence.mode,
+                    fence.token,
+                    fence.epoch,
+                    owner.token,
+                    owner.epoch,
+                    owner.process.pid,
+                    owner.process.start_identity,
+                    now.isoformat().replace("+00:00", "Z"),
+                ),
+            ).rowcount
+            if renewed != 1:
                 raise RuntimeError("intent_fence_lost")
 
     def project_capture_binding(
@@ -7631,27 +7674,38 @@ class MarkdownCoordinator:
         stop: threading.Event,
         lost: threading.Event,
     ) -> None:
-        while not stop.wait(owner.heartbeat_seconds):
-            try:
-                with self._connect() as database, begin_immediate(database):
-                    renewed = registry._heartbeat_in_transaction(database, owner)
-                    updated = database.execute(
-                        """UPDATE writer_owners SET heartbeat_at=?,expires_at=?
-                           WHERE gate_name='global' AND owner_token=?
-                             AND fencing_epoch=?""",
-                        (
-                            _timestamp(renewed.heartbeat_at),
-                            _timestamp(renewed.expires_at),
-                            owner.token,
-                            owner.epoch,
-                        ),
-                    ).rowcount
-                    if updated != 1:
-                        raise RuntimeError("writer projection was lost")
-                owner = renewed
-            except BaseException:
-                lost.set()
-                return
+        """Renew the gate and its projection; a busy database is not a lost gate.
+
+        See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
+        """
+        from lease_renewal import renew_until_stopped
+
+        ended = renew_until_stopped(
+            lambda: self._renew_canonical_writer_gate(registry, owner),
+            interval=owner.heartbeat_seconds,
+            lease_seconds=owner.ttl_seconds,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            stop=stop,
+        )
+        if ended is not None:
+            lost.set()
+
+    def _renew_canonical_writer_gate(self, registry: object, owner: OwnerLease) -> None:
+        with self._connect() as database, begin_immediate(database):
+            renewed = registry._heartbeat_in_transaction(database, owner)
+            updated = database.execute(
+                """UPDATE writer_owners SET heartbeat_at=?,expires_at=?
+                   WHERE gate_name='global' AND owner_token=?
+                     AND fencing_epoch=?""",
+                (
+                    _timestamp(renewed.heartbeat_at),
+                    _timestamp(renewed.expires_at),
+                    owner.token,
+                    owner.epoch,
+                ),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("writer projection was lost")
 
     def _require_nested_gate_owner(self, owner: object) -> None:
         """The two refusals a nested gate makes before it touches any state."""

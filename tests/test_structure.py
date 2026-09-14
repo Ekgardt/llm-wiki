@@ -608,11 +608,11 @@ SAFE_PUBLIC_EXAMPLES = (
 
 
 def _assert_pyyaml_stays_a_dev_dependency() -> None:
+    """PyYAML is a base dependency since 2026-09-14: the canonical frontmatter reader
+    needs it on every install (`docs/research/2026-09-14-a-base-install-can-search.md`)."""
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     project_dependencies, dev_dependencies = pyproject.split("[dependency-groups]", 1)
-    assert "pyyaml" not in project_dependencies.casefold(), (
-        "PyYAML must remain a test/dev dependency, not a project dependency"
-    )
+    assert '"pyyaml>=6.0.3,<7"' in project_dependencies.casefold()
     assert '"pyyaml>=6.0.3,<7"' in dev_dependencies.casefold()
 
 
@@ -904,11 +904,10 @@ def _unpublished_notes(paths: set[str]) -> set[str]:
 
 
 def _linked_note_paths(text: str) -> set[str]:
-    """The note pages this file links to by path."""
-    return {
-        f"knowledge/notes/{name}.md"
-        for name in re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
-    }
+    """The note pages this file names by path: a wikilink, or a back-quoted path."""
+    linked = re.findall(r"\[\[knowledge/notes/([^\]|]+)", text)
+    quoted = re.findall(r"`knowledge/notes/([^`]+?)\.md`", text)
+    return {f"knowledge/notes/{name}.md" for name in [*linked, *quoted]}
 
 
 def test_the_vault_index_and_log_name_only_published_notes() -> None:

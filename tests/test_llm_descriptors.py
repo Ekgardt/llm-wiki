@@ -883,6 +883,8 @@ def test_malformed_usage_fields_are_ignored_field_by_field(monkeypatch):
 
 
 def test_opencode_aggregate_usage_wins_over_part_usage(monkeypatch):
+    # OpenCode is used only with its server password (2026-09-14).
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
     descriptor = llm_client.provider_candidates("opencode", max_tokens=37)[0]
     calls = []
     responses = [
@@ -1036,6 +1038,8 @@ def test_opencode_large_positive_finite_elapsed_time_is_floored():
 
 
 def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatch):
+    # OpenCode is used only with its server password (2026-09-14).
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "test-password")
     descriptor = llm_client.provider_candidates("opencode", max_tokens=10)[0]
     responses = [
         {"id": "session-id"},

@@ -70,6 +70,9 @@ NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
 # the deferral report, so the child's graceful deferral runs before the
 # parent's kill (audit OPS-10).
 STEP_START_MARGIN_SECONDS = 120
+# The prune's kill timeout; its own budget ends a margin before it. See
+# `docs/research/2026-09-14-a-prune-inside-its-step.md`.
+PRUNE_STEP_SECONDS = 300
 
 
 def _generation_result() -> dict:
@@ -202,27 +205,43 @@ def _reclaim_step() -> _Step:
     )
 
 
+# The queue worker's wall time ends a margin before this step is killed. See
+# `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
+QUEUE_STEP_SECONDS = 600
+
+
 def _queue_step() -> _Step:
     return _Step(
         "Step 1: working deferred memory queue...",
         "work",
-        _script("memory_queue.py") + ["work"],
-        600,
+        _script("memory_queue.py")
+        + ["work", "--max-seconds", str(QUEUE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
+        QUEUE_STEP_SECONDS,
     )
 
 
+# The consolidation starts no new batch after this; one batch (a model call and its
+# write) fits in the margin before the step's kill. See
+# `docs/research/2026-09-14-every-budget-inside-its-step.md`.
+EPISODE_BUDGET_SECONDS = 180
+
+
 def _episode_step() -> _Step:
-    """Consolidate yesterday's sessions before compile reads the daily log.
+    """Consolidate every day still pending before compile reads the daily log.
 
     Sessions are kept verbatim whatever the classifier thought of them; this is
     where a day of them becomes durable knowledge, in the window where nobody is
-    waiting. Every promoted item must quote the record it came from.
+    waiting. Every promoted item must quote the record it came from. It used to
+    take yesterday only, so a day that failed once was never read again; five
+    such days were found on 2026-09-14. See
+    `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
     """
     return _Step(
-        "Step 1b: consolidating yesterday's sessions...",
+        "Step 1b: consolidating pending sessions...",
         "episodes",
-        _script("episode_consolidation.py"),
-        300,
+        _script("episode_consolidation.py")
+        + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
+        EPISODE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
     )
 
 
@@ -323,8 +342,9 @@ def _post_compile_steps() -> list[_Step]:
             # issue #29. The pruner keeps the active generation and one ancestor.
             "Step 3d: pruning superseded evidence generations...",
             "prune_generations",
-            _script("prune_generations.py") + ["--apply"],
-            300,
+            _script("prune_generations.py")
+            + ["--apply", "--budget-seconds", str(PRUNE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
+            PRUNE_STEP_SECONDS,
         ),
         _checkpoint_step(),
         _Step(
@@ -471,6 +491,21 @@ def _post_compile_pass(run_step, log) -> int:
 # every morning. The night has the time; the morning reads what it wrote.
 HEALTH_REPORT_NAME = "doctor-report.json"
 HEALTH_REPORT_BUDGET_SECONDS = 60
+# `maintenance_helpers.wait_for_compile_idle`: three tries, ten seconds each.
+COMPILE_IDLE_WAIT_SECONDS = 30
+
+
+def worst_case_seconds() -> float:
+    """The longest a pass can run by its own bounds: every step's timeout and every wait.
+
+    The Windows scheduler's limit must sit above it. See
+    `docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md`.
+    """
+    steps = [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()]
+    steps += [_compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    waits = COMPILE_IDLE_WAIT_SECONDS + COMPILE_WAIT_SECONDS
+    budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
+    return float(sum(step.timeout for step in steps) + waits + budgets)
 
 
 def _write_health_report(log) -> None:
@@ -507,6 +542,8 @@ def _update_code(log) -> None:
     log("Step 5: updating the vault code...")
     outcome = update_checkout(ROOT)
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
+    if outcome.get("detail"):
+        log(f"  update: {outcome['detail']}")
 
 
 def _prune_reports(log) -> None:

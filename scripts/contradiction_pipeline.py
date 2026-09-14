@@ -15,6 +15,7 @@ from bounded_io import read_stable_bytes
 from claim_tree_manifest import snapshot_claim_tree
 from claims import (
     CANDIDATE_SCHEMA,
+    CLAIM_LEDGER_RE,
     MAX_CLAIM_PAGE_BYTES,
     ClaimIndex,
     ClaimPipeline,
@@ -44,9 +45,6 @@ SEMANTIC_LABELS = frozenset({"contradiction", "compatible", "refinement"})
 _CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
 RECOMMENDATIONS = frozenset({"refine", "supersede", "keep-both", "quarantine"})
 MAX_SEMANTIC_OUTPUT_BYTES = 64 * 1024
-_CLAIMS_RE = re.compile(
-    rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
-)
 EVALUATION_SCHEMA = {
     "type": "object",
     "required": ["label", "confidence", "supported"],
@@ -558,10 +556,17 @@ def _well_formed_evaluation(value: object) -> bool:
 
 
 def _validated_evaluation_output(text: str) -> Mapping[str, object]:
+    """The evaluation a provider replied with, fenced or after a sentence.
+
+    A bare `json.loads` sent a fenced verdict to quarantine as malformed. See
+    `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+    """
+    from reply_json import object_with, reply_document
+
     encoded = text.encode("utf-8", errors="strict")
     if len(encoded) > MAX_SEMANTIC_OUTPUT_BYTES:
         raise ValueError("output_too_large")
-    value = json.loads(encoded)
+    value = reply_document(text, object_with("label"))
     if not _well_formed_evaluation(value):
         raise ValueError("malformed_output")
     return value
@@ -1150,7 +1155,7 @@ class ContradictionPipeline:
             self.vault / path, MAX_CLAIM_PAGE_BYTES, label="claim lifecycle page"
         )
         preconditions[path] = sha256_bytes(raw)
-        match = _CLAIMS_RE.search(raw)
+        match = CLAIM_LEDGER_RE.search(raw)
         if match is None:
             raise ValueError("lifecycle target has no canonical claim ledger")
         ledger = json.loads(match[2])

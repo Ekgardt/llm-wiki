@@ -108,7 +108,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц
 
 ### Инфраструктура
-- **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **5 LLM-бэкендов** (авто-детекция): OpenCode (с `OPENCODE_SERVER_PASSWORD`) → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search остаётся опциональным
 - **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10–3.14

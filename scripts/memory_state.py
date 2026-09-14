@@ -224,41 +224,78 @@ def _owner_alive(payload: bytes | None) -> bool:
         return False
 
 
-def _put_back(aside: Path, path: Path) -> None:
-    """Return a lock we moved aside; refused when the name was taken meanwhile."""
-    try:
-        os.link(aside, path)
-        aside.unlink()
-    except OSError:
+# How long a stealer waits for another stealer to finish judging the same lock.
+STEAL_GUARD_SECONDS = 5.0
+
+
+def _lock_descriptor_exclusively(descriptor: int) -> None:
+    """One non-blocking exclusive OS lock attempt; the kernel drops it if we die."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
         return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _await_guard(descriptor: int, guard: Path) -> None:
+    deadline = time.monotonic() + STEAL_GUARD_SECONDS
+    while True:
+        try:
+            _lock_descriptor_exclusively(descriptor)
+            return
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise StateLockTimeout(f"Could not acquire steal guard: {guard}") from exc
+            time.sleep(0.01)
+
+
+@contextmanager
+def _steal_guard(path: Path) -> Iterator[None]:
+    """One stealer at a time for this lock: check and removal under one OS lock.
+
+    See `docs/research/2026-09-14-one-stealer-at-a-time.md`.
+    """
+    guard = path.with_name(f"{path.name}.steal")
+    descriptor = os.open(str(guard), os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        _await_guard(descriptor, guard)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _current_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 def retire_stale_lock(path: Path, judged: bytes) -> bool:
     """Remove `path` only while it still holds the bytes the caller judged stale.
 
-    The lock is renamed aside first — one winner among concurrent stealers —
-    and deleted only when the moved bytes match; a fresh owner's lock moved by
-    mistake is put back. Research:
-    docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md
+    Under the steal guard the bytes are checked before anything moves: while the judged
+    file exists no creator can make a lock (`O_EXCL`) and its dead owner cannot release
+    it, so the file checked is the file removed. Research:
+    docs/research/2026-09-10-a-stale-lock-is-moved-aside-and-checked-before-it-is-removed.md,
+    docs/research/2026-09-14-one-stealer-at-a-time.md
     """
-    aside = path.with_name(f"{path.name}.stale-{os.getpid()}-{secrets.token_hex(4)}")
-    try:
-        os.replace(path, aside)
-    except OSError:
-        return False
-    try:
-        current = aside.read_bytes()
-    except OSError:
-        return False
-    if current != judged:
-        _put_back(aside, path)
-        return False
-    aside.unlink(missing_ok=True)
-    return True
+    with _steal_guard(path):
+        if _current_bytes(path) != judged:
+            return False
+        path.unlink(missing_ok=True)
+        return True
 
 
 class StateLockTimeout(TimeoutError):
     """The state lock is held by a live writer; the caller's event is retried."""
+
+
+class StateCorrupt(OSError):
+    """`run/state.json` and its previous version are both unreadable; nothing was written."""
 
 
 def _wait_for_slow_owner(deadline: float, poll: float) -> None:
@@ -345,10 +382,57 @@ def update_state(
     timeout for scheduled and other non-hook writers.
     """
     with _state_lock(timeout=lock_timeout):
-        state = load_state()
+        state, readable = _state_for_update()
         mutator(state)
+        _keep_previous(readable)
         save_state(state)
         return state
+
+
+# A writer never turns an unreadable state into an empty one: it recovers the
+# previous version or writes nothing. See
+# `docs/research/2026-09-14-a-corrupt-state-is-not-replaced-by-an-empty-one.md`.
+def _previous_state_file() -> Path:
+    return STATE_FILE.with_name(f"{STATE_FILE.name}.previous")
+
+
+def _parsed_state(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _state_for_update() -> tuple[dict[str, Any], bool]:
+    """(the state to mutate, whether the current file was readable)."""
+    if not STATE_FILE.exists():
+        return {}, False
+    current = _parsed_state(STATE_FILE)
+    if current is not None:
+        return current, True
+    return _recovered_previous(), False
+
+
+def _recovered_previous() -> dict[str, Any]:
+    """The previous version of an unreadable state file, or `StateCorrupt`."""
+    load_state()  # keeps the forensic copy and logs the corruption
+    previous = _parsed_state(_previous_state_file())
+    if previous is None:
+        raise StateCorrupt(f"state file unreadable and no readable previous version: {STATE_FILE}")
+    return previous
+
+
+def _keep_previous(readable: bool) -> None:
+    """Hard-link the readable file about to be replaced to its `.previous` name."""
+    if not readable:
+        return
+    staged = STATE_FILE.with_name(f".{STATE_FILE.name}.previous.{secrets.token_hex(8)}.tmp")
+    try:
+        os.link(STATE_FILE, staged)
+        os.replace(staged, _previous_state_file())
+    except OSError:
+        staged.unlink(missing_ok=True)
 
 
 def file_hash(path: Path) -> str:

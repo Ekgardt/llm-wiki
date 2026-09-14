@@ -773,6 +773,7 @@ def test_cli_work_uses_operational_defaults(
         "max_attempts": 8,
         "retry_base_seconds": 30,
         "retry_cap_seconds": 3600,
+        "min_claim_seconds": 120,
     }
     assert set(json.loads(capsys.readouterr().out)) == {"counts"}
 

@@ -1209,6 +1209,8 @@ class _Discovery:
         content: bytes | None,
     ) -> None:
         relative = unicodedata.normalize("NFC", path.relative_to(self.vault).as_posix())
+        if not _storable_source_path(relative):
+            return
         self._require_unseen(relative)
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
@@ -1512,6 +1514,20 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
 
 
+# The graph names a source `source:<relative path>` in at most 512 characters,
+# without control characters or backslashes. A file it cannot name is not a
+# source, exactly as a binary file is not. See
+# `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
+_MAX_SOURCE_PATH_CHARS = 512 - len("source:")
+_UNNAMEABLE_PATH = re.compile(r"[\x00-\x1f\x7f\\]")
+
+
+def _storable_source_path(relative: str) -> bool:
+    if len(relative) > _MAX_SOURCE_PATH_CHARS:
+        return False
+    return _UNNAMEABLE_PATH.search(relative) is None
+
+
 def _decodes_as_utf8(content: bytes) -> bool:
     """Whether these bytes are text at all; a binary file is not a source.
 
@@ -1548,11 +1564,48 @@ def _frontmatter_close(
     return None
 
 
-def _frontmatter_mapping(raw: bytes) -> dict[str, Any]:
-    value = yaml.safe_load(raw.decode("utf-8", errors="strict"))
+@dataclass(frozen=True, slots=True)
+class Frontmatter:
+    """A page's metadata block as read, where its body starts, and what was wrong.
+
+    A page whose metadata cannot be read costs its metadata, never the corpus:
+    one note with `title: Fix: x` used to make every reader of the vault raise.
+    See `docs/research/2026-09-14-one-page-cannot-close-the-vault.md`.
+    """
+
+    mapping: dict[str, Any]
+    body_start: int
+    problem: str | None = None
+
+
+def _frontmatter_mapping(raw: bytes) -> tuple[dict[str, Any], str | None]:
+    try:
+        value = yaml.safe_load(raw.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        return {}, f"frontmatter is not valid YAML ({type(exc).__name__})"
+    if value is None:
+        return {}, None
     if not isinstance(value, Mapping):
-        raise ValueError("frontmatter must be a mapping")
-    return dict(value)
+        return {}, "frontmatter is not a mapping"
+    return dict(value), None
+
+
+def read_frontmatter(
+    content: bytes,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> Frontmatter:
+    """The one reading of a Markdown page's frontmatter, for every reader."""
+    lines = iter(_line_spans(content))
+    first = next(lines, None)
+    if first is None or content[first[0] : first[1]].strip() != b"---":
+        return Frontmatter({}, 0)
+    closing = _frontmatter_close(content, lines, deadline, cancelled)
+    if closing is None:
+        return Frontmatter({}, 0, "unterminated YAML frontmatter")
+    mapping, problem = _frontmatter_mapping(content[first[1] : closing[0]])
+    return Frontmatter(mapping, closing[1], problem)
 
 
 def _frontmatter(
@@ -1561,15 +1614,8 @@ def _frontmatter(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, Any], int]:
-    content.decode("utf-8", errors="strict")
-    lines = iter(_line_spans(content))
-    first = next(lines, None)
-    if first is None or content[first[0] : first[1]].strip() != b"---":
-        return {}, 0
-    closing = _frontmatter_close(content, lines, deadline, cancelled)
-    if closing is None:
-        raise ValueError("unterminated YAML frontmatter")
-    return _frontmatter_mapping(content[first[1] : closing[0]]), closing[1]
+    read = read_frontmatter(content, deadline=deadline, cancelled=cancelled)
+    return read.mapping, read.body_start
 
 
 def _utc_text(value: datetime) -> str:
@@ -1584,10 +1630,11 @@ def _dated_metadata_text(value: date | datetime) -> str:
     return value.isoformat()
 
 
-def _scalar_metadata_text(value: object) -> str:
+def _scalar_metadata_text(value: object) -> str | None:
+    """A single value as text; a list or mapping in a one-value field is absent."""
     if isinstance(value, (str, int, float, bool)):
         return str(value)
-    raise ValueError("corpus metadata values must be scalar")
+    return None
 
 
 def _metadata_value(value: object) -> str | None:
@@ -1632,8 +1679,77 @@ def _validity_mapping(frontmatter: Mapping[str, object]) -> Mapping[str, object]
     if validity is None:
         return {}
     if not isinstance(validity, Mapping):
-        raise ValueError("validity metadata must be a mapping")
+        return {}
     return validity
+
+
+def _metadata_instant(value: object) -> str | None:
+    """A validity bound as text when it is an ISO date or datetime; otherwise absent."""
+    text = _metadata_value(value)
+    if text is None or _iso_parses(text):
+        return text
+    return None
+
+
+def _iso_parses(text: str) -> bool:
+    try:
+        _parsed_iso(text)
+    except ValueError:
+        return False
+    return True
+
+
+_SCALAR_FIELDS = ("type", "project", "source_authority", "authority", "confidence", "status", "language", "lang")
+_SCALAR_TYPES = (str, int, float, bool, date, datetime)
+
+
+def _field_problems(mapping: Mapping[str, object]) -> list[str]:
+    """Every metadata field the snapshot will ignore, named."""
+    validity = mapping.get("validity")
+    return _scalar_problems(mapping) + _validity_problems(validity) + _instant_problems(mapping, validity)
+
+
+def _scalar_problems(mapping: Mapping[str, object]) -> list[str]:
+    return [f"`{name}` is not a single value" for name in _SCALAR_FIELDS if _not_scalar(mapping.get(name))]
+
+
+def _validity_problems(validity: object) -> list[str]:
+    if validity is None or isinstance(validity, Mapping):
+        return []
+    return ["`validity` is not a mapping"]
+
+
+def _instant_problems(mapping: Mapping[str, object], validity: object) -> list[str]:
+    bounds = (mapping.get("valid_from"), mapping.get("valid_to"), *_validity_bounds(validity))
+    return [f"`{str(value)[:40]}` is not an ISO date" for value in bounds if _not_instant(value)]
+
+
+def _validity_bounds(validity: object) -> tuple[object, object]:
+    if not isinstance(validity, Mapping):
+        return None, None
+    return validity.get("from"), validity.get("to")
+
+
+def _not_scalar(value: object) -> bool:
+    return value is not None and not isinstance(value, _SCALAR_TYPES)
+
+
+def _not_instant(value: object) -> bool:
+    return value is not None and _metadata_instant(value) is None
+
+
+def frontmatter_problems(content: bytes) -> list[str]:
+    """What the corpus cannot read in this page's metadata, for lint to name.
+
+    The snapshot indexes such a page with the fields it could read; this is how
+    the owner learns which fields were dropped and why.
+    """
+    if not _decodes_as_utf8(content):
+        return ["page is not UTF-8"]
+    read = read_frontmatter(content)
+    if read.problem:
+        return [read.problem]
+    return _field_problems(read.mapping)
 
 
 def _metadata_status(frontmatter: Mapping[str, object]) -> str:
@@ -1715,9 +1831,20 @@ def _as_datetime(value: str | date | datetime | None) -> datetime | None:
     return result.astimezone(timezone.utc)
 
 
+def _readable_bound(value: str | None) -> datetime | None:
+    """A validity bound as an instant; one that does not parse is no bound.
+
+    The text stays stored as written, so chunk rows do not change; only the
+    reading tolerates it. See `docs/research/2026-09-14-a-bound-kept-as-written.md`.
+    """
+    if value is None or not _iso_parses(str(value)):
+        return None
+    return _as_datetime(value)
+
+
 def _within_validity(metadata: SourceMetadata, instant: datetime) -> bool:
-    start = _as_datetime(metadata.valid_from)
-    end = _as_datetime(metadata.valid_to)
+    start = _readable_bound(metadata.valid_from)
+    end = _readable_bound(metadata.valid_to)
     if start is not None and start > instant:
         return False
     return end is None or instant < end
@@ -2070,8 +2197,8 @@ def _markdown_head(
 ) -> tuple[bool, int, dict[str, Any]]:
     """(is markdown, where the searchable text starts, the frontmatter)."""
     is_markdown = PurePosixPath(source_path).suffix.casefold() == ".md"
+    content.decode("utf-8", errors="strict")
     if not is_markdown:
-        content.decode("utf-8", errors="strict")
         return False, 0, {}
     frontmatter, searchable_start = _frontmatter(
         content, deadline=deadline, cancelled=cancelled
@@ -2424,8 +2551,9 @@ class _Capture:
         content = _candidate_content(candidate, self.policy, "corpus source")
         self._count_bytes(len(content))
         is_markdown = candidate.path.suffix.casefold() == ".md"
-        readable = is_markdown or _decodes_as_utf8(content)
-        frontmatter, searchable_start = self._head(content, is_markdown)
+        # A page that is not text costs itself, as any other undecodable file does.
+        readable = _decodes_as_utf8(content)
+        frontmatter, searchable_start = self._head(content, is_markdown and readable)
         metadata = _metadata(frontmatter, candidate)
         digest = _sha256(content)
         self.hashes[candidate.relative] = digest

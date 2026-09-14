@@ -112,16 +112,40 @@ def _write_lock(pid: int) -> None:
 
 
 def _try_claim_lock() -> bool:
-    """Atomically create lock file (O_EXCL). Returns True if we own it."""
+    """Create the lock with its content in one step. Returns True if we own it.
+
+    The payload is written to a private file and linked to the lock name, so no
+    reader ever sees an empty lock and retires it as unreadable. See
+    `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    """
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    payload = f"0\n{datetime.now().isoformat(timespec='seconds')}\n{secrets.token_hex(8)}\n".encode()
+    staged = LOCK_FILE.with_name(f".{LOCK_FILE.name}.{secrets.token_hex(8)}.tmp")
+    staged.write_bytes(payload)
     try:
-        fd = os.open(str(LOCK_FILE), flags)
+        return _link_lock(staged, payload)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _link_lock(staged: Path, payload: bytes) -> bool:
+    try:
+        os.link(staged, LOCK_FILE)
+    except FileExistsError:
+        return False
+    except OSError:
+        return _exclusive_write_lock(payload)
+    return True
+
+
+def _exclusive_write_lock(payload: bytes) -> bool:
+    """The fallback where hard links are unsupported: create, then write."""
+    try:
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except OSError:
         return False
     try:
-        payload = f"0\n{datetime.now().isoformat(timespec='seconds')}\n{secrets.token_hex(8)}\n"
-        os.write(fd, payload.encode("utf-8"))
+        os.write(fd, payload)
     finally:
         os.close(fd)
     return True

@@ -171,12 +171,8 @@
       "question": "Which project functions does fuse_rrf call?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:1591 (_fusion_weights)",
-          "scripts/retrieval.py:1595 (_accumulate_backend)",
-          "scripts/retrieval.py:1605 (curated_pages_first, imported from provenance at :17)",
-          "scripts/retrieval.py:1606 (_weigh_by_trust)",
-          "scripts/retrieval.py:1609 (_fused_candidate)",
-          "the whole body of fuse_rrf is scripts/retrieval.py:1568-1612 on 2026-09-12"
+          "scripts/retrieval.py (def fuse_rrf) calls, in its body: _fusion_weights, _accumulate_backend, curated_pages_first (imported from provenance), _weigh_by_trust, _fused_candidate",
+          "the whole body of fuse_rrf was retrieval.py lines 1568-1612 on 2026-09-12"
         ],
         "must": [
           "_fusion_weights",

@@ -690,6 +690,32 @@ def _require_activated(database: sqlite3.Connection, identifier: str) -> None:
         raise ValueError("generation was never activated")
 
 
+# What no writer has touched for this long is not in flight: every builder finishes,
+# registration to activation, within a 15-minute budget. See
+# `docs/research/2026-09-14-an-abandoned-publication-is-collected.md`.
+ABANDONED_AFTER_SECONDS = 24 * 60 * 60
+_MAX_ENTRIES_DATED = 256
+
+
+def untouched_for(path: Path, seconds: float) -> bool:
+    """Whether nothing in this directory (itself or an immediate entry) changed for `seconds`.
+
+    An unreadable directory counts as touched just now: doubt keeps it.
+    """
+    return time.time() - _newest_write(path) >= seconds
+
+
+def _newest_write(path: Path) -> float:
+    try:
+        stamps = [path.lstat().st_mtime]
+        with os.scandir(path) as entries:
+            for _index, entry in zip(range(_MAX_ENTRIES_DATED), entries):
+                stamps.append(entry.stat(follow_symlinks=False).st_mtime)
+    except OSError:
+        return time.time()
+    return max(stamps)
+
+
 def _require_retained_ancestors(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("retained_ancestors must be a non-negative integer")
@@ -2924,25 +2950,24 @@ class GenerationCatalog:
             )
         return frozenset(row["generation_id"] for row in rows)
 
-    def _require_paired_generation(
-        self, database: sqlite3.Connection, identifier: str
-    ) -> None:
-        """A row with no tree, or a tree with no row, is a half-finished
-        operation. Report it; never guess which half was meant."""
+    @staticmethod
+    def _require_registered(database: sqlite3.Connection, identifier: str) -> None:
+        """A tree with no row is not this catalog's to remove."""
         registered = database.execute(
             "SELECT 1 FROM generations WHERE generation_id = ?", (identifier,)
         ).fetchone()
         if registered is None:
             raise ValueError("generation is not registered")
-        if not (self.generations_path / identifier).is_dir():
-            raise ValueError("generation tree is missing")
 
     def _require_prunable(
         self, database: sqlite3.Connection, identifier: str, retained: tuple[str, ...]
     ) -> None:
+        """Registered, once active, and no longer retained. Its tree may already be
+        gone: that is a discard whose commit was lost, and discarding completes it.
+        See `docs/research/2026-09-14-a-removal-past-its-point-of-no-return-finishes.md`."""
         if identifier in retained:
             raise ValueError("retained generation cannot be discarded")
-        self._require_paired_generation(database, identifier)
+        self._require_registered(database, identifier)
         _require_activated(database, identifier)
 
     @staticmethod
@@ -2981,12 +3006,12 @@ class GenerationCatalog:
             _require_active_root(retained)
             self._require_prunable(database, identifier, retained)
             self._delete_generation_rows(database, identifier)
-            removed = self._remove_generation_tree(
+            # Past this removal nothing may abort the commit: the tree cannot come
+            # back, and a rolled-back row would name a tree that no longer exists.
+            self._remove_generation_tree(
                 identifier, deadline=deadline, cancelled=cancelled
             )
-            _check_cancelled(cancelled)
-            self._check_deadline(deadline)
-        return removed
+        return True
 
     def _snapshot_catalog(
         self,

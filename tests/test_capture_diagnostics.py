@@ -39,10 +39,13 @@ def test_failure_is_recorded_in_trail_and_counter(diagnostics):
     )
 
     entry = json.loads(module.FAILURE_LOG.read_text(encoding="utf-8").strip())
-    assert entry["kind"] == "user_prompt_append"
-    assert entry["reason"] == "OSError: disk full"
-    assert entry["slug"] == "demo"
-    assert entry["session"] == "01234567"
+    recorded = {key: entry[key] for key in ("kind", "reason", "slug", "session")}
+    assert recorded == {
+        "kind": "user_prompt_append",
+        "reason": "OSError: disk full",
+        "slug": "demo",
+        "session": "01234567",
+    }
     assert state["capture_failures"]["user_prompt_append"]["count"] == 1
 
 
@@ -268,24 +271,27 @@ def test_clearing_an_empty_counter_reports_nothing(diagnostics):
 
 
 def test_a_writer_race_is_deferred_not_lost(diagnostics):
-    """Issue #26.3: seventeen `owner_busy` rows read as seventeen lost captures."""
+    """Issue #26.3: seventeen `owner_busy` rows read as seventeen lost captures.
+
+    A capture event is used: a worker failure is never a loss since 2026-09-14.
+    """
     module, state = diagnostics
 
     from operational_ownership import OperationalOwnershipError
 
     module.record_capture_failure(
-        "adapter_capture_worker",
+        "adapter_session_end",
         "OperationalOwnershipError: owner_busy",
         error=OperationalOwnershipError("owner_busy"),
     )
     module.record_capture_failure(
-        "adapter_capture_worker", "OSError: disk full", error=OSError("disk full")
+        "adapter_session_end", "OSError: disk full", error=OSError("disk full")
     )
 
-    entry = state["capture_failures"]["adapter_capture_worker"]
+    entry = state["capture_failures"]["adapter_session_end"]
     assert entry == {**entry, "count": 2, "deferred": 1}
-    assert module.capture_failure_totals(state) == {"adapter_capture_worker": 1}
-    assert module.capture_deferred_totals(state) == {"adapter_capture_worker": 1}
+    assert module.capture_failure_totals(state) == {"adapter_session_end": 1}
+    assert module.capture_deferred_totals(state) == {"adapter_session_end": 1}
     lines = module.FAILURE_LOG.read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["outcome"] for line in lines] == ["deferred", "lost"]
 
@@ -298,23 +304,23 @@ def test_a_lost_intent_fence_is_deferred_not_lost(diagnostics):
     from memory_queue import QueueOperationError
 
     module.record_capture_failure(
-        "adapter_capture_worker",
+        "adapter_session_end",
         "QueueOperationError: intent_fence_lost",
         error=QueueOperationError("intent_fence_lost"),
     )
     module.record_capture_failure(
-        "adapter_capture_worker",
+        "adapter_session_end",
         "QueueOperationError: capture_link_insert_failed",
         error=QueueOperationError("capture_link_insert_failed"),
     )
     module.record_capture_failure(
-        "adapter_capture_worker",
+        "adapter_session_end",
         "RuntimeError: intent_fence_lost",
         error=RuntimeError("intent_fence_lost"),
     )
 
-    assert module.capture_deferred_totals(state) == {"adapter_capture_worker": 1}
-    assert module.capture_failure_totals(state) == {"adapter_capture_worker": 2}
+    assert module.capture_deferred_totals(state) == {"adapter_session_end": 1}
+    assert module.capture_failure_totals(state) == {"adapter_session_end": 2}
 
 
 def test_only_deferred_writes_keep_the_session_quiet(diagnostics):

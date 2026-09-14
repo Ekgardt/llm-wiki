@@ -602,19 +602,42 @@ def _embedded_matrix(
     return np.ascontiguousarray(matrix, dtype=np.float32)
 
 
-def _embedded_rows(texts: list[str], embedder: object, dimensions: int):
+# Texts per embedding call, with a stop check before each: `encode` cannot be
+# interrupted, and one call over a first build's every chunk ran a 900-second pass
+# past 1 000 s. See `docs/research/2026-09-14-a-pass-that-keeps-its-budget.md`.
+EMBED_STOP_BATCH = 256
+
+
+def _embedded_block(texts: list[str], embedder: object, dimensions: int, check_stop):
+    import numpy as np
+
+    if check_stop is not None:
+        check_stop()
+    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    _require_embedded_shape(matrix, len(texts), dimensions)
+    return matrix
+
+
+def _embedded_rows(texts: list[str], embedder: object, dimensions: int, check_stop=None):
     """Encode exactly the texts asked for, or return an empty (0, d) block."""
     import numpy as np
 
     if not texts:
         return np.zeros((0, dimensions), dtype=np.float32)
-    matrix = np.asarray(_call_generation_embedder(embedder, texts))
-    _require_embedded_shape(matrix, len(texts), dimensions)
-    return np.ascontiguousarray(matrix, dtype=np.float32)
+    starts = range(0, len(texts), EMBED_STOP_BATCH)
+    blocks = [
+        _embedded_block(texts[start : start + EMBED_STOP_BATCH], embedder, dimensions, check_stop)
+        for start in starts
+    ]
+    return np.ascontiguousarray(np.vstack(blocks), dtype=np.float32)
 
 
 def _reused_matrix(
-    snapshot: CorpusSnapshot, embedder: object, dimensions: int, cache: Mapping[str, object]
+    snapshot: CorpusSnapshot,
+    embedder: object,
+    dimensions: int,
+    cache: Mapping[str, object],
+    check_stop=None,
 ) -> tuple[object, int]:
     """One row per chunk, taken from the cache where the chunk digest matches.
 
@@ -636,7 +659,7 @@ def _reused_matrix(
         index for index, chunk in enumerate(snapshot.chunks) if chunk.id not in cache
     ]
     fresh = _embedded_rows(
-        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions
+        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions, check_stop
     )
     matrix = np.zeros((len(snapshot.chunks), dimensions), dtype=np.float32)
     for row, index in enumerate(fresh_positions):
@@ -726,7 +749,41 @@ def _parent_vector_metadata(reuse_from: Path) -> Mapping[str, object] | None:
         return None
     if metadata_path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
         return None
-    return _loaded_json_mapping(metadata_path)
+    return _json_mapping(_sealed_parent_bytes(reuse_from, "vectors.json"))
+
+
+def _parent_artifact_digest(reuse_from: Path, name: str) -> str | None:
+    """The SHA-256 the parent's sealed manifest records for one artifact."""
+    descriptors = _artifact_descriptors(_loaded_json_mapping(reuse_from / "manifest.json") or {})
+    sealed = (descriptors or {}).get(name, {}).get("sha256")
+    return sealed if isinstance(sealed, str) else None
+
+
+def _sealed_parent_bytes(reuse_from: Path, name: str) -> bytes | None:
+    """The artifact's bytes, only when they hash to the parent manifest's seal.
+
+    The builder used to trust whatever sat in the parent directory; a damaged matrix of
+    the right shape was copied and sealed again. See
+    `docs/research/2026-09-14-reused-vectors-match-their-seal.md`.
+    """
+    expected = _parent_artifact_digest(reuse_from, name)
+    if expected is None:
+        return None
+    try:
+        data = (reuse_from / name).read_bytes()
+    except OSError:
+        return None
+    return data if hashlib.sha256(data).hexdigest() == expected else None
+
+
+def _json_mapping(data: bytes | None) -> Mapping[str, object] | None:
+    if data is None:
+        return None
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, Mapping) else None
 
 
 def _loaded_json_mapping(path: Path) -> Mapping[str, object] | None:
@@ -752,10 +809,15 @@ def _vector_identity_matches(
 
 
 def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
+    import io
+
     import numpy as np
 
+    data = _sealed_parent_bytes(reuse_from, "vectors.npy")
+    if data is None:
+        return None
     try:
-        matrix = np.load(reuse_from / "vectors.npy", allow_pickle=False)
+        matrix = np.load(io.BytesIO(data), allow_pickle=False)
     except (OSError, ValueError):
         return None
     if matrix.shape != (rows, dimensions) or matrix.dtype != np.float32:
@@ -840,6 +902,7 @@ def _built_generation_vectors(
     model_revision: str,
     dimensions: int,
     reuse_from: Path | None = None,
+    check_stop=None,
 ) -> tuple[list[dict[str, object]], int]:
     """The same build, plus how many rows came from the parent rather than the model."""
     _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
@@ -847,7 +910,7 @@ def _built_generation_vectors(
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
     cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
-    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache)
+    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache, check_stop)
     _publish_vector_artifacts(
         directory,
         destinations,
@@ -912,6 +975,26 @@ def _lazy_generation_query_encoder():
     return encode
 
 
+class _EmbedderUnavailable(RuntimeError):
+    """The model could not be loaded when a chunk first needed a vector."""
+
+
+def _lazy_passage_encoder():
+    """Encode passages, loading the model only when a chunk is not reused.
+
+    A night with no changed page reuses every row and never loads it. See
+    `docs/research/2026-09-14-the-model-loads-only-for-new-chunks.md`.
+    """
+
+    def encode(texts) -> list[list[float]]:
+        loaded = _get_embedder()
+        if loaded is None:
+            raise _EmbedderUnavailable(str(_embedder_unavailable_reason))
+        return _generation_embedder(loaded, is_query=False)(texts)
+
+    return encode
+
+
 def _resolved_generation_embedder(
     semantic: bool,
     embedder: object | None,
@@ -956,20 +1039,18 @@ def build_generation_vectors_if_available(
     lexical search alone.
     """
     _check_generation_stop(deadline, cancelled)
-    if not snapshot.chunks:
-        return None
-    embedder = _get_embedder()
-    if embedder is None:
+    if not snapshot.chunks or not _have_sentence_transformers():
         return None
     try:
         artifacts, reused = _built_generation_vectors(
             snapshot,
             generation_directory,
-            embedder=_generation_embedder(embedder, is_query=False),
+            embedder=_lazy_passage_encoder(),
             model_id=EMBEDDING_MODEL,
             model_revision=EMBEDDING_MODEL_REVISION,
             dimensions=EMBEDDING_DIM,
             reuse_from=reuse_from,
+            check_stop=lambda: _check_generation_stop(deadline, cancelled),
         )
     except TimeoutError:
         raise
