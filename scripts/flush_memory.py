@@ -1396,7 +1396,9 @@ def _keep_transcript_record(args: argparse.Namespace) -> None:
         "session": args.session_id,
         "host": getattr(args, "agent", None),
         "event": args.event,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        # The queue path's clock: one day for a session whichever path records it.
+        # See `docs/research/2026-09-14-one-day-for-a-session-record.md`.
+        "captured_at": _capture_now().isoformat(),
         "source_event_id": getattr(args, "source_event_id", None),
     }
     write_session_evidence(ROOT, fields, transcript)
