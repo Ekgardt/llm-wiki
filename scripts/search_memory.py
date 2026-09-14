@@ -602,19 +602,42 @@ def _embedded_matrix(
     return np.ascontiguousarray(matrix, dtype=np.float32)
 
 
-def _embedded_rows(texts: list[str], embedder: object, dimensions: int):
+# Texts per embedding call, with a stop check before each: `encode` cannot be
+# interrupted, and one call over a first build's every chunk ran a 900-second pass
+# past 1 000 s. See `docs/research/2026-09-14-a-pass-that-keeps-its-budget.md`.
+EMBED_STOP_BATCH = 256
+
+
+def _embedded_block(texts: list[str], embedder: object, dimensions: int, check_stop):
+    import numpy as np
+
+    if check_stop is not None:
+        check_stop()
+    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    _require_embedded_shape(matrix, len(texts), dimensions)
+    return matrix
+
+
+def _embedded_rows(texts: list[str], embedder: object, dimensions: int, check_stop=None):
     """Encode exactly the texts asked for, or return an empty (0, d) block."""
     import numpy as np
 
     if not texts:
         return np.zeros((0, dimensions), dtype=np.float32)
-    matrix = np.asarray(_call_generation_embedder(embedder, texts))
-    _require_embedded_shape(matrix, len(texts), dimensions)
-    return np.ascontiguousarray(matrix, dtype=np.float32)
+    starts = range(0, len(texts), EMBED_STOP_BATCH)
+    blocks = [
+        _embedded_block(texts[start : start + EMBED_STOP_BATCH], embedder, dimensions, check_stop)
+        for start in starts
+    ]
+    return np.ascontiguousarray(np.vstack(blocks), dtype=np.float32)
 
 
 def _reused_matrix(
-    snapshot: CorpusSnapshot, embedder: object, dimensions: int, cache: Mapping[str, object]
+    snapshot: CorpusSnapshot,
+    embedder: object,
+    dimensions: int,
+    cache: Mapping[str, object],
+    check_stop=None,
 ) -> tuple[object, int]:
     """One row per chunk, taken from the cache where the chunk digest matches.
 
@@ -636,7 +659,7 @@ def _reused_matrix(
         index for index, chunk in enumerate(snapshot.chunks) if chunk.id not in cache
     ]
     fresh = _embedded_rows(
-        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions
+        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions, check_stop
     )
     matrix = np.zeros((len(snapshot.chunks), dimensions), dtype=np.float32)
     for row, index in enumerate(fresh_positions):
@@ -840,6 +863,7 @@ def _built_generation_vectors(
     model_revision: str,
     dimensions: int,
     reuse_from: Path | None = None,
+    check_stop=None,
 ) -> tuple[list[dict[str, object]], int]:
     """The same build, plus how many rows came from the parent rather than the model."""
     _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
@@ -847,7 +871,7 @@ def _built_generation_vectors(
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
     cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
-    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache)
+    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache, check_stop)
     _publish_vector_artifacts(
         directory,
         destinations,
@@ -970,6 +994,7 @@ def build_generation_vectors_if_available(
             model_revision=EMBEDDING_MODEL_REVISION,
             dimensions=EMBEDDING_DIM,
             reuse_from=reuse_from,
+            check_stop=lambda: _check_generation_stop(deadline, cancelled),
         )
     except TimeoutError:
         raise

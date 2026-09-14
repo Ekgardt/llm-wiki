@@ -300,6 +300,8 @@ def _followed(path: Path, roots, state_root, deadline) -> dict:
         return follow_worktree(path, roots=roots, state_root=state_root, deadline=deadline)
     except index.RepositoryIndexRefused as refusal:
         return {"directory": str(path), **refusal.as_dict()}
+    except TimeoutError as stopped:
+        return {"directory": str(path), **index.deferred(stopped)}
 
 
 def follow_worktrees(
