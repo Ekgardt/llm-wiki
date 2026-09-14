@@ -34,7 +34,7 @@ def _database() -> sqlite3.Connection:
     database = sqlite3.connect(":memory:")
     database.row_factory = sqlite3.Row
     database.execute(
-        "CREATE TABLE tasks (id TEXT PRIMARY KEY, state TEXT, lineage_generation INTEGER)"
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, state TEXT, lineage_generation INTEGER, redrive_of TEXT)"
     )
     database.execute(
         "CREATE TABLE capture_task_links (task_id TEXT PRIMARY KEY, intent_id TEXT, "
@@ -45,7 +45,7 @@ def _database() -> sqlite3.Connection:
 
 def _linked(database, task_id="parent", generation=0) -> None:
     database.execute(
-        "INSERT INTO tasks VALUES (?, 'dead', ?)", (task_id, generation)
+        "INSERT INTO tasks(id, state, lineage_generation) VALUES (?, 'dead', ?)", (task_id, generation)
     )
     database.execute(
         "INSERT INTO capture_task_links VALUES (?,?,?,?,?,?)",
@@ -99,7 +99,7 @@ def test_the_child_link_is_signed_for_the_child_and_not_copied():
 
 def test_a_task_that_was_never_a_capture_gets_no_link():
     database = _database()
-    database.execute("INSERT INTO tasks VALUES ('parent', 'dead', 0)")
+    database.execute("INSERT INTO tasks(id, state, lineage_generation) VALUES ('parent', 'dead', 0)")
 
     _Queue()._carry_capture_link(database, "parent", "child", NOW)
 
@@ -123,7 +123,7 @@ def test_a_second_redrive_is_refused():
 
 def test_a_task_that_is_not_dead_is_still_refused_first():
     database = _database()
-    database.execute("INSERT INTO tasks VALUES ('parent', 'ready', 0)")
+    database.execute("INSERT INTO tasks(id, state, lineage_generation) VALUES ('parent', 'ready', 0)")
 
     with pytest.raises(QueueOperationError, match="redrive_requires_dead"):
         memory_queue._require_dead_task(database, "parent")

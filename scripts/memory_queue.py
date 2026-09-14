@@ -4601,6 +4601,15 @@ def _retire_exhausted_history(
     return True
 
 
+def _retire_exhausted_ready(database: sqlite3.Connection, now: datetime) -> None:
+    """A ready task no claim can take any more is dead, so a redrive can reach it."""
+    database.execute(
+        """UPDATE tasks SET state='dead',error_code='attempts_exhausted',updated_at=?
+           WHERE state='ready' AND attempts>=?""",
+        (_timestamp(now), DEFAULTS.queue_max_attempts),
+    )
+
+
 def _take_task_lease(
     database: sqlite3.Connection,
     row: sqlite3.Row,
@@ -5097,6 +5106,7 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     if row is None:
         raise KeyError(task_id)
     _require_redrivable(row)
+    _require_lineage_budget(database, row)
     return row
 
 
@@ -5104,6 +5114,31 @@ def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
     if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
+        raise QueueOperationError("redrive_generations_exhausted")
+
+
+def _redrive_depth(database: sqlite3.Connection, task_id: str) -> int:
+    """How many redrives deep this task is, counted to the bound and no further."""
+    row = database.execute(
+        """WITH RECURSIVE lineage(id, depth) AS (
+               SELECT redrive_of, 1 FROM tasks WHERE id=? AND redrive_of IS NOT NULL
+               UNION ALL
+               SELECT tasks.redrive_of, lineage.depth + 1 FROM tasks
+               JOIN lineage ON tasks.id=lineage.id
+               WHERE tasks.redrive_of IS NOT NULL AND lineage.depth < ?
+           )
+           SELECT COALESCE(MAX(depth), 0) FROM lineage""",
+        (task_id, MAX_REDRIVE_GENERATIONS),
+    ).fetchone()
+    return int(row[0])
+
+
+def _require_lineage_budget(database: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """A copy does not reset the bound: the lineage, not the dead row, gets one redrive.
+
+    See `docs/research/2026-09-14-one-second-chance-and-no-stuck-task.md`.
+    """
+    if _redrive_depth(database, str(row["id"])) >= MAX_REDRIVE_GENERATIONS:
         raise QueueOperationError("redrive_generations_exhausted")
 
 
@@ -6135,6 +6170,7 @@ class MemoryQueue:
                 raise KeyError(task_id)
             if row["state"] != "dead":
                 raise QueueOperationError("redrive_requires_dead")
+            _require_lineage_budget(connection, row)
             self._delete_stale_source_fences(connection)
             self._assert_payload_not_fenced(connection, str(row["payload_json"]))
             payload_bytes = str(row["payload_json"]).encode("utf-8")
@@ -10796,6 +10832,7 @@ class _QueueV3CandidateReader:
             self._connect()
         ) as database, begin_immediate(database):
             self._delete_stale_source_fences(database)
+            self._recover_expired_in(database, now)
             claimable = self._next_claimable_task(database, now, max_attempts)
             if claimable is None:
                 return None
@@ -11265,39 +11302,52 @@ class _QueueV3CandidateReader:
     def recover_expired_leases(self) -> int:
         now = _utc_now()
         with closing(self._connect()) as database, begin_immediate(database):
-            rows = database.execute(
-                "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
-                (_timestamp(now),),
-            ).fetchall()
-            for row in rows:
-                validation = self._require_valid_task_payload(
-                    database, row, now=now, parse=True
-                )
-                if validation is None:
-                    continue
-                database.execute(
-                    """INSERT INTO attempt_history(
-                           task_id,attempt,started_at,finished_at,outcome,error_code
-                       ) VALUES (?,?,?,?,?,?)""",
-                    (
-                        row["id"],
-                        row["attempts"],
-                        row["attempt_started_at"] or _timestamp(now),
-                        _timestamp(now),
-                        "lease_expired",
-                        "lease_expired",
-                    ),
-                )
-                changed = database.execute(
-                    """UPDATE tasks SET state='ready',error_code='lease_expired',
-                           updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
-                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
-                           attempt_started_at=NULL WHERE id=? AND state='leased'""",
-                    (_timestamp(now), _timestamp(now), row["id"]),
-                ).rowcount
-                if changed != 1:
-                    raise QueueOperationError("lease_expiry_failed")
+            return self._recover_expired_in(database, now)
+
+    def _recover_expired_in(self, database: sqlite3.Connection, now: datetime) -> int:
+        """Settle every expired lease; a task out of attempts is dead, never stuck ready.
+
+        See `docs/research/2026-09-14-one-second-chance-and-no-stuck-task.md`.
+        """
+        rows = database.execute(
+            "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at<=?",
+            (_timestamp(now),),
+        ).fetchall()
+        for row in rows:
+            self._settle_expired_lease(database, row, now)
+        _retire_exhausted_ready(database, now)
         return len(rows)
+
+    def _settle_expired_lease(
+        self, database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> None:
+        if self._require_valid_task_payload(database, row, now=now, parse=True) is None:
+            return
+        state, error_code = _EXPIRED_LEASE_OUTCOMES[
+            int(row["attempts"]) >= DEFAULTS.queue_max_attempts
+        ]
+        database.execute(
+            """INSERT INTO attempt_history(
+                   task_id,attempt,started_at,finished_at,outcome,error_code
+               ) VALUES (?,?,?,?,?,?)""",
+            (
+                row["id"],
+                row["attempts"],
+                row["attempt_started_at"] or _timestamp(now),
+                _timestamp(now),
+                "lease_expired",
+                error_code,
+            ),
+        )
+        changed = database.execute(
+            """UPDATE tasks SET state=?,error_code=?,
+                   updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
+                   lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL WHERE id=? AND state='leased'""",
+            (state, error_code, _timestamp(now), _timestamp(now), row["id"]),
+        ).rowcount
+        if changed != 1:
+            raise QueueOperationError("lease_expiry_failed")
 
     def cancel(
         self,
