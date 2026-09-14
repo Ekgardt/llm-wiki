@@ -16,13 +16,15 @@ depth is `generation_catalog.RETAINED_ANCESTOR_GENERATIONS`, which carries the
 reason. Everything else is dropped: registration, activation history and the
 directory together, inside the catalog's own write transaction.
 
-Two things this pass refuses to decide. A registration whose tree is missing, or
-a tree with no registration, is the residue of an interrupted operation — that
-is evidence, not garbage, and it is reported, never removed. A registration that
-has never been activated is either an abandoned publication or one in flight
-right now; `register` returns before `activate` is called, so the two look
-identical from here. Those are reported as pending and left to
-`discard_unactivated`, which runs under the publication fence.
+What this pass refuses to decide. A registration whose tree is missing is the
+residue of an interrupted operation and is reported, never removed (unless it was
+superseded: then it is a discard whose commit was lost, and it is completed). A
+tree with no registration is reported as an orphan; the doctor's repair removes it
+once no writer has touched it for a day. A registration that has never been
+activated is either an abandoned publication or one in flight; one whose tree no
+writer has touched for a day is abandoned and removed through
+`discard_unactivated`, and a younger one is left pending. See
+`docs/research/2026-09-14-an-abandoned-publication-is-collected.md`.
 
 Research: `docs/research/2026-08-29-how-many-superseded-generations-to-keep.md`.
 
@@ -40,8 +42,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generation_catalog import (  # noqa: E402
+    ABANDONED_AFTER_SECONDS,
     RETAINED_ANCESTOR_GENERATIONS,
     GenerationCatalog,
+    untouched_for,
 )
 from memory_state import STATE_ROOT  # noqa: E402
 
@@ -65,11 +69,15 @@ class PrunePlan:
         prunable: tuple[str, ...],
         unpaired: tuple[str, ...],
         pending: tuple[str, ...],
+        abandoned: tuple[str, ...] = (),
+        orphans: tuple[str, ...] = (),
     ) -> None:
         self.retained = retained
         self.prunable = prunable
         self.unpaired = unpaired
         self.pending = pending
+        self.abandoned = abandoned
+        self.orphans = orphans
 
 
 def _generation_directories(generations_path: Path) -> set[str]:
@@ -132,13 +140,16 @@ def plan_prune(
     activated = catalog.activated_generation_ids()
     on_disk = _generation_directories(catalog.generations_path)
     interrupted = _interrupted_discards(retained, registered, on_disk, activated)
-    unpaired = registered.symmetric_difference(on_disk) - interrupted
     candidates = _prune_candidates(retained, registered, on_disk)
+    never_activated = candidates - activated
+    abandoned = {name for name in never_activated if untouched_for(catalog.generations_path / name, ABANDONED_AFTER_SECONDS)}
     return PrunePlan(
         retained,
         tuple(sorted((candidates & activated) | interrupted)),
-        tuple(sorted(unpaired)),
-        tuple(sorted(candidates - activated)),
+        tuple(sorted(registered - on_disk - interrupted)),
+        tuple(sorted(never_activated - abandoned)),
+        tuple(sorted(abandoned)),
+        tuple(sorted(on_disk - registered)),
     )
 
 
@@ -167,7 +178,20 @@ def _discard_reporting_failure(
 
 
 def _planned(plan: PrunePlan) -> list[str]:
-    return [f"would remove {identifier}" for identifier in plan.prunable]
+    removals = [f"would remove {identifier}" for identifier in plan.prunable]
+    return removals + [f"would remove abandoned {identifier}" for identifier in plan.abandoned]
+
+
+def _discard_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
+    """A publication no writer touched for a day, removed the way an aborted build removes its own."""
+    if time.monotonic() >= deadline:
+        return f"DEFERRED: {identifier}: the pass's budget is spent", 0
+    reclaimed = _directory_bytes(catalog.generations_path / identifier)
+    try:
+        catalog.discard_unactivated(identifier, deadline=deadline)
+    except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+        return f"ERROR: {identifier}: {error}", 0
+    return f"removed abandoned {identifier} ({reclaimed} bytes)", reclaimed
 
 
 def _applied(
@@ -182,6 +206,10 @@ def _applied(
     reclaimed = 0
     for identifier in plan.prunable:
         line, freed = _discard_reporting_failure(catalog, identifier, retained_ancestors, deadline)
+        outcomes.append(line)
+        reclaimed += freed
+    for identifier in plan.abandoned:
+        line, freed = _discard_abandoned(catalog, identifier, deadline)
         outcomes.append(line)
         reclaimed += freed
     outcomes.append(f"reclaimed {reclaimed} bytes")
@@ -200,7 +228,11 @@ def _retention_lines(plan: PrunePlan) -> list[str]:
         f"PENDING: {identifier}: registered but never activated"
         for identifier in plan.pending
     ]
-    return kept + rootless + unpaired + pending
+    orphans = [
+        f"ORPHAN: {identifier}: a tree with no registration; the doctor's repair removes it after a day"
+        for identifier in plan.orphans
+    ]
+    return kept + rootless + unpaired + pending + orphans
 
 
 def _rootless_lines(plan: PrunePlan) -> list[str]:
@@ -235,8 +267,8 @@ def _print_lines(outcomes: list[str]) -> None:
 
 
 def _report(outcomes: list[str]) -> int:
-    """A pending publication is normal and does not fail the pass; a
-    registration and a tree that disagree is a half-finished operation."""
+    """A pending publication or an orphan tree is normal and does not fail the pass;
+    a registration whose tree is missing is a half-finished operation."""
     _print_lines(outcomes)
     failures = _count_prefixed(outcomes, "ERROR:")
     unpaired = _count_prefixed(outcomes, "UNPAIRED:")

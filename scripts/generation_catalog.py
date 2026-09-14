@@ -690,6 +690,32 @@ def _require_activated(database: sqlite3.Connection, identifier: str) -> None:
         raise ValueError("generation was never activated")
 
 
+# What no writer has touched for this long is not in flight: every builder finishes,
+# registration to activation, within a 15-minute budget. See
+# `docs/research/2026-09-14-an-abandoned-publication-is-collected.md`.
+ABANDONED_AFTER_SECONDS = 24 * 60 * 60
+_MAX_ENTRIES_DATED = 256
+
+
+def untouched_for(path: Path, seconds: float) -> bool:
+    """Whether nothing in this directory (itself or an immediate entry) changed for `seconds`.
+
+    An unreadable directory counts as touched just now: doubt keeps it.
+    """
+    return time.time() - _newest_write(path) >= seconds
+
+
+def _newest_write(path: Path) -> float:
+    try:
+        stamps = [path.lstat().st_mtime]
+        with os.scandir(path) as entries:
+            for _index, entry in zip(range(_MAX_ENTRIES_DATED), entries):
+                stamps.append(entry.stat(follow_symlinks=False).st_mtime)
+    except OSError:
+        return time.time()
+    return max(stamps)
+
+
 def _require_retained_ancestors(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("retained_ancestors must be a non-negative integer")

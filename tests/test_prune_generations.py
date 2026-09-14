@@ -186,11 +186,14 @@ def test_the_plan_names_the_kept_the_dropped_the_unpaired_and_the_pending(tmp_pa
 
     plan = prune_generations.plan_prune(catalog)
 
-    assert (plan.retained, plan.prunable, plan.unpaired, plan.pending) == (
+    # A tree with no registration is an orphan for the doctor, not an unpaired
+    # registration (2026-09-14).
+    assert (plan.retained, plan.prunable, plan.unpaired, plan.pending, plan.orphans) == (
         ("gen-4", "gen-3"),
         ("gen-1", "gen-2"),
-        ("gen-orphan",),
+        (),
         ("gen-flight",),
+        ("gen-orphan",),
     )
 
 
@@ -246,13 +249,17 @@ def test_an_unpaired_generation_makes_the_pass_report_a_failure(tmp_path):
 
     catalog = _catalog(tmp_path)
     _chain(catalog, ["gen-1", "gen-2", "gen-3"])
-    (catalog.generations_path / "gen-orphan").mkdir()
+    # A registration whose tree is gone and that no discard explains (2026-09-14: a tree
+    # with no registration is the doctor's orphan, not a failure of this pass).
+    _publish(catalog, "gen-flight", parent="gen-3")
+    catalog.register("gen-flight")
+    shutil.rmtree(catalog.generations_path / "gen-flight")
 
     lines = prune_generations.prune_generations(
         state_root=catalog.state_root, apply=True
     )
 
-    assert "UNPAIRED: gen-orphan: registration and tree disagree" in lines
+    assert "UNPAIRED: gen-flight: registration and tree disagree" in lines
     assert prune_generations._report(lines) == 1
 
 

@@ -80,9 +80,9 @@ DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
 GENERATION_FRESH_SECONDS = 24 * 60 * 60
 # An unregistered, invalid generation directory touched this recently may be a build
 # in flight under another fence; the longest builder bound is 15 minutes. See
-# `docs/research/2026-09-14-a-build-in-flight-is-not-an-orphan.md`.
+# `docs/research/2026-09-14-a-build-in-flight-is-not-an-orphan.md`; the rule itself is
+# `generation_catalog.untouched_for`, shared with the prune.
 GENERATION_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
-MAX_ORPHAN_ENTRIES_DATED = 256
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 # How long a probe that gave up waits for the peer it killed to be reaped.
@@ -7231,18 +7231,9 @@ def _skip_generation_child(entry: os.DirEntry, registered: set[str]) -> bool:
 
 def _written_within_grace(path: Path) -> bool:
     """Whether a build could still be writing here; an unreadable directory is kept."""
-    return time.time() - _newest_write(path) < GENERATION_ORPHAN_GRACE_SECONDS
+    from generation_catalog import untouched_for
 
-
-def _newest_write(path: Path) -> float:
-    try:
-        stamps = [path.lstat().st_mtime]
-        with os.scandir(path) as entries:
-            for _index, entry in zip(range(MAX_ORPHAN_ENTRIES_DATED), entries):
-                stamps.append(entry.stat(follow_symlinks=False).st_mtime)
-    except OSError:
-        return time.time()
-    return max(stamps)
+    return not untouched_for(path, GENERATION_ORPHAN_GRACE_SECONDS)
 
 
 def _removable_generation_orphan(
