@@ -23,6 +23,14 @@ from secret_redact import describe_error
 FETCH_TIMEOUT_SECONDS = 120.0
 GIT_TIMEOUT_SECONDS = 60.0
 SYNC_TIMEOUT_SECONDS = 600.0
+# The project's baseline sync, as `sync_memory` runs it. Without `--inexact` an
+# exact sync removes every package the lock selection does not name: dry-run on
+# the live environment said "Would uninstall 93 packages", torch and the models
+# among them. See `docs/research/2026-09-14-an-update-that-keeps-what-is-installed.md`.
+BASELINE_SYNC_COMMAND = (
+    "uv", "sync", "--locked", "--inexact", "--no-default-groups", "--no-python-downloads", "--quiet",
+)
+FETCH_DETAIL_CHARS = 300
 
 
 class SelfUpdateError(RuntimeError):
@@ -97,19 +105,23 @@ def _modified_paths(root: Path) -> set[str]:
 
 
 def _synced_dependencies(root: Path) -> bool:
-    completed = _run(
-        ("uv", "sync", "--locked", "--no-dev"), cwd=root, timeout=SYNC_TIMEOUT_SECONDS
-    )
+    completed = _run(BASELINE_SYNC_COMMAND, cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
     return completed.returncode == 0
 
 
-def _fetched(root: Path, remote: str, branch: str) -> bool:
+def _fetch_failure(root: Path, remote: str, branch: str) -> str | None:
+    """None when the fetch worked; otherwise what git said, redacted and bounded."""
+    from secret_redact import redact_secrets
+
     completed = _run(
         ("git", "fetch", "--quiet", remote, branch),
         cwd=root,
         timeout=FETCH_TIMEOUT_SECONDS,
     )
-    return completed.returncode == 0
+    if completed.returncode == 0:
+        return None
+    said = " ".join(redact_secrets(completed.stderr or "").split())
+    return said[-FETCH_DETAIL_CHARS:] or f"exit {completed.returncode}"
 
 
 def _update_target(root: Path) -> tuple[str, str] | dict:
@@ -167,8 +179,9 @@ def _prepared_update(root: Path) -> tuple[str, str] | dict:
     if isinstance(target, dict):
         return target
     branch, remote = target
-    if not _fetched(root, remote, branch):
-        return _outcome("skipped", "fetch_failed")
+    failure = _fetch_failure(root, remote, branch)
+    if failure is not None:
+        return _outcome("skipped", "fetch_failed", detail=failure)
     return _git(root, "rev-parse", "HEAD"), _git(root, "rev-parse", "FETCH_HEAD")
 
 

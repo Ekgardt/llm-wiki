@@ -534,6 +534,8 @@ def _update_code(log) -> None:
     log("Step 5: updating the vault code...")
     outcome = update_checkout(ROOT)
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
+    if outcome.get("detail"):
+        log(f"  update: {outcome['detail']}")
 
 
 def _prune_reports(log) -> None:
