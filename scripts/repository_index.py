@@ -563,15 +563,15 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
 
 
 def _newest_generation_for(catalog, scope, deadline: float | None):
-    """The newest generation already registered for this repository, or None."""
-    from generation_catalog import _manifest_belongs_to
+    """The newest code generation already registered for this repository, or None.
 
-    for identifier, _registered_at, manifest in catalog.registered_manifests(
-        deadline=deadline
-    ):
-        if _manifest_belongs_to(manifest, scope):
-            return identifier, manifest
-    return None, None
+    The vault's checkout also carries memory generations of the same scope, and
+    the newest of those holds no code roots: a refresh that read it rebuilt with
+    none and was refused, night after night. Detection, refresh and a build's
+    parent read the same generation code answers read. See
+    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
+    """
+    return catalog.code_generation_for_repository(scope, deadline=deadline)
 
 
 def _reuse_config(snapshot, workspace_sha256: str):
