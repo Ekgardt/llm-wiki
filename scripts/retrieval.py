@@ -3010,31 +3010,32 @@ def _is_episodic(relative_path: str) -> bool:
     return str(relative_path).replace("\\", "/").startswith(_EPISODIC_ROOTS)
 
 
-def _repeat_unit(candidate: RetrievalCandidate) -> tuple:
-    """What a visible slot belongs to: an episode, or a page.
-
-    Since 2026-09-08 the unit was the entry — the page and the heading the chunk
-    sits under — because a daily file holds every session of its day and by page
-    two sessions of one day took one slot between them. That is right for a file
-    of episodes and wrong for a compiled page, whose headings are sections of one
-    argument: measured 2026-09-13 on the installed vault, ten visible rows held
-    six pages, one workflow note taking ranks 3, 4 and 5, and the page that
-    should have been tenth was pushed to twelfth — which the selective-forgetting
-    stand reported as a page forgotten. Research:
-    `docs/research/2026-09-13-one-argument-one-slot.md`.
-    """
-    if _is_episodic(candidate.relative_path):
-        return (candidate.relative_path, tuple(candidate.heading_path))
-    return (candidate.relative_path,)
-
-
 def _place_by_page(
     candidate: RetrievalCandidate,
     seen: set[tuple],
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
-    entry = _repeat_unit(candidate)
+    """A page's first chunk takes a slot; a chunk of an episode keeps its rank.
+
+    A compiled page's headings are sections of one argument, so its later chunks
+    follow the distinct pages: measured 2026-09-13 on the installed vault, ten
+    visible rows held six pages, one workflow note taking ranks 3, 4 and 5
+    (`docs/research/2026-09-13-one-argument-one-slot.md`).
+
+    An episode is not one argument. A conversation is cut into turns and its
+    turns hold different facts; giving a session one slot pushed every later
+    turn behind the first chunk of every other session. Measured 2026-09-15 on
+    189 LongMemEval questions, all evidence turns in the first twelve rows: 0.392
+    at one slot per session, 0.566 at two, 0.608 at three, 0.698 in relevance
+    order, which no concave per-session reward beat. A reader that needs every
+    fact is served by relevance order, not by diversity.
+    Research: `docs/research/2026-09-15-what-a-slot-should-reward.md`.
+    """
+    if _is_episodic(candidate.relative_path):
+        first.append(candidate)
+        return
+    entry = (candidate.relative_path,)
     if entry in seen:
         extras.append(candidate)
         return
@@ -3060,7 +3061,8 @@ def _page_diverse(
     """One chunk per page first, then every chunk that repeats a page.
 
     This is the last word on the order, so it is where a page is stopped from
-    taking several visible slots. Nothing is dropped — the repeats follow the
+    taking several visible slots. Chunks of episodes are not repeats and keep
+    their rank (`_place_by_page`). Nothing is dropped — the repeats follow the
     first pass — so a caller that wanted every chunk of one page still receives
     them, in order. The remedies that compare candidates to each other (maximal
     marginal relevance, semantic deduplication) are not needed here: the
