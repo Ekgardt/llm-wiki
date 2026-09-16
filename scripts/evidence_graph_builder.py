@@ -1017,7 +1017,7 @@ def build_full_generation(
             snapshot, generation_path, deadline=deadline, cancelled=cancelled
         )
         vectors = _generation_vector_artifacts(
-            snapshot,
+            _vector_snapshot(snapshot, policy),
             generation_path,
             deadline=deadline,
             cancelled=cancelled,
@@ -1214,6 +1214,22 @@ def _manifest_versions(snapshot: corpus_snapshot.CorpusSnapshot | None):
         search_memory.GENERATION_TOKENIZER_VERSION,
         search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
     )
+
+
+def _vector_snapshot(
+    snapshot: corpus_snapshot.CorpusSnapshot | None, policy: Mapping[str, object] | None
+) -> corpus_snapshot.CorpusSnapshot | None:
+    """The corpus to encode, or nothing when this generation's vectors are never read.
+
+    A code generation is registered and never activated, and the dense leg opens the active
+    generation only, so its vectors were written and forgotten: 23 of the 27 minutes of the
+    vault's code build on 2026-09-15. The manifest then says `vector_state: absent`, which
+    the catalog and every reader already understand. Research:
+    `docs/research/2026-09-16-a-code-generation-needs-no-vectors.md`.
+    """
+    if _policy_code_roots(policy):
+        return None
+    return snapshot
 
 
 def _policy_code_roots(policy: Mapping[str, object] | None) -> tuple[str, ...]:
