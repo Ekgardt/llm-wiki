@@ -14,6 +14,7 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
+import lane_score
 from provenance import authority_weight, curated_pages_first, source_type_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
@@ -3010,6 +3011,44 @@ def _is_episodic(relative_path: str) -> bool:
     return str(relative_path).replace("\\", "/").startswith(_EPISODIC_ROOTS)
 
 
+def _evidence_ordered(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+) -> tuple[RetrievalCandidate, ...]:
+    """Turns of episodes ordered by one score over the lanes; pages keep the trust order.
+
+    The score reads what each lane said, what it did not say, whose turn it is and the
+    cross-encoder where it ran (`lane_score`). It is applied to episodes only: it was fitted
+    on conversation turns, while a compiled page's place is decided by the trust table.
+    Measured 2026-09-16 on 189 LongMemEval questions, all evidence inside the reader's
+    twelve: 0.698 before, 0.815 after. Research:
+    `docs/research/2026-09-16-one-score-over-the-lanes.md`.
+    """
+    places = _episodic_places(candidates)
+    if len(places) < 2:
+        return tuple(candidates)
+    ordered = sorted(
+        (candidates[index] for index in places),
+        key=lambda item: -lane_score.candidate_score(item, display_meta),
+    )
+    return tuple(_merged_places(candidates, places, ordered))
+
+
+def _episodic_places(candidates: Sequence[RetrievalCandidate]) -> list[int]:
+    return [index for index, item in enumerate(candidates) if _is_episodic(item.relative_path)]
+
+
+def _merged_places(
+    candidates: Sequence[RetrievalCandidate],
+    places: Sequence[int],
+    ordered: Sequence[RetrievalCandidate],
+) -> list[RetrievalCandidate]:
+    merged = list(candidates)
+    for place, candidate in zip(places, ordered):
+        merged[place] = candidate
+    return merged
+
+
 def _place_by_page(
     candidate: RetrievalCandidate,
     seen: set[tuple],
@@ -3291,6 +3330,7 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
         graph_enabled=progress.graph_enabled,
     )
     candidates, display_meta = _partial_candidates(progress, signals)
+    candidates = _evidence_ordered(candidates, display_meta)
     candidates = _promote_exact_filename(candidates, _exact_query(progress.analysis))
     return RetrievalResult(
         candidates=_capped(_page_diverse(candidates), progress.limit),
@@ -3401,6 +3441,7 @@ def _executed_plan(
     optional_failure = _rerank_failure(rerank_trace, optional_failure)
     partial = _any_true(partial, rerank_trace.optional_timeout)
 
+    candidates = _evidence_ordered(candidates, display_meta)
     candidates = _promote_exact_filename(candidates, exact_query)
     progress.candidates = candidates
     _check_stopped(deadline_monotonic, cancelled)
