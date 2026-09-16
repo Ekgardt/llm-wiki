@@ -48,6 +48,20 @@ def test_the_short_user_turn_is_found_on_its_own(tmp_path) -> None:
     assert holding[0].lstrip().startswith("**user:**")
 
 
+def test_a_bare_acknowledgement_still_folds(tmp_path) -> None:
+    root = tmp_path / "vault"
+    (root / "knowledge/daily").mkdir(parents=True)
+    (root / "knowledge/notes").mkdir(parents=True)
+    (root / "knowledge/projects").mkdir(parents=True)
+    (root / "knowledge/daily/2023-05-22.md").write_text(ENTRY + "**user:** thanks\n\n", encoding="utf-8")
+    snapshot = corpus_snapshot.collect_corpus(root, daily_paths=("knowledge/daily/2023-05-22.md",))
+
+    holding = [chunk.text for chunk in snapshot.chunks if "thanks" in chunk.text]
+
+    assert len(holding) == 1
+    assert holding[0].lstrip().startswith("**user:** my commute")
+
+
 def test_the_short_assistant_reply_stays_with_the_turn_before_it(tmp_path) -> None:
     texts = _chunks(tmp_path)
 

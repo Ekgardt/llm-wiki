@@ -2101,6 +2101,10 @@ TURN_MARKERS = (b"**user:**", b"**assistant:**")
 # A turn shorter than this stays with the turn before it: a bare "thanks" is
 # not a unit worth finding on its own.
 MIN_ROUND_BYTES = 160
+# The user's own turns earn a chunk far sooner: they carry the facts questions ask about.
+# Measured on LongMemEval 2026-09-16: of 896 evidence turns only 2 are shorter than this,
+# while 4 % of all user turns are — the bare acknowledgements, which still fold.
+MIN_USER_ROUND_BYTES = 48
 
 
 def _marker_offsets(content: bytes, marker: bytes, start: int, end: int) -> list[int]:
@@ -2128,20 +2132,25 @@ def _starts_a_user_turn(content: bytes, offset: int) -> bool:
     return content.startswith(TURN_MARKERS[0], offset)
 
 
+def _round_bound(content: bytes, cut: int) -> int:
+    """How long a round must be to earn a chunk, by whose turn begins it."""
+    if _starts_a_user_turn(content, cut):
+        return MIN_USER_ROUND_BYTES
+    return MIN_ROUND_BYTES
+
+
 def _kept_cut(content: bytes, cut: int, following: int) -> bool:
-    """A user turn always begins a chunk; a short assistant reply folds into the round before.
+    """A stated fact begins a chunk; a bare acknowledgement folds into the round before.
 
     A 91-character user turn used to end a 2 101-character chunk that began with an
     assistant reply, and the fact it stated ranked 53rd. 91 % of the stand's evidence turns
     are user turns, and the reader is handed the round either way. Research:
     `docs/research/2026-09-16-a-user-turn-always-starts-its-own-chunk.md`.
     """
-    if _starts_a_user_turn(content, cut):
-        return True
-    return following - cut >= MIN_ROUND_BYTES
+    return following - cut >= _round_bound(content, cut)
 
 
-def _without_short_preamble(content: bytes, cuts: list[int], start: int) -> list[int]:
+def _without_short_preamble(cuts: list[int], start: int) -> list[int]:
     """The heading and its stamp fold into the first round after them."""
     if not cuts or cuts[0] - start >= MIN_ROUND_BYTES:
         return cuts
@@ -2150,7 +2159,7 @@ def _without_short_preamble(content: bytes, cuts: list[int], start: int) -> list
 
 def _long_enough_cuts(content: bytes, cuts: list[int], start: int, end: int) -> list[int]:
     """The cuts that begin a round worth finding on its own."""
-    kept = _without_short_preamble(content, cuts, start)
+    kept = _without_short_preamble(cuts, start)
     bounds = [*kept, end]
     return [cut for cut, following in zip(kept, bounds[1:]) if _kept_cut(content, cut, following)]
 

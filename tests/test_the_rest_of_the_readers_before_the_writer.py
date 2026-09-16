@@ -33,7 +33,7 @@ NOTES = {
 }
 
 
-def _written(tmp_path: Path, files: dict[str, bytes], extract) -> int:
+def _written(tmp_path: Path, files: dict[str, bytes], extract, code_roots=("src",)) -> int:
     vault = tmp_path / "vault"
     for relative, data in files.items():
         path = vault / relative
@@ -41,7 +41,7 @@ def _written(tmp_path: Path, files: dict[str, bytes], extract) -> int:
         path.write_bytes(data)
     (vault / "knowledge/notes").mkdir(parents=True, exist_ok=True)
     (vault / "src").mkdir(parents=True, exist_ok=True)
-    snapshot = collect_corpus(vault, code_roots=("src",), approved_code_roots=("src",))
+    snapshot = collect_corpus(vault, code_roots=code_roots, approved_code_roots=("src",))
     sources, result = extract(snapshot.sources)
     evidence_graph.create_generation_database(
         tmp_path / "evidence.sqlite3",
@@ -84,7 +84,9 @@ def test_a_source_file_the_writer_used_to_refuse_is_written(tmp_path, name):
 
 @pytest.mark.parametrize("name", sorted(NOTES))
 def test_a_note_with_raw_yaml_values_is_written(tmp_path, name):
-    assert _written(tmp_path, {f"knowledge/notes/{name}.md": NOTES[name].encode()}, _knowledge) == 1
+    # A memory build names no code roots; a build that does collects only them since
+    # 2026-09-16 (`docs/research/2026-09-16-the-code-index-leaves-the-knowledge-alone.md`).
+    assert _written(tmp_path, {f"knowledge/notes/{name}.md": NOTES[name].encode()}, _knowledge, ()) == 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot create a file name with a line break or backslash")

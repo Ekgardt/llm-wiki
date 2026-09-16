@@ -3330,10 +3330,9 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
         graph_enabled=progress.graph_enabled,
     )
     candidates, display_meta = _partial_candidates(progress, signals)
-    candidates = _evidence_ordered(candidates, display_meta)
     candidates = _promote_exact_filename(candidates, _exact_query(progress.analysis))
     return RetrievalResult(
-        candidates=_capped(_page_diverse(candidates), progress.limit),
+        candidates=_capped(_evidence_ordered(_page_diverse(candidates), display_meta), progress.limit),
         trace=_retrieval_trace(
             requested=progress.requested,
             effective=effective,
@@ -3441,11 +3440,10 @@ def _executed_plan(
     optional_failure = _rerank_failure(rerank_trace, optional_failure)
     partial = _any_true(partial, rerank_trace.optional_timeout)
 
-    candidates = _evidence_ordered(candidates, display_meta)
     candidates = _promote_exact_filename(candidates, exact_query)
     progress.candidates = candidates
     _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(_page_diverse(candidates), progress.limit)
+    candidates = _capped(_evidence_ordered(_page_diverse(candidates), display_meta), progress.limit)
 
     return RetrievalResult(
         candidates=candidates,
