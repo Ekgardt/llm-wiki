@@ -1463,6 +1463,20 @@ def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
 
 
+def _walk_memory(discovery: _Discovery, vault: Path, policy: SnapshotPolicy) -> None:
+    """The knowledge tree belongs to the memory generation, not to the code one.
+
+    One checkout carries two generations — memory, which the active pointer names, and
+    code, which is only registered (`docs/research/2026-09-12-the-vault-is-a-repository-too.md`).
+    The code roots already exclude `knowledge`, but this walk added it back: the vault's
+    code generation of 2026-09-15 carried all 333 private pages, 28 % of its chunk tokens.
+    Research: `docs/research/2026-09-16-the-code-index-leaves-the-knowledge-alone.md`.
+    """
+    if policy.code_roots:
+        return
+    _walk_knowledge(discovery, vault)
+
+
 def _existing_path(vault: Path, relative: str) -> Path:
     path = vault.joinpath(*PurePosixPath(relative).parts)
     if not path.exists():
@@ -1508,7 +1522,7 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
         deadline=deadline,
         include_archives=policy.include_historical or policy.as_of is not None,
     )
-    _walk_knowledge(discovery, vault)
+    _walk_memory(discovery, vault, policy)
     _add_daily_paths(discovery, vault, policy, deadline)
     _add_code_roots(discovery, vault, policy, deadline)
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
