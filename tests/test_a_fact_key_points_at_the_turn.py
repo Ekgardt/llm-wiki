@@ -66,9 +66,11 @@ def test_user_turns_are_the_units_keyed(vault: Path) -> None:
 
     turns = fact_keys.user_turns(snapshot.chunks)
 
-    # Short turns fold into one chunk; its user segments are keyed as one turn.
-    assert len(turns) == 1
-    assert turns[0].text.startswith("I'm thinking of sell") and "Korg B1" in turns[0].text
+    # Since 2026-09-16 a user turn always begins its own chunk, so each is keyed on its own.
+    # See `docs/research/2026-09-16-a-user-turn-always-starts-its-own-chunk.md`.
+    assert len(turns) == 2
+    assert turns[0].text.startswith("I'm thinking of sell")
+    assert "Korg B1" in turns[1].text
 
 
 def test_keys_are_extracted_once_per_turn_and_found_by_word_and_by_vector(vault: Path, tmp_path: Path) -> None:
@@ -84,7 +86,7 @@ def test_keys_are_extracted_once_per_turn_and_found_by_word_and_by_vector(vault:
     counts = (keyed, again, store.count())
     store.close()
 
-    assert counts == (1, 0, (1, 2))
+    assert counts == (2, 0, (2, 3))
     assert (by_word[0]["byte_start"], by_vector[0]["byte_start"]) == (drum.byte_start, drum.byte_start)
 
 
@@ -99,7 +101,7 @@ def test_an_unreadable_reply_keys_nothing_and_leaves_the_turn_to_ask_again(vault
     fact_keys.key_turns(store, snapshot.chunks, lambda prompt, system_prompt: "not json", None)
     retried = fact_keys.key_turns(store, snapshot.chunks, _ask, None)
 
-    assert (retried, store.count()[0]) == (1, 1)
+    assert (retried, store.count()[0]) == (2, 2)
 
 
 def test_the_keys_leg_resolves_to_the_turn_and_never_shows_the_key(vault: Path, tmp_path: Path, monkeypatch) -> None:

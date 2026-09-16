@@ -2124,23 +2124,42 @@ def _round_starts(content: bytes, start: int, end: int) -> list[int]:
     return sorted(offset for offset in offsets if _begins_a_line(content, offset, start))
 
 
-def _long_enough_cuts(cuts: list[int], start: int, end: int) -> list[int]:
-    """Only the cuts that begin a round of at least MIN_ROUND_BYTES.
+def _starts_a_user_turn(content: bytes, offset: int) -> bool:
+    return content.startswith(TURN_MARKERS[0], offset)
 
-    A short round folds into the one before it, and a short preamble — the
-    heading and its stamp — folds into the first round after it.
+
+def _kept_cut(content: bytes, cut: int, following: int) -> bool:
+    """A user turn always begins a chunk; a short assistant reply folds into the round before.
+
+    A 91-character user turn used to end a 2 101-character chunk that began with an
+    assistant reply, and the fact it stated ranked 53rd. 91 % of the stand's evidence turns
+    are user turns, and the reader is handed the round either way. Research:
+    `docs/research/2026-09-16-a-user-turn-always-starts-its-own-chunk.md`.
     """
-    if cuts and cuts[0] - start < MIN_ROUND_BYTES:
-        cuts = cuts[1:]
-    bounds = [*cuts, end]
-    return [cut for cut, following in zip(cuts, bounds[1:]) if following - cut >= MIN_ROUND_BYTES]
+    if _starts_a_user_turn(content, cut):
+        return True
+    return following - cut >= MIN_ROUND_BYTES
+
+
+def _without_short_preamble(content: bytes, cuts: list[int], start: int) -> list[int]:
+    """The heading and its stamp fold into the first round after them."""
+    if not cuts or cuts[0] - start >= MIN_ROUND_BYTES:
+        return cuts
+    return cuts[1:]
+
+
+def _long_enough_cuts(content: bytes, cuts: list[int], start: int, end: int) -> list[int]:
+    """The cuts that begin a round worth finding on its own."""
+    kept = _without_short_preamble(content, cuts, start)
+    bounds = [*kept, end]
+    return [cut for cut, following in zip(kept, bounds[1:]) if _kept_cut(content, cut, following)]
 
 
 def _round_spans(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
     """The span cut at every user turn, short rounds folded into the one before."""
     start, end, ancestry = span
     rounds: list[tuple[int, int, tuple[str, ...]]] = []
-    for cut in _long_enough_cuts(_round_starts(content, start, end), start, end):
+    for cut in _long_enough_cuts(content, _round_starts(content, start, end), start, end):
         rounds.append((start, cut, ancestry))
         start = cut
     rounds.append((start, end, ancestry))
