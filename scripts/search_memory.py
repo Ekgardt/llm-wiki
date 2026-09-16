@@ -365,6 +365,11 @@ _GENERATION_FTS_DDL = """
                 content,
                 tokenize = 'porter unicode61'
             );
+            CREATE VIRTUAL TABLE chunk_keys USING fts5(
+                chunk_id UNINDEXED,
+                keys,
+                tokenize = 'porter unicode61'
+            );
             """
 
 
@@ -422,12 +427,24 @@ def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
     )
 
 
+def _key_rows(snapshot: CorpusSnapshot, keys: Mapping[str, str] | None):
+    """One row per chunk whose turn the nightly pass keyed, and none otherwise."""
+    if not keys:
+        return []
+    return [
+        (chunk.id, keys[chunk.span_sha256])
+        for chunk in snapshot.chunks
+        if chunk.span_sha256 in keys
+    ]
+
+
 def _write_generation_fts(
     database: sqlite3.Connection,
     snapshot: CorpusSnapshot,
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    keys: Mapping[str, str] | None = None,
 ) -> None:
     """Schema, metadata and every chunk, verified before the caller publishes."""
     database.execute("PRAGMA journal_mode=DELETE")
@@ -446,6 +463,9 @@ def _write_generation_fts(
     database.executemany(
         "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(22)) + ")",
         rows(),
+    )
+    database.executemany(
+        "INSERT INTO chunk_keys(chunk_id, keys) VALUES (?, ?)", _key_rows(snapshot, keys)
     )
     database.commit()
     if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
@@ -486,6 +506,7 @@ def _built_fts_artifact(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    keys: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Write the artifact under a temporary name, then publish it atomically."""
     state = {"stopped": False, "complete": False}
@@ -498,7 +519,7 @@ def _built_fts_artifact(
         with closing(sqlite3.connect(temporary)) as database:
             database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
             _write_generation_fts(
-                database, snapshot, deadline=deadline, cancelled=cancelled
+                database, snapshot, deadline=deadline, cancelled=cancelled, keys=keys
             )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
@@ -528,8 +549,14 @@ def build_generation_fts(
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    keys: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+    """Build one immutable generation-local FTS5 artifact from captured chunks.
+
+    `keys` carries the nightly fact keys per turn span; they are indexed beside the chunk
+    and never returned to a reader. Research:
+    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
     _require_buildable_snapshot(snapshot, deadline, cancelled)
     directory = _generation_directory(generation_directory)
     destination = directory / GENERATION_FTS_ARTIFACT
@@ -543,6 +570,7 @@ def build_generation_fts(
         temporary,
         deadline=deadline,
         cancelled=cancelled,
+        keys=keys,
     )
 
 
@@ -3794,11 +3822,38 @@ def _generation_matched_rows(
     values: Sequence[object],
     limit: int,
 ) -> list[sqlite3.Row]:
-    return connection.execute(
+    """Chunks the words match, then chunks whose keys match; the caller deduplicates."""
+    matched = connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
         [_fts_query(query), *values, limit * 5],
     ).fetchall()
+    return matched + _key_matched_rows(connection, query, filters, values, limit)
+
+
+def _key_matched_rows(
+    connection: sqlite3.Connection,
+    query: str,
+    filters: str,
+    values: Sequence[object],
+    limit: int,
+) -> list[sqlite3.Row]:
+    """Chunks found under the facts their turn states, when the nightly pass keyed them.
+
+    Key expansion, the shape LongMemEval measured as the good one: the turn is found under
+    its facts as well as its text, and what the reader gets is still the turn. An artifact
+    built before the keys existed simply has no rows here. Research:
+    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
+    try:
+        return connection.execute(
+            f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunk_keys) AS rank FROM chunk_keys "
+            "JOIN chunks ON chunks.chunk_id = chunk_keys.chunk_id "
+            f"WHERE chunk_keys MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
+            [_fts_query(query), *values, limit],
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
 
 
 def _deduplicated_results(

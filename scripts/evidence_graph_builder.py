@@ -1014,7 +1014,11 @@ def build_full_generation(
         fsync_file(database_path)
         fsync_directory(generation_path)
         search_artifact = _generation_search_artifact(
-            snapshot, generation_path, deadline=deadline, cancelled=cancelled
+            snapshot,
+            generation_path,
+            deadline=deadline,
+            cancelled=cancelled,
+            state_root=catalog.state_root,
         )
         vectors = _generation_vector_artifacts(
             _vector_snapshot(snapshot, policy),
@@ -1149,14 +1153,32 @@ def _generation_search_artifact(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    state_root: Path | None = None,
 ):
     if snapshot is None:
         return None
     import search_memory
 
     return search_memory.build_generation_fts(
-        snapshot, generation_path, deadline=deadline, cancelled=cancelled
+        snapshot,
+        generation_path,
+        deadline=deadline,
+        cancelled=cancelled,
+        keys=_nightly_keys(state_root),
     )
+
+
+def _nightly_keys(state_root: Path | None) -> dict[str, str]:
+    """The fact keys the nightly pass extracted, or none when it never ran.
+
+    They are indexed beside the chunk and never read back to a reader. Research:
+    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
+    if state_root is None:
+        return {}
+    import fact_keys
+
+    return fact_keys.keys_by_span(fact_keys.store_path(state_root))
 
 
 def _vector_reuse_source(

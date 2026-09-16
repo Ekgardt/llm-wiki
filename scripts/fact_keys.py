@@ -125,6 +125,30 @@ def user_turns(chunks: Iterable[object]) -> list[Turn]:
     return turns
 
 
+def keys_by_span(path: Path) -> dict[str, str]:
+    """Every key, gathered per turn span, for the index to carry beside the chunk.
+
+    Key expansion is the shape LongMemEval measured as the good one: a turn is found under
+    the facts it states as well as under its text, and the reader still gets the turn.
+    Research: `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
+    if not path.exists():
+        return {}
+    store = KeyStore(path)
+    try:
+        rows = store.connection.execute("SELECT span_sha256, key FROM keys ORDER BY id").fetchall()
+    finally:
+        store.close()
+    return _joined_keys(rows)
+
+
+def _joined_keys(rows: Iterable[tuple[object, object]]) -> dict[str, str]:
+    by_span: dict[str, list[str]] = {}
+    for span, key in rows:
+        by_span.setdefault(str(span), []).append(str(key))
+    return {span: "\n".join(keys) for span, keys in by_span.items()}
+
+
 class KeyStore:
     """The disposable store of keys, one SQLite file under cache/."""
 
