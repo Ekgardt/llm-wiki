@@ -563,7 +563,13 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _timestamp(value: datetime) -> str:
-    return _as_utc(value).isoformat().replace("+00:00", "Z")
+    """Always six fractional digits, so the text order SQL compares is time order.
+
+    `isoformat()` drops the fraction on a whole second, and `Z` sorts after `.`:
+    `…:00Z` compared greater than `…:00.500000Z`. The reader takes both shapes.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return _as_utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: object) -> datetime:

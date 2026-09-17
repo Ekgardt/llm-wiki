@@ -12,6 +12,14 @@ import operational_ownership
 import scheduled_weekly
 
 
+def _weekly_owner_row(candidate: Path) -> tuple:
+    with contextlib.closing(sqlite3.connect(candidate)) as database:
+        return database.execute(
+            "SELECT owner_token, fencing_epoch, expires_at FROM maintenance_owners "
+            "WHERE role='weekly' AND scope='global'"
+        ).fetchone()
+
+
 def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -24,23 +32,17 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
     marker_path = state_root / marker.relative_path
     original_marker = marker_path.read_bytes()
     phases: list[str] = []
+    outer = (
+        original_marker,
+        (lease.token, lease.epoch, operational_ownership._timestamp(lease.expires_at)),
+    )
 
     def assert_outer(phase: str) -> None:
         phases.append(phase)
-        assert marker_path.read_bytes() == original_marker
-        with sqlite3.connect(candidate) as database:
-            assert database.execute(
-                "SELECT owner_token, fencing_epoch, expires_at FROM maintenance_owners "
-                "WHERE role='weekly' AND scope='global'"
-            ).fetchone() == (
-                lease.token,
-                lease.epoch,
-                lease.expires_at.isoformat().replace("+00:00", "Z"),
-            )
+        assert (marker_path.read_bytes(), _weekly_owner_row(candidate)) == outer
 
     def nested_nightly(*, ownership, fence=None) -> int:
-        assert ownership == lease
-        assert isinstance(fence, threading.Event)
+        assert (ownership, isinstance(fence, threading.Event)) == (lease, True)
         assert_outer("nightly")
         return 0
 
@@ -74,24 +76,26 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
     )
 
     try:
-        assert scheduled_weekly.run_weekly(ownership=lease) == 0
-        assert phases[0] == "nightly"
-        assert len(phases) >= 4
-        assert marker_path.read_bytes() == original_marker
+        exit_code = scheduled_weekly.run_weekly(ownership=lease)
+        held = marker_path.read_bytes()
     finally:
         operational_ownership.release_marker_owner(lease, marker)
 
+    assert (exit_code, phases[0], len(phases) >= 4, held) == (
+        0,
+        "nightly",
+        True,
+        original_marker,
+    )
     assert not marker_path.exists()
 
 
 def test_the_weekly_pass_ages_session_records_out_of_the_active_tree():
     """The archiver only helps if the pass that runs unattended calls it."""
-    import scheduled_weekly
-
     steps = scheduled_weekly._script_steps()
-    labels = [label for _message, label, _command, _timeout in steps]
-    sessions = next(step for step in steps if step[1] == "sessions")
+    commands = {label: command for _message, label, command, _timeout in steps}
+    labels = list(commands)
+    command = commands["sessions"]
 
     assert labels.index("sessions") > labels.index("archive")
-    assert sessions[2][-1] == "--apply"
-    assert sessions[2][-2].endswith("archive_sessions.py")
+    assert (command[-1], Path(command[-2]).name) == ("--apply", "archive_sessions.py")
