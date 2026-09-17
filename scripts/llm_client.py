@@ -456,30 +456,45 @@ def _completed_call(
         response = _invoked_backend(caller, descriptor, transport, mode)
     except ProviderExited as exc:
         return _exited_result(descriptor, exc, mode, pre_call_count)
-    except ProviderTimeout:
+    except Exception as exc:  # noqa: BLE001 - providers must not crash callers
+        return _failed_result(descriptor, exc, mode, pre_call_count)
+    return _outcome_of(descriptor, transport, mode, pre_call_count, response)
+
+
+def _ran_out_of_time(exc: Exception) -> bool:
+    """A passed deadline, whichever backend met it and however it was wrapped.
+
+    Only claude used to report `provider_timeout`; a codex `TimeoutExpired` and a
+    socket timeout of the HTTP backends were filed as `provider_error`.
+    Research: docs/research/2026-09-17-every-provider-names-a-death-and-a-deadline.md
+    """
+    if isinstance(exc, (ProviderTimeout, subprocess.TimeoutExpired, TimeoutError)):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
+
+
+def _failed_result(
+    descriptor: ProviderDescriptor,
+    exc: Exception,
+    mode: str,
+    pre_call_count: TokenCount,
+) -> LLMResult:
+    if _ran_out_of_time(exc):
         print(
             f"llm_client: {descriptor.provider} backend exceeded "
             f"{_timeout_s()}s and was stopped",
             file=sys.stderr,
         )
         return LLMResult(
-            descriptor,
-            None,
-            True,
-            "provider_timeout",
-            mode,
-            TokenUsage(),
-            pre_call_count,
+            descriptor, None, True, "provider_timeout", mode, TokenUsage(), pre_call_count
         )
-    except Exception as exc:  # noqa: BLE001 - providers must not crash callers
-        print(
-            f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
-            file=sys.stderr,
-        )
-        return LLMResult(
-            descriptor, None, True, "provider_error", mode, TokenUsage(), pre_call_count
-        )
-    return _outcome_of(descriptor, transport, mode, pre_call_count, response)
+    print(
+        f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
+        file=sys.stderr,
+    )
+    return LLMResult(
+        descriptor, None, True, "provider_error", mode, TokenUsage(), pre_call_count
+    )
 
 
 def _outcome_of(
@@ -1337,9 +1352,24 @@ def provider_cwd() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory(prefix="llm-wiki-provider-")
 
 
+def _require_codex_exited_cleanly(result: subprocess.CompletedProcess) -> None:
+    """A codex that died is named with its status and what it printed.
+
+    The return code used to be ignored: a crashed or logged-out codex left an
+    empty out-file and was reported as `empty_response`, the collapse
+    `ProviderExited` was written to stop for claude.
+    """
+    if result.returncode == 0:
+        return
+    printed = b"\n".join(part for part in (result.stdout, result.stderr) if part)
+    raise ProviderExited(
+        "codex", result.returncode, _stderr_excerpt(printed.decode("utf-8", errors="ignore"))
+    )
+
+
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
-        subprocess.run(
+        result = subprocess.run(
             command,
             stdin=stdin_handle,
             capture_output=True,
@@ -1347,6 +1377,7 @@ def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> 
             check=False,
             cwd=neutral,
         )
+    _require_codex_exited_cleanly(result)
     try:
         return Path(out_path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
