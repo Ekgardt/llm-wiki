@@ -221,8 +221,27 @@ def _append_event(payload: dict, block: str) -> None:
             block,
             operation_id=_event_operation_id(payload),
         )
-    except OSError as e:
-        print(f"daily_log_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - the helper's contract is exit 0; the reason is kept
+        report_helper_failure(
+            "daily_log_append", "opencode_daily_append", error, payload.get("sessionId")
+        )
+
+
+def report_helper_failure(
+    helper: str, kind: str, error: BaseException, session_id: object
+) -> None:
+    """The reason on stderr and in the capture-failure trail; never an exit status.
+
+    The plugin helpers say "never fails" and caught `OSError` only, while the
+    writer also raises value, transaction and ownership errors. See
+    `docs/research/2026-09-17-a-helper-that-says-it-never-fails-does-not.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+
+    reason = redact_secrets(f"{type(error).__name__}: {error}")
+    print(f"{helper}: write failed: {reason}", file=sys.stderr)
+    known_session = session_id if isinstance(session_id, str) else None
+    record_capture_failure(kind, reason, error=error, session_id=known_session)
 
 
 def _event_operation_id(payload: dict) -> str | None:
