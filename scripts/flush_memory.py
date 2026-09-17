@@ -1540,11 +1540,32 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
     from capture_adoption import adopt_orphaned_capture_intents
 
     try:
-        adopt_orphaned_capture_intents(
+        result = adopt_orphaned_capture_intents(
             queue, coordinator, state_root=Path(STATE_ROOT)
         )
-    except Exception:  # noqa: BLE001 - recovery must not break the worker
+    except Exception as error:  # noqa: BLE001 - recovery must not break the worker
+        _count_dropped_capture("capture_adoption", error, None)
         return
+    _record_adoption_skips(result.get("skipped") or [])
+
+
+def _record_adoption_skips(skipped: Sequence[Mapping[str, object]]) -> None:
+    """An intent the pass could not adopt is a standing loss: say so, once per pass.
+
+    The result used to be thrown away, so an intent that could never be adopted was
+    re-read on every pass and named nowhere. See
+    `docs/research/2026-09-17-the-adoption-pass-says-what-it-skipped-and-looks-past-it.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+
+    standing = [skip for skip in skipped if not skip.get("retried")]
+    if not standing:
+        return
+    first = standing[0]
+    record_capture_failure(
+        "capture_adoption",
+        f"{len(standing)} intent(s) not adopted; first {first.get('intent_id')}: {first.get('reason')}",
+    )
 
 
 def run_capture_worker_once(

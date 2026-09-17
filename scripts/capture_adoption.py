@@ -138,9 +138,13 @@ def _adopt_one(
 
 def _skip(record: dict[str, Any], error: BaseException) -> dict[str, str]:
     """A refusal names the intent and the reason; the record is left untouched."""
+    from capture_diagnostics import is_contention
+
     return {
         "intent_id": str(record["intent_id"]),
         "reason": f"{type(error).__name__}: {error}",
+        # A writer race is tried again by the next pass; anything else will not mend itself.
+        "retried": is_contention(error),
     }
 
 
