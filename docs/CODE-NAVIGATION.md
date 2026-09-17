@@ -1,36 +1,50 @@
 # Code Navigation
 
-One-sentence summary: read-only Python navigation through pinned Pyright 1.1.411,
-owned by the MCP process, freshness-proven, and never claiming market superiority.
+One-sentence summary: read-only navigation through four pinned managed language
+servers, owned by the MCP process, freshness-proven, and never claiming market
+superiority.
 
 ## Trust and sandbox
 
 Code navigation runs only against **trusted local repositories**. This is
-**not an OS sandbox**. Pyright still runs with the current user's OS permissions
-and may read configured interpreters, external stubs, and library code; those
-inputs become fingerprinted provenance. Do not claim Pyright cannot write or read
-other user-accessible paths.
+**not an OS sandbox**. A managed server still runs with the current user's OS
+permissions and may read configured interpreters, external stubs, toolchains and
+library code; those inputs become fingerprinted provenance. Do not claim a managed
+server cannot write or read other user-accessible paths.
 
 ## Installation
 
-Pyright is installed by one explicit operator command into the approved managed
-root `cache/code-tools/pyright/1.1.411/`. It **never downloads during a query**:
+Each server is installed by one explicit operator command into its approved managed
+root, and a server **never downloads during a query**:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
+| profile | version | managed root |
+|---|---|---|
+| pyright | 1.1.411 | `cache/code-tools/pyright/1.1.411/` |
+| typescript | 6.0.0 (tsserver 5.9.3) | `cache/code-tools/typescript-language-server/6.0.0/` |
+| gopls | v0.23.0, built from pinned Go 1.27.1 | `cache/code-tools/gopls/v0.23.0/` |
+| rust-analyzer | 1.98.1, with its pinned Rust toolchain | `cache/code-tools/rust-analyzer/1.98.1/` |
+
 The installer verifies the pinned SHA-256 and npm integrity before publishing.
-No query, MCP call, doctor check, or profile discovery path downloads or updates
-Pyright. The qualified runtime uses Node 22; CI pins Node 22.23.1.
+No query, MCP call, doctor check, or profile discovery path downloads or updates a
+server. The qualified runtime uses Node 22; CI pins Node 22.23.1.
 
 ## Process ownership boundaries
 
-- **Windows Job Object** owns the assigned Pyright server tree.
-- **POSIX process group** covers the trusted, pinned Pyright server and
+- **Windows Job Object** owns the assigned server tree.
+- **POSIX process group** covers the trusted, pinned assigned server and its
   descendants only while they remain in that group.
+- A native server is launched from a sealed, digest-verified copy of itself inside
+  its owner's `run/lsp/<owner-nonce>/` scratch.
 - A hostile `setsid()` escape is **unsupported**. This path is qualified only for
-  pinned Pyright in trusted repositories and does not add an ancestry scan.
+  the pinned managed servers in trusted repositories and does not add an ancestry
+  scan.
 
 ## get_architecture modes
 

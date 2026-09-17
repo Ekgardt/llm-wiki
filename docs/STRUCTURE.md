@@ -92,7 +92,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
 │   ├── code-tools/                  managed code-tool artifacts
-│   │   └── pyright/1.1.411/           reserved pinned Pyright installation root
+│   │   ├── pyright/1.1.411/           reserved pinned Pyright installation root
+│   │   ├── typescript-language-server/6.0.0/   with tsserver 5.9.3
+│   │   ├── gopls/v0.23.0/             built from the pinned Go 1.27.1 toolchain
+│   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
 │   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
 │   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 │   ├── access_log.jsonl             legacy bounded read-only access history
@@ -424,19 +427,25 @@ step — under the ownership registry's `doctor` role scoped
 `repository:<repository_id>`. It is not a daemon: the process exits when the
 refresh does. Answers carry a `freshness` block naming both commits.
 
-The runtime starts Pyright lazily within the owning MCP process, exposes only
-allowlisted read operations, reports readiness and capability limitations, and falls
-back to existing structural evidence when unavailable. Exact small results use a
-deterministic compact renderer; the Context Compiler remains responsible for broad
-multi-source synthesis. Pyright installation is a separate explicit operator action.
-See
+The runtime starts a managed language server lazily within the owning MCP process,
+exposes only allowlisted read operations, reports readiness and capability
+limitations, and falls back to existing structural evidence when unavailable. The
+server is chosen by file suffix from the four managed profiles; a suffix no profile
+claims falls back to Pyright and degrades to structural evidence. Exact small results
+use a deterministic compact renderer; the Context Compiler remains responsible for
+broad multi-source synthesis. Installation is a separate explicit operator action
+per profile: `scripts/install_pyright.py`, or
+`scripts/install_language_server.py --profile <name>`. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
 `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
 
-The approved managed Pyright artifact path is
-`cache/code-tools/pyright/1.1.411/`. Live LSP process scratch is bounded under
-`run/lsp/<owner-nonce>/`; doctor and deletion eligibility must treat a live owner
-or retained failure evidence as protected operational state.
+The approved managed artifact paths are `cache/code-tools/pyright/1.1.411/`,
+`cache/code-tools/typescript-language-server/6.0.0/`,
+`cache/code-tools/gopls/v0.23.0/` and `cache/code-tools/rust-analyzer/1.98.1/`.
+Live LSP process scratch is bounded under
+`run/lsp/<owner-nonce>/`, which also holds the sealed digest-verified copy of a
+native server that is launched from it; doctor and deletion eligibility must treat a
+live owner or retained failure evidence as protected operational state.
 
 Every startup coordinator enters an eight-entry module registry before its first
 owned mutation. Successful startup hands ownership to the instance's existing
@@ -466,11 +475,11 @@ A successful terminal layout never contains a hidden temp. See
 
 LSP process containment is platform-qualified rather than one portable sandbox. A
 Windows Job Object owns the assigned server tree. On Linux and macOS, a POSIX
-process group owns the pinned Pyright server and descendants only while they remain
-in that group. A hostile descendant can call `setsid()` and escape; containing that
-case is unsupported. The POSIX runtime is therefore limited to qualified Pyright in
-trusted repositories and does not use a `/proc` or `ps` ancestry scan to claim
-stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
+process group owns the assigned managed server and its descendants only while they
+remain in that group. A hostile descendant can call `setsid()` and escape; containing
+that case is unsupported. The POSIX runtime is therefore limited to the qualified
+managed servers in trusted repositories and does not use a `/proc` or `ps` ancestry
+scan to claim stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
 candidate requiring a separate capability-gated design. See
 `knowledge/notes/lsp-process-containment-decision.md`.
 
@@ -579,9 +588,11 @@ or nonzero active state remains fail-closed.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
-  `cache/code-tools/pyright/1.1.411/` is the managed Pyright artifact root;
-  `scripts/install_pyright.py` is the only supported download/publish path and
-  `scripts/lsp_paths.py` derives it without directory creation.
+  `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
+  roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
+  `rust-analyzer/1.98.1`); `scripts/install_pyright.py` and
+  `scripts/install_language_server.py` are the only supported download/publish paths
+  and `scripts/lsp_paths.py` derives them without directory creation.
   v4.0: `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).

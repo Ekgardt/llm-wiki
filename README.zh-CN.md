@@ -327,12 +327,18 @@ BM25 门禁（112 条生成查询和 60 条冻结查询）已于 2026-09-10 随�
 
 本地 stdio MCP 服务器提供 **12 个 task-shaped 工具**，包括 `doctor`，并统一使用 response envelope 和 health/context resources。`find_dead_code(directory)` 返回保守候选项，`get_architecture(directory)` 返回入口点、路由、基于 canonical symbol ID 的热点和社区。文件系统分析要求显式提供存在的非根目录，且绝不回退到进程 CWD。
 
-精确 Python 模式 `definition`、`references`、`implementations`、`type`、
-`diagnostics` 以及带位置的 `callers`/`callees` 使用固定的
-**Pyright 1.1.411**。请显式安装；查询期间不会下载或更新：
+精确模式 `definition`、`references`、`implementations`、`type`、
+`diagnostics` 以及带位置的 `callers`/`callees` 使用四个固定的受管语言服务器：
+**Pyright 1.1.411**（Python）、**typescript-language-server 6.0.0**（配 tsserver
+5.9.3，用于 TypeScript/JavaScript）、**gopls v0.23.0**（Go，安装时由固定的 Go
+1.27.1 工具链编译）和 **rust-analyzer 1.98.1**（Rust，附带其固定的 Rust 工具链）。
+请逐个显式安装；查询期间不会下载或更新：
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 该路径仅支持**受信任的本地仓库**，且**不是 OS sandbox**。位置、deadline、

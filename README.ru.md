@@ -341,13 +341,19 @@ uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-cla
 
 Локальный stdio MCP-сервер предоставляет **12 task-shaped инструментов**, включая `doctor`, единый response envelope и health/context resources. `find_dead_code(directory)` возвращает консервативные кандидаты, а `get_architecture(directory)` — entry points, routes, hotspots по canonical symbol ID и communities. Анализ файловой системы требует явно заданную существующую директорию, не принимает корень диска и не использует CWD как fallback.
 
-Точные Python-режимы `definition`, `references`, `implementations`, `type`,
-`diagnostics` и позиционные `callers`/`callees` используют закреплённый
-**Pyright 1.1.411**. Установите его явно; запросы ничего не скачивают и не
-обновляют:
+Точные режимы `definition`, `references`, `implementations`, `type`,
+`diagnostics` и позиционные `callers`/`callees` используют четыре закреплённых
+управляемых языковых сервера: **Pyright 1.1.411** (Python),
+**typescript-language-server 6.0.0** с tsserver 5.9.3 (TypeScript/JavaScript),
+**gopls v0.23.0** (Go, собирается из закреплённого тулчейна Go 1.27.1) и
+**rust-analyzer 1.98.1** (Rust, вместе со своим закреплённым тулчейном Rust).
+Установите каждый явно; запросы ничего не скачивают и не обновляют:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 Этот путь поддерживается только в **доверенных локальных репозиториях** и

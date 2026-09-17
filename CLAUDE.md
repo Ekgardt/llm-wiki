@@ -188,14 +188,18 @@ superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by 
 replacement plan, and on 2026-09-18 the foundation that nothing in production ever ran --
 the sealed code workspace, the `code_capture` manifest section, the verified-analysis
 records and the `evidence-graph/v3` schema they filled -- was removed from the code
-(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`). The replacement plan implements the production-quality,
-Python 3.10-compatible read-only LSP path through pinned Pyright 1.1.411: paths,
-positions, bounded protocol, startup evidence, leased platform-qualified lifecycle
-ownership, repository containment, safe log redaction, explicit profile installation,
-document synchronization, session-manager capacity, the normalized navigation facade,
-deterministic rendering, precise `get_architecture` modes, doctor diagnostics, and
-qualification gates. A Windows Job Object owns the assigned server tree. On POSIX,
-the process group covers pinned Pyright descendants only while they remain in-group;
+(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
+The replacement plan implements the production-quality,
+Python 3.10-compatible read-only LSP path through four pinned managed language
+servers: paths, positions, bounded protocol, startup evidence, leased
+platform-qualified lifecycle ownership, repository containment, safe log redaction,
+explicit profile installation, document synchronization, session-manager capacity,
+the normalized navigation facade, deterministic rendering, precise
+`get_architecture` modes, doctor diagnostics, and qualification gates. A query is
+routed to one profile by file suffix; a suffix no profile claims falls back to
+Pyright, which opens the file, answers nothing, and degrades to structural evidence.
+A Windows Job Object owns the assigned server tree. On POSIX, the process group
+covers the assigned managed server's descendants only while they remain in-group;
 hostile `setsid()` escape is unsupported, so this path remains limited to trusted
 local repositories and is not an OS sandbox.
 It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
@@ -203,9 +207,17 @@ pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observatio
 are not written into active generations. Language servers start lazily inside the
 owning MCP process, expose only allowlisted read operations, report readiness and
 capability limits, and fall back to existing structural evidence. Installation is
-a separate explicit operator action. The managed Pyright artifact lives at
-`cache/code-tools/pyright/1.1.411/`; bounded process scratch lives under
-`run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract, which
+a separate explicit operator action, per profile: `scripts/install_pyright.py` for
+Pyright and `scripts/install_language_server.py --profile <name>` for the other
+three. The managed artifacts live at `cache/code-tools/pyright/1.1.411/`,
+`cache/code-tools/typescript-language-server/6.0.0/` (tsserver 5.9.3),
+`cache/code-tools/gopls/v0.23.0/` (built at install time from the pinned Go 1.27.1
+toolchain, because upstream publishes no binary) and
+`cache/code-tools/rust-analyzer/1.98.1/` (published, and arriving with its pinned
+Rust toolchain because it reads the project through `cargo`). Bounded process
+scratch lives under `run/lsp/<owner-nonce>/`, holds the sealed digest-verified copy
+of a native server that is launched from it, and follows the existing `run/`
+deletion contract, which
 protects live LSP owners and retained LSP failure evidence. While ownership is live,
 `run/lsp/<owner-nonce>/lease.json` is a bounded mutable live lease, refreshed every
 10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only

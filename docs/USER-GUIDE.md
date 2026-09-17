@@ -213,25 +213,32 @@ the next nightly pass. Details:
 
 ## Read-only Python code navigation
 
-Precise Python navigation uses pinned **Pyright 1.1.411** through the existing
-`get_architecture` MCP tool. Install the managed package explicitly:
+Precise navigation uses four pinned managed language servers through the existing
+`get_architecture` MCP tool: **Pyright 1.1.411** for Python,
+**typescript-language-server 6.0.0** (tsserver 5.9.3) for TypeScript and
+JavaScript, **gopls v0.23.0** for Go and **rust-analyzer 1.98.1** for Rust. The file
+suffix chooses the server; a suffix none of them claims degrades to structural
+evidence. Install each managed package explicitly:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-No query, doctor check, or profile discovery path downloads or updates Pyright.
+No query, doctor check, or profile discovery path downloads or updates a server.
 The precise modes are `mode=definition`, `mode=references`,
 `mode=implementations`, `mode=type`, and `mode=diagnostics`; positioned
-`callers` and `callees` also use Pyright. Input lines are one-based and character
-values are zero-based UTF-8 byte offsets. Structural modes retain their existing
-10-second deadline; precise modes use one absolute 60-second deadline.
+`callers` and `callees` also use a managed server. Input lines are one-based and
+character values are zero-based UTF-8 byte offsets. Structural modes retain their
+existing 10-second deadline; precise modes use one absolute 60-second deadline.
 
 This feature supports **trusted local repositories** only. It is not an OS sandbox.
-Pyright runs with the current user's permissions and may read configured
-interpreters, external stubs, and libraries. Windows uses a Job Object for the
-assigned process tree. POSIX uses a process group while descendants remain in that
-group; hostile `setsid()` escape is unsupported.
+A managed server runs with the current user's permissions and may read configured
+interpreters, external stubs, toolchains, and libraries. Windows uses a Job Object
+for the assigned process tree. POSIX uses a process group while descendants remain in
+that group; hostile `setsid()` escape is unsupported.
 
 Every result binds pre/post workspace revisions and current source citations. One
 stale attempt is retried once. There is no semantic result cache, no query-time graph

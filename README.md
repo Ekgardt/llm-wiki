@@ -336,12 +336,18 @@ Run retrieval-v2: `uv run python benchmark/run_benchmark.py`
 
 The local stdio MCP server exposes **12 task-shaped tools**, including `doctor`, with one response envelope and health/context resources. `find_dead_code(directory)` returns conservative candidates, while `get_architecture(directory)` reports entry points, routes, canonical-symbol hotspots, and communities. Filesystem analysis requires an explicit existing non-root directory and never falls back to the process CWD.
 
-Precise Python modes `definition`, `references`, `implementations`, `type`,
-`diagnostics`, and positioned `callers`/`callees` use pinned **Pyright 1.1.411**.
-Install it explicitly; queries never download or update it:
+Precise modes `definition`, `references`, `implementations`, `type`,
+`diagnostics`, and positioned `callers`/`callees` use four pinned managed language
+servers — **Pyright 1.1.411** (Python), **typescript-language-server 6.0.0** with
+tsserver 5.9.3 (TypeScript/JavaScript), **gopls v0.23.0** (Go, built from the pinned
+Go 1.27.1 toolchain) and **rust-analyzer 1.98.1** (Rust, with its pinned Rust
+toolchain). Install each explicitly; queries never download or update them:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 This path supports **trusted local repositories** only and is **not an OS sandbox**.
