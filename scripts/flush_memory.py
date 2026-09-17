@@ -162,12 +162,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def _transcript_prefixes() -> list[Path]:
-    home = Path.home()
-    return [
-        home / ".claude" / "projects",
-        home / ".codex" / "sessions",
-        STATE_ROOT / "cache" / "transient-transcripts",
-    ]
+    from host_transcripts import host_transcript_roots
+
+    return [*host_transcript_roots(), STATE_ROOT / "cache" / "transient-transcripts"]
 
 
 def _is_beneath(path: Path, root: Path) -> bool:

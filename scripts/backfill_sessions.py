@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from host_transcripts import host_transcript_roots  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from session_evidence import (  # noqa: E402
     evidence_relative_path,
@@ -33,10 +34,8 @@ from session_evidence import (  # noqa: E402
     write_session_evidence,
 )
 
-DEFAULT_SOURCE_ROOTS = (
-    Path.home() / ".claude" / "projects",
-    Path.home() / ".codex" / "sessions",
-)
+# Where the hosts keep their sessions, a moved `CLAUDE_CONFIG_DIR` or `CODEX_HOME` included.
+DEFAULT_SOURCE_ROOTS = host_transcript_roots()
 # One transcript can be tens of megabytes; the record itself is bounded to 512 KB
 # by the writer, so reading more than this only costs time.
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024

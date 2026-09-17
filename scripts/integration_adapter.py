@@ -2498,11 +2498,9 @@ def _validated_capture_transcript_path(value: object) -> Path:
     path = Path(text).resolve(strict=True)
     if path.suffix.casefold() not in {".jsonl", ".json", ".txt", ".log"}:
         raise PermissionError("capture transcript extension is not allowed")
-    roots = (
-        Path.home() / ".claude" / "projects",
-        Path.home() / ".codex" / "sessions",
-        Path(STATE_ROOT) / "cache" / "transient-transcripts",
-    )
+    from host_transcripts import host_transcript_roots
+
+    roots = (*host_transcript_roots(), Path(STATE_ROOT) / "cache" / "transient-transcripts")
     if not any(_capture_path_is_beneath(path, root) for root in roots):
         raise PermissionError("capture transcript path is not allowed")
     return path
