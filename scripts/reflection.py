@@ -36,6 +36,12 @@ SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
 
 REFLECTION_THRESHOLD = 2  # Minimum Update sections to trigger reflection.
 MAX_REFLECTION_PAGE_BYTES = 16 * 1024 * 1024
+# A rewrite shorter than this is a refusal or a fragment, not a page.
+MIN_REFLECTED_WORDS = 40
+SUMMARY_PREFIX = "One-sentence summary:"
+# The heading of the block this pass appends; the page's live body ends where it begins.
+HISTORY_MARKER = "\n## History (pre-reflection"
+_UNTOUCHED_FRONTMATTER = ("status: superseded", "status: archived", "type: decision")
 
 UPDATE_SECTION_RE = re.compile(r"^## Update \(\d{4}-\d{2}-\d{2}\)", re.MULTILINE)
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -54,37 +60,54 @@ def find_reflection_candidates() -> list[dict]:
 
 
 def _reflection_candidate(md: Path) -> dict | None:
-    content = _unreflected_text(md)
+    content = _reflectable_text(md)
     if content is None:
         return None
-    updates = UPDATE_SECTION_RE.findall(content)
+    updates = UPDATE_SECTION_RE.findall(_live_body(content))
     if len(updates) < REFLECTION_THRESHOLD:
         return None
-    title_match = H1_RE.search(content)
     return {
         "path": md,
         "slug": md.stem,
-        "title": title_match.group(1) if title_match else md.stem,
+        "title": _title_of(content, md.stem),
         "update_count": len(updates),
     }
 
 
-def _unreflected_text(md: Path) -> str | None:
-    """The text of an active page that has not been reflected yet; None otherwise."""
+def _title_of(content: str, fallback: str) -> str:
+    title_match = H1_RE.search(content)
+    if title_match is None:
+        return fallback
+    return title_match.group(1)
+
+
+def _live_body(content: str) -> str:
+    """The page before this pass's own history block: what a reader sees as the page.
+
+    The preserved original inside the block still holds its `## Update` sections; counting
+    them would reflect a page again every week. See
+    `docs/research/2026-09-17-a-reflection-is-checked-before-it-is-written.md`.
+    """
+    return content.split(HISTORY_MARKER, 1)[0]
+
+
+def _reflectable_text(md: Path) -> str | None:
+    """The text of a page this pass may rewrite; None otherwise."""
     if md.name in SKIP_NAMES or "archive" in md.parts:
         return None
     try:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return None
-    if _retired_or_reflected(content):
+    if _never_rewritten(content):
         return None
     return content
 
 
-def _retired_or_reflected(content: str) -> bool:
-    # Superseded/archived pages, and pages that already carry a ## History section.
-    return "status: superseded" in content or "status: archived" in content or "## History" in content
+def _never_rewritten(content: str) -> bool:
+    """Retired pages, and decisions: "Decisions are immutable: supersede, never edit in place"."""
+    frontmatter, _body = _split_frontmatter(content)
+    return any(marker in frontmatter for marker in _UNTOUCHED_FRONTMATTER)
 
 
 def reflect_page(md: Path, apply: bool = False) -> str:
@@ -96,12 +119,16 @@ def reflect_page(md: Path, apply: bool = False) -> str:
         md, MAX_REFLECTION_PAGE_BYTES, label="reflection page"
     )
     content = source_bytes.decode("utf-8")
-    updates = UPDATE_SECTION_RE.findall(content)
+    if _never_rewritten(content):
+        return f"  {md.stem}: a decision or a retired page is never rewritten, skipping."
     frontmatter, body = _split_frontmatter(content)
-    rewritten, message = _reflection(md, body, len(updates), apply)
+    live, earlier = _live_and_earlier(body)
+    updates = UPDATE_SECTION_RE.findall(live)
+    rewritten, message = _reflection(md, live, len(updates), apply)
     if rewritten is None:
         return message
-    encoded = redact_secrets(_reflected_page(md, frontmatter, body, rewritten)).encode("utf-8")
+    page = _reflected_page(md, frontmatter, live, rewritten) + earlier
+    encoded = redact_secrets(page).encode("utf-8")
     mutate_knowledge(
         stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
         {md: encoded},
@@ -110,6 +137,12 @@ def reflect_page(md: Path, apply: bool = False) -> str:
         },
     )
     return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
+
+
+def _live_and_earlier(body: str) -> tuple[str, str]:
+    """The body a reader sees, and the history blocks of earlier passes, kept as they are."""
+    live, marker, earlier = body.partition(HISTORY_MARKER)
+    return live, marker + earlier
 
 
 def _split_frontmatter(content: str) -> tuple[str, str]:
@@ -136,9 +169,26 @@ def _llm_reflection(md: Path, body: str) -> tuple[str | None, str]:
         return None, f"  {md.stem}: llm_client not available."
     system = "You are a knowledge consolidation engine. Output markdown only."
     rewritten = call_llm(_reflection_prompt(body), system, max_tokens=3000)
-    if not rewritten or not rewritten.strip():
-        return None, f"  {md.stem}: LLM returned empty response."
+    refused = _why_not_written(body, rewritten or "")
+    if refused is not None:
+        return None, f"  {md.stem}: rewrite not written — {refused}."
     return rewritten, ""
+
+
+def _why_not_written(body: str, rewritten: str) -> str | None:
+    """Why this reply must not replace the page, or None when it may.
+
+    The weekly pass runs unattended, and a provider's refusal once became the whole body of
+    a page. A rewrite has to keep what the page is known by. Research:
+    `docs/research/2026-09-17-a-reflection-is-checked-before-it-is-written.md`.
+    """
+    checks = (
+        (len(rewritten.split()) < MIN_REFLECTED_WORDS, "the reply is too short to be a page"),
+        (SUMMARY_PREFIX in body and SUMMARY_PREFIX not in rewritten, "the summary line is gone"),
+        (bool(UPDATE_SECTION_RE.search(rewritten)), "an update section was left unintegrated"),
+        (HISTORY_MARKER.strip() in rewritten, "the reply carries its own history block"),
+    )
+    return next((reason for failed, reason in checks if failed), None)
 
 
 def _reflection_prompt(body: str) -> str:
@@ -148,17 +198,17 @@ single coherent page, not a series of patches.
 
 Rules:
 1. PRESERVE all factual claims — do not invent new information.
-2. INTEGRATE updates into the main text — don't just concatenate.
-3. Move the OLD body (before your rewrite) into a ## History section.
-4. Keep the same title, summary, and evidence sections.
-5. Target 150-400 words for the main content (excluding History).
+2. INTEGRATE updates into the main text — don't just concatenate; leave no
+   "## Update" section behind.
+3. Keep the same title, the "One-sentence summary:" line, and evidence sections.
+4. Do NOT add a history section: the original is preserved for you.
+5. Target 150-400 words.
 
 === PAGE TO REWRITE ===
 {body}
 
 === OUTPUT ===
 Return the COMPLETE rewritten page body (starting after the H1 title).
-Include a ## History section at the end with the original body.
 Return ONLY the rewritten markdown — no commentary.
 """
 

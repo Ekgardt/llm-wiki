@@ -413,7 +413,9 @@ def _drive_reflection(d: _Drive) -> None:
         encoding="utf-8",
     )
     monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: f"# Page\n\n{secret}")
+    # A rewrite shorter than a page is refused since 2026-09-17, so the fake is page-sized.
+    rewrite = f"# Page\n\n{secret}\n\n" + "The merged narrative keeps every stated fact. " * 8
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: rewrite)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     d.function(page, apply=True)
 
@@ -1209,7 +1211,7 @@ def _conflict_reflection(vault, monkeypatch):
         "## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\nMerged")
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\n" + "Merged narrative keeps every stated fact. " * 8)
 
     def invoke():
         return module.reflect_page(source, apply=True)
