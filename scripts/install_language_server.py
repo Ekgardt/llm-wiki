@@ -463,6 +463,23 @@ def _build_if_required(profile: LanguageServerProfile, staging: Path) -> None:
     build_source_server(staging, build)
 
 
+def _require_pinned_platform(profile: LanguageServerProfile) -> None:
+    """Refuse, before any download, a platform this profile pins nothing for.
+
+    The registry falls back to the 64-bit Linux archive so that it stays
+    importable everywhere; installing that archive on another platform used to
+    download and verify it and fail only at the build or at first launch.
+    Research: `docs/research/2026-09-17-inst-a-platform-without-a-pin-is-refused-by-name.md`.
+    """
+    if not profile.platform_artifacts:
+        return
+    system, machine = platform.system(), platform.machine()
+    if profile.artifact_for_platform(system, machine) is None:
+        raise InstallError(
+            f"{profile.name} has no pinned artifact for this platform: {system} {machine}"
+        )
+
+
 def install_language_server(
     profile: LanguageServerProfile,
     *,
@@ -471,6 +488,7 @@ def install_language_server(
     runtime_artifact: Path | None = None,
 ) -> Path:
     """Install the pinned artifacts and write the receipt; return the managed root."""
+    _require_pinned_platform(profile)
     root = profile.managed_root(state_root)
     _require_absent(root)
     root.parent.mkdir(parents=True, exist_ok=True)

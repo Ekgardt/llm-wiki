@@ -249,7 +249,7 @@ def test_an_unmanaged_language_falls_back_rather_than_failing(path):
 
 def test_asking_for_a_server_we_do_not_manage_is_an_error_not_a_guess():
     with pytest.raises(ProfileError):
-        lsp_profiles.profile_named("clangd")
+        lsp_profiles.REGISTRY.get("clangd")
 
 
 def test_the_registry_names_what_it_manages():
@@ -266,7 +266,7 @@ def test_a_native_server_is_its_own_interpreter():
 
     Research: docs/research/2026-09-12-installing-go-and-building-gopls.md.
     """
-    profile = lsp_profiles.profile_named("gopls")
+    profile = lsp_profiles.REGISTRY.get("gopls")
     command = profile.launch_command(
         _abs("unused", "node"), _abs("managed", "gopls"), _abs("owner")
     )

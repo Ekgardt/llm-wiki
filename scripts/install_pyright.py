@@ -2454,6 +2454,17 @@ def _response_content_length(response: object) -> int | None:
 
 
 def _response_timeout_setter(response: object) -> object:
+    """The open socket's `settimeout`, reached through a private chain.
+
+    `http.client.HTTPResponse` has no public way to change the socket timeout
+    once the connection is open, and an absolute deadline needs each read
+    re-clamped. The chain is therefore fail-closed -- a response without it is
+    refused before any blocking read -- and
+    `test_download_real_http_response_drip_feed_honors_absolute_deadline`
+    drives a real `HTTPResponse` through it, so an interpreter that moves the
+    attribute fails the suite rather than an operator's install. Research:
+    `docs/research/2026-09-17-inst-a-platform-without-a-pin-is-refused-by-name.md`.
+    """
     try:
         set_timeout = response.fp.raw._sock.settimeout
     except (AttributeError, TypeError) as exc:

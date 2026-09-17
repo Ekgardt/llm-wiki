@@ -29,6 +29,7 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 
+from lsp_paths import PYRIGHT_VERSION
 from lsp_server_profile import (
     READINESS_INITIALIZED,
     READINESS_WORK_DONE_PROGRESS,
@@ -52,8 +53,6 @@ from pyright_profile import (
     PYRIGHT_SERVER_RELATIVE,
     QUALIFIED_NODE_MAJOR,
 )
-
-PYRIGHT_VERSION = "1.1.411"
 
 # Pyright's vendor progress notifications. These are the three names currently
 # hardcoded in `lsp_protocol.SERVER_NOTIFICATIONS`; carrying them on the profile
@@ -99,9 +98,6 @@ TYPESCRIPT_PACKAGE_URL = (
     "https://registry.npmjs.org/typescript-language-server/-/"
     "typescript-language-server-6.0.0.tgz"
 )
-TYPESCRIPT_PACKAGE_SHA256 = (
-    "6e23b48efc76af4e70928cdfe62ea6e6cfef67ab4c1e7579c4e82dd284fbdfd2"
-)
 TYPESCRIPT_PACKAGE_INTEGRITY = (
     "sha512-LXtzY3UZGfghWA5eRU6/T5j1+YiGRgy14mR3GOKyTKlE1op1TYKQnLVxwBsmnXeDhGLuvzZyIHBAqvrekAITYQ=="
 )
@@ -128,9 +124,6 @@ TYPESCRIPT_LAUNCH_MANIFEST = freeze_profile_value(
 # `lib/tsserver.js`; see the module docstring.
 TSSERVER_VERSION = "5.9.3"
 TSSERVER_PACKAGE_URL = "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz"
-TSSERVER_PACKAGE_SHA256 = (
-    "10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3"
-)
 TSSERVER_PACKAGE_INTEGRITY = (
     "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="
 )
@@ -222,40 +215,42 @@ TYPESCRIPT_PROFILE = LanguageServerProfile(
 
 GO_VERSION = "1.27.1"
 GOPLS_VERSION = "v0.23.0"
+# The one place the Go release is typed; the five archive names are built from it.
+_GO_ARCHIVE = "https://dl.google.com/go/go" + GO_VERSION
 
 GO_ARTIFACTS = (
     PlatformArtifact(
         system="linux",
         machine="x86_64",
-        url="https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz",
+        url=_GO_ARCHIVE + ".linux-amd64.tar.gz",
         integrity="sha256-Y9M58NpatTY1pW8kkKeYTf4S38/yKtdJ9j7a9ZAWhEU=",
         size=70553950,
     ),
     PlatformArtifact(
         system="linux",
         machine="arm64",
-        url="https://dl.google.com/go/go1.27.1.linux-arm64.tar.gz",
+        url=_GO_ARCHIVE + ".linux-arm64.tar.gz",
         integrity="sha256-NFC0Wj+e6FaHknNqXF5wofLps2w1qPdJWMA+UdfZK+w=",
         size=67009954,
     ),
     PlatformArtifact(
         system="darwin",
         machine="x86_64",
-        url="https://dl.google.com/go/go1.27.1.darwin-amd64.tar.gz",
+        url=_GO_ARCHIVE + ".darwin-amd64.tar.gz",
         integrity="sha256-j49SxmSVQs8Ce7ybnGjR7AQvnzSAikBBPwuLP2bzyqQ=",
         size=71621873,
     ),
     PlatformArtifact(
         system="darwin",
         machine="arm64",
-        url="https://dl.google.com/go/go1.27.1.darwin-arm64.tar.gz",
+        url=_GO_ARCHIVE + ".darwin-arm64.tar.gz",
         integrity="sha256-7iFdV+DsJpxgzJzspo5r2jIbqe5a/iT0sJiHA8LYfRI=",
         size=68100347,
     ),
     PlatformArtifact(
         system="windows",
         machine="x86_64",
-        url="https://dl.google.com/go/go1.27.1.windows-amd64.zip",
+        url=_GO_ARCHIVE + ".windows-amd64.zip",
         integrity="sha256-o5EbXg4bEFPyXtBnX0wcaq0eK/zyU98rm+TKq9Lt2V0=",
         size=78931360,
     ),
@@ -312,6 +307,9 @@ def _gopls_artifact() -> PlatformArtifact:
     A platform with no pin cannot install, and the profile still has to exist:
     `doctor` and the registry are read on every platform, and an import that
     raised would take the whole navigation path down instead of one language.
+    The fallback is for reading only: `install_language_server` asks
+    `artifact_for_platform` first and refuses an unpinned platform by name
+    before it downloads anything.
     """
     found = None
     for artifact in GO_ARTIFACTS:
@@ -739,7 +737,3 @@ def profile_configuration_names() -> frozenset[str]:
 def profile_for_path(path: Path) -> LanguageServerProfile | None:
     """The managed profile that owns a file, or None for the structural path."""
     return REGISTRY.for_path(path)
-
-
-def profile_named(name: str) -> LanguageServerProfile:
-    return REGISTRY.get(name)
