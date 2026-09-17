@@ -1140,7 +1140,7 @@ class OwnershipRegistry:
     ) -> None:
         """The deletion permit blocks everyone else, and quiescence blocks it."""
         if request.role == "runtime-deletion-check":
-            self._require_quiescence(database, request)
+            self._require_quiescence(database, request, now)
             return
         deletion = database.execute(
             "SELECT * FROM maintenance_owners WHERE role='runtime-deletion-check'"
@@ -1150,18 +1150,17 @@ class OwnershipRegistry:
                 database, deletion, now, "runtime_deletion_check_active"
             )
 
-    @staticmethod
     def _require_quiescence(
-        database: sqlite3.Connection, request: _AcquireRequest
+        self, database: sqlite3.Connection, request: _AcquireRequest, now: datetime
     ) -> None:
-        other = database.execute(
-            """SELECT 1 FROM maintenance_owners
-                WHERE NOT (role=? AND scope=?) LIMIT 1""",
+        """Every other owner must be gone; a provably dead one is reclaimed, not obeyed."""
+        others = database.execute(
+            "SELECT * FROM maintenance_owners WHERE NOT (role=? AND scope=?)",
             (request.role, request.scope),
-        ).fetchone()
-        if other is not None:
-            raise OperationalOwnershipError(
-                "runtime_deletion_check_requires_quiescence"
+        ).fetchall()
+        for other in others:
+            self._reclaim_or_refuse(
+                database, other, now, "runtime_deletion_check_requires_quiescence"
             )
 
     def _require_admission(

@@ -50,3 +50,20 @@ Files: scripts/operational_ownership.py, tests/test_a_dead_owner_is_reclaimed_wi
 - `reclaim_dead_marker_owner` no longer unlinks unconditionally after the reclaim; the
   retire step has done exactly that, with the check.
 - Live-owner paths (heartbeat, require, release) keep the strict marker check.
+
+## Addendum: the quiescence check meets a dead owner (finding Q-L9)
+
+Files: scripts/operational_ownership.py, tests/test_a_dead_owner_does_not_block_the_quiescence_check.py
+
+- `_require_quiescence` refuses the `runtime-deletion-check` role (the doctor's deletion
+  check and the private-vault backup) whenever any other owner row exists. It never asks
+  whether that row's owner is dead. A row is otherwise reclaimed only when somebody acquires
+  the same `(role, scope)` again, and some scopes are never acquired twice (a worker scope,
+  an intent that was since adopted). One crashed process can therefore refuse every later
+  backup with `backup_requires_quiescence`.
+- The operating contract already draws the line: owners that are "live,
+  expired-but-not-proven-dead, or unknown" block; a proven-dead one is not in that list.
+- Decision: the quiescence check gives every other row the registry's one reclaim proof
+  (`_reclaim_or_refuse`): expired and provably dead is reclaimed, with its projections;
+  anything else refuses with `runtime_deletion_check_requires_quiescence` as before; a probe
+  that cannot tell refuses with `owner_liveness_unknown` as everywhere else.
