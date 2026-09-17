@@ -36,7 +36,11 @@ import json
 import re
 import subprocess
 import sys
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
+from itertools import accumulate
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -63,6 +67,7 @@ from memory_state import (  # noqa: E402
     daily_logs,
     file_hash,
     load_state,
+    update_state,
 )
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import (
@@ -897,19 +902,80 @@ MAX_CONTRADICTION_BYTES = 120_000
 CONTRADICTION_SYSTEM_PROMPT = "You are a careful auditor. Only flag real contradictions."
 
 
-def _bounded_page_blob(pages: list[Path], max_bytes: int) -> str:
-    """Page bodies concatenated up to a byte cap, so one call stays affordable."""
-    parts: list[str] = []
-    total = 0
-    for md in pages:
-        chunk = _page_chunk(md)
-        if chunk is None:
-            continue
-        if total + len(chunk) > max_bytes:
-            break
-        parts.append(chunk)
-        total += len(chunk)
-    return "".join(parts)
+# Where the next contradiction run starts, as a vault-relative path in state.json.
+# One call cannot hold the vault, so each run reads the next window and the
+# audit comes round. It used to read the alphabetically first window every time
+# and report the rest as clean.
+# Research: docs/research/2026-09-17-the-contradiction-audit-moves-through-the-vault.md
+CONTRADICTION_CURSOR_KEY = "contradiction_lint_next_page"
+
+
+@dataclass(frozen=True)
+class _AuditWindow:
+    """The pages one run reads. Pages of different windows are never compared."""
+
+    chunks: tuple[str, ...]
+    names: tuple[str, ...]
+    total: int
+    oversized: tuple[str, ...]
+    following: str | None
+
+    def notes(self) -> list[str]:
+        """What this run did not read, in plain lines beside the findings."""
+        lines = []
+        if self.following is not None:
+            lines.append(
+                f"(read {len(self.names)} of {self.total} pages this run, from {self.names[0]}; "
+                f"the next run continues at {self.following})"
+            )
+        if self.oversized:
+            lines.append(f"(never read, larger than one call: {', '.join(self.oversized)})")
+        return lines
+
+
+def _from_cursor(names: list[str], cursor: str) -> list[str]:
+    """Path order, begun at the first page at or after the cursor, wrapping round."""
+    ordered = sorted(names)
+    start = bisect_left(ordered, cursor)
+    return ordered[start:] + ordered[:start]
+
+
+def _leading_fit(sizes: Iterable[int], max_bytes: int) -> int:
+    """How many of the leading sizes fit the cap together."""
+    return bisect_right(list(accumulate(sizes)), max_bytes)
+
+
+def _readable_chunks(pages: list[Path]) -> dict[str, str]:
+    chunks = {_rel(md): _page_chunk(md) for md in pages}
+    return {name: chunk for name, chunk in chunks.items() if chunk is not None}
+
+
+def _audit_window(pages: list[Path], cursor: str, max_bytes: int) -> _AuditWindow:
+    readable = _readable_chunks(pages)
+    oversized = sorted(name for name, chunk in readable.items() if len(chunk) > max_bytes)
+    fitting = _from_cursor(sorted(readable.keys() - set(oversized)), cursor)
+    taken = _leading_fit(map(len, map(readable.get, fitting)), max_bytes)
+    return _AuditWindow(
+        chunks=tuple(map(readable.get, fitting[:taken])),
+        names=tuple(fitting[:taken]),
+        total=len(readable),
+        oversized=tuple(oversized),
+        following=next(iter(fitting[taken:]), None),
+    )
+
+
+def _contradiction_cursor() -> str:
+    cursor = load_state().get(CONTRADICTION_CURSOR_KEY)
+    return cursor if isinstance(cursor, str) else ""
+
+
+def _move_contradiction_cursor(following: str | None) -> None:
+    """A window that reached the end starts the next run from the beginning."""
+
+    def _mutate(state: dict) -> None:
+        state[CONTRADICTION_CURSOR_KEY] = following or ""
+
+    update_state(_mutate)
 
 
 def _page_chunk(md: Path) -> str | None:
@@ -966,25 +1032,32 @@ def _contradiction_findings(answer: str | None) -> list[str]:
     return [CONTRADICTIONS_UNREADABLE]
 
 
-def check_contradictions(pages: list[Path]) -> list[str]:
+def check_contradictions(
+    pages: list[Path], max_bytes: int = MAX_CONTRADICTION_BYTES
+) -> list[str]:
     """Ask the LLM to flag pairs of pages that appear to contradict each other.
 
     Structural checks are free; this one costs a model call and is opt-in via
-    `--contradictions`. Absence of a provider is reported, not fatal.
+    `--contradictions`. Absence of a provider is reported, not fatal. One run
+    reads one window of the vault and says so; the next run reads the next.
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from llm_client import call_llm
     except ImportError:
         return ["(llm_client not available — skipped)"]
-    if not pages:
-        return []
+    window = _audit_window(pages, _contradiction_cursor(), max_bytes)
+    if not window.chunks:
+        return window.notes()
     answer = call_llm(
-        _contradiction_prompt(_bounded_page_blob(pages, MAX_CONTRADICTION_BYTES)),
+        _contradiction_prompt("".join(window.chunks)),
         system_prompt=CONTRADICTION_SYSTEM_PROMPT,
         max_tokens=2000,
     )
-    return _contradiction_findings(answer)
+    if answer is None:
+        return _contradiction_findings(answer)
+    _move_contradiction_cursor(window.following)
+    return _contradiction_findings(answer) + window.notes()
 
 
 # ---------- driver ----------
