@@ -35,7 +35,7 @@ import tempfile
 import urllib.request
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from go_source_build import SourceBuildError
 from lsp_identity import INSTALL_MANIFEST_NAME, build_install_manifest
@@ -108,18 +108,31 @@ def _bounds(profile: LanguageServerProfile) -> tuple[int, int]:
     return (compressed, decompressed)
 
 
-def _member_path_escapes(path: Path) -> bool:
-    return path.is_absolute() or any(part in {"..", "/"} for part in path.parts)
+def _anchored_or_climbing(path: PurePath) -> bool:
+    return bool(path.anchor) or ".." in path.parts
+
+
+def _member_path_escapes(name: str) -> bool:
+    """Whether the entry's own name leaves the archive, by either system's rules.
+
+    The host's `Path` gave a different answer on each system: `/absolute` has
+    no drive, so Windows did not call it absolute and unpacked it, while
+    `C:/x` and `go\\..\\..\\x` are plain names to POSIX. Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+    return _anchored_or_climbing(PurePosixPath(name)) or _anchored_or_climbing(
+        PureWindowsPath(name)
+    )
 
 
 def _relative_member_path(name: str) -> Path:
     """One archive entry's path, tar or zip: bounded, relative, with no `..`."""
-    path = Path(name)
-    if not path.parts or len(path.parts) > MAX_PATH_COMPONENTS:
+    parts = PurePosixPath(name).parts
+    if not parts or len(parts) > MAX_PATH_COMPONENTS:
         raise InstallError(f"member path is unusable: {name!r}")
-    if _member_path_escapes(path):
+    if _member_path_escapes(name):
         raise InstallError(f"member path escapes the archive: {name!r}")
-    return Path(*path.parts)
+    return Path(*parts)
 
 
 def _member_relative(member: tarfile.TarInfo) -> Path:

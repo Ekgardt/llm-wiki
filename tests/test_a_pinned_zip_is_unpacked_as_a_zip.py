@@ -68,6 +68,12 @@ def test_a_zip_lands_where_a_tarball_would(tmp_path: Path) -> None:
         _entry("go/../../escape", stat.S_IFREG | 0o644),
         _entry("/absolute", stat.S_IFREG | 0o644),
         _entry("go/link", stat.S_IFLNK | 0o777),
+        # Escapes by the rules of a system that may not be the one unpacking:
+        # the entry's own name decides, the same way everywhere.
+        _entry("C:/drive", stat.S_IFREG | 0o644),
+        _entry("C:relative-to-a-drive", stat.S_IFREG | 0o644),
+        _entry("\\rooted", stat.S_IFREG | 0o644),
+        _entry("go\\..\\..\\escape", stat.S_IFREG | 0o644),
     ],
 )
 def test_an_entry_that_escapes_or_is_not_a_file_is_refused(tmp_path: Path, info) -> None:
