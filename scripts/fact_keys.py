@@ -45,8 +45,11 @@ MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
 MAX_TURN_CHARS = 1500
 # A nightly step keys new entries in this much time and leaves the rest for
-# the next night; the store remembers what is done.
-DEFAULT_BUDGET_SECONDS = 600.0
+# the next night; the store remembers what is done. The nightly kills the step
+# at 660s; like its neighbours the step stops starting work 120s before that,
+# which is what one last provider call may take.
+# Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md
+DEFAULT_BUDGET_SECONDS = 540.0
 EXTRACT_SYSTEM_PROMPT = (
     "You read turns a person wrote to an assistant and write search keys for "
     "them. For each turn, list up to five short facts the person states about "
@@ -288,6 +291,12 @@ def _encoded(keys: Sequence[str], encode: Callable | None) -> Sequence[Sequence[
     return np.asarray(encode(list(keys), False), dtype=np.float32).tolist()
 
 
+def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
+    """The user turns the store has not keyed yet."""
+    done = store.keyed()
+    return [turn for turn in user_turns(chunks) if turn.span_sha256 not in done]
+
+
 def key_turns(
     store: KeyStore,
     chunks: Iterable[object],
@@ -296,8 +305,7 @@ def key_turns(
     deadline: float | None = None,
 ) -> int:
     """Key every user turn the store has not seen; how many turns were keyed."""
-    done = store.keyed()
-    pending = [turn for turn in user_turns(chunks) if turn.span_sha256 not in done]
+    pending = waiting_turns(store, chunks)
     keyed = 0
     for start in range(0, len(pending), BATCH_TURNS):
         if _past(deadline):
@@ -383,14 +391,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true", help="print how many turns and keys the store holds")
     parser.add_argument("--budget-seconds", type=float, default=DEFAULT_BUDGET_SECONDS)
     args = parser.parse_args(argv)
+    # The step's clock starts with the step: collecting the corpus is part of it.
+    deadline = time.monotonic() + args.budget_seconds
     store = KeyStore(store_path(STATE_ROOT))
     if args.status:
         turns, keys = store.count()
         print(f"keyed turns={turns} keys={keys}")
         return 0
     snapshot = collect_corpus(ROOT, code_roots=(), daily_paths=_daily_paths(ROOT))
-    keyed = key_turns(store, snapshot.chunks, _provider_ask, None, time.monotonic() + args.budget_seconds)
-    print(f"keyed {keyed} turns")
+    waiting = len(waiting_turns(store, snapshot.chunks))
+    keyed = key_turns(store, snapshot.chunks, _provider_ask, None, deadline)
+    print(f"keyed {keyed} of {waiting} waiting turns")
+    return _step_exit(waiting, keyed)
+
+
+def _step_exit(waiting: int, keyed: int) -> int:
+    """Turns were waiting and none was keyed: the step did nothing, and says so."""
+    if waiting > 0 and keyed == 0:
+        print("fact_keys: turns are waiting and none was keyed", file=sys.stderr)
+        return 1
     return 0
 
 

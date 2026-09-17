@@ -650,8 +650,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     deadline = _budget_deadline(args.budget_seconds)
     for day in _selected_days(args):
-        if _out_of_time(deadline) or not _consolidate_reported(args.vault, day, deadline):
+        if _out_of_time(deadline):
             break
+        if not _consolidate_reported(args.vault, day, deadline):
+            # The provider returned nothing: the step did not do its work, and a
+            # zero exit hid that from the nightly log.
+            # Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md
+            return 1
     return 0
 
 
