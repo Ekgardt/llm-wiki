@@ -192,6 +192,17 @@ def scheduled_path(uv_path: Path, default_path: str) -> str:
     return f"{Path(uv_path).resolve().parent}:{default_path}"
 
 
+def cron_quote(value: str) -> str:
+    """Quote one value for a cron line: for the shell, and for cron's own `%`.
+
+    cron turns an unescaped `%` into a newline before the shell sees the line, and
+    `shlex.quote` treats `%` as safe. The `\\%` sits outside the single quotes, where the
+    shell reads it as `%` whether or not cron dropped the backslash. See
+    `docs/research/2026-09-17-a-percent-sign-in-a-cron-line.md`.
+    """
+    return "\\%".join(shlex.quote(piece) for piece in value.split("%"))
+
+
 def _cron_environment(root: Path, state_root: Path, uv_path: Path) -> list[str]:
     from integration_hook_config import provider_environment
 
@@ -201,7 +212,7 @@ def _cron_environment(root: Path, state_root: Path, uv_path: Path) -> list[str]:
         **dict(sorted(provider_environment().items())),
         "PATH": scheduled_path(uv_path, CRON_DEFAULT_PATH),
     }
-    return [f"{key}={shlex.quote(value)}" for key, value in values.items()]
+    return [f"{key}={cron_quote(value)}" for key, value in values.items()]
 
 
 def build_cron_command(
@@ -219,16 +230,16 @@ def build_cron_command(
         (
             "env",
             *_cron_environment(root, state_root, uv_path),
-            shlex.quote(str(uv_path)),
+            cron_quote(str(uv_path)),
             "run",
             "--locked",
             "--no-sync",
             "--directory",
-            shlex.quote(str(root)),
+            cron_quote(str(root)),
             "python",
             f"scripts/{script}",
             ">>",
-            shlex.quote(str(log_path)),
+            cron_quote(str(log_path)),
             "2>&1",
         )
     )

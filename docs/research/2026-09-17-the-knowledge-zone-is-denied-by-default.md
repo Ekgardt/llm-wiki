@@ -42,7 +42,7 @@ exposure). The research before the fix.
   `knowledge/daily/*`; the project template gains `!knowledge/projects/_template/**`.
   Nothing that is tracked today changes state; the contract text does not change.
 - Benchmark result JSON: the checkout path becomes `<vault>`, the agent scratch directory
-  `<tmp>`, any other home path `<home>`. Two code comments lose their absolute path.
+  `<tmp>`, any other home path `<home>`. One code comment loses the other project's path; the second sits in a module whose unrelated functions the complexity gate refuses, so it is left to that module's owner.
 - One test holds the line: a probe file anywhere new under `knowledge/` is ignored, every
   tracked path under `knowledge/` is on the published list, and no tracked benchmark result
   or script names a home directory.
@@ -52,5 +52,5 @@ exposure). The research before the fix.
   sample value.
 
 Files: `.gitignore`, `benchmark/` result JSON, `scripts/mcp_server.py`,
-`scripts/answer_budget.py`, `tests/test_the_knowledge_zone_is_denied_by_default.py`,
+`tests/test_the_knowledge_zone_is_denied_by_default.py`,
 `docs/research/2026-09-17-the-knowledge-zone-is-denied-by-default.md`.
