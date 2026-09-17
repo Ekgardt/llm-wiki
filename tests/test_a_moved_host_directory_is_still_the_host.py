@@ -18,7 +18,9 @@ def _moved_transcript(tmp_path, monkeypatch, variable: str, inner: str) -> Path:
     moved = tmp_path / "moved-host"
     transcript = moved / inner / "project" / "session.jsonl"
     transcript.parent.mkdir(parents=True)
-    transcript.write_text("a decision worth keeping\n", encoding="utf-8")
+    # Bytes, not text: the product keeps a transcript's bytes as they are, and
+    # `write_text` would make this line end in `\r\n` on Windows.
+    transcript.write_bytes(b"a decision worth keeping\n")
     monkeypatch.setenv(variable, str(moved))
     return transcript
 
