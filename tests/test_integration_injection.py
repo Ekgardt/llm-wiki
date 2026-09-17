@@ -4545,7 +4545,9 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        foreach ($name in @('New-LLMWikiScheduledAction', 'Test-LLMWikiScheduledTasks')) {{
+        foreach ($name in @(
+            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec', 'Test-LLMWikiScheduledTasks'
+        )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -eq $name
@@ -4568,8 +4570,11 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
                 -UvPath {ps_literal(uv_path)} `
                 -RunnerPath {ps_literal(runner)} `
                 -PowerShellPath 'pwsh.exe'
+            $limit = if ($kind -eq 'nightly') {{ 'PT3H' }} else {{ 'PT5H' }}
             [pscustomobject]@{{
                 State = 'Ready'
+                Description = 'LLM-wiki task [llm-wiki-task-spec:2]'
+                Settings = [pscustomobject]@{{ ExecutionTimeLimit = $limit }}
                 Actions = @($action)
                 Triggers = @([pscustomobject]@{{
                     StartBoundary = '2026-08-15T03:00:00'

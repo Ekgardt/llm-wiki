@@ -18,6 +18,10 @@ param(
     [Parameter(Mandatory = $true)][string]$VaultRoot,
     [Parameter(Mandatory = $true)][string]$StateRoot,
     [Parameter(Mandatory = $true)][string]$UvPath,
+    # Which contract the tasks are judged by. 2 is the current one: a marker in the
+    # description and the time limits below. 1 is what machines installed before
+    # 2026-09-17 carry; the install control plane passes it to take such tasks back.
+    [ValidateSet(1, 2)][int]$SpecVersion = 2,
     [switch]$Uninstall,
     [switch]$Status,
     [switch]$StateJson,
@@ -59,16 +63,39 @@ function New-LLMWikiScheduledAction {
         -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded"
 }
 
+function Test-LLMWikiTaskSpec {
+    # The time limit was not part of what "equivalent" meant, so a machine registered
+    # with one-hour tasks passed as up to date and kept killing the nightly pass.
+    # Version 2 tasks carry a marker and the contract's limit; version 1 tasks are
+    # exactly those without the marker, so the two never both claim the same tasks.
+    # See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
+    param(
+        [Parameter(Mandatory = $true)]$Task,
+        [Parameter(Mandatory = $true)][int]$SpecVersion,
+        [Parameter(Mandatory = $true)][int]$LimitHours
+    )
+    $marked = ([string]$Task.Description).Contains("[llm-wiki-task-spec:2]")
+    if ($SpecVersion -eq 1) { return -not $marked }
+    if (-not $marked) { return $false }
+    try {
+        $limit = [System.Xml.XmlConvert]::ToTimeSpan([string]$Task.Settings.ExecutionTimeLimit)
+    } catch [System.FormatException] {
+        return $false
+    }
+    return $limit -eq (New-TimeSpan -Hours $LimitHours)
+}
+
 function Test-LLMWikiScheduledTasks {
     param(
         [Parameter(Mandatory = $true)][string]$VaultRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
-        [Parameter(Mandatory = $true)][string]$UvPath
+        [Parameter(Mandatory = $true)][string]$UvPath,
+        [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
     $verified = $true
     $specifications = @(
-        @{ Name = "LLMWiki-Nightly"; Kind = "nightly" },
-        @{ Name = "LLMWiki-Weekly"; Kind = "weekly" }
+        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = 3 },
+        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = 5 }
     )
     foreach ($specification in $specifications) {
         $name = $specification.Name
@@ -123,6 +150,12 @@ function Test-LLMWikiScheduledTasks {
             [string]::IsNullOrWhiteSpace([string]$task.Principal.UserId)) {
             $taskValid = $false
         }
+        if (-not (Test-LLMWikiTaskSpec `
+                -Task $task `
+                -SpecVersion $SpecVersion `
+                -LimitHours $specification.LimitHours)) {
+            $taskValid = $false
+        }
         Write-Host "  ${name}:" -ForegroundColor $(if ($taskValid) { "Green" } else { "Yellow" })
         Write-Host "    State:        $($task.State)"
         Write-Host "    Logon type:   $($task.Principal.LogonType)"
@@ -138,7 +171,8 @@ function Get-LLMWikiScheduledTaskState {
     param(
         [Parameter(Mandatory = $true)][string]$VaultRoot,
         [Parameter(Mandatory = $true)][string]$StateRoot,
-        [Parameter(Mandatory = $true)][string]$UvPath
+        [Parameter(Mandatory = $true)][string]$UvPath,
+        [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
     $existing = @(
         $tasks | ForEach-Object {
@@ -150,7 +184,8 @@ function Get-LLMWikiScheduledTaskState {
     $verified = Test-LLMWikiScheduledTasks `
         -VaultRoot $VaultRoot `
         -StateRoot $StateRoot `
-        -UvPath $UvPath 6>$null
+        -UvPath $UvPath `
+        -SpecVersion $SpecVersion 6>$null
     if ($verified) { return "equivalent" }
     return "conflict"
 }
@@ -159,7 +194,8 @@ if ($StateJson) {
     $state = Get-LLMWikiScheduledTaskState `
         -VaultRoot $VaultRoot `
         -StateRoot $StateRoot `
-        -UvPath $UvPath
+        -UvPath $UvPath `
+        -SpecVersion $SpecVersion
     [Console]::Out.WriteLine((@{ state = $state } | ConvertTo-Json -Compress))
     if ($script:IsDotSourced) { return } else { exit 0 }
 }
@@ -169,7 +205,8 @@ if ($Status) {
     $verified = Test-LLMWikiScheduledTasks `
         -VaultRoot $VaultRoot `
         -StateRoot $StateRoot `
-        -UvPath $UvPath
+        -UvPath $UvPath `
+        -SpecVersion $SpecVersion
     if ($script:IsDotSourced) { return $verified }
     if ($verified) { exit 0 }
     exit 1
@@ -179,7 +216,8 @@ if ($Uninstall) {
     $currentState = Get-LLMWikiScheduledTaskState `
         -VaultRoot $VaultRoot `
         -StateRoot $StateRoot `
-        -UvPath $UvPath
+        -UvPath $UvPath `
+        -SpecVersion $SpecVersion
     if ($currentState -eq "conflict") {
         throw "Scheduled task ownership is ambiguous; refusing uninstall"
     }
@@ -209,7 +247,8 @@ $powerShellPath = (Get-Process -Id $PID).Path
 $currentState = Get-LLMWikiScheduledTaskState `
     -VaultRoot $VaultRoot `
     -StateRoot $StateRoot `
-    -UvPath $UvPath
+    -UvPath $UvPath `
+    -SpecVersion $SpecVersion
 if ($currentState -eq "conflict") {
     throw "Scheduled task ownership is ambiguous; refusing registration"
 }
@@ -217,6 +256,11 @@ if ($currentState -eq "equivalent") {
     Write-Host "Scheduled tasks already match the LLM-Wiki contract." -ForegroundColor Green
     if ($script:IsDotSourced) { return } else { exit 0 }
 }
+
+# What Test-LLMWikiTaskSpec looks for. A version 1 registration happens only when the
+# control plane rolls an update back to a record that predates the marker.
+$specMarker = ""
+if ($SpecVersion -eq 2) { $specMarker = " [llm-wiki-task-spec:2]" }
 
 # --- Nightly task: 03:00 every day ---
 $nightlyAction = New-LLMWikiScheduledAction `
@@ -252,7 +296,7 @@ Register-ScheduledTask `
     -Trigger $nightlyTrigger `
     -Settings $nightlySettings `
     -Principal $nightlyPrincipal `
-    -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required." |
+    -Description "LLM-wiki: nightly queue drain + compile + lint. No user interaction required.$specMarker" |
     Out-Null
 Write-Host "  registered" -ForegroundColor Green
 
@@ -285,7 +329,7 @@ Register-ScheduledTask `
     -Trigger $weeklyTrigger `
     -Settings $weeklySettings `
     -Principal $nightlyPrincipal `
-    -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint." |
+    -Description "LLM-wiki: weekly deep maintenance + OKF conformance sweep + lint.$specMarker" |
     Out-Null
 Write-Host "  registered" -ForegroundColor Green
 

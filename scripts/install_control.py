@@ -1675,25 +1675,27 @@ def windows_environment_resources(
     return [_environment_resource(name, value, read_value, write_value) for name, value in values]
 
 
+# The specification names everything the contract promises about the tasks. Version 1
+# did not name the time limits, so a machine registered with one-hour tasks compared
+# equal to the corrected contract and was never rewritten. Version 1 stays readable:
+# installed manifests record it, and uninstall and rollback have to take it back.
+# See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
+WINDOWS_TASK_SPEC_VERSION = 2
+WINDOWS_TASK_LIMIT_HOURS = {"nightly": 3, "weekly": 5}
+
+
 def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> bytes:
     value = {
         "root": str(Path(root).resolve()),
+        "spec": WINDOWS_TASK_SPEC_VERSION,
         "state_root": str(Path(state_root).resolve()),
-        "tasks": [
-            {"at": "03:00", "kind": "nightly", "name": "LLMWiki-Nightly"},
-            {
-                "at": "04:00",
-                "day": "Sunday",
-                "kind": "weekly",
-                "name": "LLMWiki-Weekly",
-            },
-        ],
+        "tasks": _expected_windows_tasks(),
         "uv_path": str(Path(uv_path).resolve()),
     }
     return canonical_json_bytes(value)
 
 
-def _expected_windows_tasks() -> list[dict[str, object]]:
+def _legacy_windows_tasks() -> list[dict[str, object]]:
     return [
         {"at": "03:00", "kind": "nightly", "name": "LLMWiki-Nightly"},
         {
@@ -1703,6 +1705,28 @@ def _expected_windows_tasks() -> list[dict[str, object]]:
             "name": "LLMWiki-Weekly",
         },
     ]
+
+
+def _expected_windows_tasks() -> list[dict[str, object]]:
+    return [
+        {**task, "limit_hours": WINDOWS_TASK_LIMIT_HOURS[str(task["kind"])]}
+        for task in _legacy_windows_tasks()
+    ]
+
+
+def _windows_spec_version(value: Mapping[str, object]) -> int:
+    """Which script contract a decoded specification was registered under."""
+    shapes = {
+        1: ({"root", "state_root", "tasks", "uv_path"}, _legacy_windows_tasks()),
+        2: ({"root", "spec", "state_root", "tasks", "uv_path"}, _expected_windows_tasks()),
+    }
+    version = value.get("spec", 1)
+    if type(version) is not int or version not in shapes:
+        raise InstallControlError("install_windows_task_spec_invalid")
+    keys, tasks = shapes[version]
+    if set(value) != keys or value.get("tasks") != tasks:
+        raise InstallControlError("install_windows_task_spec_invalid")
+    return int(version)
 
 
 def _require_windows_spec_path(value: object, expected: Path | None = None) -> Path:
@@ -1718,11 +1742,7 @@ def _decode_windows_task_spec(candidate: bytes, root: Path, state_root: Path) ->
     if len(candidate) > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_windows_task_spec_invalid")
     value = _strict_json_object(candidate)
-    if (
-        set(value) != {"root", "state_root", "tasks", "uv_path"}
-        or value.get("tasks") != _expected_windows_tasks()
-    ):
-        raise InstallControlError("install_windows_task_spec_invalid")
+    _windows_spec_version(value)
     _require_windows_spec_path(value.get("root"), root)
     _require_windows_spec_path(value.get("state_root"), state_root)
     _require_windows_spec_path(value.get("uv_path"))
@@ -1737,6 +1757,7 @@ def _windows_task_command(
     state_root: Path,
     uv_path: Path,
     mode: str | None,
+    spec_version: int = WINDOWS_TASK_SPEC_VERSION,
 ) -> tuple[str, ...]:
     command = (
         powershell,
@@ -1752,6 +1773,8 @@ def _windows_task_command(
         str(Path(state_root).resolve()),
         "-UvPath",
         str(Path(uv_path).resolve()),
+        "-SpecVersion",
+        str(spec_version),
     )
     if mode is None:
         return command
@@ -1772,6 +1795,7 @@ def _windows_task_command_from_spec(
         state_root=Path(str(spec["state_root"])),
         uv_path=Path(str(spec["uv_path"])),
         mode=mode,
+        spec_version=_windows_spec_version(spec),
     )
 
 
