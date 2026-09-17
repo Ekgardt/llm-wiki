@@ -248,7 +248,9 @@ def _drive_access_tracking(d: _Drive) -> None:
             event_kind="page_read",
             query=None,
             retrieval_mode="direct",
-            candidate_id="page",
+            # One column, one identity: the page's vault-relative path. See
+            # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+            candidate_id="knowledge/notes/page.md",
             rank=None,
             generation="legacy",
             source_tool="writer-test",

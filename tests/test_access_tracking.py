@@ -27,7 +27,7 @@ class TestRecordAccess:
 
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
         assert [(row.event_kind, row.candidate_id, row.rank) for row in rows] == [
-            ("impression", "test-page", 2)
+            ("impression", access_tracking.page_identity("test-page"), 2)
         ]
 
     @pytest.mark.parametrize(
@@ -90,7 +90,8 @@ class TestGetAccessStats:
         monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         event = retrieval_telemetry.make_event(
             event_kind="page_read", query=None, retrieval_mode="direct",
-            candidate_id="page", rank=None, generation="legacy", source_tool="new",
+            candidate_id=access_tracking.page_identity("page"),
+            rank=None, generation="legacy", source_tool="new",
         )
         retrieval_telemetry.record_event(event, db_path=database)
         legacy = tmp_path / "access_log.jsonl"
@@ -208,18 +209,36 @@ class TestDecayScore:
         ) < 0.1
 
 
+def _chunk_hash_events(database, digest, count):
+    """Rows left by a writer that named something other than a page of this vault."""
+    import retrieval_telemetry
+
+    retrieval_telemetry.record_events(
+        [
+            retrieval_telemetry.make_event(
+                event_kind="impression", query=None, retrieval_mode="generation",
+                candidate_id=digest, rank=1, generation="legacy", source_tool="test",
+            )
+            for _ in range(count)
+        ],
+        db_path=database,
+    )
+
+
 class TestFlushFrontmatter:
     """Test explicit idempotent export from durable telemetry."""
 
     @staticmethod
     def _events(database, slug, count):
+        import access_tracking
         import retrieval_telemetry
 
         retrieval_telemetry.record_events(
             [
                 retrieval_telemetry.make_event(
                     event_kind="page_read", query=None, retrieval_mode="direct",
-                    candidate_id=slug, rank=None, generation="legacy", source_tool="test",
+                    candidate_id=access_tracking.page_identity(slug),
+                    rank=None, generation="legacy", source_tool="test",
                 )
                 for _ in range(count)
             ],
@@ -457,7 +476,8 @@ class TestFlushFrontmatter:
         record = (
             "from retrieval_telemetry import *; "
             "record_events([make_event(event_kind='page_read', query=None, retrieval_mode='direct', "
-            "candidate_id='page', rank=None, generation='legacy', source_tool='restart') for _ in range(3)])"
+            "candidate_id='knowledge/notes/page.md', rank=None, generation='legacy', "
+            "source_tool='restart') for _ in range(3)])"
         )
         subprocess.run([sys.executable, "-c", record], env=env, check=True)
         command = [sys.executable, str(Path(__file__).resolve().parent.parent / "scripts/access_tracking.py"), "--flush"]
@@ -480,7 +500,7 @@ class TestFlushFrontmatter:
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
-        self._events(database, "a" * 64, 2)
+        _chunk_hash_events(database, "a" * 64, 2)
         self._events(database, "page", 1)
 
         assert access_tracking.flush_all() == 1
@@ -510,7 +530,7 @@ class TestFlushFrontmatter:
         assert [access_tracking.flush_all() for _ in range(5)] == [1, 1, 1, 1, 1]
         for slug in ("alpha", "bravo", "charlie", "delta", "echo"):
             assert "access_count: 1" in (notes / f"{slug}.md").read_text(encoding="utf-8")
-        assert retrieval_telemetry.get_export_cursor(db_path=database) == "echo"
+        assert retrieval_telemetry.get_export_cursor(db_path=database) == access_tracking.page_identity("echo")
 
     def test_cursor_wrap_reaches_new_candidate_behind_cursor(self, tmp_path, monkeypatch):
         import access_tracking
@@ -531,12 +551,16 @@ class TestFlushFrontmatter:
                 f"---\ntype: concept\n---\n# {slug}\n", encoding="utf-8"
             )
             self._events(database, slug, 1)
-        retrieval_telemetry.set_export_cursor("middle", db_path=database)
+        retrieval_telemetry.set_export_cursor(
+            access_tracking.page_identity("middle"), db_path=database
+        )
 
         assert access_tracking.flush_all() == 2
         assert "access_count: 1" in (notes / "zulu.md").read_text(encoding="utf-8")
         assert "access_count: 1" in (notes / "alpha.md").read_text(encoding="utf-8")
-        assert retrieval_telemetry.get_export_cursor(db_path=database) == "alpha"
+        assert retrieval_telemetry.get_export_cursor(
+            db_path=database
+        ) == access_tracking.page_identity("alpha")
 
     def test_cursor_update_failure_retries_without_duplicate_count(self, tmp_path, monkeypatch):
         import access_tracking
@@ -570,7 +594,9 @@ class TestFlushFrontmatter:
         assert access_tracking.flush_all() == 0
         content = page.read_text(encoding="utf-8")
         assert "access_count: 2" in content
-        assert retrieval_telemetry.get_export_cursor(db_path=database) == "alpha"
+        assert retrieval_telemetry.get_export_cursor(
+            db_path=database
+        ) == access_tracking.page_identity("alpha")
 
     def test_direct_export_does_not_change_global_cursor(self, tmp_path, monkeypatch):
         import access_tracking
@@ -587,10 +613,14 @@ class TestFlushFrontmatter:
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "page", 1)
-        retrieval_telemetry.set_export_cursor("middle", db_path=database)
+        retrieval_telemetry.set_export_cursor(
+            access_tracking.page_identity("middle"), db_path=database
+        )
 
         assert access_tracking.flush_access_to_frontmatter("page") == 1
-        assert retrieval_telemetry.get_export_cursor(db_path=database) == "middle"
+        assert retrieval_telemetry.get_export_cursor(
+            db_path=database
+        ) == access_tracking.page_identity("middle")
 
     def test_corrupt_cursor_fails_closed_without_page_mutation(self, tmp_path, monkeypatch):
         import access_tracking

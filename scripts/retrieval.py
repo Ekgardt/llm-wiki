@@ -2784,10 +2784,15 @@ def _with_reported_trace(
 
 
 def _impression_candidate_id(item: Mapping[str, Any]) -> str:
-    identity = _first_present(item, ("chunk_id", "slug", "candidate_id"), None)
-    if identity is not None:
-        return str(identity)
-    return Path(str(item.get("path", ""))).stem
+    """The page that was shown, named the way every other event names a page.
+
+    One column, one identity: the vault-relative path. A generation-mode row
+    recorded its chunk hash here, which no reader of the column joins on, so
+    those impressions never reached the page's access count; a bare stem is not
+    an identity either, since two projects both hold a `state.md`. See
+    `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    """
+    return str(_first_present(item, ("path", "relative_path"), ""))
 
 
 def _record_impressions(

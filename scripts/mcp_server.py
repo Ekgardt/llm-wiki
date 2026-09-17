@@ -1214,7 +1214,10 @@ def _decision_impression_events(make_event, effective_query: str, results: list)
             event_kind="impression",
             query=effective_query,
             retrieval_mode="decision-filter",
-            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
+            # One column, one identity: the page's vault-relative path, as every
+            # other writer of `retrieval_events` names a page. See
+            # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+            candidate_id=result.get("path", ""),
             rank=rank,
             generation="legacy",
             source_tool="mcp.get_decisions",
