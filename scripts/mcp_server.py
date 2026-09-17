@@ -1802,7 +1802,21 @@ def _architecture_symbol_dependencies(request: dict):
 
 # The row keys whose lines a file can contradict. A summary's counts, a
 # community's roster and a path's hops carry no line of their own.
-_POSITION_KEYS = ("callers", "callees", "definition", "unresolved_callers")
+#
+# Audit 3, A3: only a row whose line is the *definition* of the symbol it names
+# can be corrected from that symbol's definition. A one-hop caller row, a live
+# one and an unresolved one carry the call site beside the caller's name, so
+# they are left alone; the depth walk builds its rows from node locations and
+# says so with `depth_applied`. Research:
+# `docs/research/2026-09-17-a-fresh-line-belongs-to-the-symbol-it-names.md`.
+_DEFINITION_ROW_KEYS = ("definition",)
+_WALKED_ROW_KEYS = ("callers", "callees", "definition")
+
+
+def _definition_row_keys(answer) -> tuple[str, ...]:
+    if isinstance(answer, dict) and "depth_applied" in answer:
+        return _WALKED_ROW_KEYS
+    return _DEFINITION_ROW_KEYS
 
 
 def _with_lines_from_disk(answer, request: dict):
@@ -1817,7 +1831,7 @@ def _with_lines_from_disk(answer, request: dict):
 
     if isinstance(answer, list):
         return refreshed_rows(answer, request["resolved"])
-    return refreshed_answer(answer, request["resolved"], _POSITION_KEYS)
+    return refreshed_answer(answer, request["resolved"], _definition_row_keys(answer))
 
 
 def _architecture_definition(request: dict) -> list:

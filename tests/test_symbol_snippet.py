@@ -69,7 +69,14 @@ def test_a_stale_snippet_is_read_from_the_file(tmp_path):
     path.write_text("\n\ndef target():\n    return 'now'\n", encoding="utf-8")
     stored = ["def target():", "    return 'before'"]
     occurrence = {"line_start": 1, "line_end": 2, "source_sha256": "a" * 64}
-    node = {"metadata": {"name": "target", "path": "module.py"}}
+    # The shape a graph node has: the file block is looked up by qualified name
+    # and kind (audit 3, A4), not by the bare name alone.
+    node = {
+        "node_id": "node-1",
+        "kind": "function",
+        "identity_key": "target",
+        "metadata": {"name": "target", "owner": "module", "path": "module.py"},
+    }
 
     block = symbol_snippet._block_for(
         tmp_path, "module.py", stored, occurrence, node, "stale"

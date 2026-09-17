@@ -171,12 +171,18 @@ def _exact_snippet(
     }
 
 
-def _file_block(directory: Path, relative: str, name: str) -> dict | None:
-    """The block the file holds now, when the stored one is out of date."""
+def _file_block(directory: Path, relative: str, node: dict) -> dict | None:
+    """The block the file holds now, when the stored one is out of date.
+
+    Audit 3, A4: looked up by the node's qualified name, and a method only under
+    its class, so `B.run` never answers with the source of `A.run`. Research:
+    `docs/research/2026-09-17-a-fresh-line-belongs-to-the-symbol-it-names.md`.
+    """
     from fresh_positions import span_of
 
     path = Path(directory) / relative
-    span = span_of(path, name)
+    fields = _node_fields(node)
+    span = span_of(path, fields["qualified_name"], member=fields["kind"] == "method")
     lines = None if span is None else _read_bounded(path)
     if lines is None:
         return None
@@ -204,7 +210,7 @@ def _block_for(
     """
     if freshness != "stale":
         return _exact_block(lines, occurrence)
-    fresh = _file_block(directory, relative, str(node["metadata"].get("name") or ""))
+    fresh = _file_block(directory, relative, node)
     return fresh or _exact_block(lines, occurrence)
 
 

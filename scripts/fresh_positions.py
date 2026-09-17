@@ -28,11 +28,24 @@ def _remember(lines: dict[str, int], name: str, line: int) -> None:
     lines.setdefault(name, line)
 
 
+def _remember_bare(table: dict, prefix: str, name: str, value) -> None:
+    """A module-level definition owns its bare name; a nested one only borrows it.
+
+    Audit 3, A4/B34: a method that came first used to keep the bare name of a
+    module-level function below it. Research:
+    `docs/research/2026-09-17-a-fresh-line-belongs-to-the-symbol-it-names.md`.
+    """
+    if not prefix:
+        table[name] = value
+        return
+    table.setdefault(name, value)
+
+
 def _record_definition(node: ast.stmt, prefix: str, lines: dict[str, int]) -> None:
     name = str(getattr(node, "name", ""))
     qualified = f"{prefix}{name}"
     _remember(lines, qualified, node.lineno)
-    _remember(lines, name, node.lineno)
+    _remember_bare(lines, prefix, name, node.lineno)
     _record_body(node, f"{qualified}.", lines)
 
 
@@ -47,7 +60,7 @@ def _assigned_names(node: ast.stmt) -> list[str]:
 def _record_assignment(node: ast.stmt, prefix: str, lines: dict[str, int]) -> None:
     for name in _assigned_names(node):
         _remember(lines, f"{prefix}{name}", node.lineno)
-        _remember(lines, name, node.lineno)
+        _remember_bare(lines, prefix, name, node.lineno)
 
 
 def _record_child(child: ast.stmt, prefix: str, lines: dict[str, int]) -> None:
@@ -74,7 +87,7 @@ def _record_span(node: ast.stmt, prefix: str, spans: dict[str, tuple[int, int]])
     qualified = f"{prefix}{name}"
     end = int(getattr(node, "end_lineno", node.lineno) or node.lineno)
     spans.setdefault(qualified, (node.lineno, end))
-    spans.setdefault(name, (node.lineno, end))
+    _remember_bare(spans, prefix, name, (node.lineno, end))
     _record_spans_body(node, f"{qualified}.", spans)
 
 
@@ -96,13 +109,17 @@ def definition_spans(path: Path) -> dict[str, tuple[int, int]]:
         return {}
 
 
-def span_of(path: Path, name: str) -> tuple[int, int] | None:
-    """The lines `name` spans in this file now, or None when it is not there."""
-    spans = definition_spans(path)
-    for candidate in _tail_names(name):
-        if candidate in spans:
-            return spans[candidate]
-    return None
+def span_of(path: Path, name: str, *, member: bool = False) -> tuple[int, int] | None:
+    """The lines `name` spans in this file now, or None when it is not there.
+
+    A `member` is looked up under its owner only, never by its bare name:
+    another class's method of the same name is a different symbol, not a
+    fresher copy of this one.
+    """
+    names = _tail_names(name)
+    if member:
+        names = names[:-1]
+    return _found_among(definition_spans(path), names)
 
 
 def definition_lines(path: Path) -> dict[str, int]:
@@ -139,11 +156,27 @@ def _tail_names(name: str) -> list[str]:
     return [".".join(parts[index:]) for index in range(len(parts))]
 
 
-def _line_on_disk(lines: dict[str, int], name: str) -> int | None:
-    for candidate in _tail_names(name):
-        if candidate in lines:
-            return lines[candidate]
+def _owner_is_defined(table: dict, candidate: str) -> bool:
+    owner, _, _ = candidate.rpartition(".")
+    return bool(owner) and owner in table
+
+
+def _found_among(table: dict, names: list[str]):
+    """The first entry among `names`, trying shorter ones only while the owner is unknown.
+
+    `Holder.member` whose `Holder` is in the file but whose `member` is not has
+    left the file; the bare `member` of some other class must not answer for it.
+    """
+    for candidate in names:
+        if candidate in table:
+            return table[candidate]
+        if _owner_is_defined(table, candidate):
+            return None
     return None
+
+
+def _line_on_disk(lines: dict[str, int], name: str) -> int | None:
+    return _found_among(lines, _tail_names(name))
 
 
 def _corrected(row: dict, lines: dict[str, int]) -> dict:
