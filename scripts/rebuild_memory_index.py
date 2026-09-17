@@ -42,14 +42,6 @@ TYPE_SECTIONS = {
     "raw-source": "Raw sources",
 }
 
-SUBDIR_SECTIONS = {
-    "Concepts": knowledge / "concepts",
-    "Decisions": knowledge / "decisions",
-    "Patterns": knowledge / "patterns",
-    "Debugging": knowledge / "debugging",
-    "Q&A": knowledge / "qa",
-}
-
 SUMMARY_RE = re.compile(r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)

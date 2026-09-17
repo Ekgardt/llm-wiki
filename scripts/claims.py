@@ -74,7 +74,6 @@ _NON_SUBSTANTIVE_RELATIONS = frozenset(
 # ambiguous is admitted; anything else still refuses by name. See
 # `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
 _DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
-_BLOCK_RE = re.compile(rb"(?m)^## \[(\d{2}:\d{2}:\d{2})\][^\r\n]*(?:\r?\n|$)")
 # The one definition of a Claims ledger, for its readers and its writers alike:
 # opening, the canonical JSON line, closing fence — then only blank lines before
 # the next section or the end. Three copies of this once required exactly one

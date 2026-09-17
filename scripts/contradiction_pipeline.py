@@ -43,7 +43,6 @@ FUNCTIONAL_RELATIONS = frozenset(
 )
 SEMANTIC_LABELS = frozenset({"contradiction", "compatible", "refinement"})
 _CONFIDENCE_LEVELS = frozenset({"high", "medium", "low"})
-RECOMMENDATIONS = frozenset({"refine", "supersede", "keep-both", "quarantine"})
 MAX_SEMANTIC_OUTPUT_BYTES = 64 * 1024
 EVALUATION_SCHEMA = {
     "type": "object",

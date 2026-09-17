@@ -3,7 +3,7 @@
 Covers the `knowledge/notes/` tree (filename kept for backward compat with
 hooks and docs that still reference `lint_memory`).
 
-Fourteen checks (Phase 2 expanded the original seven + Phase 6 temporal + invalid-type-value):
+The checks (`CHECK_NAMES` is the full list; Phase 2 expanded the original seven + Phase 6 temporal + invalid-type-value):
  1. broken_wikilinks — wikilinks whose target does not resolve to a file.
  2. orphan_pages — knowledge/wiki pages not referenced by the relevant index.md.
  3. orphan_daily_logs — daily logs with no compile recorded in state.json.
@@ -783,7 +783,6 @@ def check_invalid_supersede_chain(pages: list[Path]) -> list[str]:
 
 
 # Fields for temporal validity (Phase 6 — from Graphiti concept)
-VALID_FROM_RE = re.compile(r"^valid_from:\s*(.+?)\s*$", re.MULTILINE)
 VALID_TO_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
 

@@ -16,7 +16,7 @@ skips, flush treats as FLUSH_OK, query returns error string). The queue
 that want deferred execution — ``memory_queue.enqueue()``.
 
 Override backend via MEMORY_LLM_PROVIDER env var:
-    MEMORY_LLM_PROVIDER=opencode  (default — uses OpenCode HTTP API)
+    MEMORY_LLM_PROVIDER=opencode  (uses OpenCode HTTP API; only with OPENCODE_SERVER_PASSWORD)
     MEMORY_LLM_PROVIDER=codex     (uses codex exec)
     MEMORY_LLM_PROVIDER=claude    (uses claude CLI)
     MEMORY_LLM_PROVIDER=openai    (uses OPENAI_API_KEY)
@@ -24,8 +24,9 @@ Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=fake      (tests/e2e — returns MEMORY_LLM_FAKE_RESPONSE)
 
 Design:
-- NEVER crash the caller: on any LLM failure, return "" (empty string).
-- On no-backend-available: enqueue the call as a deferred task.
+- NEVER crash the caller: on any LLM failure, `call_llm` returns None.
+- On no-backend-available nothing is enqueued here: only the flush path
+  defers its work to the queue; every other caller skips or fails its step.
 - Bounded timeouts: 90s per HTTP call. The OpenCode backend makes up to
   three sequential calls (session create, system inject, prompt), so its
   aggregate wall time may reach ~270s; all other backends are single-call.

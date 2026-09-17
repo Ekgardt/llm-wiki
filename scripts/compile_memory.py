@@ -981,7 +981,6 @@ def _require_operation_integrity(
 
 
 # Historical compatibility only. Selection and archive authority use v3 readers.
-parse_compile_receipt = parse_compile_receipt_v2
 read_compile_receipt = read_compile_receipt_v2
 
 
