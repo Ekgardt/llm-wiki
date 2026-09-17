@@ -768,15 +768,24 @@ def guardrails_block(slug: str | None = None) -> str:
     return f"{guardrails}\n\n"
 
 
+# The advisory prints only what the graph proved, so the note scan is not paid,
+# and the start path gives the analysis a budget of its own instead of the
+# five-second interactive ceiling (audit 3 B30).
+IMPACT_BUDGET_SECONDS = 1.0
+
+
 def _impact_block() -> str:
     """Code-knowledge impact analysis (v4.0).
 
-    Detects wiki pages that might be stale due to recent code changes.
+    Names the pages and decisions the graph proves the uncommitted change reaches.
     Non-blocking — failures are silently ignored.
     """
     try:
         from impact_analysis import analyze_impact, format_for_advisory
-        impact = analyze_impact()
+        impact = analyze_impact(
+            textual_fallback=False,
+            deadline=time.monotonic() + IMPACT_BUDGET_SECONDS,
+        )
         return format_for_advisory(impact, max_pages=3)
     except Exception:
         return ""

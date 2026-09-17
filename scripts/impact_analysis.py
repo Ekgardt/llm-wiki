@@ -1161,8 +1161,13 @@ def analyze_impact(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    textual_fallback: bool = True,
 ) -> dict:
-    """Map explicit Git endpoints through canonical graph symbols and edges."""
+    """Map explicit Git endpoints through canonical graph symbols and edges.
+
+    `textual_fallback=False` skips the note scan for a caller that refuses its
+    word-match guesses anyway (the session start, audit 3 B30).
+    """
     bounds = _limits_or_default(limits)
     comparison, base, target = _legacy_endpoints(git_range, comparison, base, target)
     root = Path(root).resolve(strict=True)
@@ -1172,7 +1177,9 @@ def analyze_impact(
     run.collect(root, comparison=comparison, base=base, target=target, branch=branch)
     run.describe()
     run.map_changes(graph, root)
-    fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
+    fallback: list[dict] = []
+    if textual_fallback:
+        fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
     return run.report(comparison, fallback)
 
 
@@ -1344,29 +1351,35 @@ def _textual_fallback(
 
 
 def format_for_advisory(impact: dict, max_pages: int = 3) -> str:
-    """Format the impact for SessionStart, without textual-name-match guesses.
+    """Format the impact for SessionStart: the pages and decisions the graph proved.
 
-    A page that only contains a changed name as a word flagged three Karpathy pages for
-    the symbol `words` in every session. See
-    `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    Word-match guesses stay out: a page that only contains a changed name as a word
+    flagged three Karpathy pages for the symbol `words` in every session
+    (`docs/research/2026-09-14-less-noise-at-session-start.md`). What is printed is
+    `affected`, reached from the changed symbols over confirmed edges — the list
+    this block never read, so it could print nothing (audit 3 B30,
+    `docs/research/2026-09-17-the-session-start-advisory-prints-what-the-graph-proved.md`).
     """
-    stale = _advisory_pages(impact)
-    if not stale:
+    proven = _advisory_pages(impact)
+    if not proven:
         return ""
     lines = ["### Code-Knowledge Impact", impact["summary"], ""]
-    lines.extend(_advisory_line(page) for page in stale[:max_pages])
-    if len(stale) > max_pages:
-        lines.append(f"... and {len(stale) - max_pages} more.")
+    lines.extend(_advisory_line(page) for page in proven[:max_pages])
+    if len(proven) > max_pages:
+        lines.append(f"... and {len(proven) - max_pages} more.")
     return "\n".join(lines)
 
 
+_ADVISORY_GROUPS = ("decisions", "pages")
+
+
 def _advisory_pages(impact: dict) -> list[dict]:
-    return [page for page in impact.get("stale_pages", []) if page.get("method") != "textual-name-match"]
+    affected = impact.get("affected", {})
+    return [item for group in _ADVISORY_GROUPS for item in affected.get(group, [])]
 
 
 def _advisory_line(page: dict) -> str:
-    marker = "!!!" if page["confidence"] == "high" else "!"
-    return f"{marker} **{page['slug']}** - {page['reason']}"
+    return f"! **{page['path']}** - {page['via']} reaches changed code; check it still holds"
 
 
 def main() -> int:
