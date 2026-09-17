@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +36,11 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from memory_state import ROOT, STATE_ROOT, update_state  # noqa: E402
 
 SCRIPTS_DIR = ROOT / "scripts"
+# A hook must not wait on a contended state file; without the lock the turn is captured.
+TURN_END_LOCK_SECONDS = 0.5
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 SCRIPT_TIMEOUT_SECONDS = 10
 MAX_HOOK_INPUT_BYTES = 64 * 1024
@@ -306,13 +309,18 @@ _CODEX_EVENT_READERS = {
 }
 
 
-def normalize_codex_hook(raw: dict[str, Any]):
-    """Validate one official Codex hook payload and map it to shared lifecycle."""
+def normalize_codex_hook(raw: dict[str, Any], *, stop_event: str = "session_end"):
+    """Validate one official Codex hook payload and map it to shared lifecycle.
+
+    `stop_event` is what the end of a turn means this time: a capture of the
+    session, or the shared `stop` that captures nothing (`codex_turn_end`).
+    """
     event_name = _require_known_event(raw)
     normalized = _normalized_common(raw)
     _applied_turn_id(normalized, raw, event_name)
     reader = _CODEX_EVENT_READERS.get(event_name, _stop_reason)
     normalized["reason"], event_type = reader(raw)
+    event_type = {"Stop": stop_event}.get(event_name, event_type)
     return normalize_occurrence_event("codex", event_type, normalized)
 
 
@@ -344,12 +352,102 @@ def _hook_output(event_name: object, result: dict[str, Any]) -> dict[str, Any]:
     return _session_start_output(result)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _claim_capture(state: dict[str, Any], raw: dict[str, Any], now: datetime) -> bool:
+    """Whether this hook captures its session, written down in the same step."""
+    import codex_turn_end
+
+    event_name = raw["hook_event_name"]
+    if event_name == "Stop":
+        return codex_turn_end.claim_turn_end(state, raw, now)
+    if event_name == "PreCompact":
+        codex_turn_end.mark_captured(state, raw["session_id"], now)
+    return True
+
+
+def _turn_end_plan(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """What this hook captures: its own session, and one other session's quiet tail.
+
+    Without the state lock the turn is captured as it always was: a duplicate is
+    cheaper than a loss. See `docs/research/2026-09-17-a-codex-turn-is-not-a-session.md`.
+    """
+    import codex_turn_end
+
+    plan: dict[str, Any] = {"capture": True, "claimed": False, "before": None, "tail": None}
+    session_id = raw["session_id"]
+
+    def mutate(state: dict[str, Any]) -> None:
+        plan["before"] = codex_turn_end.snapshot(state, session_id)
+        plan["capture"] = _claim_capture(state, raw, now)
+        plan["tail"] = codex_turn_end.claim_quiet_tail(state, now, except_session=session_id)
+        plan["claimed"] = True
+
+    try:
+        update_state(mutate, lock_timeout=TURN_END_LOCK_SECONDS)
+    except OSError:
+        return {"capture": True, "claimed": False, "before": None, "tail": None}
+    return plan
+
+
+def _restore_claim(session_id: str, before: object) -> None:
+    """The capture this claim stood for failed, so the next turn end may try again."""
+    import codex_turn_end
+
+    try:
+        update_state(
+            lambda state: codex_turn_end.restore(state, session_id, before),
+            lock_timeout=TURN_END_LOCK_SECONDS,
+        )
+    except OSError:
+        return
+
+
+def _ingest_claimed(envelope: Any, session_id: str, plan: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return ingest_event(envelope, trigger="codex-hook")
+    except Exception:
+        if plan["claimed"]:
+            _restore_claim(session_id, plan["before"])
+        raise
+
+
+def _capture_quiet_tail(tail: dict[str, Any] | None) -> None:
+    """Capture the end of a session that stopped talking; its failure is its own."""
+    if tail is None:
+        return
+    raw = {
+        "session_id": tail["session_id"],
+        "cwd": tail.get("cwd"),
+        "transcript_path": tail.get("transcript_path"),
+        "event_id": tail.get("turn_id"),
+        "reason": "stop",
+    }
+    try:
+        ingest_event(normalize_occurrence_event("codex", "session_end", raw), trigger="codex-hook")
+    except Exception as error:  # noqa: BLE001 - recorded; the hook's own answer still stands
+        _restore_claim(tail["session_id"], tail["before"])
+        _record_hook_failure(error, tail["session_id"])
+
+
+def _ingest_codex_hook(raw: dict[str, Any], now: datetime) -> tuple[dict[str, Any], Any]:
+    """(the result of this hook's own event, the quiet tail still to capture)."""
+    normalize_codex_hook(raw)
+    plan = _turn_end_plan(raw, now)
+    stop_event = "session_end" if plan["capture"] else "stop"
+    envelope = normalize_codex_hook(raw, stop_event=stop_event)
+    return _ingest_claimed(envelope, raw["session_id"], plan), plan["tail"]
+
+
 def _dispatch_hook(seen: dict[str, object]) -> None:
     """`seen` carries the event name out, so the failure path can answer Stop."""
     raw = _read_hook_input()
     seen["event_name"] = raw["hook_event_name"]
-    result = ingest_event(normalize_codex_hook(raw), trigger="codex-hook")
+    result, tail = _ingest_codex_hook(raw, _utc_now())
     print(json.dumps(_hook_output(seen["event_name"], result), ensure_ascii=False))
+    _capture_quiet_tail(tail)
 
 
 def _report_hook_failure(event_name: object) -> None:
@@ -358,13 +456,29 @@ def _report_hook_failure(event_name: object) -> None:
     print("codex_memory: hook skipped", file=sys.stderr)
 
 
+def _record_hook_failure(error: BaseException, session_id: str | None = None) -> None:
+    """A Codex hook that failed leaves the same trail the adapter's entry point leaves."""
+    if isinstance(error, SystemExit):
+        return
+    try:
+        from capture_diagnostics import record_capture_failure
+        from secret_redact import describe_error_chain
+
+        record_capture_failure(
+            "codex_hook", describe_error_chain(error), error=error, session_id=session_id
+        )
+    except Exception:  # noqa: BLE001 - a lost trace must not lose the hook's answer
+        return
+
+
 def command_hook(args: argparse.Namespace) -> int:
     """Run one official Codex lifecycle callback without risking the host."""
     del args
     seen: dict[str, object] = {}
     try:
         _dispatch_hook(seen)
-    except (Exception, SystemExit):  # noqa: BLE001
+    except (Exception, SystemExit) as error:  # noqa: BLE001
+        _record_hook_failure(error)
         _report_hook_failure(seen.get("event_name"))
     return 0
 
