@@ -339,7 +339,16 @@ def _transcript_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _user_prompt_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
-    return {"prompt": _string(raw.get("prompt"))}
+    """The prompt, and the transcript the host named with it.
+
+    The path is what the twentieth-prompt capture reads; without it that capture
+    had nothing to read and counted an empty session. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
+    return {
+        "prompt": _string(raw.get("prompt")),
+        "transcript_path": _first_string(raw.get("transcript_path"), raw.get("transcriptPath")),
+    }
 
 
 def _event_payload(source: str, event: str, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -518,7 +527,7 @@ def _tool_capture_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_capture_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {"prompt": payload["prompt"]}
+    return {"prompt": payload["prompt"], "transcript_path": payload.get("transcript_path")}
 
 
 def _lifecycle_capture_fields(event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -2877,13 +2886,31 @@ def publish_capture_intent_from_payload(
     which is what "no user action required" has to mean on the failure path too.
     """
     try:
-        envelope = normalize_event(source, event_type, dict(payload))
-        canonical = _canonical_capture_payload(envelope)
-        slug, _project_dir = _project_context(envelope)
-        trigger = _fallback_trigger(event_type, canonical)
-        return _publish_durable_capture_intent(envelope, canonical, slug, trigger)
+        return _publish_intent_from_payload(source, event_type, payload)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _publish_intent_from_payload(
+    source: str, event_type: str, payload: Mapping[str, Any]
+) -> str | None:
+    envelope = normalize_event(source, event_type, dict(payload))
+    canonical = _canonical_capture_payload(envelope)
+    slug, _project_dir = _project_context(envelope)
+    trigger = _fallback_trigger(event_type, canonical)
+    return _publish_durable_capture_intent(envelope, canonical, slug, trigger)
+
+
+def capture_running_session(source: str, payload: Mapping[str, Any]) -> str | None:
+    """Capture a session that is still running: publish its intent, wake the worker.
+
+    The same record a compaction leaves, without the project checkpoint a real
+    compaction writes. It raises, so the mode that runs it records the reason. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
+    intent_id = _publish_intent_from_payload(source, "pre_compact", payload)
+    _wake_capture_worker({}, intent_id)
+    return intent_id
 
 
 def _record_capture_intent(result: dict[str, Any], intent_id: str | None) -> None:
@@ -3100,7 +3127,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-type")
     parser.add_argument("--maintenance", action="store_true")
     parser.add_argument("--capture-worker", action="store_true")
+    parser.add_argument("--running-capture", metavar="PAYLOAD_JSON")
     return parser
+
+
+def _run_running_capture(args: argparse.Namespace) -> int:
+    """The detached half of the twentieth-prompt capture; the payload rides in argv."""
+    if not args.source:
+        raise ValueError("invalid integration event")
+    payload = json.loads(args.running_capture)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid integration event")
+    capture_running_session(args.source, payload)
+    return 0
 
 
 def _run_active_capture_worker_once() -> int:
@@ -3246,9 +3285,23 @@ def _failed_operation(args: argparse.Namespace | None) -> str:
     """
     if args is None:
         return "unparsed"
-    modes = (("capture_worker", "capture_worker"), ("maintenance", "maintenance"))
-    named = [label for flag, label in modes if getattr(args, flag, False)]
+    named = [flag for flag in CLI_MODES if getattr(args, flag, False)]
     return next(iter(named), getattr(args, "event", None) or "unknown")
+
+
+# The invocations that carry no `--event`, in the order `main` tries them.
+CLI_MODES = ("maintenance", "capture_worker", "running_capture")
+
+
+def _cli_mode(args: argparse.Namespace):
+    """The runner of the mode this invocation asked for, or None for a host event."""
+    runners = {
+        "maintenance": lambda _args: _run_session_start_maintenance(),
+        "capture_worker": lambda _args: _run_active_capture_worker_once(),
+        "running_capture": _run_running_capture,
+    }
+    named = [runners[flag] for flag in CLI_MODES if getattr(args, flag, False)]
+    return next(iter(named), None)
 
 
 def _skip_reason(error: BaseException) -> str:
@@ -3305,10 +3358,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args: argparse.Namespace | None = None
     try:
         args = _parser().parse_args(argv)
-        if args.maintenance:
-            return _run_session_start_maintenance()
-        if args.capture_worker:
-            return _run_active_capture_worker_once()
+        mode = _cli_mode(args)
+        if mode is not None:
+            return mode(args)
         output = _run_cli_event(args)
     except (Exception, SystemExit) as error:  # noqa: BLE001
         _record_cli_capture_failure(args, error)

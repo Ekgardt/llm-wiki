@@ -597,44 +597,8 @@ def test_prompt_bookkeeping_fails_open_quickly_when_state_lock_is_held(
     assert dedupe_elapsed < 0.75
 
 
-def test_twentieth_prompt_spawns_nonblocking_flush(monkeypatch, tmp_path):
-    import user_prompt_capture
-
-    fake_root = tmp_path / "vault"
-    fake_root.mkdir()
-    project = tmp_path / "project"
-    project.mkdir()
-    spawned = []
-    monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
-    monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *args: 20)
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *a: False)
-    monkeypatch.setattr(user_prompt_capture, "_append_prompt_tag", lambda *a: None)
-    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *a: True)
-    monkeypatch.setattr(
-        user_prompt_capture, "spawn_detached", lambda args: spawned.append(args) or 123
-    )
-
-    rc = _run_capture_with_stdin(
-        "user_prompt_capture",
-        {
-            "prompt": "twentieth meaningful prompt",
-            "agent": "opencode",
-            "session_id": "session-20",
-            "cwd": str(project),
-            "transcript_path": str(tmp_path / "session.jsonl"),
-        },
-    )
-
-    assert rc == 0
-    assert len(spawned) == 1
-    assert spawned[0][0] == sys.executable
-    assert spawned[0][1] == str(fake_root / "scripts" / "flush_memory.py")
-    assert spawned[0][2:] == [
-        "--event", "pre-compact", "--session-id", "session-20",
-        "--transcript", str(tmp_path / "session.jsonl"),
-        "--trigger", "prompt-count-20",
-        "--agent", "opencode",
-    ]
+# The twentieth prompt is pinned by
+# `tests/test_the_twentieth_prompt_captures_the_session.py`, with a real counter.
 
 
 def test_tenth_prompt_injects_short_advisory_with_hook_output_contract(

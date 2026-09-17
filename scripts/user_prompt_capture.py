@@ -261,18 +261,29 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
 
 
 def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
+    """Hand the session so far to the adapter's capture route, detached.
+
+    No transcript, nothing to capture: an empty flush used to be started and
+    counted as a session with nothing worth keeping. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
     from event_envelope import canonical_agent
 
-    args = [
+    transcript = hook.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return
+    payload = {
+        "session_id": str(session_id),
+        "cwd": hook.get("cwd"),
+        "transcript_path": transcript,
+        "trigger": "prompt-count-20",
+    }
+    spawn_detached([
         sys.executable,
-        str(ROOT / "scripts" / "flush_memory.py"),
-        "--event", "pre-compact",
-        "--session-id", str(session_id),
-        "--transcript", str(hook.get("transcript_path", "")),
-        "--trigger", "prompt-count-20",
-        "--agent", canonical_agent(str(hook.get("agent") or "claude")),
-    ]
-    spawn_detached(args)
+        str(ROOT / "scripts" / "integration_adapter.py"),
+        "--source", canonical_agent(str(hook.get("agent") or "claude")),
+        "--running-capture", json.dumps(payload, ensure_ascii=False),
+    ])
 
 
 def _build_advisory_refresh() -> str:
