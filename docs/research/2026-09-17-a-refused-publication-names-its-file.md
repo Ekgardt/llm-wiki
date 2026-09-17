@@ -41,3 +41,16 @@ Files: scripts/private_vault_backup.py, tests/test_a_refused_publication_names_i
   leaving `.git` out decides whether unpushed commits are part of "memory". It goes to the
   owner with the options: back up only what Git does not carry (the ignored knowledge and
   `run/`); or keep the wide image and leave `.git`, `.venv` and tool caches out of it.
+
+## Addendum: what a publication leaves out is counted (finding Q-L29)
+
+Files: scripts/private_vault_backup.py, tests/test_a_publication_counts_what_it_leaves_out.py
+
+- `_files_under` publishes regular files only. A symlink or an empty directory that the
+  image holds (the backup scan records both kinds) is dropped without a word, and the
+  receipt reads as if the whole image had landed.
+- Decision: the behaviour stays — a link restored onto another machine points wherever the
+  old machine pointed, and an empty directory carries no memory. The receipt gains one
+  additive field, `unpublished_entries`, the number of symlinks and empty directories in the
+  image that were not written, so the record says what happened. The schema name is
+  unchanged: nothing reads the receipt but the operator.

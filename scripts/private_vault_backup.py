@@ -1428,6 +1428,24 @@ def _files_under(source_root: Path, destination_root: Path) -> list[tuple[Path, 
     ]
 
 
+def _left_out_of_publication(path: Path) -> bool:
+    """A symlink or an empty directory: publication writes regular files only."""
+    if path.is_symlink():
+        return True
+    return path.is_dir() and not any(path.iterdir())
+
+
+def _left_out_under(half: Path) -> int:
+    if not half.is_dir():
+        return 0
+    return len([path for path in half.rglob("*") if _left_out_of_publication(path)])
+
+
+def _unpublished_entries(image: Path) -> int:
+    """How many entries of the image a publication does not write, for the receipt."""
+    return sum(_left_out_under(image / half) for half, _key in _IMAGE_ROOTS)
+
+
 def _same_bytes(source: Path, destination: Path) -> bool:
     return _hash_file(source, float("inf")) == _hash_file(destination, float("inf"))
 
@@ -1530,6 +1548,7 @@ def publish_restored_image(
         "manifest_sha256": expected_manifest_sha256,
         "published_files": len(to_write),
         "identical_files": identical,
+        "unpublished_entries": _unpublished_entries(staged),
     }
 
 
