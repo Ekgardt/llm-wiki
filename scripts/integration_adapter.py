@@ -1464,8 +1464,12 @@ def _claims_match(queue: Sequence[Mapping[str, object]], owner: str) -> bool:
     return all(item.get("claim_owner") == owner for item in queue)
 
 
+MAX_CHECKPOINT_REDUCERS = 128
+
+
 def _trim_reducers(reducers: dict[str, object]) -> None:
-    if len(reducers) > 128:
+    """Back to the bound, oldest first: one commit can add more than one reducer."""
+    while len(reducers) > MAX_CHECKPOINT_REDUCERS:
         reducers.pop(next(iter(reducers)))
 
 
@@ -2572,10 +2576,18 @@ def _capture_excerpt_text(path: Path, limit: int) -> str:
     tail = _whole_lines_tail(raw_tail)
     dropped = size - len(head) - len(tail)
     return (
-        head.decode("utf-8", errors="ignore")
-        + _capture_excerpt_marker(dropped)
-        + tail.decode("utf-8", errors="ignore")
+        _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
     )
+
+
+def _evidence_text(data: bytes) -> str:
+    """Evidence is kept around a byte that does not decode, and shows that it was there.
+
+    A short transcript used to be decoded strictly and a long one with `ignore`: one
+    stray byte lost the short session whole. See
+    `docs/research/2026-09-17-four-small-capture-corrections.md`.
+    """
+    return data.decode("utf-8", errors="replace")
 
 
 def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES) -> str:
@@ -2595,11 +2607,11 @@ def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES
     `limit` is the bound this read keeps to; it is lowered when the text grew too
     much inside its JSON record (`_fitting_capture_record`).
     """
-    from bounded_io import read_stable_utf8
+    from bounded_io import read_stable_bytes
 
     if path.stat().st_size > limit:
         return _capture_excerpt_text(path, limit)
-    return read_stable_utf8(path, limit, label="capture transcript")
+    return _evidence_text(read_stable_bytes(path, limit, label="capture transcript"))
 
 
 def _capture_path_evidence(

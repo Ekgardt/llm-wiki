@@ -243,6 +243,16 @@ def _prompt_counter_key(session_id: str, slug: str) -> str:
     return f"project:{slug or 'unknown'}"
 
 
+# One key per session for ever made `run/state.json` grow towards the size its
+# readers refuse. See `docs/research/2026-09-17-four-small-capture-corrections.md`.
+MAX_PROMPT_COUNTERS = 200
+
+
+def _forget_oldest_counts(counters: dict) -> None:
+    while len(counters) > MAX_PROMPT_COUNTERS:
+        counters.pop(next(iter(counters)))
+
+
 def _increment_prompt_count(session_id: str, slug: str) -> int:
     """Increment this session's prompt count, falling back to the project."""
     count = 0
@@ -250,8 +260,10 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
     def _mutate(state: dict) -> None:
         nonlocal count
         counters = state.setdefault("user_prompt_counts", {})
-        count = int(counters.get(key, 0)) + 1
+        # Re-inserted, so the map's order is "counted most recently last".
+        count = int(counters.pop(key, 0)) + 1
         counters[key] = count
+        _forget_oldest_counts(counters)
 
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
