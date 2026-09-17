@@ -283,7 +283,8 @@ on 2026-08-05, explicitly approved implementation of the operational database pa
 and offline adoption backend on 2026-08-12, and approved durable capture producer
 activation on 2026-08-16. This scope keeps the three root zones and existing runtime
 environment variables.
-Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`. The only
+Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`; the verified
+commit becomes local `main` tracking `origin/main`, so the nightly fast-forward applies. The only
 new runtime directory is `run/capture-intents/`. New create-only
 `capture-intent/v1` records remain there until an immutable terminal record under
 existing `run/queue-results/` proves committed Markdown, validated no-durable-content,

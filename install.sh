@@ -165,8 +165,8 @@ claude_status_line() {
   esac
 }
 
-# A remote bootstrap pins one commit, and the nightly update skips a detached head.
-# Nothing said so, and such a vault silently never updated.
+# The nightly update skips a detached head, so a checkout its operator detached to
+# freeze it is told so. A remote bootstrap is no longer such a checkout (see below).
 code_update_note() {
   if git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1; then
     echo "nightly fast-forward of the checked-out branch"
@@ -178,12 +178,19 @@ code_update_note() {
 # A failed fetch used to leave the directory `git init` had made, and the next
 # attempt stopped at "already exists" with no way forward. The directory is ours
 # alone here — the caller checked that it did not exist — so a failure takes it back.
+#
+# The pin decides what runs first, not what runs forever: the verified commit becomes the
+# local default branch with the remote one as its upstream, so the nightly fast-forward
+# reaches this vault as it reaches a cloned one. `git checkout --detach` freezes it again.
+# See docs/research/2026-09-17-a-verified-first-install-then-follows-main.md.
 fetch_pinned_checkout() {
-  local target="$1" url="$2" commit="$3"
+  local target="$1" url="$2" commit="$3" branch="${4:-main}"
   if git init "$target" \
     && git -C "$target" remote add origin "$url" \
     && git -C "$target" fetch --depth 1 origin "$commit" \
-    && git -C "$target" checkout --detach "$commit"; then
+    && git -C "$target" checkout -B "$branch" "$commit" \
+    && git -C "$target" config "branch.$branch.remote" origin \
+    && git -C "$target" config "branch.$branch.merge" "refs/heads/$branch"; then
     return 0
   fi
   rm -rf -- "$target"

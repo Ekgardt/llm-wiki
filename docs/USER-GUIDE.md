@@ -87,7 +87,10 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 
 Remote bootstrap accepts only a full 40-hex `LLM_WIKI_COMMIT`. It fetches that exact
 commit into a new `~/LLM-wiki`, verifies `HEAD`, repository identity, and required files,
-then executes the checked-out installer. Branches and tags are rejected. Existing
+then executes the checked-out installer. Branches and tags are rejected. The verified
+commit becomes the local `main` branch tracking `origin/main`, so the nightly fast-forward
+reaches this vault like a cloned one; `git -C ~/LLM-wiki checkout --detach` freezes it, and
+the nightly report then says `skipped (detached_head)`. Existing
 checkouts retain all remote settings unless `--protect-push` or `-ProtectPush` is explicit.
 The installer detects agents. It configures OpenCode, Codex, and Claude only when their
 configuration verifies.

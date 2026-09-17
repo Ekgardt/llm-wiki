@@ -63,12 +63,19 @@ function Invoke-NativeCommand {
 # attempt stopped at "already exists" with no way forward. The directory is ours
 # alone here - the caller checked that it did not exist - so a failure takes it back.
 # See docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it-did.md.
-function Get-PinnedCheckout([string]$Target, [string]$Url, [string]$Commit) {
+#
+# The pin decides what runs first, not what runs forever: the verified commit becomes the
+# local default branch with the remote one as its upstream, so the nightly fast-forward
+# reaches this vault as it reaches a cloned one. `git checkout --detach` freezes it again.
+# See docs/research/2026-09-17-a-verified-first-install-then-follows-main.md.
+function Get-PinnedCheckout([string]$Target, [string]$Url, [string]$Commit, [string]$Branch = "main") {
     $steps = @(
         @("init", $Target),
         @("-C", $Target, "remote", "add", "origin", $Url),
         @("-C", $Target, "fetch", "--depth", "1", "origin", $Commit),
-        @("-C", $Target, "checkout", "--detach", $Commit)
+        @("-C", $Target, "checkout", "-B", $Branch, $Commit),
+        @("-C", $Target, "config", "branch.$Branch.remote", "origin"),
+        @("-C", $Target, "config", "branch.$Branch.merge", "refs/heads/$Branch")
     )
     foreach ($step in $steps) {
         & git @step | Out-Host
@@ -87,7 +94,7 @@ function Get-ExistingTargetAdvice([string]$Target) {
     }
     return "Remote install target already exists: $Target. It is not an LLM-Wiki checkout; move it away and run the same command again"
 }
-# A remote bootstrap pins one commit, and the nightly update skips a detached head.
+# The nightly update skips a detached head, so a checkout its operator detached is told so.
 function Get-CodeUpdateNote([string]$VaultRoot) {
     & git -C $VaultRoot symbolic-ref -q HEAD *> $null
     if ($LASTEXITCODE -eq 0) { return "nightly fast-forward of the checked-out branch" }

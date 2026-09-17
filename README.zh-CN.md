@@ -149,6 +149,8 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 仅当 `LLM_WIKI_COMMIT` 是精确的 40 位十六进制 commit OID 时，才支持远程 bootstrap。
 请只从可信位置传入安装程序并设置该值；bootstrap 会获取精确 commit，验证 `HEAD`、
 仓库身份和必需文件，然后只执行 checkout 中的安装程序。分支名和标签名会被拒绝。
+经过验证的 commit 会成为跟踪 `origin/main` 的本地 `main` 分支，因此夜间 fast-forward
+更新会像对待克隆的仓库一样到达该 vault；`git -C ~/LLM-wiki checkout --detach` 会将其冻结在当前 commit。
 
 本地安装程序会同步锁定的 production baseline，运行有界 production smoke，创建 runtime
 目录并接入受支持的智能体。完整回归套件仍是独立的 development 与 release gate。已有

@@ -150,6 +150,9 @@ The installer also supports remote bootstrap only when `LLM_WIKI_COMMIT` is an e
 40-hex commit OID. Pipe the installer from a trusted location while setting that value;
 the bootstrap fetches that exact commit, verifies `HEAD`, repository identity, and required
 files, then executes only the checked-out installer. Branch and tag names are rejected.
+The verified commit becomes the local `main` branch tracking `origin/main`, so the nightly
+fast-forward update reaches this vault like a cloned one; `git -C ~/LLM-wiki checkout --detach`
+freezes it at the current commit.
 
 The local installer syncs the locked production baseline, runs a bounded production smoke,
 creates runtime directories, and wires supported agents. The full regression suite remains
