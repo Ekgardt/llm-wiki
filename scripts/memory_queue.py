@@ -14922,7 +14922,11 @@ def _claim_when_reachable(
         try:
             return queue.claim(owner, lease_seconds=lease_seconds, max_attempts=max_attempts)
         except sqlite3.OperationalError as error:
-            if not _is_busy_database(error) or monotonic() >= deadline:
+            # Only a busy database is "nothing to claim yet". A disk I/O error or
+            # a missing table is a failure the operator has to see, not an idle queue.
+            if not _is_busy_database(error):
+                raise
+            if monotonic() >= deadline:
                 return None
             time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
 
