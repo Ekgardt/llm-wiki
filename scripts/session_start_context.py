@@ -2,13 +2,13 @@
 
 Emits a JSON object on stdout with `hookSpecificOutput.additionalContext`
 containing a trimmed view of project memory:
-  - `knowledge/index.md` — H1, Entry points, first 3 non-empty knowledge sections,
-    with each bullet line clipped to keep the section visually scannable.
+  - `knowledge/index.md` — H1, Entry points, first 3 non-empty knowledge sections.
+    Lines are kept whole; the section budgets decide what fits.
   - Latest daily log — a short excerpt of the most recent meaningful session
     block. Empty hook-trigger blocks, XML `<analysis>`/`<summary>` wrappers,
     and mojibake lines are stripped. If nothing clean remains, falls back to
     a one-line note.
-  - the private vault log (`vault_log.LOG_RELATIVE`) — last 3 dated entries, each clipped.
+  - the private vault log (`vault_log.LOG_RELATIVE`) — last 3 dated entries, whole.
 
 All complete sections are packed under the shared token budget. A debug dump
 of the payload is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
@@ -83,10 +83,7 @@ SECTION_PRIORITIES: dict[str, int] = {
 }
 INDEX_KNOWLEDGE_SECTIONS = 3
 INDEX_MAX_CHARS = 1200
-INDEX_BULLET_MAX = 140
-LOG_ENTRY_MAX = 200
 DAILY_EXCERPT_LINES = 6
-DAILY_LINE_MAX = 160
 HOOK_STATE_LOCK_TIMEOUT = 0.1
 RECOVERY_LIMIT_SECONDS = 0.1
 RECOVERY_MAX_TRANSACTIONS = 4
@@ -187,6 +184,12 @@ NOISE_PATTERNS = (
     re.compile(r"^\s*-\s*Trigger:\s*.*$"),
     re.compile(r"^\s*-\s*Transcript:\s*.*$"),
     re.compile(r"^\s*-\s*Project root:\s*.*$"),
+    # The labels the capture worker writes under its header: the host's name, a
+    # 64-character digest and one word of tier took three of the six excerpt lines. See
+    # `docs/research/2026-09-17-the-daily-excerpt-shows-the-entry-not-its-label.md`.
+    re.compile(r"^\s*-\s*Agent:\s*.*$"),
+    re.compile(r"^\s*-\s*Capture intent:\s*.*$"),
+    re.compile(r"^\s*-\s*Tier:\s*.*$"),
     re.compile(r"^\s*\(no summary.*\)\s*$"),
     re.compile(r"^\s*###\s*Compact summary\s*$", re.IGNORECASE),
 )
@@ -196,7 +199,7 @@ XML_TAG_RE = re.compile(r"</?(analysis|summary)>", re.IGNORECASE)
 # Strip the `| <uuid>` session-id tail from `## [HH:MM:SS] session-end`
 # headers — the UUID is useless noise in the injected context.
 SESSION_ID_STRIP_RE = re.compile(
-    r"^(##\s+\[\d{2}:\d{2}:\d{2}\]\s+session-end)\s*\|.*$"
+    r"^(##\s+\[\d{2}:\d{2}:\d{2}\]\s+(?:session-end|pre-compact))\s*\|.*$"
 )
 
 
@@ -216,11 +219,6 @@ def is_noise(line: str) -> bool:
     if XML_TAG_RE.fullmatch(stripped):
         return True
     return any(pat.match(line) for pat in NOISE_PATTERNS)
-
-
-def clip(line: str, limit: int) -> str:
-    """Keep lines whole; section and global budgets decide whether they fit."""
-    return line
 
 
 @dataclass
@@ -409,7 +407,7 @@ def clean_block(block: list[str]) -> list[str]:
         ln = SESSION_ID_STRIP_RE.sub(r"\1", ln)
         if not ln.strip():
             continue
-        cleaned.append(clip(ln, DAILY_LINE_MAX))
+        cleaned.append(ln)
     return cleaned
 
 
@@ -454,7 +452,7 @@ def last_log_entries(n: int = 3) -> str:
     for ln in MEMORY_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
         ln = ln.rstrip()
         if ln.startswith("- ") and not is_mojibake(ln):
-            entries.append(clip(ln, LOG_ENTRY_MAX))
+            entries.append(ln)
     return "\n".join(entries[-n:])
 
 
