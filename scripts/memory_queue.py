@@ -15538,7 +15538,7 @@ def _valid_day(raw_day: object, now: datetime) -> str | None:
 
 def _daily_log_path(day: str) -> Path | None:
     """The daily log for this day, when it stays inside the daily directory."""
-    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    root = _vault_root()
     daily_dir = (root / "knowledge" / "daily").resolve()
     daily_path = (daily_dir / f"{day}.md").resolve()
     try:
@@ -15620,7 +15620,7 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
 
 def _manual_compile() -> bool:
     """Run one compile pass in a child process."""
-    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    root = _vault_root()
     command = [
         sys.executable,
         str(root / "scripts" / "compile_memory.py"),
