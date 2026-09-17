@@ -81,7 +81,9 @@ def test_keys_are_extracted_once_per_turn_and_found_by_word_and_by_vector(vault:
     again = fact_keys.key_turns(store, snapshot.chunks, _ask, _encode)
 
     by_word = fact_keys.search(store, "Pearl Export drum", 5)
-    by_vector = fact_keys.search(store, "musical instruments I own", 5, _encode)
+    # No word of this question is in any key, so the vector alone decides. With "I own" in it
+    # the drum turn used to lead only because its two keys were counted as two lexical votes.
+    by_vector = fact_keys.search(store, "musical instruments", 5, _encode)
     drum = next(turn for turn in fact_keys.user_turns(snapshot.chunks) if "drum" in turn.text)
     counts = (keyed, again, store.count())
     store.close()

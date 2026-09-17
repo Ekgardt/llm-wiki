@@ -46,3 +46,22 @@ def test_a_reply_that_pads_its_turn_numbers_still_keys_the_turns(chunks: tuple, 
 
     assert (keyed, store.count()) == (2, (2, 2))
     store.close()
+
+
+def test_three_keys_sharing_one_word_are_one_vote_so_the_best_match_leads(chunks: tuple, tmp_path: Path) -> None:
+    store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
+    reply = json.dumps(
+        {
+            "0": ["I sold my Pearl Export drum set"],
+            "1": ["I keep a Korg piano", "I keep a Korg synth", "I keep a Korg tuner"],
+        }
+    )
+    fact_keys.key_turns(store, chunks, lambda prompt, system_prompt: reply)
+    drums, korg = fact_keys.user_turns(chunks)
+
+    found = fact_keys.search(store, "sold Pearl Export drum set", 5)
+    both = fact_keys.search(store, "Pearl Export drum set or Korg", 5)
+
+    assert [item["byte_start"] for item in found] == [drums.byte_start]
+    assert [item["byte_start"] for item in both] == [drums.byte_start, korg.byte_start]
+    store.close()

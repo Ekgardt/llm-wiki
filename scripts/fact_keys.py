@@ -328,16 +328,31 @@ def search(store: KeyStore, question: str, limit: int, encode: Callable | None =
     """The turns whose keys match the question, as candidates a context can resolve.
 
     Lexical hits and, with an encoder, dense hits, one vote each; a turn two
-    legs agree on comes first.
+    legs agree on comes first. A leg returns one row per matching key, so it is
+    reduced to its turns before it votes: three keys sharing one word of the
+    question are one vote, not three. Among equals the first leg's order holds,
+    which is what a stable sort over an insertion-ordered mapping gives.
     """
-    hits = list(store.lexical(question, limit))
+    legs = [_turns_of(store.lexical(question, limit))]
     if encode is not None:
-        hits.extend(store.dense(encode([question], True)[0], limit))
-    votes: dict[tuple, int] = {}
-    for source_path, byte_start, byte_end, _key in hits:
-        votes[(source_path, byte_start, byte_end)] = votes.get((source_path, byte_start, byte_end), 0) + 1
-    ranked = sorted(votes, key=lambda span: (-votes[span], list(votes).index(span)))[:limit]
+        legs.append(_turns_of(store.dense(encode([question], True)[0], limit)))
+    votes = _votes(legs)
+    ranked = sorted(votes, key=lambda span: -votes[span])[:limit]
     return [{"path": path, "byte_start": start, "byte_end": end, "cited": True} for path, start, end in ranked]
+
+
+def _votes(legs: Sequence[Sequence[tuple]]) -> dict[tuple, int]:
+    """How many legs returned each turn, in the order the turns were first seen."""
+    votes: dict[tuple, int] = {}
+    for leg in legs:
+        for span in leg:
+            votes[span] = votes.get(span, 0) + 1
+    return votes
+
+
+def _turns_of(rows: Sequence[tuple]) -> list[tuple]:
+    """The distinct turns a leg returned, in the leg's own rank order."""
+    return list(dict.fromkeys((source_path, byte_start, byte_end) for source_path, byte_start, byte_end, _key in rows))
 
 
 def _resident_encoder():
