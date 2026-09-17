@@ -59,6 +59,9 @@ TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 PROJECT_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
+AUTHORITY_RE = re.compile(
+    r"^source_authority:\s*[\"']?([^\"'\n]+?)[\"']?\s*$", re.MULTILINE
+)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
@@ -163,6 +166,8 @@ def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
         "summary": _clipped(summary_m.group(1).strip() if summary_m else ""),
         "source": "knowledge",
         "path": md.relative_to(ROOT).as_posix(),
+        "authority": _extract(content, AUTHORITY_RE) or "inferred",
+        "stated_at": _extract(content, TIMESTAMP_RE) or "",
     }
 
 
@@ -180,6 +185,9 @@ def _feedback_correction(relative: str, source_bytes: bytes, project: str | None
         "summary": _clipped(candidate.get("text", "")),
         "source": "feedback",
         "path": candidate.get("promoted_to", ""),
+        # A promoted feedback record is the operator's own correction.
+        "authority": "user",
+        "stated_at": str(candidate.get("captured_at", "")),
     }
 
 
@@ -217,7 +225,7 @@ def build_guardrails(
     if not corrections:
         return ""
     lines = ["## Guard rails (learned rules — do NOT repeat these mistakes)\n"]
-    unique = _deduplicated(corrections)
+    unique = _deduplicated(_ranked(corrections))
     by_type: dict[str, list[dict]] = {}
     for c in unique[:max_rules]:
         by_type.setdefault(c["type"], []).append(c)
@@ -232,6 +240,35 @@ def _past_the_ceiling(found: int, max_rules: int) -> list[str]:
     if found <= max_rules:
         return []
     return [f"({found - max_rules} more rule(s) past the ceiling of {max_rules} are not shown)"]
+
+
+# The hierarchy of CLAUDE.md §4 rule 13, as sort keys: what the operator stated
+# outranks what the web said, which outranks what a model derived or inferred.
+_AUTHORITY_RANK = {"user": 0, "web": 1, "ai-derived": 2, "inferred": 3}
+
+
+def _ranked(corrections: list[dict]) -> list[dict]:
+    """Strongest authority first, then newest, then by path for a stable order.
+
+    Three stable passes, read bottom-up: the slots used to go to whatever came
+    first in path order, so a correction the operator stated yesterday lost its
+    place to an inferred page whose slug starts with `a`. A rule that declares no
+    time sorts after every rule that does. See
+    `docs/research/2026-09-17-the-guard-rail-slots-go-to-the-strongest-and-newest-rules.md`.
+    """
+    by_path = sorted(corrections, key=lambda item: str(item.get("path", "")))
+    by_time = sorted(by_path, key=_stated_at, reverse=True)
+    return sorted(by_time, key=_authority_rank)
+
+
+def _authority_rank(correction: dict) -> int:
+    authority = str(correction.get("authority", "inferred")).strip().lower()
+    return _AUTHORITY_RANK.get(authority, _AUTHORITY_RANK["inferred"])
+
+
+def _stated_at(correction: dict) -> str:
+    """The time the rule declares, as its own text: these are written here."""
+    return str(correction.get("stated_at", ""))
 
 
 def _deduplicated(corrections: list[dict]) -> list[dict]:
