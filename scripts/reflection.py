@@ -96,12 +96,20 @@ def _reflectable_text(md: Path) -> str | None:
     if md.name in SKIP_NAMES or "archive" in md.parts:
         return None
     try:
-        content = md.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+        content = _page_source(md).decode("utf-8")
+    except (OSError, ValueError):
+        # Too large, unstable, or not UTF-8 (`UnicodeDecodeError` is a `ValueError`):
+        # the rewriter would refuse it, and one refusal ended the whole weekly loop.
+        # Research: docs/research/2026-09-17-a-page-the-rewriter-cannot-read-is-not-a-candidate.md
         return None
     if _never_rewritten(content):
         return None
     return content
+
+
+def _page_source(md: Path) -> bytes:
+    """The one way this pass reads a page: bounded and stable, for finder and rewriter."""
+    return read_stable_bytes(md, MAX_REFLECTION_PAGE_BYTES, label="reflection page")
 
 
 def _never_rewritten(content: str) -> bool:
@@ -115,9 +123,7 @@ def reflect_page(md: Path, apply: bool = False) -> str:
 
     Returns a summary of what was done (or would be done if dry-run).
     """
-    source_bytes = read_stable_bytes(
-        md, MAX_REFLECTION_PAGE_BYTES, label="reflection page"
-    )
+    source_bytes = _page_source(md)
     content = source_bytes.decode("utf-8")
     if _never_rewritten(content):
         return f"  {md.stem}: a decision or a retired page is never rewritten, skipping."
