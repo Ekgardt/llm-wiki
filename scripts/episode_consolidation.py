@@ -22,7 +22,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -168,11 +168,23 @@ def _json_array(raw: str) -> list:
     return value
 
 
-def _string_field(item: dict, name: str, limit: int) -> str:
+def _raw_field(item: dict, name: str, limit: int) -> str:
     value = item.get(name)
     if not isinstance(value, str):
         return ""
     return value.strip()[:limit]
+
+
+def _one_line(text: str) -> str:
+    """A daily log is line-structured: a field that could end its line could begin an entry.
+
+    Research: docs/research/2026-09-17-a-lesson-is-one-line-from-a-session-that-holds-its-quote.md
+    """
+    return " ".join(text.split())
+
+
+def _string_field(item: dict, name: str, limit: int) -> str:
+    return _one_line(_raw_field(item, name, limit))
 
 
 def _lesson_kind(item: dict) -> str | None:
@@ -212,30 +224,33 @@ def _lesson_of(item: object) -> Lesson | None:
         Lesson(
             kind,
             _string_field(item, "text", MAX_TEXT_CHARS),
-            _string_field(item, "quote", MAX_QUOTE_CHARS),
-            _string_field(item, "session", 80),
+            # As the model gave it: it is matched against the records first.
+            _raw_field(item, "quote", MAX_QUOTE_CHARS),
+            "",
             _string_field(item, "trigger", MAX_TRIGGER_CHARS),
         )
     )
 
 
-def _grounded(lesson: Lesson, corpus: str) -> bool:
-    """The quote has to be in the day's records; an invention is dropped."""
-    return lesson.quote in corpus
+def _holding_session(quote: str, records: dict[str, str]) -> str | None:
+    """The record the quote is in; an invention is in none. The model's own
+    `session` is not trusted with the `Source:` line."""
+    return next((stem for stem, text in records.items() if quote in text), None)
 
 
-def _kept_lesson(item: object, corpus: str) -> Lesson | None:
+def _kept_lesson(item: object, records: dict[str, str]) -> Lesson | None:
     lesson = _lesson_of(item)
     if lesson is None:
         return None
-    if not _grounded(lesson, corpus):
+    session = _holding_session(lesson.quote, records)
+    if session is None:
         return None
-    return lesson
+    return replace(lesson, quote=_one_line(lesson.quote), session=session)
 
 
 def grounded_lessons(raw: str, paths: list[Path]) -> list[Lesson]:
-    corpus = "\n".join(_record_text(path) for path in paths)
-    kept = [_kept_lesson(item, corpus) for item in _json_array(raw)]
+    records = {path.stem: _record_text(path) for path in paths}
+    kept = [_kept_lesson(item, records) for item in _json_array(raw)]
     return [lesson for lesson in kept if lesson is not None][:MAX_ITEMS]
 
 
