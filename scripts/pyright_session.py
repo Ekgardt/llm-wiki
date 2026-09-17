@@ -410,6 +410,26 @@ def _startup_code(error: BaseException, prefix: str = "pyright") -> str:
     return f"{prefix}_startup_failed"
 
 
+# How long a session waits before it tries a failed start again, and -- by its
+# length -- how many times it tries at all. Microsoft's retry guidance for an
+# interactive caller is "a smaller number of retries with only a short delay";
+# a language server is heavier than an HTTP call, so the delays grow.
+_STARTUP_RETRY_BACKOFF = (5.0, 30.0, 120.0)
+
+
+def _startup_is_retryable(error: BaseException, prefix: str) -> bool:
+    """Whether trying this start again could plausibly end differently.
+
+    The clock and the operating system are transient: a cold two-second query
+    deadline, a machine under load, a temporary file-system error. Identity,
+    protocol and capability failures are not -- they describe the install, and
+    the same install will fail the same way.
+    """
+    if _startup_code(error, prefix).endswith("_startup_timeout"):
+        return True
+    return isinstance(error, OSError) and not isinstance(error, PermissionError)
+
+
 
 
 
@@ -2013,6 +2033,11 @@ class LanguageServerSession:
         self._wire_sending: set[tuple[str, str, int]] = set()
         self._starting = False
         self._startup_attempted = False
+        # A start that ran out of time, or met the operating system, may be
+        # tried again -- at most `len(_STARTUP_RETRY_BACKOFF)` times, and never
+        # before the monotonic instant the last failure named.
+        self._startup_retries = 0
+        self._startup_retry_after = 0.0
         self._startup_cleanup_error: StartupCleanupError | None = None
         self._startup_process: LspProcess | None = None
         self._bootstrap_owner_nonce: str | None = None
@@ -2948,10 +2973,24 @@ class LanguageServerSession:
             return None
         retained = (self._startup_cleanup_error, self._startup_process)
         nothing_retained = retained == (None, None)
-        if self._startup_attempted and nothing_retained:
+        if self._startup_claim_refused_locked(nothing_retained):
             return None
+        self._degradation_codes = ()
         self._begin_startup_locked(nothing_retained)
         return retained
+
+    def _startup_claim_refused_locked(self, nothing_retained: bool) -> bool:
+        """Whether a fresh attempt is refused because the last one is spent.
+
+        A first attempt, and one that still has a retained owner to clear, are
+        never refused. A spent attempt is refused for good unless the failure
+        scheduled a retry, and then only until that instant has passed.
+        """
+        if not nothing_retained:
+            return False
+        if self._startup_attempted:
+            return True
+        return time.monotonic() < self._startup_retry_after
 
     def _begin_startup_locked(self, nothing_retained: bool) -> None:
         """Take the startup claim; a first attempt also records that it happened."""
@@ -3210,6 +3249,19 @@ class LanguageServerSession:
             self._process = None
             self._record_retained_cleanup_locked(retained_error)
             self._degrade_locked(code)
+            self._schedule_startup_retry_locked(error)
+
+    def _schedule_startup_retry_locked(self, error: BaseException) -> None:
+        """Let a later caller try this start again, once the backoff has passed."""
+        if self._startup_retries >= len(_STARTUP_RETRY_BACKOFF):
+            return
+        if not _startup_is_retryable(error, self._profile.degradation_prefix):
+            return
+        self._startup_retry_after = (
+            time.monotonic() + _STARTUP_RETRY_BACKOFF[self._startup_retries]
+        )
+        self._startup_retries += 1
+        self._startup_attempted = False
 
     def _handle_launch_failure(
         self,
@@ -5389,13 +5441,29 @@ class LanguageServerSessionManager:
             live.append((key, session))
         return live
 
+    @staticmethod
+    def _eviction_rank(session: LanguageServerSession, deadline: float) -> int:
+        """0 for a session that owns no server; it costs a caller nothing.
+
+        A checkout whose start failed keeps answering `get()`, and each answer
+        renews its last-used time, so least-recently-used alone would evict a
+        healthy neighbour to keep a session that owns nothing.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            return 1 if session._process is not None else 0
+        finally:
+            session._lock.release()
+
     def _idle_entry(
         self,
         key: tuple[str, PyrightIdentity],
         session: LanguageServerSession,
         deadline: float,
-    ) -> tuple[float, tuple[str, PyrightIdentity], LanguageServerSession] | None:
-        """The session's last-used time, when it is idle enough to evict."""
+    ) -> tuple[int, float, tuple[str, PyrightIdentity], LanguageServerSession] | None:
+        """The session's eviction order, when it is idle enough to evict."""
         closed, closing, starting, active, last_used = self._session_state(
             session,
             deadline,
@@ -5404,7 +5472,7 @@ class LanguageServerSessionManager:
             return None
         if active != 0:
             return None
-        return last_used, key, session
+        return self._eviction_rank(session, deadline), last_used, key, session
 
     def _reserve_lru_idle_locked(
         self,
@@ -5412,13 +5480,13 @@ class LanguageServerSessionManager:
         deadline: float,
     ) -> tuple[tuple[str, PyrightIdentity], LanguageServerSession] | None:
         idle: list[
-            tuple[float, tuple[str, PyrightIdentity], LanguageServerSession]
+            tuple[int, float, tuple[str, PyrightIdentity], LanguageServerSession]
         ] = []
         for key, session in live:
             entry = self._idle_entry(key, session, deadline)
             if entry is not None:
                 idle.append(entry)
-        for _last_used, key, session in sorted(idle, key=lambda item: item[0]):
+        for _rank, _last_used, key, session in sorted(idle, key=lambda item: item[:2]):
             if session._reserve_idle_close(deadline):
                 return key, session
         return None
