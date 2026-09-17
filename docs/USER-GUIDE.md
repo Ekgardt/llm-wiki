@@ -533,6 +533,20 @@ clears restored plaintext; success leaves validated `vault/` and `state/` direct
 for reviewed recovery. This command never overwrites or automatically publishes into
 an installed vault.
 
+Putting a restored image into an installed vault is a separate, explicit step:
+
+```bash
+uv run python scripts/private_vault_backup.py publish --image <restore-dir> --manifest-sha256 <64-hex-digest>
+```
+
+Publish validates the image again, then writes only files that are absent from the
+vault named by `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`. A destination that exists with
+different bytes refuses the whole publication before anything is written, and the
+refusal names the file by its place in the image (for example
+`vault/knowledge/notes/page.md`). Nothing is merged or overwritten, and there is no
+force flag. Symlinks and empty directories are not written; the receipt counts them as
+`unpublished_entries`.
+
 ### Queue migration and work
 
 ```bash
