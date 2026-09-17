@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from impact_analysis import (  # noqa: E402
     ImpactLimits,
+    _textual_symbols,
     analyze_impact,
     collect_git_changes,
-    extract_symbols_from_file,
     find_stale_wiki_pages,
     format_for_advisory,
 )
@@ -764,29 +764,20 @@ def test_note_capture_rejects_parent_identity_swap(tmp_path, monkeypatch):
 
 
 class TestExtractSymbols:
-    """Test symbol extraction from source files."""
+    """The names the low-confidence textual fallback reads out of changed bytes."""
 
-    def test_extract_from_python(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("def hello():\n    pass\nclass World:\n    pass\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
-        assert "hello" in symbols
-        assert "World" in symbols
+    def test_extract_from_python(self):
+        symbols = _textual_symbols(b"def hello():\n    pass\nclass World:\n    pass\n")
+        assert ("hello" in symbols, "World" in symbols) == (True, True)
 
-    def test_extract_from_javascript(self, tmp_path):
-        f = tmp_path / "app.js"
-        f.write_text("function greet() {}\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
-        assert "greet" in symbols
+    def test_extract_from_javascript(self):
+        assert "greet" in _textual_symbols(b"function greet() {}\n")
 
-    def test_extract_from_nonexistent(self, tmp_path):
-        symbols = extract_symbols_from_file(tmp_path / "nope.py")
-        assert symbols == []
+    def test_extract_from_empty_content(self):
+        assert _textual_symbols(None) == []
 
-    def test_extract_deduplicates(self, tmp_path):
-        f = tmp_path / "dup.py"
-        f.write_text("def foo():\n    foo()\n    foo()\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
+    def test_extract_deduplicates(self):
+        symbols = _textual_symbols(b"def foo():\n    foo()\n    foo()\n")
         assert symbols.count("foo") == 1
 
 

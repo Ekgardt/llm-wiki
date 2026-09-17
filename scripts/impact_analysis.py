@@ -551,33 +551,6 @@ def _changed_paths(changes: list[dict]) -> list[str]:
     return sorted({str(item["new_path"] or item["old_path"]) for item in changes})
 
 
-def extract_symbols_from_file(file_path: Path) -> list[str]:
-    """Extract names for the explicitly low-confidence textual fallback."""
-    if not file_path.exists():
-        return []
-    try:
-        return _parsed_symbols(file_path)
-    except (ImportError, OSError, ValueError):
-        return _textual_file_symbols(file_path)
-
-
-def _parsed_symbols(file_path: Path) -> list[str]:
-    from code_graph import parse_file
-
-    parsed = parse_file(file_path)
-    return sorted(
-        {item["name"] for key in ("functions", "classes") for item in parsed.get(key, [])}
-    )
-
-
-def _textual_file_symbols(file_path: Path) -> list[str]:
-    try:
-        content = file_path.read_bytes()
-    except OSError:
-        return []
-    return _textual_symbols(content)
-
-
 def _textual_symbols(content: bytes | None) -> list[str]:
     if not content:
         return []
