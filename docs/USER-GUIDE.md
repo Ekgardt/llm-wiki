@@ -377,7 +377,8 @@ uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
 ```
 
 There is no "recompile everything": a day whose compile was committed is never
-compiled again (`--all` is still accepted and changes nothing).
+compiled again. `--all` is deprecated — still accepted, it prints one line
+saying it does nothing and will be removed.
 
 Compile runs automatically on MAJOR sessions after the hour cutoff, but you
 can trigger it manually anytime. The pipeline uses VERIFY-BEFORE-WRITE —

@@ -20,7 +20,12 @@ def test_a_refused_compile_records_its_refusal_not_the_holders_status(monkeypatc
     arguments = type(
         "A",
         (),
-        {"trigger": "auto", "discard_unusable_receipts": False, "lock_token": None},
+        {
+            "trigger": "auto",
+            "discard_unusable_receipts": False,
+            "lock_token": None,
+            "all": False,
+        },
     )
     monkeypatch.setattr(compile_memory, "parse_args", arguments)
     monkeypatch.setattr(

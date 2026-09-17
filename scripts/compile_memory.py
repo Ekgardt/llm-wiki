@@ -2,9 +2,10 @@
 
 CLI:
     uv run python scripts/compile_memory.py              # compile changed daily logs
-    uv run python scripts/compile_memory.py --all        # accepted, same as no flag: a
-                                                         # day with a committed receipt
-                                                         # is never compiled again
+    uv run python scripts/compile_memory.py --all        # deprecated, does nothing and
+                                                         # says so: a day with a
+                                                         # committed receipt is never
+                                                         # compiled again
     uv run python scripts/compile_memory.py --file PATH  # compile one daily log
     uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
     uv run python scripts/compile_memory.py --trigger auto|manual
@@ -3645,14 +3646,10 @@ def _transaction_authority(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--all",
-        action="store_true",
-        help=(
-            "Accepted for old command lines; changes nothing. Every pending daily "
-            "log is compiled by default, and a committed day is never recompiled."
-        ),
-    )
+    # Deprecated, and hidden from --help so no new command line learns it. It is
+    # still accepted, and says so, because old command lines and notes name it;
+    # it cannot be made real, because a committed day is never compiled again.
+    p.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--file", type=str, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
@@ -3758,7 +3755,62 @@ def discard_unusable_receipts() -> list[str]:
         print(f"compile_memory: discarding {path.name}: {reason}", file=sys.stderr)
         path.unlink()
         discarded.append(path.name)
+    _forget_discarded_days(discarded)
     return discarded
+
+
+def _forget_discarded_days(discarded: Sequence[str]) -> None:
+    """Take the days whose receipts were discarded out of the mirror.
+
+    The mirror is only a cheap diagnostic copy of what the receipts say, but a
+    day left in it is never offered to a compile again — so discarding a receipt
+    without clearing the mirror left the day "compiled" with no evidence, which
+    is the one thing the receipt contract forbids. The day is found from the
+    receipt's file name, which is the identity of its source, so an unreadable
+    receipt names its day as well as a readable one. Days recorded before
+    receipts existed carry no discarded receipt and are left alone.
+    """
+    owners = _receipt_owners()
+    forgotten = sorted({owners[name] for name in discarded if name in owners})
+    if not forgotten:
+        return
+    print(
+        f"compile_memory: {len(forgotten)} day(s) are pending again: "
+        + ", ".join(forgotten),
+        file=sys.stderr,
+    )
+    update_state(lambda state: _drop_mirror_days(state, forgotten))
+
+
+def _drop_mirror_days(state: dict, names: Sequence[str]) -> None:
+    mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    for name in names:
+        mirror.pop(name, None)
+
+
+def _receipt_owners() -> dict[str, str]:
+    """Which daily each receipt file name belongs to, by the name alone."""
+    owners: dict[str, str] = {}
+    for path in _canonical_dailies():
+        _record_receipt_owners(owners, path)
+    return owners
+
+
+def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
+    content = _readable_daily(path)
+    if content is None:
+        return
+    logical = path.relative_to(ROOT).as_posix()
+    owners[f"{sha256_bytes(content)}.md"] = path.name
+    for part in _daily_parts(logical, content):
+        owners[f"v3-{compile_source_identity(logical, part.sha256)}.md"] = path.name
+
+
+def _readable_daily(path: Path) -> bytes | None:
+    try:
+        return read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    except (OSError, ValueError):
+        return None
 
 
 def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
@@ -4170,8 +4222,21 @@ def _unlink_quietly(path: Path) -> None:
 COMPILE_PROVIDER_CEILING_S = 300
 
 
+def _report_deprecated_flags(args: argparse.Namespace) -> None:
+    """Say plainly that a flag does nothing rather than letting it look busy."""
+    if not args.all:
+        return
+    print(
+        "compile_memory: --all is deprecated and does nothing: every pending "
+        "daily log is compiled anyway, and a day with a committed receipt is "
+        "never compiled again. The flag will be removed.",
+        file=sys.stderr,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    _report_deprecated_flags(args)
     if args.discard_unusable_receipts:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")

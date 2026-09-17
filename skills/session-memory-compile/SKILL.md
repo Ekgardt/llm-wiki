@@ -1,7 +1,7 @@
 ---
 type: skill
 name: session-memory-compile
-argument-hint: "[--all | --file path/to/daily.md | --dry-run]"
+argument-hint: "[--file path/to/daily.md | --dry-run]"
 description: Wrapper around scripts/compile_memory.py — distill knowledge/daily logs into durable knowledge/notes pages and refresh index + log.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Bash(uv run python scripts/compile_memory.py *) Bash(python scripts/compile_memory.py *) Bash(uv run python scripts/rebuild_memory_index.py)
@@ -12,8 +12,7 @@ Run the scripted compile pass. The script uses the unified llm_client (`scripts/
 
 Procedure:
 1. Run `uv run python scripts/compile_memory.py $ARGUMENTS`.
-   - no args = compile only daily logs whose hash changed since last compile
-   - `--all` = compile every daily log
+   - no args = compile every daily log that has no committed receipt yet
    - `--file knowledge/daily/YYYY-MM-DD.md` = compile one specific daily log
    - `--dry-run` = plan only, no writes, no state or log updates
 2. The script already:

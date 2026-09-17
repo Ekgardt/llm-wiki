@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`compile_memory.py --all`.** It has never changed anything: every daily log
+  without a committed receipt is compiled anyway, and a day with one is never
+  compiled again. The flag is still accepted, is hidden from `--help`, and now
+  prints one line saying it does nothing and will be removed.
+
 ### Changed
 
 - **The test tree comes under the complexity law.** `lizard -C 5` reported 88
