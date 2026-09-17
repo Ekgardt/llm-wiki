@@ -191,11 +191,16 @@ def write_hints(
 
 
 def export_hints(catalog, scope, state_root: Path, *, deadline: float | None = None) -> dict:
-    """Project the newest generation of `scope` into its hint file."""
+    """Project the newest code generation of `scope` into its hint file.
+
+    The code generation, never the active pointer: on the vault the pointer names
+    the memory generation of the same checkout, which holds no symbols. See
+    `docs/research/2026-09-17-a-hint-table-is-made-from-the-code-generation.md`.
+    """
     from evidence_graph import EvidenceGraph
 
     bound = deadline if deadline is not None else time.monotonic() + EXPORT_BUDGET_SECONDS
-    graph = EvidenceGraph.open_active_for_repository(catalog, scope, deadline=bound)
+    graph = EvidenceGraph.open_code_for_repository(catalog, scope, deadline=bound)
     if graph is None:
         return {"status": "skipped", "reason": "no_generation"}
     try:
