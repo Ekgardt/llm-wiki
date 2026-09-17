@@ -1689,15 +1689,45 @@ def _refusal_look(
     """
     from refusal_pass import needs_a_second_search
 
-    answer, context = first
-    if search is None or single.regenerated or not needs_a_second_search(answer):
+    if search is None or single.regenerated or not needs_a_second_search(first[0]):
         return first
+    return _looked_again(
+        single, first[1], first, lambda: _searched_again(single, candidates, first, search)
+    )
+
+
+def _searched_again(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+    search: Callable[[str, int], Iterable[object]],
+) -> tuple[dict[str, object], GroundedContext]:
+    """The optional part of `_refusal_look`: search for the gap, answer once more."""
+    answer, context = first
     more = _merged(candidates, None, _searched_for_the_gap(answer, single, search))
     if more is None:
         return first
     second = single.run(more)
     _record_second_look(single.question, context, False, False, searched=True)
     return _adopted(first, second)
+
+
+def _looked_again(single: _AnswerPass, context: GroundedContext, kept: object, look: Callable[[], object]):
+    """What an optional look produced, or `kept` when the look itself failed.
+
+    A second look is an improvement on an answer that is already verified. Its
+    reply may not parse, may fail the schema, or the deadline may pass inside
+    its generation or one of its searches; none of that unmakes the first
+    answer. Only the failures a pass is defined to have are taken: anything
+    else is a defect and still surfaces. The failure is recorded, not hidden.
+    """
+    from evidence_resolver import EvidenceResolutionError
+
+    try:
+        return look()
+    except (GroundedQAError, EvidenceResolutionError, TimeoutError) as exc:
+        _record_failed_look(single.question, context, exc)
+        return kept
 
 
 def _searched_for_the_gap(
@@ -1780,7 +1810,27 @@ def _count_step(
     fetch: Callable[[int], Iterable[object]] | None,
     search: Callable[[str, int], Iterable[object]] | None,
 ) -> tuple[tuple[dict[str, object], GroundedContext], tuple, bool]:
-    """One step: search wider, answer again; whether anything new was read."""
+    """One step: search wider, answer again; whether anything new was read.
+
+    A step that fails keeps the answer it started from and reports that
+    nothing grew, which ends the loop. See `_looked_again`.
+    """
+    return _looked_again(
+        single,
+        current[1],
+        (current, pool, False),
+        lambda: _counted_again(single, current, pool, fetch, search),
+    )
+
+
+def _counted_again(
+    single: _AnswerPass,
+    current: tuple[dict[str, object], GroundedContext],
+    pool: tuple,
+    fetch: Callable[[int], Iterable[object]] | None,
+    search: Callable[[str, int], Iterable[object]] | None,
+) -> tuple[tuple[dict[str, object], GroundedContext], tuple, bool]:
+    """The optional part of `_count_step`."""
     from aggregation_pass import COUNTING_RULE
 
     answer, context = current
@@ -1821,8 +1871,19 @@ def _calendar_look(
     if not note:
         return first
     # The gap is between dates the cited spans carry; nothing else is needed.
-    second = single.run(_cited_candidates(context, answer) or candidates, note)
-    _record_second_look(single.question, context, False, False, computed=True)
+    cited = _cited_candidates(context, answer) or candidates
+    return _looked_again(single, context, first, lambda: _computed_again(single, cited, first, note))
+
+
+def _computed_again(
+    single: _AnswerPass,
+    cited: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+    note: str,
+) -> tuple[dict[str, object], GroundedContext]:
+    """The optional part of `_calendar_look`: answer once more beside the figures."""
+    second = single.run(cited, note)
+    _record_second_look(single.question, first[1], False, False, computed=True)
     return _adopted(first, second)
 
 
@@ -1978,6 +2039,14 @@ def _record_second_look(
     causes = [name for name, flag in fired if flag]
     try:
         _write_outcome_events(question, context, "second look: " + ", ".join(causes))
+    except Exception:  # noqa: BLE001 - telemetry must never break an answer
+        pass
+
+
+def _record_failed_look(question: str, context: GroundedContext, error: Exception) -> None:
+    """Best effort, never fatal: that a second look failed, and with which error class."""
+    try:
+        _write_outcome_events(question, context, "second look failed: " + type(error).__name__)
     except Exception:  # noqa: BLE001 - telemetry must never break an answer
         pass
 
