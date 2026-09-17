@@ -45,6 +45,7 @@ from lsp_protocol import (
 )
 from lsp_security import redact_lsp_text
 from operational_ownership import OwnerLease, OwnershipRegistry
+from process_liveness import process_state
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
@@ -6667,12 +6668,125 @@ def _reject_protocol_callback_lifecycle(instance: LspProcess) -> None:
 
 def _validated_owner_root(owner_root: Path) -> str:
     owner_nonce = owner_root.name
-    if re.fullmatch(r"[0-9a-f]{32}", owner_nonce) is None:
+    if _OWNER_NONCE_PATTERN.fullmatch(owner_nonce) is None:
         raise ValueError(
             "owner_root basename must be 32 lowercase hexadecimal characters"
         )
     _require_fresh_owner_root(owner_root)
+    _sweep_dead_owner_roots(owner_root)
     return owner_nonce
+
+
+_OWNER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
+# The sweep looks at no more owner roots than doctor reports on.
+_MAX_SWEPT_OWNER_ROOTS = 128
+
+
+def _sweep_dead_owner_roots(owner_root: Path) -> None:
+    """Remove sibling owner roots whose owner is dead and which kept no evidence.
+
+    A controlled close removes its own root; a failure or an abrupt death
+    leaves one behind, with its records and any sealed `launch-` tree, and
+    nothing else in the product ever removes it. There is no daemon, so the
+    sweep runs at the one moment the product is already working in this
+    directory: starting a new server. It never raises — a sweep that cannot
+    finish is no reason to fail a start. Research:
+    `docs/research/2026-09-17-lsp-the-owner-record-names-the-first-generation-only.md`.
+    """
+    with contextlib.suppress(OSError):
+        _sweep_owner_parent(owner_root.parent, owner_root.name)
+
+
+def _sweep_owner_parent(parent: Path, mine: str) -> None:
+    with os.scandir(parent) as entries:
+        for scanned, entry in enumerate(entries, 1):
+            if scanned > _MAX_SWEPT_OWNER_ROOTS:
+                return
+            _sweep_one_owner_root(Path(entry.path), entry.name, mine)
+
+
+def _sweep_one_owner_root(root: Path, name: str, mine: str) -> None:
+    if name == mine or _OWNER_NONCE_PATTERN.fullmatch(name) is None:
+        return
+    if not _owner_root_is_dead(root):
+        return
+    with contextlib.suppress(OSError):
+        _remove_owner_root_tree(root)
+
+
+def _owner_root_is_dead(root: Path) -> bool:
+    """No retained evidence, and every process the records name is proven gone."""
+    if (root / "failure.json").exists():
+        return False
+    pids = _owner_root_pids(root)
+    if not pids:
+        return False
+    return all(process_state(pid) == "dead" for pid in pids)
+
+
+def _owner_root_pids(root: Path) -> tuple[int, ...]:
+    """Every process this root's records name, or () when they cannot be read.
+
+    The owner record must be there: without it the root belongs to a start
+    that has not published yet, which is a live one. The lease may be absent —
+    a controlled cleanup removes it — but if it is there it names the
+    generation running now, which after a restart is not the one the owner
+    record names.
+    """
+    owner = _record_pids(root / "owner.json", ("owner_pid",), required=True)
+    lease = _record_pids(
+        root / "lease.json", ("manager_pid", "server_pid"), required=False
+    )
+    if owner is None or lease is None:
+        return ()
+    return owner + lease
+
+
+def _record_pids(
+    path: Path, names: tuple[str, ...], *, required: bool
+) -> tuple[int, ...] | None:
+    """The pids the record names; () when absent and allowed to be; None otherwise."""
+    try:
+        payload = _bounded_record_bytes(path)
+    except FileNotFoundError:
+        return None if required else ()
+    except OSError:
+        return None
+    return _payload_pids(payload, names)
+
+
+def _bounded_record_bytes(path: Path) -> bytes:
+    with open(path, "rb") as handle:
+        payload = handle.read(_MAX_EVIDENCE_BYTES + 1)
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise OSError("LSP evidence record exceeds its byte bound")
+    return payload
+
+
+def _payload_pids(payload: bytes, names: tuple[str, ...]) -> tuple[int, ...] | None:
+    """Those fields as process identifiers, or None when any one is not."""
+    try:
+        record = _canonical_evidence_record(payload)
+    except ValueError:
+        return None
+    pids = tuple(record.get(name) for name in names)
+    if not all(_is_server_pid(pid) for pid in pids):
+        return None
+    return pids
+
+
+def _remove_owner_root_tree(root: Path) -> None:
+    """Take one dead owner root down, unsealing the launch trees it may hold."""
+    for directory, _subdirectories, files in os.walk(root):
+        _unseal_for_removal(Path(directory), files)
+    shutil.rmtree(root)
+
+
+def _unseal_for_removal(directory: Path, files: Sequence[str]) -> None:
+    """A sealed launch tree is 0o500 and 0o400; nothing can be unlinked inside it."""
+    os.chmod(directory, 0o700)
+    for name in files:
+        os.chmod(directory / name, 0o600)
 
 
 def _require_fresh_owner_root(owner_root: Path) -> None:

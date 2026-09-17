@@ -3482,7 +3482,14 @@ def test_doctor_lsp_rejects_non_integer_lease_schema_version(tmp_path, monkeypat
     assert "lsp_owner_live" not in check["details"]["codes"]
 
 
-def test_doctor_lsp_rejects_lease_generation_identity_mismatch(tmp_path, monkeypatch) -> None:
+def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
+    """A recovery restart leaves `owner.json` naming generation 1; it is immutable.
+
+    The lease names the generation running now, and a different nonce and
+    server pid there is the normal shape of a restarted server, not a record
+    to refuse. See
+    `docs/research/2026-09-17-lsp-the-owner-record-names-the-first-generation-only.md`.
+    """
     import doctor
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
@@ -3499,19 +3506,53 @@ def test_doctor_lsp_rejects_lease_generation_identity_mismatch(tmp_path, monkeyp
         owner_nonce=owner_nonce,
         generation_nonce="2" * 32,
         manager_pid=1111,
+        server_pid=3333,
+        heartbeat_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(seconds=25),
+    )
+    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+
+    codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
+        "codes"
+    ]
+
+    assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (False, True)
+
+
+def test_doctor_rejects_a_lease_belonging_to_another_owner(
+    tmp_path, monkeypatch
+) -> None:
+    import doctor
+
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    owner_nonce = "a" * 32
+    owner = _write_lsp_owner(
+        tmp_path,
+        owner_nonce=owner_nonce,
+        generation_nonce="1" * 32,
+        started_at=now - timedelta(minutes=1),
+        owner_pid=2222,
+    )
+    _write_lsp_lease(
+        owner,
+        owner_nonce="b" * 32,
+        generation_nonce="2" * 32,
+        manager_pid=1111,
         server_pid=2222,
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
     monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
 
-    check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
+    codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
+        "codes"
+    ]
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert "lsp_owner_live" not in check["details"]["codes"]
+    assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (True, False)
 
 
-def test_doctor_lsp_rejects_failure_generation_identity_mismatch(tmp_path) -> None:
+def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path) -> None:
+    """The generation that failed is the one that was running, not the first."""
     import doctor
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
@@ -3528,12 +3569,12 @@ def test_doctor_lsp_rejects_failure_generation_identity_mismatch(tmp_path) -> No
         owner_nonce=owner_nonce,
         generation_nonce="2" * 32,
         timestamp=now - timedelta(days=8),
-        server_pid=2222,
+        server_pid=3333,
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
+    assert "lsp_state_unreadable" not in check["details"]["codes"]
 
 
 def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeypatch) -> None:

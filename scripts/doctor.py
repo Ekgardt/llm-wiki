@@ -3837,9 +3837,15 @@ def _validated_lsp_records(
 
 
 def _lsp_nonces_match(owner: dict, lease: dict, entry_name: str) -> bool:
-    if owner.get("owner_nonce") != entry_name or lease.get("owner_nonce") != entry_name:
-        return False
-    return owner.get("generation_nonce") == lease.get("generation_nonce")
+    """Both records belong to this owner directory.
+
+    The generation nonces are deliberately not compared. `owner.json` is
+    immutable create-only and names the generation the owner started with; a
+    recovery restart installs a second generation and republishes the lease,
+    and no record may be rewritten to agree with it.
+    """
+    owned = (owner.get("owner_nonce"), lease.get("owner_nonce"))
+    return owned == (entry_name, entry_name)
 
 
 def _lsp_start_within_window(
@@ -3860,8 +3866,6 @@ def _lsp_records_match(
     heartbeat_at: datetime | None,
 ) -> bool:
     if not _lsp_nonces_match(owner, lease, entry_name):
-        return False
-    if owner.get("owner_pid") != lease.get("server_pid"):
         return False
     return _lsp_start_within_window(owner, now, heartbeat_at)
 
@@ -3922,14 +3926,6 @@ def _lsp_liveness(
     return _lsp_pid_liveness(pids, heartbeat_at, deadline)
 
 
-def _failure_identity_mismatch(owner: dict, failure: dict) -> bool:
-    if failure.get("generation_nonce") != owner.get("generation_nonce"):
-        return True
-    return "server_pid" in failure and failure.get("server_pid") != owner.get(
-        "owner_pid"
-    )
-
-
 def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
     owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
     failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
@@ -3943,9 +3939,7 @@ def _failure_contradicts_owner(
 ) -> bool:
     if not isinstance(owner, dict) or not isinstance(failure, dict):
         return False
-    return _failure_identity_mismatch(owner, failure) or _failure_time_invalid(
-        owner, failure, now
-    )
+    return _failure_time_invalid(owner, failure, now)
 
 
 def _validated_failure_record(
