@@ -2577,7 +2577,34 @@ class ProjectStore:
         transaction = _mutate_knowledge(
             self.coordinator, f"journal-rebuild:{slug}:{last}:{uuid.uuid4().hex}", changes, (), None
         )
-        return {"project": slug, "events": len(events), "last_sequence": last, "sealed": len(sealed), "transaction": transaction.id}
+        released = self._release_parked_checkpoints(slug, last)
+        return {
+            "project": slug,
+            "events": len(events),
+            "last_sequence": last,
+            "sealed": len(sealed),
+            "transaction": transaction.id,
+            "released": released,
+        }
+
+    def _release_parked_checkpoints(self, slug: str, head: int) -> int:
+        """Hand the checkpoints parked above the rebuilt head back to `recover`.
+
+        A checkpoint that met a journal in need of this rebuild was marked
+        `quarantined`, which `recover` never replays and which blocks every later
+        sequence. The rebuild is what it was waiting for, so it goes back to
+        `reserved`; a row that fails again is quarantined again by the replay rules.
+        See `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+        """
+        with self.coordinator._connect() as database:
+            rows = database.execute(
+                "SELECT sequence FROM project_checkpoints WHERE project = ? "
+                "AND sequence > ? AND state = 'quarantined' ORDER BY sequence",
+                (slug, head),
+            ).fetchall()
+        for row in rows:
+            self._set_checkpoint_state(slug, int(row["sequence"]), "reserved")
+        return len(rows)
 
     def _ensure_project_directory(self, slug: str) -> None:
         target = self._project_directory(slug)
