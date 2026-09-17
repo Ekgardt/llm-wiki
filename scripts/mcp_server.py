@@ -5529,7 +5529,26 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "changes": _changes_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
+    if mode in _DIRECTORY_CHECKED_MODES:
+        return _checked_directory_call(call, arguments, deadline)
     return call(arguments, deadline)
+
+
+# The task-shaped modes that answer about `directory` and used to only
+# `resolve()` it: a relative path meant the server's working directory and a
+# filesystem root was accepted (audit 3, B1). Research:
+# `docs/research/2026-09-17-every-mode-checks-the-directory-it-is-given.md`.
+_DIRECTORY_CHECKED_MODES = frozenset(
+    {"provenance", "snippet", "coverage", "search", "query", "data_flow", "cross_service"}
+)
+
+
+def _checked_directory_call(call, arguments: dict, deadline: float):
+    """Run one mode on a directory that passed the validator the older modes use."""
+    resolved, error = _validated_code_directory(arguments.get("directory"), deadline=deadline)
+    if error:
+        return {"error": error}
+    return call({**arguments, "directory": str(resolved)}, deadline)
 
 
 def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
