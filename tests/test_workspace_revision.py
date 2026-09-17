@@ -1358,7 +1358,11 @@ def test_private_index_nonregular_unmatched_tracked_path_uses_exact_fallback(
         scope, expected, monkeypatch
     )
 
-    assert result is False
+    # A status path a compute would drop -- this one is a symlink in no relevant
+    # place -- is not evidence of a change, or every later verification would
+    # answer "changed" for ever:
+    # docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md
+    assert result is True
     assert exact_calls == 1
     assert private_calls == 0
 

@@ -26,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - Windows has no fcntl module
     _fcntl = None
 
+from corpus_snapshot import always_pruned_directory_name
 from lsp_profiles import navigable_suffixes, profile_configuration_names
 from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
@@ -1153,14 +1154,50 @@ def _entry_status_agrees(entry: RevisionEntry, status: str | None) -> bool:
 _KIND_STATUS_AGREEMENT: dict[str, Callable[[str | None], bool]] = {
     "source": lambda status: status is None,
     "configuration": lambda status: status != "deleted",
+    # Git deleted it from the index and the worktree file is still there; the
+    # entry carries that file's digest, and git has to keep saying the same.
+    "index-deleted": lambda status: status == "deleted",
 }
 
 
+def _inside_pruned_directory(normalized: str) -> bool:
+    """Whether a directory the corpus walk prunes holds this path."""
+    return any(
+        always_pruned_directory_name(part)
+        for part in PurePosixPath(normalized).parts[:-1]
+    )
+
+
+def _status_path_contributes(root: Path, normalized: str) -> bool:
+    """Whether a compute would record this status path as an entry of its own.
+
+    A compute drops a status path that is not a regular file -- a nested
+    untracked repository git reports as one directory, a symlink outside a
+    relevant place. Asking the same question here keeps a path git will report
+    for ever from making every verification answer "changed". See
+    `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    if _inside_pruned_directory(normalized):
+        return False
+    path = root / PurePosixPath(normalized)
+    try:
+        return _status_entry_stat(path, normalized) is not None
+    except FileNotFoundError:
+        return True
+    except PermissionError:
+        return True
+
+
 def _status_paths_all_expected(
-    current_status: Mapping[str, str], entries: Mapping[str, RevisionEntry]
+    current_status: Mapping[str, str],
+    entries: Mapping[str, RevisionEntry],
+    root: Path,
 ) -> bool:
-    """Whether every path git reports as changed is one the revision recorded."""
-    return all(path in entries for path in current_status)
+    """Whether every path git reports as changed is one the revision could record."""
+    return all(
+        path in entries or not _status_path_contributes(root, path)
+        for path in current_status
+    )
 
 
 def _git_state_matches_revision(
@@ -1168,12 +1205,13 @@ def _git_state_matches_revision(
     git_state: bytes,
     expected: WorkspaceRevision,
     entries: dict[str, RevisionEntry],
+    root: Path,
 ) -> bool:
     if current_head != expected.git_head:
         return False
     current_status = _normalized_status(git_state)
     if current_status is None or not _status_paths_all_expected(
-        current_status, entries
+        current_status, entries, root
     ):
         return False
     return all(
@@ -1399,8 +1437,14 @@ def _prepare_file(
 
 
 def _collect_subdirectory(item: _ScannedEntry, directories: list[Path]) -> None:
-    """A subdirectory joins the walk unless it is the git marker itself."""
-    if item.entry.name != ".git":
+    """A subdirectory joins the walk unless the corpus walk prunes it too.
+
+    `.git` is pruned by that same rule, being hidden; so are `.venv` (about
+    10 800 ignored files on this checkout, all of them hashed and all of them
+    counted against the entry ceiling) and `__pycache__`. See
+    `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    if not always_pruned_directory_name(item.entry.name):
         directories.append(item.path)
 
 
@@ -3640,12 +3684,11 @@ def _require_inside_checkout(path: Path, resolved_root: Path) -> None:
 
 
 def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
-    """Record one path git reported as changed."""
+    """Record one path git reported as changed, as the disk says it is."""
     normalized = _normalized_path(raw)
-    path = build.root / PurePosixPath(normalized)
-    if status == "deleted":
-        build.add(raw, "deleted", None)
+    if _inside_pruned_directory(normalized):
         return
+    path = build.root / PurePosixPath(normalized)
     try:
         info = _status_entry_stat(path, normalized)
     except FileNotFoundError:
@@ -3654,7 +3697,19 @@ def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
     if info is None:
         return
     _require_inside_checkout(path, build.resolved_root)
-    build.add(raw, status, path)
+    build.add(raw, _present_status_kind(status), path)
+
+
+def _present_status_kind(status: str) -> str:
+    """The kind for a path git reported this way whose file is on the disk.
+
+    `git rm --cached` of a file `.gitignore` also names leaves git reporting a
+    deletion for a file that is still there. Recording that as `deleted` made an
+    entry with a digest and a size, which this module's own validator rejects;
+    it is a file the checkout still holds, and its content is hashed like any
+    other. See `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    return "index-deleted" if status == "deleted" else status
 
 
 def _initial_git_state(
@@ -3868,7 +3923,7 @@ def verify_workspace_revision_unchanged(
 
 # The entry kinds a stored workspace revision may name.
 _REVISION_ENTRY_KINDS = frozenset(
-    {"source", "configuration", "modified", "untracked", "deleted"}
+    {"source", "configuration", "modified", "untracked", "deleted", "index-deleted"}
 )
 
 
@@ -4298,10 +4353,13 @@ def _revision_state_matches(
     expected: WorkspaceRevision,
     entries: Mapping[str, RevisionEntry],
     private_state: _PrivateGitState | None,
+    root: Path,
 ) -> bool:
     """Whether git agrees; a private-path failure restarts instead of raising."""
     try:
-        return _git_state_matches_revision(current_head, git_state, expected, entries)
+        return _git_state_matches_revision(
+            current_head, git_state, expected, entries, root
+        )
     except _RevisionStopped:
         raise
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
@@ -4635,7 +4693,7 @@ def _verified_against_git(
             root, expected, private_state, deadline=deadline, cancelled=cancelled
         )
         if not _revision_state_matches(
-            current_head, git_state, expected, entries, private_state
+            current_head, git_state, expected, entries, private_state, root
         ):
             return False
     elif expected.git_head is not None:
