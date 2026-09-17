@@ -3325,9 +3325,15 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         raise PermissionError(f"could not apply owner-only permissions to {path}")
 
 
-def _windows_acl_lines(path: Path) -> list[str] | None:
-    """The access control entries icacls reports, or None when it refuses."""
-    from markdown_transaction import _acl_output_text, _run_acl_command
+def _windows_acl_lines(path: Path, identity: str) -> list[str] | None:
+    """The access control entries icacls reports, or None when it refuses.
+
+    Read under the code page in which `identity` is named: the wrong one drops
+    the letters of a name that is not ASCII, and an owner-only file then reads
+    as somebody else's. Research:
+    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
+    """
+    from markdown_transaction import _acl_lines_naming, _run_acl_command
 
     try:
         verified = _run_acl_command(["icacls", str(path)])
@@ -3335,11 +3341,7 @@ def _windows_acl_lines(path: Path) -> list[str] | None:
         return None
     if verified.returncode != 0:
         return None
-    return [
-        line.strip()
-        for line in _acl_output_text(verified.stdout).splitlines()
-        if ":(" in line
-    ]
+    return _acl_lines_naming(verified.stdout, identity)
 
 
 def _acl_owner_lines(acl_lines: list[str], folded: str) -> list[str]:
@@ -3358,10 +3360,11 @@ def _acl_is_owner_only(acl_lines: list[str], identity: str) -> bool:
 def _is_owner_only_windows(path: Path) -> bool:
     from markdown_transaction import _windows_acl_identity
 
-    acl_lines = _windows_acl_lines(path)
+    identity = _windows_acl_identity()
+    acl_lines = _windows_acl_lines(path, identity)
     if acl_lines is None:
         return False
-    return _acl_is_owner_only(acl_lines, _windows_acl_identity())
+    return _acl_is_owner_only(acl_lines, identity)
 
 
 def _is_owner_only_posix(path: Path) -> bool:

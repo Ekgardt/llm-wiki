@@ -6401,13 +6401,19 @@ def _read_lock_fd(fd: int) -> tuple[dict | None, os.stat_result | None]:
 
 
 def _create_windows_lock_handle(ctypes, path: Path):
+    """Open the lock file through the loader that keeps the error and the width.
+
+    `ctypes.windll` declares no argument types and keeps no last error, so the
+    handle was passed on as a C int. Research:
+    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
+    """
+    from markdown_transaction import _windows_kernel32
+
     generic_read_write = 0x80000000 | 0x40000000
     share_read_write_delete = 0x1 | 0x2 | 0x4
     open_existing = 3
     file_attribute_normal = 0x80
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
+    handle = _windows_kernel32().CreateFileW(
         str(path),
         generic_read_write,
         share_read_write_delete,
@@ -6423,13 +6429,15 @@ def _open_windows_lock(path: Path) -> int | None:
     import ctypes
     import msvcrt
 
+    from markdown_transaction import _windows_kernel32
+
     handle = _create_windows_lock_handle(ctypes, path)
     if handle is None:
         return None
     try:
         return msvcrt.open_osfhandle(handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
     except OSError:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        _windows_kernel32().CloseHandle(handle)
         return None
 
 
