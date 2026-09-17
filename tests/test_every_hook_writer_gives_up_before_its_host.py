@@ -17,6 +17,10 @@ sys.path.insert(0, str(REPOSITORY / "scripts"))
 
 import daily_log_append  # noqa: E402
 import integration_adapter  # noqa: E402
+import pytest  # noqa: E402
+
+# These tests measure the budgets themselves; every other test gets the slow-machine bound.
+pytestmark = pytest.mark.shipped_append_budgets
 
 BREADCRUMB_EVENTS = ("UserPromptSubmit", "PostToolUse")
 # Starting the interpreter through `uv`, and writing the failure line afterwards.

@@ -147,6 +147,37 @@ def _no_writes_into_the_live_vault():
     assert not leaked, "tests wrote into the live vault: " + ", ".join(leaked[:20])
 
 
+SHIPPED_APPEND_BUDGETS = "shipped_append_budgets"
+_APPEND_BUDGETS = (
+    "daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS",
+    "daily_log_append.LIFECYCLE_APPEND_BUDGET_SECONDS",
+)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{SHIPPED_APPEND_BUDGETS}: the test measures the hooks' append budgets and sees the shipped values",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _unhurried_hook_appends(request, monkeypatch):
+    """A test of what a hook writes does not race the hook's append budget.
+
+    The budget fits the host's timeout, not a loaded CI runner: the first append into a
+    fresh vault took 1.4-5.6 s on the Windows shards, the breadcrumb budget is 3 s, and a
+    writer past it gives up by design. Patched by name, so a reloaded module is patched too.
+    Research: docs/research/2026-09-17-a-content-test-does-not-race-the-hook-budget.md.
+    """
+    if request.node.get_closest_marker(SHIPPED_APPEND_BUDGETS):
+        return
+    from tests.slow_machine import LONG_TIMEOUT
+
+    for budget in _APPEND_BUDGETS:
+        monkeypatch.setattr(budget, LONG_TIMEOUT)
+
+
 # Default fake provider for any accidental live LLM calls in unit tests.
 os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")
 

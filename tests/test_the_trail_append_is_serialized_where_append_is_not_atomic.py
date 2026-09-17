@@ -117,6 +117,7 @@ def test_a_lock_that_never_frees_up_is_given_up_without_writing_or_raising(trail
     )
 
 
+@pytest.mark.shipped_append_budgets
 def test_the_whole_wait_fits_well_inside_a_hook_budget():
     import daily_log_append
 
