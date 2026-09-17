@@ -813,6 +813,19 @@ class _CaptureKeepAlive:
         self._coordinator.heartbeat_intent_fence(self._intent_fence, self._owner)
 
 
+class CaptureProviderUnavailable(RuntimeError):
+    """The provider did not answer: the capture waits for it, it has not failed.
+
+    See `docs/research/2026-09-17-an-absent-provider-is-waited-for-and-a-spent-task-is-a-loss.md`.
+    """
+
+
+# How long a capture waits for a provider that did not answer. Eight attempts an
+# hour apart span most of a working day; with no stated wait they were spent in
+# about an hour, which is shorter than one subscription usage window.
+PROVIDER_RETRY_SECONDS = 3600
+
+
 def _call_capture_classifier(
     record: Mapping[str, object],
     llm_call: Callable[[str, str, int], object] | None,
@@ -824,7 +837,7 @@ def _call_capture_classifier(
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
     if (result.available, result.failure_class) != (True, None):
-        raise RuntimeError("capture provider call did not succeed")
+        raise CaptureProviderUnavailable("capture provider call did not succeed")
     tier, body = _parse_capture_wire_output(result.text)
     return result, tier, body
 
@@ -1554,8 +1567,6 @@ def _process_or_fail(
     worker, the CLI boundary swallowed it with exit 0, and the task sat leased
     until its TTL expired — three silent attempts before anyone could see why.
     """
-    from memory_queue import QueueFailure
-
     try:
         return process_capture_lease(
             queue,
@@ -1564,13 +1575,33 @@ def _process_or_fail(
             owner=owner,
             process_missing=process_missing,
         )
-    except Exception:
-        # retry_after=0, not the drain loop's 60: this worker runs once per
-        # lifecycle event, so there is no hot loop to damp, and the crash
-        # recovery choreography re-claims immediately.
+    except Exception as error:
         with contextlib.suppress(Exception):
-            queue.fail(lease, QueueFailure("processor_failed", retry_after=0))
+            queue.fail(lease, _capture_queue_failure(error))
+        _raise_if_attempts_spent(lease, error)
         raise
+
+
+def _capture_queue_failure(error: BaseException) -> object:
+    """What the queue is told: an absent provider states its wait, the rest do not.
+
+    The backoff is the queue's own. A stated wait of zero said nothing, whatever
+    the comment that used to stand here claimed.
+    """
+    from memory_queue import QueueFailure
+
+    if isinstance(error, CaptureProviderUnavailable):
+        return QueueFailure("provider_unavailable", retry_after=PROVIDER_RETRY_SECONDS)
+    return QueueFailure("processor_failed")
+
+
+def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:
+    """The last attempt's failure is a loss, and is raised as one so it is recorded as one."""
+    from capture_diagnostics import DurableWorkExhausted
+    from reliable_memory import DEFAULTS
+
+    if int(getattr(lease, "attempt", 0)) >= DEFAULTS.queue_max_attempts:
+        raise DurableWorkExhausted("capture task spent its last attempt") from error
 
 
 def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:

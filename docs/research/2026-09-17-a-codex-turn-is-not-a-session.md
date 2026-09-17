@@ -33,7 +33,12 @@ the fix.
   ([Claude Code hooks reference](https://code.claude.com/docs/en/hooks), fetched 2026-09-17).
   Our Claude configuration already sends `Stop` to the shared `stop` event, which captures
   nothing.
-- `SessionEnd` is newer than the Codex CLI this integration was reviewed against (0.153.4,
+- The same page bounds that event: "`SessionEnd` and `Interrupt` use 1 second by default and
+  support up to 3 seconds". Our capture starts a Python process through `uv`, reads a
+  transcript and publishes a durable record; the shipped budget for it is 15 seconds. Three
+  seconds is not a budget a capture can be promised in, so `SessionEnd` cannot simply replace
+  `Stop` as the capture signal.
+- `SessionEnd` is also newer than the Codex CLI this integration was reviewed against (0.153.4,
   `docs/research/2026-09-09-native-codex-hooks-and-handshake.md`), and no Codex is installed
   on the machine this fix was written on. Registering an event an installed host may not
   know, in a file the installer and doctor own, is not something to do unverified. It is left

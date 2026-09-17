@@ -98,12 +98,26 @@ def is_contention(error: BaseException) -> bool:
 DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
 
 
+class DurableWorkExhausted(RuntimeError):
+    """The task behind a durable capture spent its last attempt and is now dead.
+
+    Nothing retries a dead task: it waits for an operator's `redrive`. That is a
+    loss to show, not work that is merely late. See
+    `docs/research/2026-09-17-an-absent-provider-is-waited-for-and-a-spent-task-is-a-loss.md`.
+    """
+
+
 def _outcome_of(error: BaseException | None, kind: str = "") -> str:
+    if isinstance(error, DurableWorkExhausted):
+        return "lost"
+    return "deferred" if _is_retried_work(error, kind) else "lost"
+
+
+def _is_retried_work(error: BaseException | None, kind: str) -> bool:
+    """Durable work a later worker takes up, or a writer race the next event repeats."""
     if kind in DURABLE_WORK_KINDS:
-        return "deferred"
-    if error is not None and is_contention(error):
-        return "deferred"
-    return "lost"
+        return True
+    return error is not None and is_contention(error)
 
 
 def _safe_reason(reason: str) -> str:
