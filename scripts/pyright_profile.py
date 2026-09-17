@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import math
+import ntpath
 import os
 import re
 import shutil
@@ -14,7 +15,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 
 try:
@@ -1524,11 +1525,24 @@ def _expected_source_server(
     return None
 
 
-def _path_is_reserved(path: Path, raw: str) -> bool:
-    is_reserved = getattr(os.path, "isreserved", None)
+def _windows_name_is_reserved(raw: str) -> bool:
+    """Windows rules for one path text; a pure function, so it runs anywhere."""
+    is_reserved = getattr(ntpath, "isreserved", None)
     if is_reserved is not None:
         return bool(is_reserved(raw))
-    return path.is_reserved()
+    # Below 3.13 only: from 3.13 the branch above answers, and the pathlib
+    # method is removed in 3.15.
+    return PureWindowsPath(raw).is_reserved()
+
+
+def _path_is_reserved(raw: str) -> bool:
+    """No name is reserved outside Windows, so nothing is asked there.
+
+    Research: `docs/research/2026-09-17-reserved-names-are-a-windows-question.md`.
+    """
+    if os.name != "nt":
+        return False
+    return _windows_name_is_reserved(raw)
 
 
 def _is_local_absolute_path(path: Path) -> bool:
@@ -1537,7 +1551,7 @@ def _is_local_absolute_path(path: Path) -> bool:
         return False
     if "\0" in raw or ".." in path.parts:
         return False
-    return not _path_is_reserved(path, raw)
+    return not _path_is_reserved(raw)
 
 
 def _lexical_absolute_path(path: Path) -> Path:
