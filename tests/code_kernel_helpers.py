@@ -295,13 +295,53 @@ def _write_pyright_lockfile(
     )
 
 
+_DEFAULT_BUNDLES = {"pyright-langserver.js": b"synthetic pyright bundle\n"}
+
+
+def _write_pyright_bundles(package_root: Path, bundles: Mapping[str, bytes]) -> None:
+    """The `package/dist` files the shim loads, which the receipt now attests."""
+    from pyright_profile import PYRIGHT_EXECUTED_TREE_RELATIVE
+
+    dist = package_root.parent / PYRIGHT_EXECUTED_TREE_RELATIVE
+    dist.mkdir(parents=True, exist_ok=True)
+    for name, content in bundles.items():
+        (dist / name).write_bytes(content)
+
+
+def pyright_executed_tree_sha256(
+    server_bytes: bytes, bundles: Mapping[str, bytes]
+) -> str:
+    """The receipt's digest over the shim and the `package/dist` files with it."""
+    from pyright_profile import (
+        PYRIGHT_EXECUTED_TREE_RELATIVE,
+        PYRIGHT_SERVER_RELATIVE,
+        executed_tree_digest,
+    )
+
+    entries = [
+        (PYRIGHT_SERVER_RELATIVE.as_posix(), hashlib.sha256(server_bytes).hexdigest())
+    ]
+    entries.extend(
+        (
+            (PYRIGHT_EXECUTED_TREE_RELATIVE / name).as_posix(),
+            hashlib.sha256(content).hexdigest(),
+        )
+        for name, content in bundles.items()
+    )
+    return executed_tree_digest(entries)
+
+
 def _write_pyright_manifest(
     destination: Path,
     build_manifest,
     server_bytes: bytes,
+    bundles: Mapping[str, bytes],
     overrides: Mapping[str, object] | None,
 ) -> None:
-    manifest = build_manifest(server_sha256=hashlib.sha256(server_bytes).hexdigest())
+    manifest = build_manifest(
+        server_sha256=hashlib.sha256(server_bytes).hexdigest(),
+        executed_tree_sha256=pyright_executed_tree_sha256(server_bytes, bundles),
+    )
     manifest.update(dict(overrides or {}))
     (destination / "install-manifest.json").write_bytes(canonical_json_bytes(manifest))
 
@@ -316,14 +356,11 @@ def create_pyright_fixture(
     lockfile_version: int | None = 3,
     lockfile_link: bool = False,
     server_bytes: bytes = b"synthetic pyright language server\n",
+    bundle_bytes: Mapping[str, bytes] | None = None,
     manifest_overrides: Mapping[str, object] | None = None,
 ) -> Path:
     """Create a synthetic package tree without invoking npm or the network."""
-    from pyright_profile import (
-        PYRIGHT_PACKAGE_INTEGRITY,
-        PYRIGHT_PACKAGE_URL,
-        build_pyright_install_manifest,
-    )
+    from pyright_profile import PYRIGHT_PACKAGE_INTEGRITY, PYRIGHT_PACKAGE_URL
 
     integrity = PYRIGHT_PACKAGE_INTEGRITY if integrity is None else integrity
     package_root = destination / "package" if managed else destination / "node_modules/pyright"
@@ -341,10 +378,30 @@ def create_pyright_fixture(
             _lockfile_entry(integrity, PYRIGHT_PACKAGE_URL, package_version, lockfile_link),
         )
     if managed:
-        _write_pyright_manifest(
-            destination, build_pyright_install_manifest, server_bytes, manifest_overrides
+        _write_managed_receipt(
+            destination, package_root, server_bytes, bundle_bytes, manifest_overrides
         )
     return server
+
+
+def _write_managed_receipt(
+    destination: Path,
+    package_root: Path,
+    server_bytes: bytes,
+    bundle_bytes: Mapping[str, bytes] | None,
+    manifest_overrides: Mapping[str, object] | None,
+) -> None:
+    from pyright_profile import build_pyright_install_manifest
+
+    bundles = _DEFAULT_BUNDLES if bundle_bytes is None else dict(bundle_bytes)
+    _write_pyright_bundles(package_root, bundles)
+    _write_pyright_manifest(
+        destination,
+        build_pyright_install_manifest,
+        server_bytes,
+        bundles,
+        manifest_overrides,
+    )
 
 
 def source_bytes(snapshot: CorpusSnapshot, source_id: str) -> bytes:

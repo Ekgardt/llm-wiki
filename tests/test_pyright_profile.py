@@ -6,6 +6,7 @@ import builtins
 import dataclasses
 import io
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -451,7 +452,10 @@ def test_thawed_profile_values_match_live_manifest_fingerprints() -> None:
 
     configuration = thaw(PYRIGHT_CONFIGURATION)
     initialization_options = thaw(PYRIGHT_INITIALIZATION_OPTIONS)
-    manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(b"server"))
+    manifest = build_pyright_install_manifest(
+        server_sha256=sha256_bytes(b"server"),
+        executed_tree_sha256=sha256_bytes(b"tree"),
+    )
 
     assert configuration == {
         "python": {
@@ -537,8 +541,11 @@ def test_constants_configuration_and_public_dataclasses_are_exact() -> None:
 
 def test_install_manifest_builder_and_validator_form_one_canonical_contract() -> None:
     server_sha256 = sha256_bytes(b"server")
+    executed_tree_sha256 = sha256_bytes(b"tree")
 
-    manifest = build_pyright_install_manifest(server_sha256=server_sha256)
+    manifest = build_pyright_install_manifest(
+        server_sha256=server_sha256, executed_tree_sha256=executed_tree_sha256
+    )
 
     assert validate_pyright_install_manifest(manifest) == manifest
     assert canonical_json_bytes(manifest) == canonical_json_bytes(
@@ -548,6 +555,7 @@ def test_install_manifest_builder_and_validator_form_one_canonical_contract() ->
         "configuration_sha256": sha256_bytes(
             canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
         ),
+        "executed_tree_sha256": executed_tree_sha256,
         "initialization_options_sha256": sha256_bytes(
             canonical_json_bytes(
                 thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS)
@@ -556,7 +564,7 @@ def test_install_manifest_builder_and_validator_form_one_canonical_contract() ->
         "package_integrity": PYRIGHT_PACKAGE_INTEGRITY,
         "package_sha256": PYRIGHT_PACKAGE_SHA256,
         "package_url": PYRIGHT_PACKAGE_URL,
-        "schema_version": "pyright-install/v1",
+        "schema_version": "pyright-install/v2",
         "server_relative_path": "package/langserver.index.js",
         "server_sha256": server_sha256,
         "version": PYRIGHT_VERSION,
@@ -733,9 +741,8 @@ def test_managed_manifest_without_package_tree_is_presence_evidence(
     server = create_pyright_fixture(
         lsp_paths.managed_pyright_root(state_root), managed=True
     )
-    server.unlink()
-    server.with_name("package.json").unlink()
-    server.parent.rmdir()
+    # The whole package tree, bundles included: the receipt stays, the code goes.
+    shutil.rmtree(server.parent)
     _install_node_probe(monkeypatch, tmp_path)
 
     result = discover_pyright(scope, state_root=state_root)
@@ -2278,7 +2285,7 @@ def test_managed_manifest_canonicalization_recursion_degrades_stably(
     real_canonical = pyright_profile.canonical_json_bytes
 
     def canonical(value: object) -> bytes:
-        if isinstance(value, dict) and value.get("schema_version") == "pyright-install/v1":
+        if isinstance(value, dict) and value.get("schema_version") == "pyright-install/v2":
             raise RecursionError("reviewer reproduction")
         return real_canonical(value)
 
@@ -2317,7 +2324,10 @@ def test_managed_receipt_attests_base_profile_while_identity_includes_repository
     assert result.configuration_sha256 == _configuration_fingerprint(
         repository_configuration
     )
-    manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(server.read_bytes()))
+    manifest = build_pyright_install_manifest(
+        server_sha256=sha256_bytes(server.read_bytes()),
+        executed_tree_sha256=sha256_bytes(b"tree"),
+    )
     assert manifest["configuration_sha256"] == sha256_bytes(
         canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
     )

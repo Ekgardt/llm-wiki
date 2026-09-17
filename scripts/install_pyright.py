@@ -1907,6 +1907,20 @@ def _posix_existing_entry(entry: os.DirEntry) -> _ExistingEntry:
 
 _SNAPSHOT_FILES = frozenset({"install-manifest.json", "package/package.json"})
 
+# `package/langserver.index.js` is a 229-byte shim; the code the process runs is
+# the bundles directly under `package/dist`. Both the receipt and every
+# re-validation of it are taken over that set. Research:
+# `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+_EXECUTED_TREE_POSIX = _profile.PYRIGHT_EXECUTED_TREE_RELATIVE.as_posix()
+_EXECUTED_TREE_PARTS = tuple(_profile.PYRIGHT_EXECUTED_TREE_RELATIVE.parts)
+
+
+def _is_executed_tree_member(parts: tuple[str, ...]) -> bool:
+    """A file directly under `package/dist`: what the shim's `require` loads."""
+    return len(parts) == len(_EXECUTED_TREE_PARTS) + 1 and (
+        parts[: len(_EXECUTED_TREE_PARTS)] == _EXECUTED_TREE_PARTS
+    )
+
 
 def _snapshot_paths() -> frozenset[str]:
     return _SNAPSHOT_FILES | {_profile.PYRIGHT_SERVER_RELATIVE.as_posix()}
@@ -2000,12 +2014,17 @@ def _visited_file_bytes(entry: _ExistingEntry, total_bytes: int) -> int:
     return total
 
 
+def _is_executed_tree_relative(relative: str) -> bool:
+    """A file directly under `package/dist` -- the code a launch executes."""
+    prefix = _EXECUTED_TREE_POSIX + "/"
+    return relative.startswith(prefix) and "/" not in relative[len(prefix) :]
+
+
 def _record_interesting_file(
     snapshots: dict[str, _ExistingEntry], relative: str, entry: _ExistingEntry
 ) -> None:
-    if relative not in _snapshot_paths():
-        return
-    snapshots[relative] = entry
+    if relative in _snapshot_paths() or _is_executed_tree_relative(relative):
+        snapshots[relative] = entry
 
 
 def _child_directory_identity(directory: _Handle, name: str) -> tuple[object, ...]:
@@ -2159,9 +2178,93 @@ def _read_package_files(
     )
 
 
+def _recorded_server_digest(server_raw: bytes, validated: dict[str, object]) -> str:
+    if not server_raw:
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    server_sha256 = hashlib.sha256(server_raw).hexdigest()
+    if not hmac.compare_digest(server_sha256, validated["server_sha256"]):
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    return server_sha256
+
+
+def _executed_tree_snapshots(
+    snapshots: dict[str, _ExistingEntry],
+) -> tuple[tuple[str, _ExistingEntry], ...]:
+    rows = tuple(
+        (relative, entry)
+        for relative, entry in sorted(snapshots.items())
+        if _is_executed_tree_relative(relative)
+    )
+    if len(rows) > _profile.MAX_EXECUTED_TREE_FILES:
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    return rows
+
+
+def _executed_tree_digest_under(
+    dist: _Handle,
+    snapshots: dict[str, _ExistingEntry],
+    server_sha256: str,
+    deadline: float,
+) -> str:
+    entries = [(_profile.PYRIGHT_SERVER_RELATIVE.as_posix(), server_sha256)]
+    for relative, entry in _executed_tree_snapshots(snapshots):
+        _check_deadline(deadline)
+        content = _read_bounded_file(
+            dist,
+            relative.rsplit("/", 1)[1],
+            _profile.MAX_EXECUTED_TREE_BYTES,
+            deadline,
+            expected_identity=entry.identity,
+            expected_size=entry.size,
+        )
+        entries.append((relative, hashlib.sha256(content).hexdigest()))
+    return _profile.executed_tree_digest(entries)
+
+
+def _measured_existing_executed_tree(
+    package: _Handle,
+    snapshots: dict[str, _ExistingEntry],
+    server_sha256: str,
+    deadline: float,
+) -> str:
+    dist_entry = snapshots.get(_EXECUTED_TREE_POSIX)
+    if dist_entry is None:
+        return _profile.executed_tree_digest(
+            [(_profile.PYRIGHT_SERVER_RELATIVE.as_posix(), server_sha256)]
+        )
+    if dist_entry.identity is None:
+        raise PyrightInstallError("pyright_existing_install_invalid")
+    dist = _open_expected_child(
+        package,
+        _profile.PYRIGHT_EXECUTED_TREE_RELATIVE.name,
+        directory=True,
+        expected_identity=dist_entry.identity,
+    )
+    try:
+        return _executed_tree_digest_under(dist, snapshots, server_sha256, deadline)
+    finally:
+        dist.close()
+
+
+def _require_recorded_executed_tree(
+    package: _Handle,
+    snapshots: dict[str, _ExistingEntry],
+    server_sha256: str,
+    validated: dict[str, object],
+    deadline: float,
+) -> None:
+    """The tree someone else published must be the tree their receipt names."""
+    measured = _measured_existing_executed_tree(
+        package, snapshots, server_sha256, deadline
+    )
+    if not hmac.compare_digest(measured, validated["executed_tree_sha256"]):
+        raise PyrightInstallError("pyright_existing_install_invalid")
+
+
 def _verified_server_digest(
     installation: _Handle,
     entries: tuple[_ExistingEntry, ...],
+    snapshots: dict[str, _ExistingEntry],
     validated: dict[str, object],
     deadline: float,
 ) -> str:
@@ -2173,13 +2276,12 @@ def _verified_server_digest(
     )
     try:
         server_raw = _read_package_files(package, entries[2], entries[3], deadline)
+        server_sha256 = _recorded_server_digest(server_raw, validated)
+        _require_recorded_executed_tree(
+            package, snapshots, server_sha256, validated, deadline
+        )
     finally:
         package.close()
-    if not server_raw:
-        raise PyrightInstallError("pyright_existing_install_invalid")
-    server_sha256 = hashlib.sha256(server_raw).hexdigest()
-    if not hmac.compare_digest(server_sha256, validated["server_sha256"]):
-        raise PyrightInstallError("pyright_existing_install_invalid")
     return server_sha256
 
 
@@ -2190,7 +2292,7 @@ def _install_from_snapshots(
     entries = _required_snapshot_entries(snapshots)
     manifest_raw, validated = _validated_manifest(installation, entries[0], deadline)
     server_sha256 = _verified_server_digest(
-        installation, entries, validated, deadline
+        installation, entries, snapshots, validated, deadline
     )
     return InstalledPyright(
         root=root,
@@ -2734,6 +2836,33 @@ class _ArchiveNames:
         self.kinds: dict[str, str] = {}
         self.explicit: set[str] = set()
         self.folded: dict[str, str] = {}
+        self.executed: dict[str, str] = {}
+        self.executed_bytes = 0
+
+    def record_executed(self, parts: tuple[str, ...], digest: str, size: int) -> None:
+        """Keep the digest of one bundle so the receipt can attest the tree.
+
+        Research:
+        `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+        """
+        if not _is_executed_tree_member(parts):
+            return
+        self.executed["/".join(parts)] = digest
+        self.executed_bytes += size
+        self._require_executed_bounds()
+
+    def _require_executed_bounds(self) -> None:
+        if len(self.executed) > _profile.MAX_EXECUTED_TREE_FILES:
+            raise PyrightInstallError("pyright_executed_tree_limit")
+        if self.executed_bytes > _profile.MAX_EXECUTED_TREE_BYTES:
+            raise PyrightInstallError("pyright_executed_tree_limit")
+
+    def executed_tree_sha256(self, server_sha256: str) -> str:
+        entries = [
+            (_profile.PYRIGHT_SERVER_RELATIVE.as_posix(), server_sha256),
+            *self.executed.items(),
+        ]
+        return _profile.executed_tree_digest(entries)
 
     def add(self, parts: tuple[str, ...], kind: str) -> None:
         for index in range(1, len(parts) + 1):
@@ -2899,6 +3028,7 @@ def _extract_file_member(
     archive: tarfile.TarFile,
     member: tarfile.TarInfo,
     parts: tuple[str, ...],
+    names: _ArchiveNames,
     deadline: float,
 ) -> tuple[bytes | None, str | None]:
     package_member = parts == ("package", "package.json")
@@ -2912,6 +3042,7 @@ def _extract_file_member(
         digest, captured = _copy_member_data(
             stage, parts, extracted, member.size, deadline, capture=package_member
         )
+    names.record_executed(parts, digest, member.size)
     return _member_findings(package_member, server_member, captured, digest)
 
 
@@ -2932,7 +3063,7 @@ def _extract_one_member(
         stage.ensure_directory(parts, deadline)
         return None, None
     _account_member_size(member, state)
-    return _extract_file_member(stage, archive, member, parts, deadline)
+    return _extract_file_member(stage, archive, member, parts, names, deadline)
 
 
 def _merge_found(
@@ -3050,7 +3181,7 @@ def _extract_archive(
     accepted_state: tuple[object, ...],
     accepted_sha256: str,
     accepted_sha512: bytes,
-) -> tuple[_Stage, bytes, str]:
+) -> tuple[_Stage, bytes, str, str]:
     _check_deadline(deadline)
     stage = _new_stage(parent)
     try:
@@ -3062,7 +3193,12 @@ def _extract_archive(
         _require_artifact_digests(
             artifact, deadline, accepted_state, accepted_sha256, accepted_sha512
         )
-        return stage, package_json, server_sha256
+        return (
+            stage,
+            package_json,
+            server_sha256,
+            names.executed_tree_sha256(server_sha256),
+        )
     except TimeoutError:
         stage.cleanup()
         raise
@@ -3131,8 +3267,12 @@ def _fetched_artifact(
     return _copy_local_artifact(artifact, temporary, deadline)
 
 
-def _staged_manifest(stage: _Stage, server_sha256: str, deadline: float) -> bytes:
-    manifest = _profile.build_pyright_install_manifest(server_sha256=server_sha256)
+def _staged_manifest(
+    stage: _Stage, server_sha256: str, executed_tree_sha256: str, deadline: float
+) -> bytes:
+    manifest = _profile.build_pyright_install_manifest(
+        server_sha256=server_sha256, executed_tree_sha256=executed_tree_sha256
+    )
     manifest_bytes = canonical_json_bytes(manifest)
     stage.write_bytes(("install-manifest.json",), manifest_bytes, deadline)
     stage.sync_directories(deadline)
@@ -3195,7 +3335,7 @@ def _install_under_lock(
         accepted_state = _artifact_state(temporary.handle)
         _verify_artifact_digests(package_sha256, package_sha512)
         _check_deadline(deadline)
-        stage, package_json, server_sha256 = _extract_archive(
+        stage, package_json, server_sha256, executed_tree_sha256 = _extract_archive(
             parent,
             temporary,
             deadline,
@@ -3204,7 +3344,9 @@ def _install_under_lock(
             package_sha512,
         )
         _validate_package_json(package_json)
-        manifest_bytes = _staged_manifest(stage, server_sha256, deadline)
+        manifest_bytes = _staged_manifest(
+            stage, server_sha256, executed_tree_sha256, deadline
+        )
         _check_deadline(deadline)
         published = _publish_stage(stage, parent, root, deadline)
         if published is not None:

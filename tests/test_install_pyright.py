@@ -37,6 +37,7 @@ from tests.code_kernel_helpers import (
     PyrightInstallArtifactFixture,
     PyrightTarEntry,
     create_pyright_install_artifact,
+    pyright_executed_tree_sha256,
     use_pyright_install_artifact_identity,
 )
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
@@ -132,7 +133,10 @@ def test_successful_local_install_is_exact_and_canonical(
 
     root = _root(state_root)
     server_sha256 = sha256_bytes(artifact.server_bytes)
-    expected_manifest = build_pyright_install_manifest(server_sha256=server_sha256)
+    expected_manifest = build_pyright_install_manifest(
+        server_sha256=server_sha256,
+        executed_tree_sha256=pyright_executed_tree_sha256(artifact.server_bytes, {}),
+    )
     manifest_bytes = canonical_json_bytes(expected_manifest)
     assert result == InstalledPyright(
         root=root,

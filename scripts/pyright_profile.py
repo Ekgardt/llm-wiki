@@ -41,6 +41,15 @@ PYRIGHT_PACKAGE_INTEGRITY = (
 QUALIFIED_NODE_MAJOR = 22
 PYRIGHT_SERVER_RELATIVE = Path("package/langserver.index.js")
 
+# `langserver.index.js` is a 229-byte shim whose whole body is a `require` of
+# `./dist/pyright-langserver`; the megabytes the process executes are the
+# bundles directly under `package/dist`. Digesting only the shim let a
+# truncated or edited bundle pass as the pinned install (audit 3, B20).
+# Research: `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+PYRIGHT_EXECUTED_TREE_RELATIVE = Path("package/dist")
+MAX_EXECUTED_TREE_FILES = 64
+MAX_EXECUTED_TREE_BYTES = 32 * 1024 * 1024
+
 
 def _freeze_pyright_profile_value(value: object) -> object:
     if isinstance(value, dict):
@@ -94,7 +103,7 @@ PYRIGHT_INITIALIZATION_OPTIONS = _freeze_pyright_profile_value(
     {"files": {"exclude": []}}
 )
 
-PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v1"
+PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v2"
 PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(
     canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
 )
@@ -154,6 +163,7 @@ _NODE_PROBE_ERRORS = (
 _MANIFEST_KEYS = frozenset(
     {
         "configuration_sha256",
+        "executed_tree_sha256",
         "initialization_options_sha256",
         "package_integrity",
         "package_sha256",
@@ -164,6 +174,10 @@ _MANIFEST_KEYS = frozenset(
         "version",
     }
 )
+# The nine-key receipt every installed vault carries today. It cannot be
+# upgraded in place -- the digest would attest whatever is on disk rather than
+# the pinned bytes -- so it is named and the operator reinstalls.
+_MANIFEST_KEYS_BEFORE_TREE_DIGEST = _MANIFEST_KEYS - {"executed_tree_sha256"}
 
 
 class _SubprocessFacade:
@@ -224,19 +238,49 @@ class _ManifestValidationError(ValueError):
         self.code = code
 
 
-def build_pyright_install_manifest(*, server_sha256: str) -> dict[str, str]:
+def _require_hex_digest(value: object, label: str) -> str:
+    if not isinstance(value, str) or _HEX_SHA256.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def executed_tree_digest(entries: object) -> str:
+    """One digest over the files a launch executes, independent of their order.
+
+    `entries` are `(relative posix path, file sha256)` pairs. The fold is over
+    sorted `"<path>\\0<digest>\\n"` lines, so the installer can build it from the
+    member digests it already takes while streaming the verified archive and
+    discovery can rebuild the same value from the unpacked tree.
+    """
+    lines = sorted(
+        f"{_require_path_text(path)}\0{_require_hex_digest(digest, path)}\n"
+        for path, digest in entries
+    )
+    return sha256_bytes("".join(lines).encode("utf-8"))
+
+
+def _require_path_text(path: object) -> str:
+    if not isinstance(path, str) or not path:
+        raise ValueError("executed tree entry needs a relative path")
+    return path
+
+
+def build_pyright_install_manifest(
+    *, server_sha256: str, executed_tree_sha256: str
+) -> dict[str, str]:
     """Build the closed canonical receipt value used by the explicit installer."""
-    if not isinstance(server_sha256, str) or _HEX_SHA256.fullmatch(server_sha256) is None:
-        raise ValueError("server_sha256 must be a lowercase SHA-256 digest")
     return {
         "configuration_sha256": PYRIGHT_CONFIGURATION_SHA256,
+        "executed_tree_sha256": _require_hex_digest(
+            executed_tree_sha256, "executed_tree_sha256"
+        ),
         "initialization_options_sha256": PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
         "package_integrity": PYRIGHT_PACKAGE_INTEGRITY,
         "package_sha256": PYRIGHT_PACKAGE_SHA256,
         "package_url": PYRIGHT_PACKAGE_URL,
         "schema_version": PYRIGHT_INSTALL_MANIFEST_SCHEMA,
         "server_relative_path": PYRIGHT_SERVER_RELATIVE.as_posix(),
-        "server_sha256": server_sha256,
+        "server_sha256": _require_hex_digest(server_sha256, "server_sha256"),
         "version": PYRIGHT_VERSION,
     }
 
@@ -253,19 +297,39 @@ _MANIFEST_CHECKS = (
 )
 
 
+_MANIFEST_DIGEST_FIELDS = ("executed_tree_sha256", "server_sha256")
+
+
+def _manifest_digests_are_hex(value: dict) -> bool:
+    return all(
+        _HEX_SHA256.fullmatch(value[field]) is not None
+        for field in _MANIFEST_DIGEST_FIELDS
+    )
+
+
 def _manifest_shape_is_valid(value: object) -> bool:
     if not isinstance(value, dict) or set(value) != _MANIFEST_KEYS:
         return False
     if any(not isinstance(item, str) for item in value.values()):
         return False
-    return _HEX_SHA256.fullmatch(value["server_sha256"]) is not None
+    return _manifest_digests_are_hex(value)
+
+
+def _require_tree_digest_era(value: object) -> None:
+    """A receipt from before the executed-tree digest is named, not guessed at."""
+    if isinstance(value, dict) and set(value) == _MANIFEST_KEYS_BEFORE_TREE_DIGEST:
+        raise _ManifestValidationError("pyright_manifest_predates_tree_digest")
 
 
 def validate_pyright_install_manifest(value: object) -> dict[str, str]:
     """Validate the install receipt's closed pinned domain."""
+    _require_tree_digest_era(value)
     if not _manifest_shape_is_valid(value):
         raise _ManifestValidationError("pyright_manifest_malformed")
-    expected = build_pyright_install_manifest(server_sha256=value["server_sha256"])
+    expected = build_pyright_install_manifest(
+        server_sha256=value["server_sha256"],
+        executed_tree_sha256=value["executed_tree_sha256"],
+    )
     for field, code in _MANIFEST_CHECKS:
         if value[field] != expected[field]:
             raise _ManifestValidationError(code)
@@ -997,6 +1061,105 @@ def _executable_digest_codes(receipt_server_sha256: object, executable_sha256: s
     return {"pyright_executable_digest_mismatch"}
 
 
+_EXECUTED_TREE_READ_CODES = (
+    (FileNotFoundError, "pyright_executed_tree_missing"),
+    (PermissionError, "pyright_executed_tree_unsafe"),
+    (ValueError, "pyright_executed_tree_oversized"),
+    (OSError, "pyright_executed_tree_unreadable"),
+)
+_EXECUTED_TREE_MISMATCH = "pyright_executed_tree_digest_mismatch"
+
+
+def _executed_tree_read_code(error: Exception) -> str:
+    for kind, code in _EXECUTED_TREE_READ_CODES:
+        if isinstance(error, kind):
+            return code
+    raise error
+
+
+def _executed_tree_names(directory: Path) -> list[str]:
+    """The regular files directly under `package/dist`, bounded and sorted.
+
+    A directory that is not there at all is an empty bundle set, not a read
+    failure: the receipt of a real install names bundles, so the digest then
+    mismatches and says so, which is the more useful of the two verdicts.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(
+                entry.name for entry in entries if entry.is_file(follow_symlinks=False)
+            )
+    except FileNotFoundError:
+        return []
+    if len(names) > MAX_EXECUTED_TREE_FILES:
+        raise ValueError("executed tree holds more files than the bound allows")
+    return names
+
+
+def _executed_tree_entry(
+    directory: Path, name: str, budget: list[int], deadline: float | None
+) -> tuple[str, str]:
+    _check_deadline(deadline)
+    content = read_stable_bytes(
+        directory / name, budget[0], label="Pyright executed tree"
+    )
+    budget[0] -= len(content)
+    return (
+        (PYRIGHT_EXECUTED_TREE_RELATIVE / name).as_posix(),
+        sha256_bytes(content),
+    )
+
+
+def _measured_executed_tree(
+    server: Path, server_sha256: str, deadline: float | None
+) -> tuple[str | None, str | None]:
+    """The digest of the shim and the bundles it loads, or a degradation code.
+
+    `server` is `<root>/package/langserver.index.js`, so the bundles are two
+    levels up and then down `PYRIGHT_EXECUTED_TREE_RELATIVE`.
+    """
+    directory = server.parent.parent / PYRIGHT_EXECUTED_TREE_RELATIVE
+    budget = [MAX_EXECUTED_TREE_BYTES]
+    entries = [(PYRIGHT_SERVER_RELATIVE.as_posix(), server_sha256)]
+    try:
+        for name in _executed_tree_names(directory):
+            entries.append(_executed_tree_entry(directory, name, budget, deadline))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError) as exc:
+        return None, _executed_tree_read_code(exc)
+    _check_deadline(deadline)
+    return executed_tree_digest(entries), None
+
+
+def _executed_tree_codes(
+    server: Path,
+    receipt_tree_sha256: object,
+    executable_sha256: str | None,
+    deadline: float | None,
+) -> set[str]:
+    """Re-check the code a launch executes, not only the file that loads it.
+
+    Bounded by `MAX_EXECUTED_TREE_FILES`, `MAX_EXECUTED_TREE_BYTES` and the
+    caller's deadline. Measured at 12--25 ms on the pinned artifact; the whole
+    package tree is 1.3--4.2 s, which is why only the bundles are covered.
+    Research: `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+    """
+    receipt = _hex_digest_or_none(receipt_tree_sha256)
+    if receipt is None or executable_sha256 is None:
+        return set()
+    measured, code = _measured_executed_tree(server, executable_sha256, deadline)
+    if code is not None:
+        return {code}
+    return _tree_digest_verdict(measured, receipt)
+
+
+def _tree_digest_verdict(measured: str | None, receipt: str) -> set[str]:
+    if measured == receipt:
+        return set()
+    return {_EXECUTED_TREE_MISMATCH}
+
+
 def _managed_manifest(
     server: Path,
     executable_sha256: str | None,
@@ -1012,6 +1175,9 @@ def _managed_manifest(
     codes |= _canonical_form_codes(value, raw)
     codes |= _manifest_validation_codes(value)
     codes |= _executable_digest_codes(value.get("server_sha256"), executable_sha256)
+    codes |= _executed_tree_codes(
+        server, value.get("executed_tree_sha256"), executable_sha256, deadline
+    )
     return _hex_digest_or_none(value.get("package_sha256")), codes
 
 
