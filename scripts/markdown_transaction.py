@@ -4295,6 +4295,29 @@ def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str 
     return record.id
 
 
+# How long an append may repeat one attempt without advancing before it gives up:
+# several full settle windows, so ordinary contention never reaches it. See
+# `docs/research/2026-09-17-a-transaction-that-is-over-stays-over.md`.
+_APPEND_STALL_SECONDS = 6 * _WRITER_WAIT_SECONDS
+
+
+class _AppendStall:
+    """The time an append has spent without advancing to a new attempt."""
+
+    def __init__(self, seconds: float) -> None:
+        self._seconds = seconds
+        self._since = time.monotonic()
+
+    def progressed(self) -> None:
+        self._since = time.monotonic()
+
+    def require_moving(self) -> None:
+        if time.monotonic() - self._since >= self._seconds:
+            raise TimeoutError(
+                "knowledge append stalled behind an attempt that never settled"
+            )
+
+
 def _append_until_committed(
     coordinator: MarkdownCoordinator,
     operation_id: str,
@@ -4305,10 +4328,16 @@ def _append_until_committed(
     content_guard: Literal["model_output"] | None = None,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    stall_seconds: float = _APPEND_STALL_SECONDS,
 ) -> TransactionRecord:
     attempt = 0
     parent: str | None = None
+    stall = _AppendStall(stall_seconds)
     while attempt < 64:
+        # `retry` repeats the same attempt, so the loop itself has to notice the
+        # caller's deadline and an attempt that never settles.
+        coordinator._require_operation_active(deadline, cancelled)
+        stall.require_moving()
         candidate_id = _append_candidate_id(operation_id, attempt)
         outcome = _run_append_candidate(
             coordinator,
@@ -4326,6 +4355,7 @@ def _append_until_committed(
         if outcome == "advance":
             parent = _refused_parent(coordinator, candidate_id) or parent
             attempt += 1
+            stall.progressed()
     raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
 
 
