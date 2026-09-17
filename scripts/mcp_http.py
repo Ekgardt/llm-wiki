@@ -386,13 +386,27 @@ def _announce(host: str, port: int, token_path: Path) -> None:
         )
 
 
-def _shutdown() -> None:
+def _close_navigation_sessions() -> None:
     try:
         mcp_server._close_navigation_session_manager(
             time.monotonic() + mcp_server.MCP_OPERATION_SECONDS
         )
     except Exception as error:  # noqa: BLE001 - reported, never hidden
         print(f"mcp_http: navigation sessions not closed cleanly: {error}", file=sys.stderr)
+
+
+def _shutdown() -> None:
+    """Close navigation, then let no model be mid-inference when we exit.
+
+    Audit 3, A8: the stdio transport settled inference and this one did not,
+    although abandoned retrieval stages run here. One rule, one function:
+    `mcp_server._settle_inference`. Research:
+    `docs/research/2026-09-17-the-shared-server-settles-inference-too.md`.
+    """
+    try:
+        _close_navigation_sessions()
+    finally:
+        mcp_server._settle_inference()
 
 
 # How long the warm-up may take before we give up and serve anyway. It is not a
