@@ -366,8 +366,21 @@ def _parse_raw_record(fields: list[bytes], index: int, comparison: str) -> tuple
         "new_path": new_path,
         "old_oid": parts[2].decode("ascii", errors="strict"),
         "new_oid": parts[3].decode("ascii", errors="strict"),
+        "old_mode": parts[0].decode("ascii", errors="strict"),
+        "new_mode": parts[1].decode("ascii", errors="strict"),
     }
     return record, index + 1 + path_count
+
+
+# The only modes whose bytes are a file's source. `160000` is a submodule
+# commit, which has no blob; `120000` is a symlink, whose bytes are a path.
+# Audit 3, B31/B32: asking for either aborted the whole diff. Research:
+# `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+_REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+
+
+def _holds_source(record: dict, side: str) -> bool:
+    return record[f"{side}_mode"] in _REGULAR_FILE_MODES
 
 
 def _raw_header_parts(header: bytes) -> list[bytes]:
@@ -505,7 +518,7 @@ class _ChangeCollector:
             self._add_record(record, worktree_new)
 
     def _add_record(self, record: dict, worktree_new: bool) -> None:
-        old_blob = self._object_blob(record["old_oid"])
+        old_blob = self._old_blob(record)
         new_blob = self._new_blob(record, worktree_new)
         self.total_bytes += len(old_blob or b"") + len(new_blob or b"")
         if self.total_bytes > self.bounds.max_total_blob_bytes:
@@ -517,7 +530,14 @@ class _ChangeCollector:
     def _object_blob(self, oid: str) -> bytes | None:
         return _object_blob(self.root, oid, deadline=self.deadline, limit=self.bounds.max_blob_bytes)
 
+    def _old_blob(self, record: dict) -> bytes | None:
+        if not _holds_source(record, "old"):
+            return None
+        return self._object_blob(record["old_oid"])
+
     def _new_blob(self, record: dict, worktree_new: bool) -> bytes | None:
+        if not _holds_source(record, "new"):
+            return None
         if worktree_new and record["status"] != "D":
             return _worktree_blob(self.root, record["new_path"], self.bounds.max_blob_bytes)
         return self._object_blob(record["new_oid"])
@@ -783,12 +803,37 @@ def _changed_ranges(
     if prefix == len(old_lines) == len(new_lines):
         return []
     suffix = _common_suffix(old_lines, new_lines, prefix, deadline)
+    old_side = _range_side(prefix, len(old_lines) - suffix, old_offsets)
+    inserted = new_lines[prefix : len(new_lines) - suffix]
     return [
         {
-            "old": _range_side(prefix, len(old_lines) - suffix, old_offsets),
+            "old": _anchored_insertion(old_side, prefix, inserted),
             "new": _range_side(prefix, len(new_lines) - suffix, new_offsets),
         }
     ]
+
+
+def _continues_the_block_above(inserted: list[bytes]) -> bool:
+    """An indented first line belongs to what precedes it; anything else starts anew."""
+    for line in inserted:
+        if line.strip():
+            return line[:1] in (b" ", b"\t")
+    return False
+
+
+def _anchored_insertion(old_side: dict, prefix: int, inserted: list[bytes]) -> dict:
+    """Which old line an insertion-only hunk is tested against.
+
+    An insertion lies between old lines `prefix` and `prefix + 1`. Only the
+    second was ever tested, so a line appended to a function matched nobody, or
+    the next function (audit 3, A13). Research:
+    `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+    """
+    if old_side["byte_end"] > old_side["byte_start"]:
+        return old_side
+    if prefix < 1 or not _continues_the_block_above(inserted):
+        return old_side
+    return {**old_side, "line_start": prefix, "line_end": prefix}
 
 
 def _line_offsets(lines: list[bytes], deadline: float | None) -> list[int]:
@@ -1004,13 +1049,31 @@ _KIND_GROUPS = {
 }
 
 
+_FRONTIER_CHUNK = 512  # evidence_graph.MAX_NODE_FILTER
+
+
+def _edges_into(graph, frontier: list[str], bounds: ImpactLimits, deadline: float) -> list[dict]:
+    """Every traversed edge that points at the frontier, asked in slices.
+
+    Audit 3, A14: the whole edge set of seven types was read with one row
+    ceiling, which a real generation exceeds, so `affected` was silently empty.
+    Research: `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+    """
+    edges: list[dict] = []
+    for index in range(0, len(frontier), _FRONTIER_CHUNK):
+        edges.extend(
+            graph.edges(
+                edge_types=tuple(sorted(TRAVERSED_EDGES)),
+                target_node_ids=frontier[index : index + _FRONTIER_CHUNK],
+                max_rows=bounds.max_graph_rows,
+                deadline=deadline,
+            )
+        )
+    return edges
+
+
 def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline: float) -> dict:
-    edges = graph.edges(
-        edge_types=tuple(sorted(TRAVERSED_EDGES)),
-        max_rows=bounds.max_graph_rows,
-        deadline=deadline,
-    )
-    used = _reaching_edges(edges, set(symbol_ids), bounds.max_depth)
+    used = _reaching_edges(graph, set(symbol_ids), bounds, deadline)
     groups = _empty_affected()
     for node_id, edge in used.items():
         _add_affected(groups, graph, node_id, edge, bounds, deadline)
@@ -1019,24 +1082,33 @@ def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline:
     return groups
 
 
-def _reaching_edges(edges: list[dict], reached: set[str], max_depth: int) -> dict[str, dict]:
-    """The confirmed edge that first reached each source node, over at most max_depth rounds."""
+def _reaching_edges(
+    graph, reached: set[str], bounds: ImpactLimits, deadline: float
+) -> dict[str, dict]:
+    """The confirmed edge that first reached each source node, one hop a round."""
     used: dict[str, dict] = {}
-    for _depth in range(max_depth):
-        if not _extend_reach(edges, reached, used):
+    frontier = sorted(reached)
+    for _depth in range(bounds.max_depth):
+        if not frontier:
             break
+        _check_impact_stop(deadline)
+        frontier = _extend_reach(_edges_into(graph, frontier, bounds, deadline), reached, used)
     return used
 
 
-def _extend_reach(edges: list[dict], reached: set[str], used: dict[str, dict]) -> bool:
-    added = False
+def _extend_reach(edges: list[dict], reached: set[str], used: dict[str, dict]) -> list[str]:
+    """The nodes this round reached for the first time: the next round's frontier.
+
+    `reached` grows only after the round is read, so a round is exactly one hop
+    and `max_depth` is a depth (audit 3, B33).
+    """
+    fresh: dict[str, dict] = {}
     for edge in edges:
-        if not _extends_reach(edge, reached):
-            continue
-        reached.add(edge["source_node_id"])
-        used[edge["source_node_id"]] = edge
-        added = True
-    return added
+        if _extends_reach(edge, reached):
+            fresh[edge["source_node_id"]] = edge
+    reached.update(fresh)
+    used.update(fresh)
+    return sorted(fresh)
 
 
 def _extends_reach(edge: dict, reached: set[str]) -> bool:
