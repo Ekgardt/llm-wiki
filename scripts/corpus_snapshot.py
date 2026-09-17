@@ -24,7 +24,13 @@ from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
-EXTRACTOR_VERSION = "markdown-heading-extractor/v3"
+# The name of the rule that cuts a source into chunks. Change where anything is cut
+# and this moves with it: deep validation, the doctor and the nightly all ask whether a
+# generation was made by today's rule by reading this string. v4 (2026-09-17) names the
+# 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
+# `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
+# `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
+EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
 MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
