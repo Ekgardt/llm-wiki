@@ -501,7 +501,7 @@ Recovery rolls verified prepared/applying transactions forward and quarantines a
 target that matches neither its recorded before nor after hash. It never overwrites
 unknown bytes. Undo creates a new forward transaction and works only while every
 target still matches the original committed after-hash. Pruning removes expired
-transaction images; after the 30-day undo window, or after an explicit prune, that
+transaction images; after the 2-day undo window, or after an explicit prune, that
 undo history is gone. External editors may briefly observe a mixed tree while a
 multi-file transaction applies. CAS safety is guaranteed only for cooperating
 transaction-API writers; concurrent external edits are unsupported and detected
@@ -604,7 +604,7 @@ backfill remain disabled.
 
 `cache/` and `logs/` are disposable. Do not delete `run/` until `doctor` reports no
 nonterminal, conflicted, quarantined, or source failure transaction; no transaction
-inside the 30-day undo window; no retained queue task/result or legacy queue artifact;
+inside the 2-day undo window; no retained queue task/result or legacy queue artifact;
    and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
    retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never

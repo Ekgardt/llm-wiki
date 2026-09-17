@@ -118,7 +118,7 @@ completion. See `knowledge/notes/solo-operator-superset-product-decision.md`.
 transactions with before/after hashes. Project handoff is projected from an
 append-only `journal.md`. `cache/` and `logs/` are disposable; `run/` must not be
 deleted while doctor reports a nonterminal, conflicted, or quarantined
-transaction, a transaction inside the 30-day undo window, or any retained queue
+transaction, a transaction inside the 2-day undo window, or any retained queue
 task or result, or while a project lease, writer, queue worker, or maintenance
 owner is live. Deleting eligible committed artifacts loses undo history.
 
@@ -132,7 +132,7 @@ writers. Queue delivery is at least once. Archives keep 90 hot days and preserve
 logical evidence in immutable uncompressed BagIt packages. Claims with uncertain
 evidence or evaluator disagreement enter quarantine; automatic semantic supersession
 and eager backfill remain disabled. Do not delete `run/` while doctor reports a
-source failure, any 30-day undo artifact, retained work/result, or live owner. There
+source failure, any 2-day undo artifact, retained work/result, or live owner. There
 is no persistent daemon, cloud service, remote queue/cache, exactly-once promise, or
 gzip archive tier. The single automatic Git operation is the nightly fast-forward
 update of the checkout, which never pushes, never resolves a conflict, and declines

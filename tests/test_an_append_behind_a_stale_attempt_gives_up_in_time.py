@@ -16,6 +16,8 @@ from pathlib import Path
 import markdown_transaction
 from markdown_transaction import MarkdownCoordinator
 
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+
 _LOG = "knowledge/daily/2026-08-25.md"
 
 
@@ -63,7 +65,7 @@ def test_the_caller_gets_a_timeout_at_its_deadline(tmp_path: Path) -> None:
     )
 
     worker.start()
-    worker.join(20)
+    worker.join(SHORT_TIMEOUT)
 
     assert _states(coordinator) == ["preparing"]
     assert (worker.is_alive(), outcome) == (False, [TimeoutError])
@@ -80,6 +82,6 @@ def test_without_a_deadline_the_caller_still_gets_a_timeout(tmp_path: Path) -> N
     )
 
     worker.start()
-    worker.join(60)
+    worker.join(LONG_TIMEOUT)
 
     assert (worker.is_alive(), outcome) == (False, [TimeoutError])

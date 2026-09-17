@@ -305,7 +305,7 @@ of claim ledgers.
 The system performs no automatic Git staging, commit, branch, or remote operation.
 It adds no cloud service, remote queue/cache, or persistent daemon. Runtime databases
 coordinate local work only. Operational defaults are 10-second transaction and
-5-second queue busy timeouts; 30-day transaction/undo retention; 90-day archive hot
+5-second queue busy timeouts; 2-day transaction/undo retention; 90-day archive hot
 retention; 30/10-second project lease/heartbeat; 30-second checkpoint debounce and
 20-event fallback; 120/40-second queue lease/heartbeat; 8 attempts with 30/3600-second
 retry base/cap; and worker limits of 20 tasks, 600 seconds, and 2 idle seconds.

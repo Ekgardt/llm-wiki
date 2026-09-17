@@ -635,16 +635,15 @@ def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch
     real_thread = retrieval.threading.Thread
     starts = 0
 
-    class FailingThenRealThread:
-        def __init__(self, *args, **kwargs):
-            self._thread = real_thread(*args, **kwargs)
-
+    # A real thread, so the registry that tracks inference threads forgets it when it
+    # ends; a wrapper object stayed registered for the rest of the test session.
+    class FailingThenRealThread(real_thread):
         def start(self):
             nonlocal starts
             starts += 1
             if starts <= retrieval.MAX_OPTIONAL_STRAGGLERS:
                 raise RuntimeError("thread startup failed")
-            self._thread.start()
+            super().start()
 
     monkeypatch.setattr(retrieval.threading, "Thread", FailingThenRealThread)
     monkeypatch.setattr(

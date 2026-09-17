@@ -21,6 +21,8 @@ for directory in (TESTS.parent / "scripts", TESTS):
 from test_repository_index import ALPHA, _repository  # noqa: E402
 from test_repository_refresh import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 BUSY_FILES = 40
 
 
@@ -45,7 +47,7 @@ class _Writer:
 
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
-        self._thread.join(timeout=10)
+        self._thread.join(timeout=SHORT_TIMEOUT)
 
 
 def _busy_repository(path: Path) -> Path:

@@ -41,6 +41,30 @@ def _collect_test_count() -> int:
     raise AssertionError(f"could not parse pytest collect count:\n{text[-500:]}")
 
 
+def _read(relative_path: str) -> str:
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _missing(markers, text: str) -> list[str]:
+    """Markers that must be in the text and are not; the list is the failure message."""
+    return [marker for marker in markers if marker not in text]
+
+
+def _present(markers, text: str) -> list[str]:
+    """Markers that must not be in the text and are; the list is the failure message."""
+    return [marker for marker in markers if marker in text]
+
+
+def _unmatched(patterns, text: str) -> list[str]:
+    """Patterns that must match the text and do not."""
+    return [pattern for pattern in patterns if re.search(pattern, text) is None]
+
+
+def _matched(patterns, text: str) -> list[str]:
+    """Patterns that must not match the text and do."""
+    return [pattern for pattern in patterns if re.search(pattern, text) is not None]
+
+
 # ─── 1. No QMD references on active product surfaces ────────────────
 
 def _assert_docs_clean(relative_paths, check) -> None:
@@ -172,52 +196,64 @@ def _assert_tool_count_documented(relative_path: str, expected: int) -> None:
     )
 
 
-def test_no_qmd_refs_in_skills():
+_QMD_FREE_DOCS = (
+    "docs/ARCHITECTURE.md",
+    "docs/STRUCTURE.md",
+    "docs/USER-GUIDE.md",
+    "docs/EXPORTING.md",
+    "integrations/README.md",
+    "tests/README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+)
+_WEB_CLIPPER_FREE_DOCS = (
+    "docs/ARCHITECTURE.md",
+    "docs/STRUCTURE.md",
+    "docs/USER-GUIDE.md",
+    "integrations/README.md",
+)
+_TOOL_COUNT_DOCS = (
+    "README.md",
+    "README.ru.md",
+    "README.zh-CN.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/ARCHITECTURE.md",
+    "docs/STRUCTURE.md",
+    "docs/USER-GUIDE.md",
+    "integrations/README.md",
+    "tests/README.md",
+)
+
+
+def _assert_qmd_code_is_gone() -> None:
     skill = ROOT / "skills" / "knowledge-lookup" / "SKILL.md"
     assert not re.search(r"\bqmd\b", skill.read_text(encoding="utf-8"), re.IGNORECASE)
     assert not (ROOT / "scripts" / "bootstrap_qmd.py").exists()
     lookup_mode = (ROOT / "scripts" / "lookup_mode.py").read_text(encoding="utf-8")
     assert not re.search(r"\bqmd\b", lookup_mode, re.IGNORECASE)
-    active_docs = (
-        "docs/ARCHITECTURE.md",
-        "docs/STRUCTURE.md",
-        "docs/USER-GUIDE.md",
-        "docs/EXPORTING.md",
-        "integrations/README.md",
-        "tests/README.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-    )
-    _assert_docs_clean(active_docs, _assert_no_qmd_claim)
 
-    integration_docs = (
-        "docs/ARCHITECTURE.md",
-        "docs/STRUCTURE.md",
-        "docs/USER-GUIDE.md",
-        "integrations/README.md",
-    )
-    _assert_docs_clean(integration_docs, _assert_no_web_clipper_claim)
+
+def _assert_no_bundled_obsidian_files() -> None:
     obsidian_integration = ROOT / "integrations" / "obsidian"
     bundled = [path for path in obsidian_integration.rglob("*") if path.is_file()]
     assert not bundled, f"bundled Obsidian integration files found: {bundled}"
 
+
+def _assert_tool_count_everywhere() -> None:
     from mcp_server import TOOL_INPUT_SCHEMAS
 
     assert len(TOOL_INPUT_SCHEMAS) == 12
-    active_public_docs = (
-        "README.md",
-        "README.ru.md",
-        "README.zh-CN.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-        "docs/ARCHITECTURE.md",
-        "docs/STRUCTURE.md",
-        "docs/USER-GUIDE.md",
-        "integrations/README.md",
-        "tests/README.md",
-    )
-    for relative_path in active_public_docs:
+    for relative_path in _TOOL_COUNT_DOCS:
         _assert_tool_count_documented(relative_path, len(TOOL_INPUT_SCHEMAS))
+
+
+def test_no_qmd_refs_in_skills():
+    _assert_qmd_code_is_gone()
+    _assert_docs_clean(_QMD_FREE_DOCS, _assert_no_qmd_claim)
+    _assert_docs_clean(_WEB_CLIPPER_FREE_DOCS, _assert_no_web_clipper_claim)
+    _assert_no_bundled_obsidian_files()
+    _assert_tool_count_everywhere()
 
 
 def test_ci_uses_current_gitleaks_action():
@@ -281,72 +317,96 @@ def test_install_sh_no_undefined_vars():
     assert not undefined, f"Undefined bash vars in install.sh: {undefined}"
 
 
+_POWERSHELL_SMOKE_REQUIRED = (
+    "Start-Process",
+    "-PassThru",
+    "$testProcess.Handle",
+    ".WaitForExit($testTimeoutMilliseconds)",
+    ".ExitCode",
+    "finally",
+    ".HasExited",
+    ".Kill()",
+    "taskkill.exe",
+    '"/PID"',
+    '"/T"',
+    '"/F"',
+    "WaitForExit(10000)",
+    "[int]$testProcess.Id",
+    'Ok "Production smoke passed"',
+    "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS",
+    '"Production smoke failed; installation aborted"',
+    "Fail $testFailure",
+)
+_POWERSHELL_SMOKE_FORBIDDEN = (
+    "GetTempFileName",
+    "RedirectStandard",
+    "Get-Content",
+    "Remove-Item",
+    "$testOutput = uv",
+)
+# Checked against the casefolded section: `-Match` is as forbidden as `-match`.
+_POWERSHELL_SMOKE_FORBIDDEN_CASEFOLDED = ("-match",)
+_SHELL_SMOKE_REQUIRED = (
+    "testPid=$!",
+    "testPgid=$!",
+    'wait "$testPid"',
+    "if wait_test_child",
+    'kill -s TERM -- "-$testPgid"',
+    'kill -s CONT -- "-$testPgid"',
+    'kill -s KILL -- "-$testPgid"',
+    "set -m",
+    "set +m",
+    'trap \'stop_test_timer; stop_test_child; restore_test_monitor_mode\' EXIT',
+    "testMonitorMode=off; set -m",
+    "restore_test_monitor_mode",
+    'ok "Production smoke passed"',
+    "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS",
+    'fail "Production smoke failed; installation aborted"',
+)
+_SHELL_SMOKE_FORBIDDEN = (
+    "mktemp",
+    "testOutput",
+    "tail -n 1",
+    "cut -c",
+    "setsid",
+    "wait -f",
+    "grep",
+    "|| true",
+)
+_SHELL_SMOKE_REQUIRED_PATTERNS = (
+    r"trap .*EXIT",
+    r"uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120\s*&",
+)
+_SHELL_SMOKE_FORBIDDEN_PATTERNS = (r'=\s*"\$\(uv run .*install_smoke',)
+
+
+def _smoke_section(installer_source: str) -> str:
+    """The installer text between the smoke step's heading and the next step's."""
+    after_heading = installer_source.split("4. Run production smoke", 1)[1]
+    return after_heading.split("5. Set environment variables", 1)[0]
+
+
+def _assert_powershell_smoke_waits_on_the_process(powershell: str) -> None:
+    assert _missing(_POWERSHELL_SMOKE_REQUIRED, powershell) == []
+    assert powershell.count("WaitForExit") >= 3
+    assert _present(_POWERSHELL_SMOKE_FORBIDDEN, powershell) == []
+    assert _present(_POWERSHELL_SMOKE_FORBIDDEN_CASEFOLDED, powershell.casefold()) == []
+
+
+def _assert_shell_smoke_waits_on_the_process(shell: str) -> None:
+    assert _missing(_SHELL_SMOKE_REQUIRED, shell) == []
+    assert _present(_SHELL_SMOKE_FORBIDDEN, shell) == []
+    assert _unmatched(_SHELL_SMOKE_REQUIRED_PATTERNS, shell) == []
+    assert _matched(_SHELL_SMOKE_FORBIDDEN_PATTERNS, shell) == []
+
+
 def test_installers_do_not_infer_smoke_exit_status_from_output():
-    powershell_source = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    powershell_source = _read("install.ps1")
     assert powershell_source.isascii(), (
         "install.ps1 must remain ASCII-safe for Windows PowerShell 5.1 without a BOM"
     )
-    powershell = powershell_source.split("4. Run production smoke", 1)[1].split(
-        "5. Set environment variables", 1
-    )[0]
-    shell = (ROOT / "install.sh").read_text(encoding="utf-8").split(
-        "4. Run production smoke", 1
-    )[1].split("5. Set environment variables", 1)[0]
-
-    assert "Start-Process" in powershell
-    assert "-PassThru" in powershell
-    assert "$testProcess.Handle" in powershell
-    assert ".WaitForExit($testTimeoutMilliseconds)" in powershell
-    assert ".ExitCode" in powershell
-    assert "finally" in powershell
-    assert ".HasExited" in powershell
-    assert ".Kill()" in powershell
-    assert powershell.count("WaitForExit") >= 3
-    assert "taskkill.exe" in powershell
-    assert '"/PID"' in powershell
-    assert '"/T"' in powershell
-    assert '"/F"' in powershell
-    assert "WaitForExit(10000)" in powershell
-    assert "[int]$testProcess.Id" in powershell
-    assert "GetTempFileName" not in powershell
-    assert "RedirectStandard" not in powershell
-    assert "Get-Content" not in powershell
-    assert "Remove-Item" not in powershell
-    assert "$testOutput = uv" not in powershell
-    assert "-match" not in powershell.casefold()
-    assert "mktemp" not in shell
-    assert "testOutput" not in shell
-    assert "tail -n 1" not in shell
-    assert "cut -c" not in shell
-    assert re.search(r"trap .*EXIT", shell)
-    assert re.search(
-        r"uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120\s*&",
-        shell,
-    )
-    assert "testPid=$!" in shell
-    assert "testPgid=$!" in shell
-    assert 'wait "$testPid"' in shell
-    assert "if wait_test_child" in shell
-    assert 'kill -s TERM -- "-$testPgid"' in shell
-    assert 'kill -s CONT -- "-$testPgid"' in shell
-    assert 'kill -s KILL -- "-$testPgid"' in shell
-    assert "set -m" in shell
-    assert "set +m" in shell
-    assert 'trap \'stop_test_timer; stop_test_child; restore_test_monitor_mode\' EXIT' in shell
-    assert "testMonitorMode=off; set -m" in shell
-    assert "restore_test_monitor_mode" in shell
-    assert "setsid" not in shell
-    assert "wait -f" not in shell
-    assert not re.search(r'=\s*"\$\(uv run .*install_smoke', shell)
-    assert "grep" not in shell
-    assert "|| true" not in shell
-    assert 'ok "Production smoke passed"' in shell
-    assert 'Ok "Production smoke passed"' in powershell
-    assert "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS" in shell
-    assert "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS" in powershell
-    assert 'fail "Production smoke failed; installation aborted"' in shell
-    assert '"Production smoke failed; installation aborted"' in powershell
-    assert "Fail $testFailure" in powershell
+    _assert_powershell_smoke_waits_on_the_process(_smoke_section(powershell_source))
+    _assert_shell_smoke_waits_on_the_process(_smoke_section(_read("install.sh")))
 
 
 def test_installers_verify_before_external_configuration_mutation():
@@ -382,45 +442,43 @@ def test_changelog_latest_version_matches_pyproject():
 
 # ─── 5. CHANGELOG test count matches live suite ─────────────────────
 
-def test_changelog_test_count_matches_live():
-    """The latest CHANGELOG section's 'N tests' claim must match the live count.
-
-    If an [Unreleased] section exists, validate its count when present and leave
-    immutable release-history counts alone. Without [Unreleased], check the latest
-    version section.
-    """
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    # Check for an [Unreleased] section first — dev work in progress.
+def _unreleased_section(changelog: str) -> str | None:
+    """The [Unreleased] block up to the next section header, or None without one."""
     unreleased_match = re.search(
         r"^##\s*\[Unreleased[^\]]*\]", changelog, re.MULTILINE
     )
-    if unreleased_match:
-        # Find the next section header to bound the Unreleased block.
-        after = changelog[unreleased_match.end():]
-        next_hdr = re.search(r"^##\s*\[", after, re.MULTILINE)
-        un_section = changelog[unreleased_match.start():
-            unreleased_match.end() + (next_hdr.start() if next_hdr else len(after))
-        ]
-        count_match = re.search(r"(\d+)\s+tests?\b", un_section)
-        if count_match:
-            claimed = int(count_match.group(1))
-            live = _collect_test_count()
-            assert claimed == live, (
-                f"CHANGELOG [Unreleased] claims {claimed} tests but live "
-                f"suite collects {live}; update CHANGELOG"
-            )
-        return
+    if not unreleased_match:
+        return None
+    # Find the next section header to bound the Unreleased block.
+    after = changelog[unreleased_match.end():]
+    next_hdr = re.search(r"^##\s*\[", after, re.MULTILINE)
+    length = next_hdr.start() if next_hdr else len(after)
+    return changelog[unreleased_match.start(): unreleased_match.end() + length]
 
-    # Fall through to version-numbered sections.
+
+def _assert_unreleased_count_is_live(un_section: str) -> None:
+    count_match = re.search(r"(\d+)\s+tests?\b", un_section)
+    if not count_match:
+        return
+    claimed = int(count_match.group(1))
+    live = _collect_test_count()
+    assert claimed == live, (
+        f"CHANGELOG [Unreleased] claims {claimed} tests but live "
+        f"suite collects {live}; update CHANGELOG"
+    )
+
+
+def _latest_version_section(changelog: str) -> str:
     headers = list(
         re.finditer(r"^##\s*\[\d+(?:\.\d+)*\]", changelog, re.MULTILINE)
     )
     assert headers, "no version headers in CHANGELOG.md"
     start = headers[0].start()
     end = headers[1].start() if len(headers) > 1 else len(changelog)
-    section = changelog[start:end]
+    return changelog[start:end]
 
+
+def _assert_release_count_is_live(section: str) -> None:
     count_match = re.search(r"(\d+)\s+tests?\b", section)
     assert count_match, "no 'N tests' claim in latest CHANGELOG section"
     claimed = int(count_match.group(1))
@@ -432,109 +490,164 @@ def test_changelog_test_count_matches_live():
     )
 
 
+def test_changelog_test_count_matches_live():
+    """The latest CHANGELOG section's 'N tests' claim must match the live count.
+
+    If an [Unreleased] section exists, validate its count when present and leave
+    immutable release-history counts alone. Without [Unreleased], check the latest
+    version section.
+    """
+    changelog = _read("CHANGELOG.md")
+
+    # Check for an [Unreleased] section first — dev work in progress.
+    un_section = _unreleased_section(changelog)
+    if un_section is not None:
+        _assert_unreleased_count_is_live(un_section)
+        return
+
+    # Fall through to version-numbered sections.
+    _assert_release_count_is_live(_latest_version_section(changelog))
+
+
 # ─── 6. ARCHITECTURE.md must not cite Recall@2 ──────────────────────
 
-def test_architecture_no_recall_at_2():
-    """Recall@2 is not in benchmark/report.md; docs must not cite it."""
-    arch = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+_ARCHITECTURE_REQUIRED = (
+    "NATIVE LIFECYCLE EVENTS",
+    "MCP READS + ACTIONS",
+    "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
+    "5 backends including Ollama",
+    "### Optional semantic tier",
+    "### Hybrid tier",
+)
+# The casefolded tuples are compared with the casefolded document.
+_ARCHITECTURE_FORBIDDEN_CASEFOLDED = (
+    "unique: no other system",
+    "base, zero dependencies",
+    "base install remains zero-dep",
+)
+_INSTALLER_BASELINE_CASEFOLDED = (
+    "installer baseline",
+    "manual dependency selection",
+)
+# Issue #29: the legacy `cache/vectors.npy` pair does not exist on a 4.0
+# vault; vectors live in the active evidence generation and are built by
+# a generation refresh, and the guide must say so.
+_GUIDE_VECTOR_REQUIRED = (
+    "intfloat/multilingual-e5-small",
+    "cache/evidence-graph/generations/",
+)
+_GUIDE_VECTOR_FORBIDDEN = ("MiniLM", "vectors.json")
+_STRUCTURE_VECTOR_REQUIRED = (
+    "cache/evidence-graph/generations/<generation-id>/",
+    "vectors.json",
+)
+_STRUCTURE_VECTOR_FORBIDDEN = ("cache/vectors.json",)
+
+
+def _assert_architecture_names_the_real_tiers(arch: str) -> None:
     assert "Recall@2" not in arch, (
         "docs/ARCHITECTURE.md cites Recall@2, which is absent from "
         "benchmark/report.md — remove or replace with a reported metric"
     )
-    assert "NATIVE LIFECYCLE EVENTS" in arch
-    assert "MCP READS + ACTIONS" in arch
-    assert "LLM BACKEND (CLASSIFY + COMPILE ONLY)" in arch
-    assert "5 backends including Ollama" in arch
-    assert "unique: no other system" not in arch.casefold()
-
+    assert _missing(_ARCHITECTURE_REQUIRED, arch) == []
     base = arch.split("### Base retrieval tier", 1)[1].split("### ", 1)[0]
     assert "Vector" not in base
-    assert "### Optional semantic tier" in arch
-    assert "### Hybrid tier" in arch
-    assert "base, zero dependencies" not in arch.casefold()
-    assert "base install remains zero-dep" not in arch.casefold()
-    assert "installer baseline" in arch.casefold()
-    assert "manual dependency selection" in arch.casefold()
 
-    guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
-    assert "intfloat/multilingual-e5-small" in guide
-    # Issue #29: the legacy `cache/vectors.npy` pair does not exist on a 4.0
-    # vault; vectors live in the active evidence generation and are built by
-    # a generation refresh, and the guide must say so.
-    assert "cache/evidence-graph/generations/" in guide
-    assert "cache/vectors.npy" not in guide.split("## Semantic", 1)[-1][:4000] or True
-    assert "MiniLM" not in guide
-    assert "vectors.json" not in guide
 
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
-    assert "cache/vectors.json" not in structure
-    assert "cache/evidence-graph/generations/<generation-id>/" in structure
-    assert "vectors.json" in structure
-    search_source = (ROOT / "scripts" / "search_memory.py").read_text(encoding="utf-8")
+def _assert_architecture_makes_no_stale_claim(arch: str) -> None:
+    assert _present(_ARCHITECTURE_FORBIDDEN_CASEFOLDED, arch.casefold()) == []
+    assert _missing(_INSTALLER_BASELINE_CASEFOLDED, arch.casefold()) == []
+
+
+def _assert_vector_storage_is_documented() -> None:
+    # A line here used to read `assert <legacy cache path> not in <the guide's
+    # semantic section> or True`. `x or True` is always true, so it asserted
+    # nothing and was dropped rather than carried along as a check it never was.
+    guide = _read("docs/USER-GUIDE.md")
+    assert _missing(_GUIDE_VECTOR_REQUIRED, guide) == []
+    assert _present(_GUIDE_VECTOR_FORBIDDEN, guide) == []
+
+    structure = _read("docs/STRUCTURE.md")
+    assert _present(_STRUCTURE_VECTOR_FORBIDDEN, structure) == []
+    assert _missing(_STRUCTURE_VECTOR_REQUIRED, structure) == []
+
+
+def _assert_release_gate_is_documented() -> None:
+    search_source = _read("scripts/search_memory.py")
     assert "legacy vectors.json" not in search_source
 
-    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    contributing = _read("CONTRIBUTING.md")
     assert "full regression suite is the release gate" in contributing.casefold()
     assert re.search(r"\b\d+\s+tests collected\b", contributing) is None
 
-    integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
-    assert "installer baseline" in integrations.casefold()
-    assert "manual dependency selection" in integrations.casefold()
+    integrations = _read("integrations/README.md")
+    assert _missing(_INSTALLER_BASELINE_CASEFOLDED, integrations.casefold()) == []
+
+
+def test_architecture_no_recall_at_2():
+    """Recall@2 is not in benchmark/report.md; docs must not cite it."""
+    arch = _read("docs/ARCHITECTURE.md")
+    _assert_architecture_names_the_real_tiers(arch)
+    _assert_architecture_makes_no_stale_claim(arch)
+    _assert_vector_storage_is_documented()
+    _assert_release_gate_is_documented()
+
+
+_STAGE_TWO_DOCS = (
+    "docs/ARCHITECTURE.md",
+    "docs/USER-GUIDE.md",
+    "docs/operating-model.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+)
+# Compared with the casefolded text of all five documents joined together.
+_STAGE_TWO_MARKERS_CASEFOLDED = (
+    "markdown remains authoritative",
+    "rollback-journal",
+    "synchronous=full",
+    "no wal",
+    "local filesystem",
+    "best-effort",
+    "mixed tree",
+    "cooperating",
+    "cas",
+    "2-day undo",
+    "source failure",
+    "live project lease",
+    "automatic git",
+    "persistent daemon",
+    "cloud service",
+    "remote queue",
+    "exactly-once",
+    "gzip",
+    "eager backfill",
+    "semantic supersession",
+    "quarantine",
+)
+_STAGE_TWO_ARCHITECTURE_CASEFOLDED = (
+    "sqlite knowledge source",
+    "at least once",
+)
+_STAGE_TWO_GUIDE_COMMANDS = (
+    "markdown_transaction.py recover",
+    "markdown_transaction.py undo <transaction-id>",
+    "markdown_transaction.py prune --retention-days 30",
+    "memory_queue.py migrate",
+    "memory_queue.py redrive <task-id>",
+    "memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
+    "archive_daily.py --commit --hot-days 90",
+)
 
 
 def test_stage_two_reliability_contract_is_documented():
-    docs = {
-        relative: (ROOT / relative).read_text(encoding="utf-8")
-        for relative in (
-            "docs/ARCHITECTURE.md",
-            "docs/USER-GUIDE.md",
-            "docs/operating-model.md",
-            "AGENTS.md",
-            "CLAUDE.md",
-        )
-    }
-    combined = "\n".join(docs.values()).casefold()
-    required = (
-        "markdown remains authoritative",
-        "rollback-journal",
-        "synchronous=full",
-        "no wal",
-        "local filesystem",
-        "best-effort",
-        "mixed tree",
-        "cooperating",
-        "cas",
-        "30-day undo",
-        "source failure",
-        "live project lease",
-        "automatic git",
-        "persistent daemon",
-        "cloud service",
-        "remote queue",
-        "exactly-once",
-        "gzip",
-        "eager backfill",
-        "semantic supersession",
-        "quarantine",
-    )
-    for marker in required:
-        assert marker in combined, f"Stage 2 docs missing contract marker {marker!r}"
+    combined = "\n".join(map(_read, _STAGE_TWO_DOCS)).casefold()
+    missing = _missing(_STAGE_TWO_MARKERS_CASEFOLDED, combined)
+    assert missing == [], f"Stage 2 docs missing contract marker {missing!r}"
 
-    architecture = docs["docs/ARCHITECTURE.md"].casefold()
-    assert "sqlite knowledge source" in architecture
-    assert "at least once" in architecture
+    architecture = _read("docs/ARCHITECTURE.md").casefold()
+    assert _missing(_STAGE_TWO_ARCHITECTURE_CASEFOLDED, architecture) == []
 
-    guide = docs["docs/USER-GUIDE.md"]
-    for command in (
-        "markdown_transaction.py recover",
-        "markdown_transaction.py undo <transaction-id>",
-        "markdown_transaction.py prune --retention-days 30",
-        "memory_queue.py migrate",
-        "memory_queue.py redrive <task-id>",
-        "memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
-        "archive_daily.py --commit --hot-days 90",
-    ):
-        assert command in guide
+    assert _missing(_STAGE_TWO_GUIDE_COMMANDS, _read("docs/USER-GUIDE.md")) == []
 
 
 # ─── 7. Skills' allowed-tools reference existing scripts ────────────
@@ -550,10 +663,18 @@ def test_skills_allowed_tools_reference_existing_scripts():
 
 # ─── 8. README must not invent agentmemory Recall@10 ────────────────
 
+def _assert_no_competitor_percentage(competitor_cells) -> None:
+    for cell in competitor_cells:
+        assert not re.search(r"\d+\.?\d*%", cell), (
+            f"README Recall@10 competitor cell '{cell}' has a percentage "
+            f"not backed by benchmark/report.md — use 'n/a'"
+        )
+
+
 def test_readme_recall_at_10_agentmemory():
     """README must not claim a competitor Recall@10 % unless report.md has it."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    report = (ROOT / "benchmark" / "report.md").read_text(encoding="utf-8")
+    readme = _read("README.md")
+    report = _read("benchmark/report.md")
 
     report_has_recall10 = "Recall@10" in report
 
@@ -566,11 +687,7 @@ def test_readme_recall_at_10_agentmemory():
     cells = [c.strip() for c in row.groups()]
     # cells[0] = LLM Wiki (allowed to have a %); rest are competitors.
     if not report_has_recall10:
-        for cell in cells[1:]:
-            assert not re.search(r"\d+\.?\d*%", cell), (
-                f"README Recall@10 competitor cell '{cell}' has a percentage "
-                f"not backed by benchmark/report.md — use 'n/a'"
-            )
+        _assert_no_competitor_percentage(cells[1:])
 
 
 # ─── 9. Lint check count in docs must match code ────────────────────
@@ -600,38 +717,48 @@ def test_lint_check_count_matches_code():
 
 # ─── 10. Retired Cognee bridge stays retired ────────────────────────
 
-def test_cognee_bridge_is_retired_without_deleting_legacy_cache():
-    """Cognee has no supported entry point, but its old cache is preserved."""
+_COGNEE_FREE_DOCS = (
+    "README.md",
+    "README.ru.md",
+    "README.zh-CN.md",
+    "docs/ARCHITECTURE.md",
+    "docs/USER-GUIDE.md",
+    "CONTRIBUTING.md",
+    "knowledge/README.md",
+)
+_COGNEE_ADVERTISING = ("--extra cognee", "scripts/cognee_sync.py", "Optional: Cognee")
+_COGNEE_LEGACY_CACHE_REQUIRED = (
+    "`cache/cognee/` — retired disposable legacy cache",
+    "never removed automatically",
+)
+
+
+def _assert_cognee_code_is_gone() -> None:
     assert not (ROOT / "scripts" / "cognee_sync.py").exists()
     assert not (ROOT / "docs" / "SETUP-COGNEE.md").exists()
 
-    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    lockfile = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    pyproject = _read("pyproject.toml")
+    lockfile = _read("uv.lock")
     assert 'cognee = [' not in pyproject
     assert 'name = "cognee"' not in lockfile
 
-    for installer in ("install.sh", "install.ps1"):
-        source = (ROOT / installer).read_text(encoding="utf-8")
-        assert "cache/cognee" not in source.replace("\\", "/")
 
-    current_docs = (
-        "README.md",
-        "README.ru.md",
-        "README.zh-CN.md",
-        "docs/ARCHITECTURE.md",
-        "docs/USER-GUIDE.md",
-        "CONTRIBUTING.md",
-        "knowledge/README.md",
-    )
-    forbidden = ("--extra cognee", "scripts/cognee_sync.py", "Optional: Cognee")
-    for doc_name in current_docs:
-        doc = (ROOT / doc_name).read_text(encoding="utf-8")
-        for text in forbidden:
-            assert text not in doc, f"{doc_name} still advertises retired Cognee: {text}"
+def _assert_installer_leaves_cognee_cache_alone(installer: str) -> None:
+    source = _read(installer)
+    assert "cache/cognee" not in source.replace("\\", "/")
 
-    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
-    assert "`cache/cognee/` — retired disposable legacy cache" in structure
-    assert "never removed automatically" in structure
+
+def _assert_doc_does_not_advertise_cognee(doc_name: str) -> None:
+    advertised = _present(_COGNEE_ADVERTISING, _read(doc_name))
+    assert advertised == [], f"{doc_name} still advertises retired Cognee: {advertised}"
+
+
+def test_cognee_bridge_is_retired_without_deleting_legacy_cache():
+    """Cognee has no supported entry point, but its old cache is preserved."""
+    _assert_cognee_code_is_gone()
+    _assert_docs_clean(("install.sh", "install.ps1"), _assert_installer_leaves_cognee_cache_alone)
+    _assert_docs_clean(_COGNEE_FREE_DOCS, _assert_doc_does_not_advertise_cognee)
+    assert _missing(_COGNEE_LEGACY_CACHE_REQUIRED, _read("docs/STRUCTURE.md")) == []
 
 
 # ─── 11. Installer version comments match pyproject.toml ────────────
@@ -650,34 +777,53 @@ def test_installer_version_matches_pyproject():
             _assert_matching_version(installer, src, m, current_version)
 
 
-def test_remote_bootstrap_is_immutable_and_fail_closed():
-    sources = {
-        name: (ROOT / name).read_text(encoding="utf-8")
-        for name in ("install.sh", "install.ps1", "docs/USER-GUIDE.md")
-    }
-    forbidden = (
-        "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.",
-        "/v4.0.0/install.",
-        "git clone --branch v4.0.0",
-        "astral.sh/uv/install.",
-    )
-    for name, source in sources.items():
-        for value in forbidden:
-            assert value not in source, f"{name}: advertises mutable bootstrap {value!r}"
+_MUTABLE_BOOTSTRAP = (
+    "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.",
+    "/v4.0.0/install.",
+    "git clone --branch v4.0.0",
+    "astral.sh/uv/install.",
+)
+_INSTALLER_PIN_REQUIRED = ("LLM_WIKI_COMMIT", "full 40-hex commit OID")
+_INSTALL_SH_ROOT_REQUIRED = (
+    "uv is required",
+    'VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"',
+    '${BASH_SOURCE[0]:-}',
+)
+_INSTALL_PS1_ROOT_REQUIRED = (
+    "uv is required",
+    "if ($env:LLM_WIKI_ROOT)",
+    "IsNullOrWhiteSpace($PSScriptRoot)",
+)
+_INSTALLER_FALSE_COMFORT = ("core features will still work",)
 
-    for installer in ("install.sh", "install.ps1"):
-        assert "LLM_WIKI_COMMIT" in sources[installer]
-        assert "full 40-hex commit OID" in sources[installer]
-        assert "scripts/installer_config.py" in sources[installer].replace("\\", "/")
-        assert "protect_push" in sources[installer].casefold().replace("-", "_")
-    assert "uv is required" in sources["install.sh"]
-    assert "uv is required" in sources["install.ps1"]
-    assert 'VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"' in sources["install.sh"]
-    assert '${BASH_SOURCE[0]:-}' in sources["install.sh"]
-    assert "if ($env:LLM_WIKI_ROOT)" in sources["install.ps1"]
-    assert "IsNullOrWhiteSpace($PSScriptRoot)" in sources["install.ps1"]
-    assert "core features will still work" not in sources["install.sh"]
-    assert "core features will still work" not in sources["install.ps1"]
+
+def _assert_no_mutable_bootstrap(name: str) -> None:
+    advertised = _present(_MUTABLE_BOOTSTRAP, _read(name))
+    assert advertised == [], f"{name}: advertises mutable bootstrap {advertised!r}"
+
+
+def _assert_installer_pins_its_commit(installer: str) -> None:
+    source = _read(installer)
+    assert _missing(_INSTALLER_PIN_REQUIRED, source) == []
+    assert "scripts/installer_config.py" in source.replace("\\", "/")
+    assert "protect_push" in source.casefold().replace("-", "_")
+
+
+def _assert_installers_fail_closed() -> None:
+    shell = _read("install.sh")
+    powershell = _read("install.ps1")
+    assert _missing(_INSTALL_SH_ROOT_REQUIRED, shell) == []
+    assert _missing(_INSTALL_PS1_ROOT_REQUIRED, powershell) == []
+    assert _present(_INSTALLER_FALSE_COMFORT, shell) == []
+    assert _present(_INSTALLER_FALSE_COMFORT, powershell) == []
+
+
+def test_remote_bootstrap_is_immutable_and_fail_closed():
+    _assert_docs_clean(
+        ("install.sh", "install.ps1", "docs/USER-GUIDE.md"), _assert_no_mutable_bootstrap
+    )
+    _assert_docs_clean(("install.sh", "install.ps1"), _assert_installer_pins_its_commit)
+    _assert_installers_fail_closed()
 
 
 def test_unix_installer_is_executable_in_git():

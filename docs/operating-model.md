@@ -61,7 +61,7 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
   30/3600 seconds, and short-lived worker limits 20 tasks/600 seconds/2 idle seconds.
   Transaction undo retention is 30 days. Runtime CLI flags provide explicit overrides.
 - `run/` deletion is blocked by nonterminal/conflicted/quarantined transactions,
-  source failure, the 30-day undo window, retained queue tasks/results, and any live
+  source failure, the 2-day undo window, retained queue tasks/results, and any live
   project lease, writer, queue worker, or maintenance owner.
 - There is no automatic Git operation, persistent daemon, cloud service, remote
   queue/cache, SQLite knowledge source, gzip archive tier, or automatic purge.

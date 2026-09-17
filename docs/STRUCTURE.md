@@ -674,7 +674,7 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 **Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
 The current `run/` contains recoverable but operationally significant transactions
 and queued work. Delete it only after `doctor` reports no nonterminal, conflicted, or
-quarantined transaction, no transaction inside the 30-day undo window, and no
+quarantined transaction, no transaction inside the 2-day undo window, and no
 retained queue task or result, and no live project lease, writer, queue worker, or
 maintenance or LSP owner, and no retained LSP failure evidence. Deleting eligible
 committed artifacts loses undo history.

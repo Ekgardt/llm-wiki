@@ -28,6 +28,8 @@ from test_writer_gate_reclaims_a_dead_projection import (  # noqa: E402
     _coordinator,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def _hold_the_gate(coordinator, held: threading.Event, release: threading.Event) -> None:
     with coordinator.writer_gate():
@@ -58,7 +60,7 @@ def test_the_owner_enters_once_the_live_writer_leaves(tmp_path: Path) -> None:
     with coordinator.writer_gate(owner=owner, wait_seconds=30):
         entered = coordinator.writer_gate_held()
 
-    writer.join(30)
+    writer.join(SHORT_TIMEOUT)
     assert entered is True
 
 
@@ -72,5 +74,5 @@ def test_the_refusal_is_still_owner_busy_when_the_wait_runs_out(tmp_path: Path) 
             pass
 
     release.set()
-    writer.join(30)
+    writer.join(SHORT_TIMEOUT)
     assert refusal.value.code == "owner_busy"
