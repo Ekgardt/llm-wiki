@@ -404,7 +404,7 @@ def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
 def _annotation_suffix(argument: ast.arg) -> str:
     if argument.annotation is None:
         return ""
-    return f":{ast.unparse(argument.annotation)}"
+    return f":{_expression_text(argument.annotation)}"
 
 
 _ROUTE_MODULES = {
@@ -530,7 +530,7 @@ def _bound_parameters(node: Mapping[str, object]) -> list[str]:
 
 def _passed_name(value: ast.expr) -> str | None:
     if isinstance(value, (ast.Name, ast.Attribute)):
-        return ast.unparse(value)
+        return _expression_text(value)
     return None
 
 
@@ -741,6 +741,66 @@ def _route_path(decorator: ast.Call, receiver: str | None, receivers: set[str]) 
     return _string_constant(decorator.args[0])
 
 
+# Audit 3, B25. `@app.route` names no verb: "The methods parameter defaults to
+# ["GET"]. HEAD is always added automatically, and OPTIONS is added
+# automatically by default" (Flask, `add_url_rule`). It used to be filed under
+# the literal method `ROUTE`, which no HTTP-client lookup can ever ask for.
+# HEAD and OPTIONS are the framework's addition, not the repository's
+# declaration, so they are not minted. Research:
+# `docs/research/2026-09-17-graph-a-decorator-is-a-call-until-it-is-a-route.md`.
+_DEFAULT_ROUTE_METHODS = ("GET",)
+
+
+def _methods_keyword(decorator: ast.Call) -> ast.expr | None:
+    return next(
+        (item.value for item in decorator.keywords if item.arg == "methods"), None
+    )
+
+
+def _literal_methods(keyword: ast.expr | None) -> tuple[str, ...]:
+    if not isinstance(keyword, (ast.List, ast.Tuple, ast.Set)):
+        return ()
+    named = [_string_constant(item) for item in keyword.elts]
+    return tuple(item.upper() for item in named if item)
+
+
+def _declared_methods(decorator: ast.Call) -> tuple[str, ...]:
+    return _literal_methods(_methods_keyword(decorator)) or _DEFAULT_ROUTE_METHODS
+
+
+def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, ...]:
+    """The verbs one route decorator declares, in the order the source names them."""
+    if function.attr.lower() != "route":
+        return (function.attr.upper(),)
+    return _declared_methods(decorator)
+
+
+# Audit 3, B25. `ast.unparse` is recursive, and the `ast` documentation warns
+# that "Trying to unparse a highly complex expression would result with
+# RecursionError". An attribute chain is not nested source, so `a.b.b…()` 500
+# deep parses fine and then aborted the whole extraction from inside
+# `_call_edges`. Depth is measured iteratively before anything recurses.
+MAX_EXPRESSION_DEPTH = 64
+_TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
+
+
+def _expression_too_deep(node: ast.AST) -> bool:
+    frontier = [(node, 0)]
+    while frontier:
+        current, depth = frontier.pop()
+        if depth > MAX_EXPRESSION_DEPTH:
+            return True
+        frontier.extend((child, depth + 1) for child in ast.iter_child_nodes(current))
+    return False
+
+
+def _expression_text(node: ast.AST) -> str:
+    """What the source says, or a bounded stand-in when it is too deep to render."""
+    if _expression_too_deep(node):
+        return _TOO_DEEP_TEXT
+    return ast.unparse(node)
+
+
 def _call_fallback_reason(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> str:
     if isinstance(func, ast.Name) and func.id in aliases:
         return "missing_dependency"
@@ -925,6 +985,10 @@ class _Collector:
         self.function_parent_scope: dict[str, str] = {}
         self.scope_parent: dict[str, str] = {}
         self.route_receivers: dict[str, set[str]] = {}
+        # The `id()` of every decorator a route node was minted for, so the
+        # call-edge pass can leave exactly those alone (audit 3, B25). The
+        # trees stay alive for the whole of `extract()`, as `node_ast` relies on.
+        self.route_decorators: set[int] = set()
         self.sqlite_modules: dict[str, set[str]] = {}
         self.python_entry_names: dict[str, set[str]] = {}
         self.node_ast: dict[int, str] = {}
@@ -1443,11 +1507,23 @@ class _Collector:
         path = _route_path(decorator, receiver, self.route_receivers[source.record.logical_id])
         if path is None:
             self.add_observation(
-                function_id, "EXPOSES", ast.unparse(decorator),
+                function_id, "EXPOSES", _expression_text(decorator),
                 "unsupported_semantics", source, span,
             )
             return
-        method = function.attr.upper()
+        self.route_decorators.add(id(decorator))
+        for method in _route_methods(decorator, function):
+            self._route_node(method, path, qualified_name, function_id, source, span)
+
+    def _route_node(
+        self,
+        method: str,
+        path: str,
+        qualified_name: str,
+        function_id: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
         key = f"{self.repository_id}\x1f{method}\x1f{path}\x1f{qualified_name}"
         route = self.add_node(
             "route", "code-route/v1", key,
@@ -1548,7 +1624,7 @@ class _Collector:
     ) -> None:
         if isinstance(node, ast.ClassDef):
             self._inheritance_edges(ctx, node, aliases)
-        if isinstance(node, ast.Call) and not self._is_route_decorator(node, parent):
+        if isinstance(node, ast.Call) and not self._is_route_decorator(node):
             self._call_edges(ctx, node, aliases, parent)
 
     def _inheritance_edges(
@@ -1560,7 +1636,7 @@ class _Collector:
         for base in node.bases:
             targets = self._resolve_expression(base, ctx.module_name, aliases)
             self._resolved_edge(
-                class_id, "INHERITS", targets, ast.unparse(base), ctx.source, ctx.span(base),
+                class_id, "INHERITS", targets, _expression_text(base), ctx.source, ctx.span(base),
                 "unresolved_reference",
             )
 
@@ -1576,7 +1652,7 @@ class _Collector:
         span = ctx.span(node)
         targets = self._resolve_expression(node.func, ctx.module_name, aliases, owner)
         self._resolved_edge(
-            source_node_id, "CALLS", targets, ast.unparse(node.func), ctx.source, span,
+            source_node_id, "CALLS", targets, _expression_text(node.func), ctx.source, span,
             _call_fallback_reason(node.func, aliases),
             fallback_candidates=self._candidate_modules(node.func, aliases),
         )
@@ -2146,10 +2222,15 @@ class _Collector:
             current = parent.get(id(current))
         return None
 
-    @staticmethod
-    def _is_route_decorator(node: ast.Call, parent: Mapping[int, ast.AST]) -> bool:
-        current = parent.get(id(node))
-        return isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and node in current.decorator_list
+    def _is_route_decorator(self, node: ast.Call) -> bool:
+        """A call is a route decorator exactly when a route was minted for it.
+
+        Audit 3, B25: this used to answer "is this call in some function's
+        decorator list", so `@factory(1)` lost its CALLS edge while the same
+        decorator on a class kept it. Definitions are collected before edges
+        within one `extract()`, so the set is complete by the time it is read.
+        """
+        return id(node) in self.route_decorators
 
     def extract(self) -> CodeExtraction:
         self.check_stop()
