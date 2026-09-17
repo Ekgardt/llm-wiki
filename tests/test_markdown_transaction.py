@@ -28,6 +28,102 @@ from tests.slow_machine import SHORT_TIMEOUT
 # load. These waits bound a hang, not the expected duration.
 _COORDINATION_BUDGET_SECONDS = 60.0
 
+_CHANGED_PAGES = (
+    "knowledge/notes/new.md",
+    "knowledge/index.md",
+    "knowledge/log.md",
+)
+
+
+def _bytes_at(root: Path, relatives: tuple[str, ...]) -> tuple[bytes, ...]:
+    """What each named page holds, in one value a test can compare in one line."""
+    return tuple((root / relative).read_bytes() for relative in relatives)
+
+
+def _row(database: sqlite3.Connection, query: str, *parameters: object):
+    return database.execute(query, parameters).fetchone()
+
+
+def _prepared_artifacts(
+    artifact_root: Path, synced: list[Path]
+) -> tuple[bytes, bytes, bool, set[str]]:
+    """Both stored images, whether the plan is a file, and what was fsynced."""
+    return (
+        markdown_transaction._image_bytes(artifact_root / "before/000000.bin"),
+        markdown_transaction._image_bytes(artifact_root / "after/000000.bin"),
+        (artifact_root / "plan.json").is_file(),
+        {path.relative_to(artifact_root).as_posix() for path in synced},
+    )
+
+
+def _column_set(database: sqlite3.Connection, query: str, position: int) -> set[str]:
+    return {row[position] for row in database.execute(query)}
+
+
+def _schema_and_pragmas(path: Path, wanted: tuple[set[str], set[str], set[str]]):
+    """Which of the wanted tables and columns exist, and the durability pragmas.
+
+    Each found set is narrowed to the names asked about, so comparing the result
+    with those names is the subset test the schema contract actually makes.
+    """
+    queries = (
+        ("SELECT name FROM sqlite_master WHERE type='table'", 0),
+        ("PRAGMA table_info(writer_owners)", 1),
+        ('PRAGMA table_info("operation")', 1),
+    )
+    with sqlite3.connect(path) as database:
+        found = tuple(
+            _column_set(database, query, position) for query, position in queries
+        )
+        return (
+            *(names & asked for names, asked in zip(found, wanted)),
+            _row(database, "PRAGMA journal_mode")[0],
+            _row(database, "PRAGMA synchronous")[0],
+        )
+
+
+def _read_if_present(path: Path) -> bytes | None:
+    """What one page holds, or None where the file or its directory is gone."""
+    if not path.is_file():
+        return None
+    return path.read_bytes()
+
+
+def _page_bytes(paths: tuple[Path, ...]) -> tuple[bytes | None, ...]:
+    return tuple(_read_if_present(path) for path in paths)
+
+
+def _apply_outcome(coordinator: MarkdownCoordinator, transaction_id: str):
+    """How one apply ended: committed, or refused and whether it named the parent."""
+    try:
+        return ("applied", coordinator.apply(transaction_id).state)
+    except RuntimeError as exc:
+        return ("refused", "parent identity" in str(exc))
+
+
+def _owner_row_shape(owner) -> tuple[bool, object, bool, bool]:
+    """A writer-owner row as four judgements: present, whose, filled in, fenced.
+
+    The row is `(owner_token, process_id, heartbeat_at, expires_at, fencing_epoch)`.
+    """
+    if owner is None:
+        return (False, None, False, False)
+    return (True, owner[1], all(owner[index] for index in (0, 2, 3)), owner[4] >= 1)
+
+
+def _artifact_modes(artifact_root: Path, synced: list[Path]) -> tuple[int, set[int]]:
+    """The artifact directory's mode, and every mode found among its files."""
+    return (
+        stat.S_IMODE(artifact_root.stat().st_mode),
+        {stat.S_IMODE(path.stat().st_mode) for path in synced},
+    )
+
+
+def _rows_at(path: Path, queries: tuple[str, ...]) -> tuple[object, ...]:
+    """One row per query, read through one connection to one database."""
+    with sqlite3.connect(path) as database:
+        return tuple(_row(database, query) for query in queries)
+
 
 @pytest.fixture
 def vault(tmp_path: Path) -> Path:
@@ -89,19 +185,26 @@ def test_prepare_and_apply_create_replace_delete(vault: Path, state_root: Path):
         operation_id="compile:abc",
     )
 
-    assert transaction.state == "prepared"
-    assert transaction.operations[0].before_hash == "absent"
-    assert transaction.operations[0].after_hash == sha256_bytes(b"new\n")
-    assert transaction.operations[2].before_hash == sha256_bytes(b"old\n")
-    assert transaction.operations[2].after_hash == "absent"
-    assert not (vault / "knowledge/notes/new.md").exists()
+    created = transaction.operations[0]
+    deleted = transaction.operations[2]
+    assert (
+        transaction.state,
+        (created.before_hash, created.after_hash),
+        (deleted.before_hash, deleted.after_hash),
+        (vault / "knowledge/notes/new.md").exists(),
+    ) == (
+        "prepared",
+        ("absent", sha256_bytes(b"new\n")),
+        (sha256_bytes(b"old\n"), "absent"),
+        False,
+    )
 
     committed = coordinator.apply(transaction.id)
-    assert committed.state == "committed"
-    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new\n"
-    assert (vault / "knowledge/index.md").read_bytes() == b"index-v2\n"
-    assert (vault / "knowledge/log.md").read_bytes() == b"log-v2\n"
-    assert not old.exists()
+    assert (committed.state, _bytes_at(vault, _CHANGED_PAGES), old.exists()) == (
+        "committed",
+        (b"new\n", b"index-v2\n", b"log-v2\n"),
+        False,
+    )
 
 
 def test_model_output_recheck_quarantines_and_rolls_back_exact_old_bytes(
@@ -357,18 +460,22 @@ def test_prepare_captures_before_images_and_fsyncs_every_artifact(
     # Stored compressed since 2026-09-05 — the trail had reached 5.3 GB of
     # near-identical copies of append-only journals — and read back through the
     # helper every restore path uses, so what an image stands for is unchanged.
-    assert markdown_transaction._image_bytes(artifact_root / "before/000000.bin") == b"before\n"
-    assert markdown_transaction._image_bytes(artifact_root / "after/000000.bin") == b"after\n"
-    assert (artifact_root / "plan.json").is_file()
-    assert {path.relative_to(artifact_root).as_posix() for path in synced} == {
-        "before/000000.bin",
-        "after/000000.bin",
-        "plan.json",
-        "manifest.json",
-    }
+    assert _prepared_artifacts(artifact_root, synced) == (
+        b"before\n",
+        b"after\n",
+        True,
+        {
+            # The writer names itself — its number and its process start — before
+            # its `preparing` row can exist, so a reused number cannot keep the row.
+            "owner.json",
+            "before/000000.bin",
+            "after/000000.bin",
+            "plan.json",
+            "manifest.json",
+        },
+    )
     if os.name != "nt":
-        assert stat.S_IMODE(artifact_root.stat().st_mode) == 0o700
-        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in synced)
+        assert _artifact_modes(artifact_root, synced) == (0o700, {0o600})
 
 
 def test_prepare_rejects_oversized_before_image_without_artifact(
@@ -895,10 +1002,7 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
                 "SELECT owner_token, process_id, heartbeat_at, expires_at, fencing_epoch "
                 "FROM writer_owners WHERE gate_name = 'global'"
             ).fetchone()
-        assert owner is not None
-        assert owner[1] == os.getpid()
-        assert all(owner[index] for index in (0, 2, 3))
-        assert owner[4] >= 1
+        assert _owner_row_shape(owner) == (True, os.getpid(), True, True)
         release.set()
         one.result(timeout=SHORT_TIMEOUT)
         two.result(timeout=SHORT_TIMEOUT)
@@ -917,30 +1021,30 @@ def test_nested_writer_references_parent_without_reacquiring_or_releasing_it(
     registry = operational_ownership.OwnershipRegistry(state_root)
     parent = registry.acquire("doctor", scope="global")
 
+    nested = (
+        "SELECT canonical_role, canonical_scope, owner_token, fencing_epoch "
+        "FROM writer_owners WHERE gate_name='global'",
+        "SELECT COUNT(*) FROM maintenance_owners",
+    )
     with coordinator.writer_gate(owner=parent) as projected:
-        assert projected == parent
         with coordinator.writer_gate(owner=parent) as reentrant:
-            assert reentrant == parent
-            with sqlite3.connect(candidate) as database:
-                assert database.execute(
-                    "SELECT canonical_role, canonical_scope, owner_token, fencing_epoch "
-                    "FROM writer_owners WHERE gate_name='global'"
-                ).fetchone() == ("doctor", "global", parent.token, parent.epoch)
-                assert database.execute(
-                    "SELECT COUNT(*) FROM maintenance_owners"
-                ).fetchone() == (1,)
+            assert (projected, reentrant, *_rows_at(candidate, nested)) == (
+                parent,
+                parent,
+                ("doctor", "global", parent.token, parent.epoch),
+                (1,),
+            )
 
-        with sqlite3.connect(candidate) as database:
-            assert database.execute(
-                "SELECT COUNT(*) FROM writer_owners"
-            ).fetchone() == (1,)
+        assert _rows_at(candidate, ("SELECT COUNT(*) FROM writer_owners",)) == ((1,),)
 
-    with sqlite3.connect(candidate) as database:
-        assert database.execute("SELECT COUNT(*) FROM writer_owners").fetchone() == (0,)
-        assert database.execute(
+    assert _rows_at(
+        candidate,
+        (
+            "SELECT COUNT(*) FROM writer_owners",
             "SELECT owner_token, fencing_epoch FROM maintenance_owners "
-            "WHERE role='doctor' AND scope='global'"
-        ).fetchone() == (parent.token, parent.epoch)
+            "WHERE role='doctor' AND scope='global'",
+        ),
+    ) == ((0,), (parent.token, parent.epoch))
     registry.release(parent)
 
 
@@ -952,32 +1056,33 @@ def test_v3_top_level_writer_inserts_and_releases_canonical_projection(
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
     coordinator = MarkdownCoordinator._from_v3_candidate(candidate, state_root=state_root)
 
+    held = (
+        "SELECT canonical_role, canonical_scope, actor_id, owner_token, "
+        "fencing_epoch FROM writer_owners WHERE gate_name='global'",
+        "SELECT role, scope, actor_id, owner_token, fencing_epoch "
+        "FROM maintenance_owners WHERE role='markdown-writer' AND scope='global'",
+        "SELECT heartbeat_at, expires_at FROM writer_owners WHERE gate_name='global'",
+        "SELECT heartbeat_at, expires_at FROM maintenance_owners "
+        "WHERE role='markdown-writer' AND scope='global'",
+    )
     with coordinator.writer_gate() as owner:
-        assert owner.role == "markdown-writer"
-        assert owner.scope == "global"
         with coordinator._connect() as database:
             coordinator._assert_writer_ownership(database)
-        with sqlite3.connect(candidate) as database:
-            assert database.execute(
-                "SELECT canonical_role, canonical_scope, actor_id, owner_token, "
-                "fencing_epoch FROM writer_owners WHERE gate_name='global'"
-            ).fetchone() == database.execute(
-                "SELECT role, scope, actor_id, owner_token, fencing_epoch "
-                "FROM maintenance_owners WHERE role='markdown-writer' AND scope='global'"
-            ).fetchone()
-            assert database.execute(
-                "SELECT heartbeat_at, expires_at FROM writer_owners "
-                "WHERE gate_name='global'"
-            ).fetchone() == database.execute(
-                "SELECT heartbeat_at, expires_at FROM maintenance_owners "
-                "WHERE role='markdown-writer' AND scope='global'"
-            ).fetchone()
+        gate, canonical, gate_times, canonical_times = _rows_at(candidate, held)
+        # The projection carries the canonical owner's identity and its timing.
+        assert ((owner.role, owner.scope), gate, gate_times) == (
+            ("markdown-writer", "global"),
+            canonical,
+            canonical_times,
+        )
 
-    with sqlite3.connect(candidate) as database:
-        assert database.execute("SELECT COUNT(*) FROM writer_owners").fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM maintenance_owners WHERE role='markdown-writer'"
-        ).fetchone() == (0,)
+    assert _rows_at(
+        candidate,
+        (
+            "SELECT COUNT(*) FROM writer_owners",
+            "SELECT COUNT(*) FROM maintenance_owners WHERE role='markdown-writer'",
+        ),
+    ) == ((0,), (0,))
 
 
 def test_crashed_writer_owner_is_reclaimed_with_higher_fence(vault: Path, state_root: Path):
@@ -1009,24 +1114,26 @@ with coordinator.writer_gate():
         text=True,
         timeout=10,
     )
-    assert result.returncode == 0, result.stderr
-    assert marker.is_file()
-    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
-        crashed = database.execute(
-            "SELECT process_id, owner_token, fencing_epoch FROM writer_owners "
-            "WHERE gate_name = 'global'"
-        ).fetchone()
-    assert crashed is not None
+    database_path = state_root / "run/markdown-transactions.sqlite3"
+    gate = (
+        "SELECT process_id, owner_token, fencing_epoch FROM writer_owners "
+        "WHERE gate_name = 'global'",
+    )
+    (crashed,) = _rows_at(database_path, gate)
+    assert (result.returncode, marker.is_file(), crashed is None) == (
+        0,
+        True,
+        False,
+    ), result.stderr
 
     with coordinator.writer_gate():
-        with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
-            recovered = database.execute(
-                "SELECT process_id, owner_token, fencing_epoch FROM writer_owners "
-                "WHERE gate_name = 'global'"
-            ).fetchone()
-        assert recovered[0] == os.getpid()
-        assert recovered[1] != crashed[1]
-        assert recovered[2] > crashed[2]
+        (recovered,) = _rows_at(database_path, gate)
+        # A new process, a new token, and a fence strictly above the dead owner's.
+        assert (
+            recovered[0],
+            recovered[1] == crashed[1],
+            recovered[2] > crashed[2],
+        ) == (os.getpid(), False, True)
 
 
 def test_live_writer_heartbeat_renews_before_expiry(
@@ -1426,18 +1533,18 @@ def test_windows_parent_swap_cannot_redirect_handle_relative_mutation(
             blocked.append(True)
 
     monkeypatch.setattr(coordinator, "_before_target_mutation", attempt_swap)
-    try:
-        result = coordinator.apply(transaction.id)
-    except RuntimeError as exc:
-        assert swapped == [True]
-        assert "parent identity" in str(exc)
-        assert (notes / "page.md").read_bytes() == b"outside"
-        assert (original / "page.md").read_bytes() == b"before"
-    else:
-        assert blocked == [True]
-        assert result.state == "committed"
-        assert target.read_bytes() == b"after"
-        assert (outside / "page.md").read_bytes() == b"outside"
+    pages = (target, original / "page.md", outside / "page.md")
+
+    outcome = _apply_outcome(coordinator, transaction.id)
+
+    # Two worlds are acceptable and no third: either the rename went through and
+    # the apply refused it by name, leaving the outside bytes where the swapped
+    # directory now stands and the real page under its old parent; or the rename
+    # was blocked and the apply committed to the real page.
+    assert (swapped, blocked, outcome, _page_bytes(pages)) in (
+        ([True], [], ("refused", True), (b"outside", b"before", None)),
+        ([], [True], ("applied", "committed"), (b"after", None, b"outside")),
+    )
 
 
 def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monkeypatch):
@@ -1454,18 +1561,21 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
     monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
     monkeypatch.setattr(markdown_transaction, "_run_acl_command", successful)
     markdown_transaction._harden_windows_acl(path)
-    assert len(calls) == 2
-    assert calls[0][0].casefold() == "icacls"
-    assert "DOMAIN\\user:(F)" in calls[0]
-    assert "/remove:g" in calls[0]
-    for sid in (
+    hardening = calls[0]
+    # The groups every Windows install grants by default, removed by SID.
+    removed = (
         "*S-1-3-4",
         "*S-1-5-18",
         "*S-1-5-32-544",
         "*S-1-5-32-545",
         "*S-1-5-11",
-    ):
-        assert sid in calls[0]
+    )
+    assert (
+        len(calls),
+        hardening[0].casefold(),
+        {"DOMAIN\\user:(F)", "/remove:g"} <= set(hardening),
+        set(removed) <= set(hardening),
+    ) == (2, "icacls", True, True)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL identity")
@@ -1561,26 +1671,29 @@ def test_windows_sharing_violation_leaves_unknown_target_unchanged(
 
 def test_database_has_required_tables_and_durability_pragmas(vault: Path, state_root: Path):
     MarkdownCoordinator(vault, state_root)
-    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
-        tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {
-            "transaction",
-            "operation",
-            "project_leases",
-            "writer_owners",
-            "writer_fences",
-            "maintenance_owners",
-        } <= tables
-        owner_columns = {
-            row[1] for row in database.execute("PRAGMA table_info(writer_owners)")
-        }
-        assert {"owner_token", "process_id", "heartbeat_at", "expires_at", "fencing_epoch"} <= owner_columns
-        operation_columns = {
-            row[1] for row in database.execute('PRAGMA table_info("operation")')
-        }
-        assert {"parent_device", "parent_inode"} <= operation_columns
-        assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
+    database_path = state_root / "run/markdown-transactions.sqlite3"
+    tables = {
+        "transaction",
+        "operation",
+        "project_leases",
+        "writer_owners",
+        "writer_fences",
+        "maintenance_owners",
+    }
+    owner_columns = {
+        "owner_token",
+        "process_id",
+        "heartbeat_at",
+        "expires_at",
+        "fencing_epoch",
+    }
+    operation_columns = {"parent_device", "parent_inode"}
+
+    found = _schema_and_pragmas(
+        database_path, (tables, owner_columns, operation_columns)
+    )
+
+    assert found == (tables, owner_columns, operation_columns, "delete", 2)
 
 
 def test_coordinator_candidate_transaction_state_accepts_abort_states_only(

@@ -2298,10 +2298,64 @@ def _recovery_still_concerns(row: sqlite3.Row, cutoff: datetime) -> bool:
     return _parse_timestamp(row["updated_at"]) >= cutoff
 
 
-def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
-    if selected_state != "preparing" or owner_pid is None:
+# A process number is handed out again after its process ends, so the writer of a
+# `preparing` row is named by its number and its start together. The coordinator
+# schema is compared text for text and pinned in the adoption record, so the start
+# identity lives beside the attempt's other evidence instead of in a column. See
+# `docs/research/2026-09-17-the-writer-of-an-unfinished-attempt-is-named-by-its-start.md`.
+_PREPARER_RECORD = "owner.json"
+_MAX_PREPARER_RECORD_BYTES = 4096
+
+
+def _preparer_record_bytes() -> bytes | None:
+    """This process's number and start; None where the platform names no start."""
+    from operational_ownership import (
+        OperationalOwnershipError,
+        current_process_identity,
+    )
+
+    try:
+        identity = current_process_identity()
+    except OperationalOwnershipError:
+        return None
+    return canonical_json_bytes(
+        {"pid": identity.pid, "start_identity": identity.start_identity}
+    )
+
+
+def _recorded_preparer(artifact_root: Path) -> tuple[int, str] | None:
+    """The writer an attempt recorded; None for a row older than the record."""
+    try:
+        with open(artifact_root / _PREPARER_RECORD, "rb") as handle:
+            raw = handle.read(_MAX_PREPARER_RECORD_BYTES + 1)
+        value = json.loads(raw)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    pid, start = value.get("pid"), value.get("start_identity")
+    if not _preparer_fields_valid(pid, start):
+        return None
+    return pid, start
+
+
+def _preparer_fields_valid(pid: object, start: object) -> bool:
+    if type(pid) is not int or not isinstance(start, str):
         return False
-    return _pid_alive(owner_pid)
+    return start.isascii() and 0 < len(start) <= 512
+
+
+def _preparer_alive(artifact_root: Path, owner_pid: object) -> bool:
+    """Whether the process that wrote a `preparing` row still runs; doubt is alive."""
+    if owner_pid is None:
+        return False
+    recorded = _recorded_preparer(artifact_root)
+    if recorded is None or recorded[0] != owner_pid:
+        return _pid_alive(owner_pid)
+    from operational_ownership import ProcessIdentity, process_identity_state
+
+    identity = ProcessIdentity(pid=recorded[0], start_identity=recorded[1])
+    return process_identity_state(identity) != "dead"
 
 
 # Every write stores a full copy of the target before and a full copy after, and
@@ -3904,14 +3958,14 @@ def _apply_or_reread_terminal(
 def _preparer_is_alive(coordinator: MarkdownCoordinator, operation_id: str) -> bool:
     with coordinator._connect() as database:
         owner = database.execute(
-            'SELECT owner_pid FROM "transaction" WHERE operation_id = ?',
+            'SELECT id, owner_pid FROM "transaction" WHERE operation_id = ?',
             (operation_id,),
         ).fetchone()
     if owner is None:
         return False
-    if owner["owner_pid"] is None:
-        return False
-    return _pid_alive(owner["owner_pid"])
+    return _preparer_alive(
+        coordinator.transaction_root / owner["id"], owner["owner_pid"]
+    )
 
 
 def _recover_abandoned_preparation(
@@ -4087,11 +4141,22 @@ def _classify_settled_append(
 ) -> _AppendAttemptResult:
     if record is None:
         return "retry"
-    if coordinator._artifacts_pruned(record.id):
-        # The images that would prove a duplicate are gone with the undo window,
-        # so this is a new request: the next candidate id carries the write.
+    if _nothing_to_compare(coordinator, record):
         return "advance"
     return _classify_comparable_append(coordinator, record, relative, block)
+
+
+def _nothing_to_compare(
+    coordinator: MarkdownCoordinator, record: TransactionRecord
+) -> bool:
+    """A record that cannot prove a duplicate: the next candidate id carries the write.
+
+    Either its images are gone with the undo window, or it was recovered before it
+    planned anything (its writer died inside `prepare`) and so wrote nothing.
+    """
+    if not record.operations:
+        return True
+    return coordinator._artifacts_pruned(record.id)
 
 
 def _classify_comparable_append(
@@ -5535,6 +5600,7 @@ class MarkdownCoordinator:
             self._require_operation_active(deadline, cancelled)
             artifact_root.mkdir(parents=True)
             _harden_owner_only(artifact_root, 0o700)
+            self._record_preparer(artifact_root)
             before_root.mkdir()
             after_root.mkdir()
             if os.name != "nt":
@@ -5544,6 +5610,14 @@ class MarkdownCoordinator:
             self._remove_artifacts(artifact_root)
             raise
         return _ArtifactRoots(artifact_root, before_root, after_root)
+
+    def _record_preparer(self, artifact_root: Path) -> None:
+        """Name this writer durably before its `preparing` row can exist."""
+        record = _preparer_record_bytes()
+        if record is None:
+            return
+        self._write_new_file(artifact_root / _PREPARER_RECORD, record)
+        fsync_directory(artifact_root)
 
     def _insert_preparing_row(
         self,
@@ -6800,6 +6874,13 @@ class MarkdownCoordinator:
             return True
         return False
 
+    def _preparing_writer_alive(
+        self, transaction_id: str, selected_state: str, owner_pid: object
+    ) -> bool:
+        if selected_state != "preparing":
+            return False
+        return _preparer_alive(self.transaction_root / transaction_id, owner_pid)
+
     def _recover_one(
         self,
         transaction_id: str,
@@ -6811,11 +6892,15 @@ class MarkdownCoordinator:
             transaction_id, selected_state, recovered
         ):
             return
-        if _preparing_owner_alive(
-            selected_state, owner_pid
-        ) or not self._promoted_for_recovery(transaction_id, recovered):
+        if self._preparing_writer_alive(transaction_id, selected_state, owner_pid):
             return
-        self._apply_recovered(transaction_id, recovered)
+        self._promote_and_apply(transaction_id, recovered)
+
+    def _promote_and_apply(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> None:
+        if self._promoted_for_recovery(transaction_id, recovered):
+            self._apply_recovered(transaction_id, recovered)
 
     def _recover_selected(
         self,
