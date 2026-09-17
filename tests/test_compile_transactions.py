@@ -588,12 +588,21 @@ def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatc
         completed_at="2026-08-16T12:00:00Z",
     )
 
-    import agent_timeline
+    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text(encoding="utf-8")
+    assert _resolved_evidence_texts(root, page) == _quoted_texts(evidence)
 
-    monkeypatch.setattr(agent_timeline, "ROOT", root)
-    monkeypatch.setattr(agent_timeline, "KNOWLEDGE", root / "knowledge/notes")
-    activity = agent_timeline._extract_knowledge_timeline(None, days=36_500)
-    assert {item["agent"] for item in activity} == set(agents)
+
+def _quoted_texts(evidence: list) -> list:
+    return sorted(str(item["quoted_text"]) for item in evidence)
+
+
+def _resolved_evidence_texts(root: Path, page: str) -> list:
+    """What each reference in a compiled page resolves to, by the product's resolver."""
+    from evidence_resolver import EvidenceResolver, extract_evidence_references
+
+    resolver = EvidenceResolver(root)
+    references = extract_evidence_references(page)
+    return sorted(resolver.resolve(item).bytes.decode("utf-8") for item in references)
 
 
 def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pending(vault):
