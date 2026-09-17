@@ -13702,13 +13702,6 @@ def _ensure_sqlite_enabled() -> None:
         _post_marker_legacy_conflict(state_root)
 
 
-def _queue_dir() -> Path:
-    """Compatibility path: SQLite and results now live directly under run/."""
-    path = _state_root() / "run"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _vault_root() -> Path:
     """The vault this process belongs to, resolved the way writers resolve it."""
     return Path(
@@ -14011,11 +14004,6 @@ def mark_attempt(task_id: str, success: bool) -> None:
     _settle_legacy_attempt(queue, lease, task_id, success)
 
 
-def recover_stale_leases(max_age_seconds: int = 600) -> int:
-    del max_age_seconds
-    return _queue().recover_expired_leases()
-
-
 def cancel(
     task_id: str,
     *,
@@ -14062,11 +14050,6 @@ def restore(
         deadline=deadline,
         cancelled=cancelled,
     )
-
-
-def retained_queue_state() -> bool:
-    """Return whether queue records or results block deletion of run/."""
-    return _queue().retains_run_directory()
 
 
 # A heartbeat thread may sit inside SQLite for `queue_busy_ms` (5 s); the

@@ -5214,10 +5214,12 @@ class MarkdownCoordinator:
         it is not changed here.
 
         This exposes the same step for the one case where that door is walled
-        up: a row whose name no request can produce any more. It is used by the
-        explicit one-time repair after the 2026-08-30 rename of batch
-        identities, and by nothing else. The caller must already hold the
-        project lease.
+        up: a row whose name no request can produce any more. It has three
+        callers: the one-time repair after the 2026-08-30 rename of batch
+        identities (`repair_orphaned_checkpoint_names`), the journal-gap repair
+        (`repair_journal_gap`), and the project journal's own replay when the
+        files moved under a reservation (`_replayed_after_rebinding`). The
+        caller must already hold the project lease.
 
         `include_committed` is for the one repair that needs it: a sequence
         this database calls committed while the journal does not hold it. The
