@@ -50,7 +50,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
-from daily_log_append import locked_append  # noqa: E402
+from daily_log_append import (  # noqa: E402
+    LIFECYCLE_APPEND_BUDGET_SECONDS,
+    append_deadline,
+    locked_append,
+)
 from event_envelope import canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -222,8 +226,13 @@ def _is_user_home(project_dir: Path) -> bool:
 def _append_entry(
     daily_path: Path, entry: str, operation_id: str | None = None
 ) -> None:
-    """Append entry to daily log via canonical locked writer."""
-    locked_append(daily_path, entry, operation_id=operation_id)
+    """Append entry to daily log via canonical locked writer, inside the hook's budget."""
+    locked_append(
+        daily_path,
+        entry,
+        operation_id=operation_id,
+        deadline=append_deadline(LIFECYCLE_APPEND_BUDGET_SECONDS),
+    )
 
 
 def _vault_paths() -> tuple[Path, Path] | None:

@@ -311,7 +311,11 @@ def _append_prompt_tag(
 ) -> bool:
     """Append a one-line breadcrumb to today's daily log."""
     try:
-        from daily_log_append import append_daily
+        from daily_log_append import (
+            BREADCRUMB_APPEND_BUDGET_SECONDS,
+            append_daily,
+            append_deadline,
+        )
 
         ts = datetime.now().strftime("%H:%M:%S")
         safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
@@ -319,7 +323,15 @@ def _append_prompt_tag(
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"
         )
-        append_daily(slug, session_id, block, operation_id=operation_id)
+        # A deadline inside the host's: without one the append retried until the
+        # host cancelled the hook, and the lost breadcrumb left no reason.
+        append_daily(
+            slug,
+            session_id,
+            block,
+            operation_id=operation_id,
+            deadline=append_deadline(BREADCRUMB_APPEND_BUDGET_SECONDS),
+        )
         return True
     except Exception as error:  # noqa: BLE001
         record_capture_failure(

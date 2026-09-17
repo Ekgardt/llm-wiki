@@ -17,6 +17,7 @@ import io
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -29,6 +30,20 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+
+# How long a hook's append may try before it gives up and says why. Each is
+# shorter than the host's own timeout for that hook, with room left to start
+# the interpreter and to write the failure line: the shipped prompt and tool
+# hooks get 5 seconds, the session-end hook 15 (its delegate 10). A writer with
+# no deadline retried until it was killed and left no reason. See
+# `docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md`.
+BREADCRUMB_APPEND_BUDGET_SECONDS = 3.0
+LIFECYCLE_APPEND_BUDGET_SECONDS = 7.0
+
+
+def append_deadline(budget_seconds: float) -> float:
+    """The monotonic instant a hook's append stops trying."""
+    return time.monotonic() + budget_seconds
 
 
 def locked_append(

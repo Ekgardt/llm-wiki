@@ -102,11 +102,7 @@ def test_prompt_append_failure_is_recorded(monkeypatch):
         "record_capture_failure",
         lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
     )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "daily_log_append",
-        type("M", (), {"append_daily": staticmethod(_raise_disk_full)}),
-    )
+    monkeypatch.setattr(__import__("daily_log_append"), "append_daily", _raise_disk_full)
 
     assert user_prompt_capture._append_prompt_tag("demo", "session", "hello") is False
     assert recorded and recorded[0][0] == "user_prompt_append"
@@ -122,14 +118,11 @@ def test_tool_append_failure_is_recorded(monkeypatch):
         "record_capture_failure",
         lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
     )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "daily_log_append",
-        type("M", (), {"append_daily": staticmethod(_raise_disk_full)}),
-    )
+    monkeypatch.setattr(__import__("daily_log_append"), "append_daily", _raise_disk_full)
 
     assert post_tool_capture._append_tool_tag("demo", "session", "Edit", "a.py") is False
     assert recorded and recorded[0][0] == "post_tool_append"
+    assert "OSError" in recorded[0][1]
 
 
 def _raise_disk_full(*args, **kwargs):
