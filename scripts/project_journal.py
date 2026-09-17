@@ -750,7 +750,12 @@ def _journal_body(content: bytes) -> str:
 
 
 def _journal_event_lines(content: bytes) -> list[str]:
-    lines = [line for line in _journal_body(content).splitlines() if line]
+    # A line ends at "\n" and nowhere else. `str.splitlines()` also breaks at
+    # U+2028, U+2029 and U+0085, which canonical JSON writes raw inside a string:
+    # one such character in a checkpoint's text wedged the journal for good. See
+    # `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+    split = (line.removesuffix("\r") for line in _journal_body(content).split("\n"))
+    lines = [line for line in split if line]
     if len(lines) > MAX_JOURNAL_EVENTS:
         raise ProjectJournalReadError(
             "too_many_events",
