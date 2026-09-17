@@ -340,7 +340,10 @@ def test_critique_failure_lineage_records_stage_provider_and_stable_code(
             (draft, None),
             (None, "provider_error"),
             (draft, None),
-            ('{"reviews": []}', None),
+            (
+                '{"reviews": [{"slug": "safe-note", "verdict": "pass", "reason": "ok"}]}',
+                None,
+            ),
         ]
     )
 

@@ -118,6 +118,19 @@ def _draft_response() -> str:
     return json.dumps({"operations": [semantic], "audit": {}})
 
 
+def _pass_review() -> str:
+    """The critique now needs a verdict for every operation the draft carried."""
+    operations = json.loads(_draft_response())["operations"]
+    return json.dumps(
+        {
+            "reviews": [
+                {"slug": item["slug"], "verdict": "pass", "reason": "ok"}
+                for item in operations
+            ]
+        }
+    )
+
+
 def _provider(name: str = "fake", index: int = 0) -> ProviderDescriptor:
     return ProviderDescriptor(
         provider=name,
@@ -174,12 +187,10 @@ def test_source_identity_hashes_logical_path_and_digest(vault):
         canonical_json_bytes(["knowledge/daily/2026-07-15.md", digest])
     )
     assert first_identity != second_identity
-    assert compile_memory.compile_receipt_path(first_identity).name == (
-        f"v3-{first_identity}.md"
-    )
-    assert compile_memory.compile_receipt_path(second_identity).name == (
-        f"v3-{second_identity}.md"
-    )
+    assert [
+        compile_memory.compile_receipt_path(identity).name
+        for identity in (first_identity, second_identity)
+    ] == [f"v3-{first_identity}.md", f"v3-{second_identity}.md"]
 
 
 def test_complete_item_packer_rejects_oversized_daily_before_dispatch(vault):
@@ -253,11 +264,22 @@ def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):
 
     prompt = compile_memory._critique_prompt(inputs, [operation])
 
-    assert "A durable exact-byte observation." in prompt
-    assert "A second durable exact-byte observation." not in prompt
-    assert "The prior state is blue." not in prompt
-    assert "knowledge/daily/2026-07-14.md" in prompt
-    assert inputs.dailies[0].sha256 in prompt
+    carried = [
+        text in prompt
+        for text in (
+            "A durable exact-byte observation.",
+            "knowledge/daily/2026-07-14.md",
+            inputs.dailies[0].sha256,
+        )
+    ]
+    uncited = [
+        text in prompt
+        for text in (
+            "A second durable exact-byte observation.",
+            "The prior state is blue.",
+        )
+    ]
+    assert (carried, uncited) == ([True, True, True], [False, False])
 
 
 def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
@@ -323,17 +345,24 @@ def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
     )
     receipt = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
 
-    assert receipt.is_file()
-    assert not (root / f"knowledge/daily/receipts/{source.sha256}.md").exists()
+    digest_only = root / f"knowledge/daily/receipts/{source.sha256}.md"
+    assert (receipt.is_file(), digest_only.exists()) == (True, False)
     record = compile_memory.parse_compile_receipt_v3(
         receipt.read_bytes(),
         logical_path=source.logical_path,
         source_sha256=source.sha256,
     )
-    assert record["source_identity"] == source_identity
-    assert record["source"] == source.receipt_descriptor()
-    assert record["batch_manifest_sha256"] == batch.manifest_sha256
-    assert record["operation_id"] == result.operation_id
+    assert (
+        record["source_identity"],
+        record["source"],
+        record["batch_manifest_sha256"],
+        record["operation_id"],
+    ) == (
+        source_identity,
+        source.receipt_descriptor(),
+        batch.manifest_sha256,
+        result.operation_id,
+    )
     assert "completed_at" not in record
 
 
@@ -518,20 +547,30 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
 
     receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
     assert result.state == "committed"
-    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
-    assert b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes()
-    assert inputs.dailies[0].sha256.encode() in (root / "knowledge/log.md").read_bytes()
-    assert receipt.is_file()
+    assert (
+        (root / "knowledge/notes/exact-byte-pattern.md").is_file(),
+        b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes(),
+        inputs.dailies[0].sha256.encode() in (root / "knowledge/log.md").read_bytes(),
+        receipt.is_file(),
+    ) == (True, True, True, True)
     text = receipt.read_text(encoding="utf-8")
-    assert text.startswith("---\ntype: compile-receipt\n")
     record = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert canonical_json_bytes(record).decode() in text
-    assert record["source_digest"] == inputs.dailies[0].sha256
-    assert record["action_key"] == "a" * 64
-    assert record["state"] == "completed"
-    assert record["operation_id"] == result.operation_id
-    assert record["evidence"][0]["quote_sha256"] == sha256_bytes(
-        b"A durable exact-byte observation."
+    assert (
+        text.startswith("---\ntype: compile-receipt\n"),
+        canonical_json_bytes(record).decode() in text,
+    ) == (True, True)
+    assert (
+        record["source_digest"],
+        record["action_key"],
+        record["state"],
+        record["operation_id"],
+        record["evidence"][0]["quote_sha256"],
+    ) == (
+        inputs.dailies[0].sha256,
+        "a" * 64,
+        "completed",
+        result.operation_id,
+        sha256_bytes(b"A durable exact-byte observation."),
     )
     validate_schema(
         record,
@@ -657,34 +696,34 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
 
     page = root / "knowledge/notes/exact-byte-pattern.md"
     receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
-    assert not page.exists()
-    assert not receipt.exists()
-    assert b"exact-byte-pattern" not in (root / "knowledge/index.md").read_bytes()
-    assert b"Use an immutable snapshot" not in (root / "knowledge/log.md").read_bytes()
-    import search_memory
-
-    original_knowledge = search_memory.KNOWLEDGE_DIR
-    search_memory.KNOWLEDGE_DIR = root / "knowledge/notes"
-    try:
-        assert page not in search_memory._collect_pages()
-    finally:
-        search_memory.KNOWLEDGE_DIR = original_knowledge
+    assert (
+        page.exists(),
+        receipt.exists(),
+        b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes(),
+        b"Use an immutable snapshot" in (root / "knowledge/log.md").read_bytes(),
+        page in _collected_pages(root),
+    ) == (False, False, False, False, False)
     candidates = list((root / "knowledge/inbox/claims").glob("*.md"))
-    assert len(candidates) == 1
     transaction = coordinator._record_for_operation_id(result.operation_id)
-    assert transaction is not None
-    assert result.operation_id.startswith("compile-quarantine:")
-    assert {item.path for item in transaction.operations} == {
-        candidates[0].relative_to(root).as_posix()
-    }
-    assert all(
-        item.page != "knowledge/notes/exact-byte-pattern.md"
-        for item in index.candidates(NormalizedClaim(new))
-    )
+    indexed_pages = _candidate_pages(index, NormalizedClaim(new))
     selected = compile_memory.select_dailies(
-        Namespace(file=None, all=False), {}, coordinator=coordinator
+        Namespace(file=None), {}, coordinator=coordinator
     )
-    assert selected == [daily]
+    assert (
+        len(candidates),
+        transaction is not None,
+        result.operation_id.startswith("compile-quarantine:"),
+        _operation_paths(transaction),
+        "knowledge/notes/exact-byte-pattern.md" in indexed_pages,
+        selected,
+    ) == (
+        1,
+        True,
+        True,
+        {candidates[0].relative_to(root).as_posix()},
+        False,
+        [daily],
+    )
 
     retried = compile_memory.apply_compile_plan(
         inputs,
@@ -694,8 +733,30 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
         coordinator=coordinator,
         completed_at="2026-07-14T12:00:00Z",
     )
-    assert retried.transaction_id == result.transaction_id
-    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
+    assert (
+        retried.transaction_id,
+        len(list((root / "knowledge/inbox/claims").glob("*.md"))),
+    ) == (result.transaction_id, 1)
+
+
+def _operation_paths(transaction) -> set:
+    return {item.path for item in transaction.operations}
+
+
+def _candidate_pages(index, claim) -> list:
+    return [item.page for item in index.candidates(claim)]
+
+
+def _collected_pages(root: Path) -> list:
+    """What the search collector sees when it is pointed at this vault's notes."""
+    import search_memory
+
+    original = search_memory.KNOWLEDGE_DIR
+    search_memory.KNOWLEDGE_DIR = root / "knowledge/notes"
+    try:
+        return list(search_memory._collect_pages())
+    finally:
+        search_memory.KNOWLEDGE_DIR = original
 
 
 def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
@@ -740,11 +801,13 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
             coordinator=coordinator, completed_at="2026-07-15T12:00:00Z",
         )
 
-    assert raised.value.paths == (candidates[0].relative_to(root).as_posix(),)
-    assert sorted((root / "knowledge/inbox/claims").glob("*.md")) == candidates
-    assert candidates[0].read_bytes() == before
-    selected = compile_memory.select_dailies(Namespace(file=None, all=False), {}, coordinator=coordinator)
-    assert selected == [daily]
+    selected = compile_memory.select_dailies(Namespace(file=None), {}, coordinator=coordinator)
+    assert (
+        raised.value.paths,
+        sorted((root / "knowledge/inbox/claims").glob("*.md")),
+        candidates[0].read_bytes(),
+        selected,
+    ) == ((candidates[0].relative_to(root).as_posix(),), candidates, before, [daily])
     outcome = compile_memory._still_quarantined_outcome(raised.value)
     assert (outcome.status, outcome.outcome, outcome.paths) == (0, "quarantined", 0)
     assert "batch still quarantined: 1 candidate(s)" in capsys.readouterr().out
@@ -1039,13 +1102,17 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
     )
 
-    assert result.operation_id.startswith("compile-quarantine:")
-    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
-    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
     current = existing.read_bytes()
-    assert replacement["fingerprint"].encode() in current
-    assert b'"lifecycle":"active"' in current
-    assert b'"lifecycle":"superseded"' not in current
+    assert (
+        result.operation_id.startswith("compile-quarantine:"),
+        (root / "knowledge/notes/exact-byte-pattern.md").exists(),
+        len(list((root / "knowledge/inbox/claims").glob("*.md"))),
+    ) == (True, False, 1)
+    assert (
+        replacement["fingerprint"].encode() in current,
+        b'"lifecycle":"active"' in current,
+        b'"lifecycle":"superseded"' in current,
+    ) == (True, True, False)
 
 
 def test_committed_compile_clears_durable_source_failure(vault):
@@ -1225,7 +1292,7 @@ def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
     inputs = compile_memory.snapshot_compile_inputs([daily])
     calls = []
     provider = _provider()
-    responses = [_draft_response(), json.dumps({"reviews": [{"slug": "exact-byte-pattern", "verdict": "pass", "reason": "ok"}]})]
+    responses = [_draft_response(), _pass_review()]
 
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
@@ -1241,19 +1308,28 @@ def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
     )
 
     exact = inputs.dailies[0].content.decode("utf-8")
-    assert len(calls) == 2
-    assert exact in calls[0][1]
-    assert exact not in calls[1][1]
-    assert "A durable exact-byte observation." in calls[1][1]
-    assert "A second durable exact-byte observation." not in calls[1][1]
-    assert all(schema is not None for _descriptor, _prompt, schema in calls)
-    assert resolved.action.draft_calls[0].structured_output == "native"
-    assert resolved.action.critique_calls[0].structured_output == "native"
-    assert resolved.cache_hit is False
-    assert cache.get(
+    assert (
+        len(calls),
+        exact in calls[0][1],
+        exact in calls[1][1],
+        "A durable exact-byte observation." in calls[1][1],
+        "A second durable exact-byte observation." in calls[1][1],
+        _schemas_declared(calls),
+    ) == (2, True, False, True, False, True)
+    cached = cache.get(
         resolved.action,
         lambda plan: compile_memory.validate_compile_plan(plan, inputs),
-    ) == resolved.plan
+    )
+    assert (
+        resolved.action.draft_calls[0].structured_output,
+        resolved.action.critique_calls[0].structured_output,
+        resolved.cache_hit,
+        cached,
+    ) == ("native", "native", False, resolved.plan)
+
+
+def _schemas_declared(calls: list) -> bool:
+    return all(schema is not None for _descriptor, _prompt, schema in calls)
 
 
 def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):
@@ -1265,7 +1341,7 @@ def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):
     provider = _provider()
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = [_draft_response(), '{"reviews": []}']
+    responses = [_draft_response(), _pass_review()]
     monkeypatch.setattr(
         compile_memory,
         "call_candidate",
@@ -1328,7 +1404,7 @@ def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monk
     second = _provider("second", 1)
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [first, second])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = iter([None, _draft_response(), '{"reviews": []}'])
+    responses = iter([None, _draft_response(), _pass_review()])
 
     def call(descriptor, *args, **kwargs):
         text = next(responses)
@@ -1382,14 +1458,16 @@ def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):
         )
 
     receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
-    assert not receipt.exists()
+    assert receipt.exists() is False
     monkeypatch.setattr(coordinator, "_apply_operation", original)
     recovered = coordinator.recover()
 
-    assert recovered[-1].state == "committed"
-    assert receipt.is_file()
-    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
-    assert b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes()
+    assert (
+        recovered[-1].state,
+        receipt.is_file(),
+        (root / "knowledge/notes/exact-byte-pattern.md").is_file(),
+        b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes(),
+    ) == ("committed", True, True, True)
 
 
 def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkeypatch):
@@ -1465,7 +1543,7 @@ def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):
 
     inputs = compile_memory.snapshot_compile_inputs([daily])
     provider = _provider()
-    responses = [_draft_response(), '{"reviews": []}']
+    responses = [_draft_response(), _pass_review()]
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
     monkeypatch.setattr(
@@ -2039,19 +2117,21 @@ def test_the_retry_receipt_names_the_transaction_that_committed_it(vault):
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:30:00Z",
     )
-    assert result.state == "committed"
-
     coordinator = MarkdownCoordinator(root, state_root)
     digest = inputs.dailies[0].sha256
     record = compile_memory.read_compile_receipt(digest, coordinator)
-    assert record is not None
+    assert (result.state, record is not None) == ("committed", True)
 
     identity = str(record["operation_id"])
-    assert "#" not in identity, "the receipt names the identity, not the attempt"
     committed = coordinator.committed_attempt(identity)
-    assert committed is not None
-    assert committed.state == "committed"
-    assert committed.operation_id.startswith(f"{identity}#")
+    assert (
+        "#" in identity,
+        committed is not None,
+        committed.state,
+        committed.operation_id.startswith(f"{identity}#"),
+    ) == (False, True, "committed", True), (
+        "the receipt names the identity, not the attempt"
+    )
 
 
 def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
@@ -2083,12 +2163,18 @@ def test_the_quarantined_attempt_is_kept_and_named_as_the_parent(vault):
     )
     database.close()
 
-    quarantined = [row for row in rows if row["state"] == "quarantined"]
-    committed = [row for row in rows if row["state"] == "committed"]
-    assert len(quarantined) == 1
-    assert committed
-    assert committed[-1]["operation_id"] != quarantined[0]["operation_id"]
-    assert committed[-1]["parent_transaction_id"] is not None
+    quarantined = _rows_in_state(rows, "quarantined")
+    committed = _rows_in_state(rows, "committed")
+    assert (
+        len(quarantined),
+        bool(committed),
+        committed[-1]["operation_id"] == quarantined[0]["operation_id"],
+        committed[-1]["parent_transaction_id"] is not None,
+    ) == (1, True, False, True)
+
+
+def _rows_in_state(rows: list, state: str) -> list:
+    return [row for row in rows if row["state"] == state]
 
 
 def test_a_second_refusal_takes_the_next_ordinal_again(vault):
@@ -2188,8 +2274,12 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
     second = compile_memory._committed_outcome(published)
 
     out = capsys.readouterr().out
-    assert "batch quarantined: 1 candidate(s) under knowledge/inbox/claims/" in out
-    assert "batch published 2 page(s)" in out
-    assert compile_memory.compile_outcome([first]) == "quarantined"
-    assert compile_memory.compile_outcome([first, second]) == "partial"
-    assert compile_memory._finished_outcome("error", [second]) == "failed"
+    assert (
+        "batch quarantined: 1 candidate(s) under knowledge/inbox/claims/" in out,
+        "batch published 2 page(s)" in out,
+    ) == (True, True)
+    assert (
+        compile_memory.compile_outcome([first]),
+        compile_memory.compile_outcome([first, second]),
+        compile_memory._finished_outcome("error", [second]),
+    ) == ("quarantined", "partial", "failed")

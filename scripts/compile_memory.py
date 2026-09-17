@@ -183,7 +183,10 @@ DRAFT_PROGRAM = (
     "compile-draft/v4: skeptical complete-line evidence semantic operations "
     "with derived-provenance claims"
 )
-CRITIQUE_PROGRAM = "compile-critique/v2: specificity durability evidence completeness"
+CRITIQUE_PROGRAM = (
+    "compile-critique/v3: specificity durability evidence completeness, "
+    "one verdict for every operation"
+)
 DRAFT_SYSTEM = "You are a skeptical memory editor. Return only the requested JSON."
 CRITIQUE_SYSTEM = "You are a strict memory-plan critic. Return only the requested JSON."
 RAW_PLAN_SCHEMA = {
@@ -1128,7 +1131,8 @@ class _CompileAttempt:
     ) -> ResolvedCompilePlan | None:
         try:
             operations = _with_derived_claims(
-                _draft_operations(draft_text), self.inputs
+                _with_snapshot_actions(_draft_operations(draft_text), self.inputs),
+                self.inputs,
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return self._record(
@@ -1161,8 +1165,8 @@ class _CompileAttempt:
         Sixteen operations of a long day cost about twice the draft prompt, so
         one review of all of them cannot fit and the whole plan used to be
         thrown away. Each batch is reviewed whole, with its evidence, and the
-        drop lists are merged; nothing is reviewed twice and nothing goes
-        unreviewed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
+        drop lists are merged; nothing is reviewed twice, and an operation
+        with no verdict is asked about again rather than passed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
         """
         dropped: set[str] = set()
         for batch in self._critique_batches(descriptor, operations):
@@ -1170,11 +1174,26 @@ class _CompileAttempt:
         return _without_dropped(operations, dropped)
 
     def _reviewed_batch(self, descriptor: object, batch: list[object]) -> set[str]:
+        """Only a `pass` lets an operation through; a skipped one is asked again.
+
+        The reviewer used to be read for its drops alone, so an operation it
+        left out, or named with a mistyped slug, was written unreviewed. What a
+        reply does not name is asked about once more, alone — a small prompt,
+        not a new draft — and what is still unnamed refuses the critique.
+        """
+        verdicts = self._verdicts(descriptor, batch)
+        skipped = _unreviewed(batch, verdicts)
+        if skipped:
+            verdicts = {**verdicts, **self._verdicts(descriptor, skipped)}
+        _require_every_verdict(batch, verdicts)
+        return {slug for slug, verdict in verdicts.items() if verdict == "drop"}
+
+    def _verdicts(self, descriptor: object, batch: list[object]) -> dict[str, str]:
         prompt = _critique_prompt(self.inputs, batch)
         critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
         if critique.text is None:
             raise _ProviderStageFailure(critique.failure_class or "provider_error")
-        return set(_dropped_slugs(critique.text))
+        return _review_verdicts(critique.text)
 
     def _critique_batches(
         self, descriptor: object, operations: list[object]
@@ -1326,7 +1345,8 @@ def _draft_operations(draft_text: str) -> list[object]:
     return operations
 
 
-def _dropped_slugs(critique_text: str) -> set[object]:
+def _review_verdicts(critique_text: str) -> dict[str, str]:
+    """The verdict each named slug received; a slug named twice keeps its drop."""
     critique_plan = _parse_json_object(critique_text, "reviews")
     _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
     if set(critique_plan) != {"reviews"}:
@@ -1334,15 +1354,32 @@ def _dropped_slugs(critique_text: str) -> set[object]:
     reviews = critique_plan.get("reviews")
     if not isinstance(reviews, list):
         raise ValueError("critique reviews must be an array")
-    return _dropped_from_reviews(reviews)
+    verdicts: dict[str, str] = {}
+    for item in reviews:
+        _merge_verdict(verdicts, item)
+    return verdicts
 
 
-def _dropped_from_reviews(reviews: list[object]) -> set[object]:
-    return {
-        item.get("slug")
-        for item in reviews
-        if isinstance(item, dict) and item.get("verdict") == "drop"
-    }
+def _merge_verdict(verdicts: dict[str, str], review: Mapping[str, object]) -> None:
+    slug = str(review["slug"])
+    if verdicts.get(slug) == "drop":
+        return
+    verdicts[slug] = str(review["verdict"])
+
+
+def _unreviewed(batch: list[object], verdicts: Mapping[str, str]) -> list[object]:
+    return [
+        item
+        for item in batch
+        if isinstance(item, dict) and item.get("slug") not in verdicts
+    ]
+
+
+def _require_every_verdict(batch: list[object], verdicts: Mapping[str, str]) -> None:
+    skipped = _unreviewed(batch, verdicts)
+    if skipped:
+        names = ", ".join(sorted(str(item.get("slug")) for item in skipped))
+        raise ValueError(f"critique gave no verdict for: {names}")
 
 
 def _without_dropped(
@@ -1487,7 +1524,8 @@ def _critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
         cited.extend(_cited_evidence(semantic, bindings))
     return f"""{CRITIQUE_PROGRAM}
 Drop operations that are not specific, durable, complete, and exactly evidenced.
-Return reviews with slug, verdict pass|drop, and reason.
+Return exactly one review for every operation: its slug, verdict pass|drop, and reason.
+An operation without a review is not written.
 
 OPERATIONS
 {canonical_json_bytes(normalized).decode('utf-8')}
@@ -1552,6 +1590,44 @@ def _operation_kind(semantic: Mapping[str, object]) -> str:
     if semantic["action"] == "create":
         return "create"
     return "replace"
+
+
+def _with_snapshot_actions(
+    operations: list[object], inputs: CompileInputs
+) -> list[object]:
+    """Let the snapshot say whether each page exists; the model was never shown.
+
+    The draft prompt carries only the context pages that fit, so on a real vault
+    the model has not seen most slugs and cannot know whether its page is new.
+    A `create` for a page that exists used to refuse the whole plan, and the
+    retry asked the same blind question again at the price of a full draft.
+    Both actions carry the same fields and an update only appends a dated
+    section, so the rewrite is mechanical and costs no tokens. See
+    `docs/research/2026-09-17-the-compile-decides-what-the-snapshot-already-knows.md`.
+    """
+    for operation in operations:
+        _follow_snapshot(operation, inputs)
+    return operations
+
+
+def _follow_snapshot(operation: dict[str, object], inputs: CompileInputs) -> None:
+    """The draft schema has already made this an object with a slug and an action."""
+    target = _target_snapshot(inputs, f"knowledge/notes/{operation['slug']}.md")
+    decided = _snapshot_action(target)
+    if decided == operation["action"]:
+        return
+    print(
+        f"compile_memory: {operation['slug']}: drafted {operation['action']}, "
+        f"the snapshot says {decided}",
+        file=sys.stderr,
+    )
+    operation["action"] = decided
+
+
+def _snapshot_action(target: TargetSnapshot | None) -> str:
+    if target is None:
+        return "create"
+    return "update"
 
 
 def _require_target_state(
