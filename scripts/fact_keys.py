@@ -248,15 +248,24 @@ def _loaded(raw: str | None) -> dict:
     return document
 
 
-def _turn_indices(document: Mapping[str, object], size: int) -> list[int]:
-    numbered = (int(name) for name in document if re.fullmatch(r"\d+", str(name)))
-    return [index for index in numbered if index < size]
+def _turn_indices(document: Mapping[str, object], size: int) -> dict[int, str]:
+    """Each turn index the reply covers, with the name the reply wrote it under.
+
+    The value can only be read back under the reply's own spelling: "00" is turn
+    0, and looking it up as "0" raised and failed the nightly step. The first
+    spelling of an index wins.
+    """
+    named: dict[int, str] = {}
+    for name in document:
+        if re.fullmatch(r"\d+", str(name)):
+            named.setdefault(int(name), name)
+    return {index: name for index, name in named.items() if index < size}
 
 
 def _parsed_batch(raw: str | None, size: int) -> dict[int, list[str]]:
     """Keys per turn index, from the reply; an unreadable reply keys nothing."""
     document = _loaded(raw)
-    return {index: _clean_keys(document[str(index)]) for index in _turn_indices(document, size)}
+    return {index: _clean_keys(document[name]) for index, name in _turn_indices(document, size).items()}
 
 
 def extract(turns: Sequence[Turn], ask: Callable[[str, str], str | None]) -> dict[str, list[str]]:
