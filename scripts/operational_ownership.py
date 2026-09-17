@@ -7,7 +7,6 @@ import ctypes
 import hashlib
 import json
 import os
-import platform
 import re
 import secrets
 import sqlite3
@@ -19,6 +18,8 @@ from pathlib import Path
 from typing import Literal, cast
 
 import markdown_transaction
+import process_liveness
+from process_liveness import _is_plain_int, _platform_system
 from reliable_memory import (
     DEFAULTS,
     OperationalDatabaseContract,
@@ -70,7 +71,6 @@ _LONG_LEASE_ROLES = frozenset(
 _MARKER_ROLES = frozenset({"compile", "nightly", "weekly"})
 _COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
-_MAX_PROCESS_STAT_BYTES = 8192
 _MAX_MARKER_BYTES = 4096
 
 
@@ -115,39 +115,8 @@ class MarkerIdentity:
     pid: int
 
 
-class _DarwinProcBsdInfo(ctypes.Structure):
-    _fields_ = (
-        ("flags", ctypes.c_uint32),
-        ("status", ctypes.c_uint32),
-        ("xstatus", ctypes.c_uint32),
-        ("pid", ctypes.c_uint32),
-        ("ppid", ctypes.c_uint32),
-        ("uid", ctypes.c_uint32),
-        ("gid", ctypes.c_uint32),
-        ("ruid", ctypes.c_uint32),
-        ("rgid", ctypes.c_uint32),
-        ("svuid", ctypes.c_uint32),
-        ("svgid", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-        ("command", ctypes.c_char * 16),
-        ("name", ctypes.c_char * 32),
-        ("files", ctypes.c_uint32),
-        ("process_group", ctypes.c_uint32),
-        ("job_control", ctypes.c_uint32),
-        ("tty_device", ctypes.c_uint32),
-        ("tty_process_group", ctypes.c_uint32),
-        ("nice", ctypes.c_int32),
-        ("start_seconds", ctypes.c_uint64),
-        ("start_microseconds", ctypes.c_uint64),
-    )
-
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _platform_system() -> str:
-    return platform.system()
 
 
 def _unsupported_platform() -> OperationalOwnershipError:
@@ -156,212 +125,18 @@ def _unsupported_platform() -> OperationalOwnershipError:
     )
 
 
-def _read_bounded_system_file(path: Path, maximum: int) -> bytes:
-    with path.open("rb") as stream:
-        content = stream.read(maximum + 1)
-    if len(content) > maximum:
-        raise OSError(f"system process file exceeded {maximum} bytes")
-    return content
-
-
-def _is_plain_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _linux_stat_fields(pid: int, raw: bytes) -> list[bytes]:
-    closing = raw.rfind(b")")
-    prefix = f"{pid} (".encode("ascii")
-    if not raw.startswith(prefix) or closing < len(prefix):
-        raise OSError("Linux process stat was malformed")
-    fields = raw[closing + 1 :].split()
-    if len(fields) <= 19:
-        raise OSError("Linux process stat was incomplete")
-    return fields
-
-
-def _linux_start_ticks(fields: list[bytes]) -> int:
-    try:
-        start_ticks = int(fields[19])
-    except ValueError as exc:
-        raise OSError("Linux process identity was malformed") from exc
-    if start_ticks <= 0:
-        raise OSError("Linux process identity was malformed")
-    return start_ticks
-
-
-def _linux_boot_id() -> str:
-    try:
-        boot_id = (
-            _read_bounded_system_file(Path("/proc/sys/kernel/random/boot_id"), 128)
-            .decode("ascii", errors="strict")
-            .strip()
-        )
-    except UnicodeError as exc:
-        raise OSError("Linux process identity was malformed") from exc
-    if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", boot_id):
-        raise OSError("Linux process identity was malformed")
-    return boot_id.lower()
-
-
-def _linux_process_start_identity(pid: int) -> str | None:
-    try:
-        raw = _read_bounded_system_file(
-            Path(f"/proc/{pid}/stat"), _MAX_PROCESS_STAT_BYTES
-        )
-    except FileNotFoundError:
-        return None
-    fields = _linux_stat_fields(pid, raw)
-    if fields[0] in {b"Z", b"X", b"x"}:
-        return None
-    start_ticks = _linux_start_ticks(fields)
-    return f"linux:{_linux_boot_id()}:{start_ticks}"
-
-
-def _windows_process_api(kernel32: object) -> tuple[object, object, object, object]:
-    """Bind the kernel32 entry points this probe uses, with exact signatures."""
-    from ctypes import wintypes
-
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    open_process.restype = wintypes.HANDLE
-    get_exit_code = kernel32.GetExitCodeProcess
-    get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-    get_exit_code.restype = wintypes.BOOL
-    get_process_times = kernel32.GetProcessTimes
-    get_process_times.argtypes = (
-        wintypes.HANDLE,
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-    )
-    get_process_times.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-    return open_process, get_exit_code, get_process_times, close_handle
-
-
-def _windows_open_refusal() -> None:
-    """A refused open means a missing process only for the two 'no such pid' errors."""
-    error = ctypes.get_last_error()
-    if error in {87, 1168}:
-        return None
-    raise ctypes.WinError(error)
-
-
-def _windows_creation_filetime(handle: object, get_process_times: object) -> int:
-    from ctypes import wintypes
-
-    creation = wintypes.FILETIME()
-    exit_time = wintypes.FILETIME()
-    kernel = wintypes.FILETIME()
-    user = wintypes.FILETIME()
-    if not get_process_times(
-        handle,
-        ctypes.byref(creation),
-        ctypes.byref(exit_time),
-        ctypes.byref(kernel),
-        ctypes.byref(user),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    created = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
-    if created <= 0:
-        raise OSError("Windows process creation time was unavailable")
-    return created
-
-
-def _windows_running_identity(
-    handle: object, get_exit_code: object, get_process_times: object
-) -> str | None:
-    from ctypes import wintypes
-
-    exit_code = wintypes.DWORD()
-    if not get_exit_code(handle, ctypes.byref(exit_code)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if exit_code.value != 259:
-        return None
-    return f"windows:{_windows_creation_filetime(handle, get_process_times)}"
-
-
-def _windows_process_start_identity(pid: int) -> str | None:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process, get_exit_code, get_process_times, close_handle = (
-        _windows_process_api(kernel32)
-    )
-    handle = open_process(0x1000, False, pid)
-    if not handle:
-        return _windows_open_refusal()
-    try:
-        return _windows_running_identity(handle, get_exit_code, get_process_times)
-    finally:
-        close_handle(handle)
-
-
-def _darwin_proc_pidinfo(pid: int, information: object, size: int) -> int:
-    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    function = library.proc_pidinfo
-    function.argtypes = (
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_void_p,
-        ctypes.c_int,
-    )
-    function.restype = ctypes.c_int
-    return function(pid, 3, 0, ctypes.byref(information), size)
-
-
-def _darwin_absent_process(pid: int) -> None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError as exc:
-        raise OSError("Darwin process identity was inaccessible") from exc
-    raise OSError("Darwin process identity was unavailable")
-
-
-def _require_darwin_information(
-    information: object, pid: int, *, fully_sized: bool
-) -> None:
-    if not fully_sized or information.pid != pid:
-        raise OSError("Darwin process identity was malformed")
-    if information.start_seconds <= 0 or information.start_microseconds >= 1_000_000:
-        raise OSError("Darwin process start time was unavailable")
-
-
-def _darwin_process_start_identity(pid: int) -> str | None:
-    information = _DarwinProcBsdInfo()
-    size = ctypes.sizeof(information)
-    result = _darwin_proc_pidinfo(pid, information, size)
-    if result <= 0:
-        return _darwin_absent_process(pid)
-    _require_darwin_information(information, pid, fully_sized=result == size)
-    return f"darwin:{information.start_seconds}:{information.start_microseconds}"
-
-
-# Held by name, not by value: the probe is resolved at call time so that
-# substituting one platform's probe substitutes what this dispatch calls.
-_PROCESS_IDENTITY_PROBES = {
-    "Windows": "_windows_process_start_identity",
-    "Linux": "_linux_process_start_identity",
-    "Darwin": "_darwin_process_start_identity",
-}
-
-
-def _require_pid(pid: object) -> None:
-    if not _is_plain_int(pid) or pid <= 0:
-        raise ValueError("pid must be a positive integer")
-
-
 def process_start_identity(pid: int) -> str | None:
-    """Return the OS process-start identity, or ``None`` for a missing process."""
-    _require_pid(pid)
-    probe = _PROCESS_IDENTITY_PROBES.get(_platform_system())
-    if probe is None:
-        raise _unsupported_platform()
-    return globals()[probe](pid)
+    """The OS process-start identity, or ``None`` for a missing process.
+
+    The probes live in `process_liveness` so that a lock file naming its owner
+    can be read without importing the coordinator; this module keeps the name
+    and the refusal its callers expect.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    try:
+        return process_liveness.process_start_identity(pid)
+    except process_liveness.ProcessIdentityUnavailable as exc:
+        raise _unsupported_platform() from exc
 
 
 def current_process_identity() -> ProcessIdentity:
