@@ -176,7 +176,9 @@ def test_asking_a_code_index_for_the_memory_tree_is_refused_by_name(vault, tmp_p
     _repository(root, {"scripts/alpha.py": ALPHA, "knowledge/notes/page.md": "# page\n"})
 
     with pytest.raises(repository_index.RepositoryIndexRefused) as refusal:
-        repository_index.selected_code_roots(root, ["scripts", "knowledge"])
+        repository_index.selected_code_roots(
+            root, ["scripts", "knowledge"], memory_owner=True
+        )
 
     assert refusal.value.reason == "repository_root_is_the_memory_tree"
 
@@ -373,9 +375,14 @@ def _assert_pointer_untouched_and_scope_resolves(state, repository, receipt) -> 
 
     catalog = generation_catalog.GenerationCatalog(state)
     assert catalog.get_active() is None, "a foreign index must not move the pointer"
-    selected = catalog.get_active_for_repository(resolve_repository_scope(repository))
-    assert selected is not None
-    assert selected["generation_id"] == receipt["generation_id"]
+    scope = resolve_repository_scope(repository)
+    # A code generation is a code reader's answer, never the pointer path's:
+    # docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md
+    selected, _manifest = catalog.code_generation_for_repository(scope)
+    assert (selected, catalog.get_active_for_repository(scope)) == (
+        receipt["generation_id"],
+        None,
+    )
 
 
 def _assert_navigation_reads_the_generation(repository, receipt) -> None:

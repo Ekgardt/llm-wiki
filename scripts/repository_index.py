@@ -286,13 +286,18 @@ def _is_the_vault(root: Path, state_root: Path) -> bool:
     return root in {Path(ROOT).resolve(), state_root}
 
 
-def _require_not_the_memory_tree(root: Path, requested: Iterable[str]) -> None:
-    """`knowledge/` belongs to the memory generation; a code index refuses it by name.
+def _require_not_the_memory_tree(
+    root: Path, requested: Iterable[str], memory_owner: bool
+) -> None:
+    """The vault's `knowledge/` belongs to its memory generation; a code index refuses it.
 
     Refused rather than pruned: asking for the memory tree in a code index is a
     mistake worth naming, and silence about a dropped root is what NEW-67 was.
+    Only this vault's, though: `knowledge/` is this vault's noun, and another
+    repository's directory of that name is one of its code roots. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
-    if MEMORY_ROOT not in set(requested):
+    if not memory_owner or MEMORY_ROOT not in set(requested):
         return
     raise _refuse(
         "repository_root_is_the_memory_tree",
@@ -536,7 +541,7 @@ def selected_code_roots(
     `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
     """
     if requested is not None:
-        _require_not_the_memory_tree(root, requested)
+        _require_not_the_memory_tree(root, requested, memory_owner)
         return _requested_code_roots(root, requested)
     discovered = _discovered_code_roots(root)
     if not memory_owner:

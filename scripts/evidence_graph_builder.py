@@ -1989,7 +1989,8 @@ def build_incremental_generation(
         cancelled=cancelled,
     )
     delta = _incremental_delta(
-        current, parent_entries, parent_manifest, reuse_config, config_matches
+        current, parent_entries, parent_manifest, reuse_config, config_matches,
+        _policy_code_roots(policy),
     )
     runner = _IncrementalExtractor(
         extractor,
@@ -2200,11 +2201,17 @@ def _workspace_surface_moved(
     return current_source.get("language") != parent_source.get("language")
 
 
-def _workspace_source_ids(sources: Mapping[str, Mapping[str, object]]) -> set[str]:
+def _workspace_source_ids(
+    sources: Mapping[str, Mapping[str, object]], code_roots: tuple[str, ...]
+) -> set[str]:
+    """Every source outside the memory walk; a code root named `knowledge` is code.
+
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
     return {
         source_id
         for source_id, source in sources.items()
-        if not str(source["relative_path"]).startswith("knowledge/")
+        if not corpus_snapshot.is_memory_path(str(source["relative_path"]), code_roots)
     }
 
 
@@ -2216,6 +2223,7 @@ def _workspace_membership_changed(
     changed: set[str],
     added: set[str],
     deleted: set[str],
+    code_roots: tuple[str, ...],
 ) -> bool:
     """Whether the workspace surface itself moved, not only its file contents."""
     parent_workspace_manifest = str(
@@ -2223,8 +2231,8 @@ def _workspace_membership_changed(
     )
     if parent_workspace_manifest != reuse_config.workspace_manifest_sha256:
         return True
-    current_workspace_ids = _workspace_source_ids(current)
-    previous_workspace_ids = _workspace_source_ids(parent_sources)
+    current_workspace_ids = _workspace_source_ids(current, code_roots)
+    previous_workspace_ids = _workspace_source_ids(parent_sources, code_roots)
     if added & current_workspace_ids or deleted & previous_workspace_ids:
         return True
     workspace_ids = current_workspace_ids | previous_workspace_ids
@@ -2251,6 +2259,7 @@ def _incremental_delta(
     parent_manifest: Mapping[str, object] | None,
     reuse_config: IncrementalReuseConfig,
     config_matches: bool,
+    code_roots: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """What changed since the parent, and therefore what has to be rebuilt."""
     current_ids = set(current)
@@ -2263,11 +2272,12 @@ def _incremental_delta(
         if _source_differs(current[source_id], parent_entries[source_id])
     }
     membership_changed = config_matches and _workspace_membership_changed(
-        parent_manifest, reuse_config, current, parent_entries, changed, added, deleted
+        parent_manifest, reuse_config, current, parent_entries,
+        changed, added, deleted, code_roots,
     )
     rebuild = _initial_rebuild(config_matches, current_ids, added, changed)
     if membership_changed:
-        rebuild.update(_workspace_source_ids(current))
+        rebuild.update(_workspace_source_ids(current, code_roots))
     return {
         "added": added,
         "deleted": deleted,
@@ -2277,13 +2287,14 @@ def _incremental_delta(
         "membership_changed": membership_changed,
         "parent_entries": parent_entries,
         "current_ids": current_ids,
-        "universes": _universe_ids(current, parent_entries),
+        "universes": _universe_ids(current, parent_entries, code_roots),
     }
 
 
 def _universe_ids(
     current: Mapping[str, Mapping[str, object]],
     parent_entries: Mapping[str, Mapping[str, object]],
+    code_roots: tuple[str, ...] = (),
 ) -> tuple[set[str], set[str]]:
     """The two extraction universes, each naming every id that has been in it.
 
@@ -2291,8 +2302,8 @@ def _universe_ids(
     parent entry, and a source moved across the boundary belongs to both until
     the move has been accounted for.
     """
-    current_workspace = _workspace_source_ids(current)
-    parent_workspace = _workspace_source_ids(parent_entries)
+    current_workspace = _workspace_source_ids(current, code_roots)
+    parent_workspace = _workspace_source_ids(parent_entries, code_roots)
     return (
         current_workspace | parent_workspace,
         (set(current) - current_workspace) | (set(parent_entries) - parent_workspace),

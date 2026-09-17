@@ -141,13 +141,15 @@ def _memory_publications(catalog: GenerationCatalog) -> set[str]:
     pointer. Its lifecycle belongs to the collector that knows its readers
     (`repository_retention`, the vault's checkout included since 2026-09-17), so
     it is never an abandoned publication, and neither is a registration whose
-    manifest cannot be read. See
-    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
+    manifest cannot be read. "Holds code" is the catalog's one predicate, so a
+    generation built before the manifest named its roots is still a code one. See
+    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md` and
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
     return {
         identifier
         for identifier, _registered_at, manifest in catalog.registered_manifests()
-        if not manifest.get("code_roots")
+        if not catalog.holds_code(identifier, manifest)
     }
 
 

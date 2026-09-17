@@ -1386,6 +1386,11 @@ def _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled):
     the code one first. Every other repository has no memory generation and
     falls straight through. Decision:
     `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+
+    The pointer is asked only when the repository has no code generation
+    registered at all. One that is registered and cannot be opened is "no usable
+    index", never a confident empty answer out of the memory generation. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
     code = _bounded_call(
         graph_class.open_code_for_repository, catalog, scope,
@@ -1393,6 +1398,12 @@ def _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled):
     )
     if code is not None:
         return code
+    registered = _bounded_call(
+        catalog.code_generations_for_repository, scope,
+        deadline=deadline, cancelled=cancelled,
+    )
+    if registered:
+        return None
     return _bounded_call(
         graph_class.open_active_for_repository, catalog, scope,
         deadline=deadline, cancelled=cancelled,

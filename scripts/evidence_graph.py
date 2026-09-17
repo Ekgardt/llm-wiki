@@ -3785,13 +3785,34 @@ class EvidenceGraph:
         catalog row, the scope must be the same repository, and the seal is
         re-checked after the open. Decision:
         `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+
+        Retention keeps a second code generation for a reader behind a refresh;
+        when the newest cannot be opened this walks on to it. See
+        `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
         """
         _check_build_stop(deadline, cancelled, time.monotonic)
         expected_scope = RepositoryScope.from_dict(repository_scope.as_dict())
         options = _stop_options(deadline, cancelled)
-        _identifier, manifest = catalog.code_generation_for_repository(
-            expected_scope, **options
-        )
+        held = catalog.code_generations_for_repository(expected_scope, **options)
+        for _identifier, manifest in held:
+            _check_build_stop(deadline, cancelled, time.monotonic)
+            graph = cls._opened_code_manifest(
+                catalog, manifest, expected_scope, options, deadline, cancelled
+            )
+            if graph is not None:
+                return graph
+        return None
+
+    @classmethod
+    def _opened_code_manifest(
+        cls,
+        catalog: object,
+        manifest: dict,
+        expected_scope: RepositoryScope,
+        options: dict,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> EvidenceGraph | None:
         resolved = _resolved_repository_manifest(manifest)
         if resolved is None:
             return None

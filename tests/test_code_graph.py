@@ -417,7 +417,7 @@ def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
         # This repository has no registered code generation, so the read falls
         # through to the active pointer:
         # docs/research/2026-09-12-the-vault-is-a-repository-too.md.
-        code_generation_for_repository=lambda _scope, **_options: (None, None),
+        code_generations_for_repository=lambda _scope, **_options: [],
     )
     graph = SimpleNamespace(database_path=tmp_path / "evidence.sqlite3", close=lambda: None)
 
@@ -472,7 +472,10 @@ def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkey
     import evidence_graph
     import repository_scope
 
-    catalog = SimpleNamespace(catalog_path=tmp_path / "catalog.sqlite3")
+    catalog = SimpleNamespace(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        code_generations_for_repository=lambda _scope: [],
+    )
     graph = SimpleNamespace(database_path=tmp_path / "evidence.sqlite3", close=lambda: None)
     calls = []
 

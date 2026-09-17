@@ -16,6 +16,9 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
+from test_a_question_is_answered_by_its_own_kind_of_generation import (  # noqa: E402
+    _active_memory_generation,
+)
 from test_repository_index import ALPHA, _repository, vault  # noqa: E402,F401
 
 DESCRIPTORS = Path("/proc/self/fd")
@@ -74,6 +77,10 @@ def test_no_stop_point_of_an_open_leaves_the_graph_database_open(vault, opener_n
     repository = _repository(state.parent / "repo", {"pkg/alpha.py": ALPHA})
     repository_index.index_repository(repository, state_root=state)
     catalog = generation_catalog.GenerationCatalog(state)
+    # The pointer path answers memory questions only, so the active opener needs
+    # a memory generation of this checkout to have anything to open:
+    # docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md
+    _active_memory_generation(catalog, repository, "gen-memory")
 
     stopped, left_open = _leaks(getattr(EvidenceGraph, opener_name), catalog, resolve_repository_scope(repository))
 

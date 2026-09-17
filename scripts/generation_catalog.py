@@ -2036,11 +2036,45 @@ def _validate_generation(
     return normalized, _content_seal(final_seal, digests)
 
 
-def _holds_code_for(manifest: dict[str, object], scope: RepositoryScope) -> bool:
-    """True when this manifest is a code generation of exactly this repository."""
-    if not manifest.get("code_roots"):
-        return False
-    return _manifest_belongs_to(manifest, scope)
+def _recorded_artifact_digest(manifest: dict[str, object], name: str) -> str | None:
+    for artifact in manifest.get("artifacts") or []:
+        if artifact.get("path") == name:
+            return str(artifact.get("sha256"))
+    return None
+
+
+def _policy_code_roots(
+    generation_path: Path, manifest: dict[str, object], state_root: Path
+) -> tuple[str, ...]:
+    """The code roots of the snapshot policy, read only when the bytes are the recorded ones.
+
+    A generation built before the manifest named its roots (2026-09-12) still
+    says what it was built from in `source-manifest.json`, whose digest the
+    manifest binds. Unreadable, or not the recorded bytes: no roots — nobody can
+    read such a generation either. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    import evidence_graph
+
+    try:
+        raw = read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
+        )
+    except (OSError, ValueError):
+        return ()
+    if sha256_bytes(raw) != _recorded_artifact_digest(manifest, "source-manifest.json"):
+        return ()
+    return _decoded_policy_roots(raw)
+
+
+def _decoded_policy_roots(raw: bytes) -> tuple[str, ...]:
+    try:
+        policy = json.loads(raw).get("policy") or {}
+        return tuple(str(name) for name in policy.get("code_roots") or ())
+    except (AttributeError, TypeError, ValueError):
+        return ()
 
 
 class GenerationCatalog:
@@ -2075,6 +2109,7 @@ class GenerationCatalog:
         # One validation per generation per process, re-checked by its cheap
         # entry seal. See `_validate` below for what that trades away.
         self._validated: dict[str, tuple[tuple[_EntrySeal, ...], tuple]] = {}
+        self._held_code: dict[str, bool] = {}
         self._read_only = False
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
@@ -2117,6 +2152,7 @@ class GenerationCatalog:
         catalog._clock = clock or (lambda: datetime.now(timezone.utc))
         catalog._candidate_issuer = object()
         catalog._validated = {}
+        catalog._held_code = {}
         catalog._read_only = True
         check_stop()
         with closing(catalog._readonly()):
@@ -3108,13 +3144,51 @@ class GenerationCatalog:
         (None, None) when the repository has none yet. Decision:
         `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
         """
+        held = self.code_generations_for_repository(
+            repository_scope, deadline=deadline, cancelled=cancelled
+        )
+        if not held:
+            return None, None
+        return held[0]
+
+    def code_generations_for_repository(
+        self,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Every registered code generation of this repository, newest first.
+
+        Retention keeps a second one for a reader behind a refresh; a reader
+        that cannot open the newest walks on to it.
+        """
         expected = RepositoryScope.from_dict(repository_scope.as_dict())
-        for identifier, _registered_at, manifest in self.registered_manifests(
-            deadline=deadline, cancelled=cancelled
-        ):
-            if _holds_code_for(manifest, expected):
-                return identifier, manifest
-        return None, None
+        return [
+            (identifier, manifest)
+            for identifier, _registered_at, manifest in self.registered_manifests(
+                deadline=deadline, cancelled=cancelled
+            )
+            if _manifest_belongs_to(manifest, expected)
+            and self.holds_code(identifier, manifest)
+        ]
+
+    def holds_code(self, identifier: str, manifest: dict[str, object]) -> bool:
+        """True when this generation was built from code roots, not from the memory walk.
+
+        The manifest says so since 2026-09-12; an older one is asked through the
+        snapshot policy it binds. Remembered per id: a generation is immutable.
+        See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+        """
+        if manifest.get("code_roots"):
+            return True
+        if identifier not in self._held_code:
+            self._held_code[identifier] = bool(
+                _policy_code_roots(
+                    self.generations_path / identifier, manifest, self.state_root
+                )
+            )
+        return self._held_code[identifier]
 
     def registered_manifests(
         self,
@@ -3167,13 +3241,17 @@ class GenerationCatalog:
         activate, indexing one would make the vault's own scope unresolvable and
         every knowledge query would fall back to the legacy index -- NEW-65,
         recreated deliberately.
+
+        The pointer path answers memory questions, so a code generation is
+        never its answer: a code reader asks `code_generations_for_repository`.
+        See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
         """
         if repository_scope is None:
             return None
         for identifier, _registered_at, manifest in self.registered_manifests(
             deadline=deadline, cancelled=cancelled
         ):
-            if not _manifest_belongs_to(manifest, repository_scope):
+            if not self._memory_of(identifier, manifest, repository_scope):
                 continue
             selected = self._validated_scoped_generation(
                 identifier, deadline, cancelled
@@ -3181,6 +3259,13 @@ class GenerationCatalog:
             if selected is not None:
                 return selected
         return None
+
+    def _memory_of(
+        self, identifier: str, manifest: dict[str, object], scope: RepositoryScope
+    ) -> bool:
+        if not _manifest_belongs_to(manifest, scope):
+            return False
+        return not self.holds_code(identifier, manifest)
 
     def _validated_scoped_generation(
         self,

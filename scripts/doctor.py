@@ -7455,13 +7455,23 @@ def _partition_code_extraction(
     return _source_partitions(source_ids, state, check_stop, SourceExtraction)
 
 
+def _is_memory_source(snapshot, source) -> bool:
+    """A source the memory walk collected; a code root named `knowledge` holds code.
+
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    from corpus_snapshot import is_memory_path
+
+    return is_memory_path(source.record.relative_path, snapshot.policy.code_roots)
+
+
 def _code_extraction_sources(snapshot):
     return tuple(
         sorted(
             (
                 source
                 for source in snapshot.sources
-                if not source.record.relative_path.startswith("knowledge/")
+                if not _is_memory_source(snapshot, source)
             ),
             key=lambda source: (
                 source.record.logical_id,
@@ -7476,7 +7486,7 @@ def _knowledge_extraction_sources(snapshot):
     return tuple(
         source
         for source in snapshot.sources
-        if source.record.relative_path.startswith("knowledge/")
+        if _is_memory_source(snapshot, source)
         and not source.record.relative_path.startswith("knowledge/projects/")
     )
 
@@ -7519,6 +7529,11 @@ class _SourceExtractionAdapter:
 
     def __init__(self, snapshot, repository_id: str) -> None:
         self.by_id = {source.record.logical_id: source for source in snapshot.sources}
+        self.memory_ids = frozenset(
+            source.record.logical_id
+            for source in snapshot.sources
+            if _is_memory_source(snapshot, source)
+        )
         self.code_sources = _code_extraction_sources(snapshot)
         self.knowledge_sources = _knowledge_extraction_sources(snapshot)
         self.repository_id = repository_id
@@ -7536,12 +7551,11 @@ class _SourceExtractionAdapter:
         return _source_extraction(SourceExtraction, result, content)
 
     def _result_for(self, captured, source_bytes, deadline, cancelled):
-        path = captured.record.relative_path
-        if path.startswith("knowledge/projects/"):
+        if captured.record.logical_id not in self.memory_ids:
+            return self._code_result(captured, source_bytes, deadline, cancelled)
+        if captured.record.relative_path.startswith("knowledge/projects/"):
             return _project_extraction(captured, deadline, cancelled)
-        if path.startswith("knowledge/"):
-            return self._knowledge_result(captured, source_bytes, deadline, cancelled)
-        return self._code_result(captured, source_bytes, deadline, cancelled)
+        return self._knowledge_result(captured, source_bytes, deadline, cancelled)
 
     def _knowledge_result(self, captured, source_bytes, deadline, cancelled):
         self.knowledge_partitions = _memoized(
@@ -7675,7 +7689,7 @@ def _workspace_manifest_sha256(snapshot: object) -> str:
             source.record.language,
         ]
         for source in snapshot.sources
-        if not source.record.relative_path.startswith("knowledge/")
+        if not _is_memory_source(snapshot, source)
     )
     return hashlib.sha256(canonical_json_bytes(membership)).hexdigest()
 

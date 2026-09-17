@@ -1497,6 +1497,20 @@ def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
 
 
+def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
+    """True for a source the memory walk collected, false for one a code root holds.
+
+    `knowledge/` is this vault's noun. Another repository's tracked `knowledge/`
+    directory is one of its code roots, and `knowledge/mod.py` there is code. The
+    vault's own code roots never include it (`repository_index.selected_code_roots`).
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    path = PurePosixPath(relative_path)
+    if path.parts[:1] != ("knowledge",):
+        return False
+    return not any(path.is_relative_to(PurePosixPath(root)) for root in code_roots)
+
+
 def _walk_memory(discovery: _Discovery, vault: Path, policy: SnapshotPolicy) -> None:
     """The knowledge tree belongs to the memory generation, not to the code one.
 
