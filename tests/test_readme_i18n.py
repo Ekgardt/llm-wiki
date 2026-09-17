@@ -28,6 +28,26 @@ def _readmes() -> list[tuple[Path, str]]:
     return [(path, path.read_text(encoding="utf-8")) for path in README_FILES]
 
 
+def _missing(needles: tuple[str, ...], haystack: str) -> list[str]:
+    """What a document should say and does not — named, so one assertion carries them all."""
+    return [needle for needle in needles if needle not in haystack]
+
+
+def _present(needles: tuple[str, ...], haystack: str) -> list[str]:
+    """What a document must not say and does."""
+    return [needle for needle in needles if needle in haystack]
+
+
+def _workflow() -> dict:
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+
+
+def _step(job: dict, name: str) -> dict:
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
 def _collect_test_count() -> int:
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
@@ -247,18 +267,16 @@ def test_installers_report_agent_activation_and_scheduler_limits_truthfully() ->
 
 def test_windows_scheduler_status_validates_registered_contract() -> None:
     source = (ROOT / "scripts/install-scheduled-tasks.ps1").read_text(encoding="utf-8")
+    required = (
+        "function Test-LLMWikiScheduledTasks",
+        ".Principal.LogonType",
+        ".Actions.Count",
+        ".Triggers.Count",
+        "if ($verified)",
+        "exit 1",
+    )
 
-    assert _missing(
-        source,
-        (
-            "function Test-LLMWikiScheduledTasks",
-            ".Principal.LogonType",
-            ".Actions.Count",
-            ".Triggers.Count",
-            "if ($verified)",
-            "exit 1",
-        ),
-    ) == []
+    assert _missing(source, required) == []
 
 
 def test_all_readmes_mention_knowledge_layout():
@@ -310,6 +328,12 @@ def test_all_readmes_share_locked_dependency_profiles_and_smoke_contract() -> No
         "uv sync --locked --no-default-groups --inexact --extra code-graph",
         "uv sync --locked",
         "uv run --locked --no-sync pytest -q",
+        # the MCP compatibility alias and its semantics, the bounded smoke, and the
+        # optional navigation prerequisite
+        "mcp-server",
+        "compatibility alias",
+        "production smoke",
+        "Node 22",
     )
     claims = (
         "mcp-server",
@@ -325,6 +349,41 @@ def test_all_readmes_share_locked_dependency_profiles_and_smoke_contract() -> No
 
 
 def test_ci_qualifies_real_pyright_on_all_supported_os_families():
+    job = _workflow()["jobs"]["pyright-navigation"]
+    entries = job["strategy"]["matrix"]["include"]
+    install_step = _step(job, "Explicit Pyright install")
+    facts = (
+        [(entry["os"], entry["platform"], entry["python"], entry["node"]) for entry in entries],
+        # The budget is per platform, because the same suite takes about three
+        # times longer on the hosted Windows image. Every family declares one.
+        [entry["timeout"] > 0 for entry in entries],
+        job["timeout-minutes"],
+        job["env"]["LLM_WIKI_STATE_ROOT"],
+        job["env"]["LLM_WIKI_TEST_USE_EXTERNAL_STATE"],
+        '"${{ env.LLM_WIKI_STATE_ROOT }}"' in install_step["run"],
+        "shell" in install_step,
+    )
+
+    assert facts == (
+        [
+            ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
+            ("windows-2025", "windows", "3.10", "22.23.1"),
+            ("macos-15", "macos", "3.10", "22.23.1"),
+        ],
+        [True, True, True],
+        "${{ matrix.timeout }}",
+        "${{ github.workspace }}/../llm-wiki-state",
+        "1",
+        True,
+        False,
+    )
+
+
+def test_ci_runs_a_whole_installer_on_every_supported_os_family():
+    """Three installer defects at once were invisible because no job ran an installer.
+
+    Research: `docs/research/2026-09-17-a-real-install-is-run-in-ci.md`.
+    """
     import yaml
 
     workflow = yaml.safe_load(

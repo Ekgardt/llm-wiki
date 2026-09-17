@@ -306,6 +306,68 @@ jobs:
       - run: uv run --locked --no-sync pytest tests/test_integration_injection.py -q -k installer
       - run: uv run --locked --no-sync pytest tests/test_dependency_environments.py -q -k installer
 
+  # The jobs above drive pieces of the installers with fake runners; none of them
+  # ever ran an installer. Three defects lived behind that gap at once: a fresh
+  # vault never adopted the queue (issue #17 twice), the Windows installer had no
+  # adoption step, and the POSIX one used bash 4 syntax that stock macOS lacks. This
+  # job runs the real thing, under a HOME and a state root of its own, and then asks
+  # the vault whether session capture is actually enabled.
+  #
+  # `--scheduler cron` is the explicit degraded fallback and the only backend a
+  # hosted runner can register: ubuntu-24.04 has no systemd user manager, and the
+  # macOS LaunchAgent domain needs an Aqua session. The native backends stay covered
+  # by the `installer` job above. macOS runs the installer with `/bin/bash`, which is
+  # bash 3.2 — the shell the contract names.
+  # See docs/research/2026-09-17-a-real-install-is-run-in-ci.md.
+  install-end-to-end:
+    name: timing::installer::end-to-end-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-15
+            platform: macos
+          - os: windows-2025
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-e2e-state-${{ matrix.platform }}
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-e2e-env-${{ matrix.platform }}
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      # Created before HOME moves: the steps above install into the runner's own home.
+      - name: A home of its own, so nothing of the runner's is configured
+        shell: bash
+        run: mkdir -p "${{ runner.temp }}/installer-home"
+      - name: Run install.sh end to end
+        if: runner.os != 'Windows'
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+        run: /bin/bash ./install.sh --scheduler cron
+      - name: Run install.ps1 end to end
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
+      - name: The installed vault reports session capture enabled
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+
   pyright-navigation:
     name: timing::focused::pyright-${{ matrix.platform }}
     strategy:
@@ -389,6 +451,7 @@ jobs:
       - clean-hybrid
       - clean-code-graph
       - installer
+      - install-end-to-end
       - pyright-navigation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
