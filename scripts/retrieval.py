@@ -210,18 +210,39 @@ def _optional_stage_admitted(
     return _optional_stage_fits(kind, deadline)
 
 
+def _every_value_measures(_value: Any) -> bool:
+    """A stage that says nothing about itself is measured by every run it finishes."""
+    return True
+
+
+def _observe_completed_stage(
+    kind: str | None, started: float, value: Any, observes: Callable[[Any], bool]
+) -> None:
+    """Record what the run cost, unless its own result says it did not finish."""
+    if not observes(value):
+        return
+    _observe_optional_stage(kind, time.monotonic() - started)
+
+
 def _run_optional_bounded(
     operation: Callable[[], Any],
     *,
     deadline: float,
     cancelled: Callable[[], bool] | None,
     kind: str | None = None,
+    observes: Callable[[Any], bool] = _every_value_measures,
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers.
 
     The stage is always started; what varies is whether the caller waits for
     it. That split is the point: warming is never refused, only the spending of
     a budget that cannot buy a result.
+
+    `observes` reads the value the operation returned and says whether it is
+    evidence of a finished run. A stage that gives up on its own deadline
+    returns normally, and timing that run would teach the cost model a number
+    bounded by the budget rather than by the work. See
+    `docs/research/2026-09-17-an-abandoned-stage-is-not-a-measurement.md`.
     """
     # Decided before the worker starts, and deliberately so: this run is about
     # to record its own cost, and a fast one would otherwise overwrite the
@@ -232,7 +253,7 @@ def _run_optional_bounded(
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-    _start_optional_worker(operation, result, completed, slots, kind)
+    _start_optional_worker(operation, result, completed, slots, kind, observes)
     _require_admitted_optional_stage(admitted)
     _await_optional_stage(completed, deadline, cancelled)
     ok, value = result.get_nowait()
@@ -261,6 +282,7 @@ def _start_optional_worker(
     completed: threading.Event,
     slots: threading.BoundedSemaphore,
     kind: str | None = None,
+    observes: Callable[[Any], bool] = _every_value_measures,
 ) -> None:
     def run() -> None:
         started = time.monotonic()
@@ -270,8 +292,9 @@ def _start_optional_worker(
             result.put((False, exc))
         else:
             # Only a run that produced something is a cost observation. A fast
-            # failure is not evidence that the work is cheap.
-            _observe_optional_stage(kind, time.monotonic() - started)
+            # failure is not evidence that the work is cheap, and neither is a
+            # run the stage abandoned on its own deadline.
+            _observe_completed_stage(kind, started, value, observes)
             result.put((True, value))
         finally:
             completed.set()
@@ -2141,7 +2164,22 @@ def _run_reranker(
         deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
+        observes=_rerank_scored,
     )
+
+
+def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the stage really scored, or returned the fused order it was given.
+
+    A rerank cut by its own deadline (and an unavailable or failed one) returns
+    normally with every document marked not applied. Timing such a run teaches
+    the admission model a cost bounded by the budget the stage was given, so a
+    warm reranker that needs longer than the share on offer would be admitted,
+    waited for and abandoned on every call.
+    """
+    if not reranked:
+        return False
+    return bool(reranked[0].get("reranker_applied"))
 
 
 def _reranked_candidates(
