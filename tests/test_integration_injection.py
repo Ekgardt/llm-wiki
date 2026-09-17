@@ -4307,7 +4307,7 @@ def test_install_scripts_generate_context(tmp_path):
                 ),
                 (".claude/.mcp.json", install_sh, False),
                 ("Existing ~/.claude.json found without llm-wiki", sh_claude, True),
-                ("grep -q '\"llm-wiki\"'", sh_claude, True),
+                ('claude_mcp_state "$CLAUDE_MCP" "$VAULT_ROOT"', sh_claude, True),
                 ("scripts/installer_config.py", sh_opencode, True),
                 ("opencode", sh_opencode, True),
                 ('--root "$VAULT_ROOT"', sh_opencode, True),

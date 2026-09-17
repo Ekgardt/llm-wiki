@@ -1314,6 +1314,9 @@ def test_powershell_installer_sync_block_behaves_by_exit_code(
     block = source.split(
         "# --- 8. Bounded runtime sync --------------------------------------", 1
     )[1]
+    # The sync block ends where the next step begins. Steps after it (weights, queue
+    # adoption) have outcomes of their own, which the stand-in `uv` cannot answer for.
+    block = block.split("# --- 8a.", 1)[0]
     harness = f"""
 function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
 function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}

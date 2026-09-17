@@ -15,9 +15,9 @@
 #   4. Sets LLM_WIKI_ROOT environment variable (user-level)
 #   5. Registers Windows Task Scheduler (nightly + weekly)
 #   6. Detects agents (Claude Code, OpenCode, Codex)
-#   7. Wires up Codex wrapper to PowerShell profile
-#   8. Copies OpenCode plugin if OpenCode is installed
-#   9. Builds search index
+#   7. Wires up each detected agent (hooks through the install transaction, MCP entries)
+#   8. Synchronizes runtime state and derived indexes
+#   9. Adopts the Reliability V3 queue so session capture works
 #
 # Safe to re-run. Idempotent.
 
@@ -58,6 +58,40 @@ function Invoke-NativeCommand {
         }
     }
     if ($CaptureOutput) { return ($output -join [Environment]::NewLine) }
+}
+# A failed fetch used to leave the directory `git init` had made, and the next
+# attempt stopped at "already exists" with no way forward. The directory is ours
+# alone here - the caller checked that it did not exist - so a failure takes it back.
+# See docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it-did.md.
+function Get-PinnedCheckout([string]$Target, [string]$Url, [string]$Commit) {
+    $steps = @(
+        @("init", $Target),
+        @("-C", $Target, "remote", "add", "origin", $Url),
+        @("-C", $Target, "fetch", "--depth", "1", "origin", $Commit),
+        @("-C", $Target, "checkout", "--detach", $Commit)
+    )
+    foreach ($step in $steps) {
+        & git @step | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+    }
+    return $true
+}
+function Get-ExistingTargetAdvice([string]$Target) {
+    $isCheckout = (Test-Path -LiteralPath (Join-Path $Target "install.ps1") -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $Target "pyproject.toml") -PathType Leaf)
+    if ($isCheckout) {
+        return "Remote install target already exists: $Target. It holds a checkout; continue from it: & '$Target\install.ps1'"
+    }
+    return "Remote install target already exists: $Target. It is not an LLM-Wiki checkout; move it away and run the same command again"
+}
+# A remote bootstrap pins one commit, and the nightly update skips a detached head.
+function Get-CodeUpdateNote([string]$VaultRoot) {
+    & git -C $VaultRoot symbolic-ref -q HEAD *> $null
+    if ($LASTEXITCODE -eq 0) { return "nightly fast-forward of the checked-out branch" }
+    return "none - this checkout is pinned to one commit, which the nightly update skips; update it by hand with git"
 }
 function Protect-PushUrls([string]$VaultRoot) {
     $remoteResult = Invoke-NativeCommand git @("-C", $VaultRoot, "remote") -CaptureOutput -ReturnResult
@@ -110,7 +144,7 @@ function Get-CodexInlineHooksState(
     # Asked before the ownership transaction, and it writes nothing: the
     # transaction may own hooks.json only when the inline configuration neither
     # disables the feature, already carries our handlers, nor contradicts them.
-    $state = (& uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+    $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
         hooks-state `
         --source (Join-Path $VaultRoot "integrations\codex\hooks.json") `
         --config (Join-Path $CodexDir "config.toml") | Out-String).Trim()
@@ -121,7 +155,7 @@ function Install-CodexMcp(
     [string]$VaultRoot,
     [string]$Config
 ) {
-    $state = (& uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+    $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
         config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { return 1 }
     if ($state -eq "equivalent") { return 0 }
@@ -179,11 +213,10 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     }
     $commit = $env:LLM_WIKI_COMMIT.ToLowerInvariant()
     $VAULT_ROOT = Join-Path $env:USERPROFILE "LLM-wiki"
-    if (Test-Path -LiteralPath $VAULT_ROOT) { Fail "Remote install target already exists: $VAULT_ROOT" }
-    Invoke-NativeCommand git @("init", $VAULT_ROOT)
-    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "remote", "add", "origin", $repositoryUrl)
-    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "fetch", "--depth", "1", "origin", $commit)
-    Invoke-NativeCommand git @("-C", $VAULT_ROOT, "checkout", "--detach", $commit)
+    if (Test-Path -LiteralPath $VAULT_ROOT) { Fail (Get-ExistingTargetAdvice $VAULT_ROOT) }
+    if (-not (Get-PinnedCheckout -Target $VAULT_ROOT -Url $repositoryUrl -Commit $commit)) {
+        Fail "Could not fetch $commit; nothing was left behind, so the same command can be run again"
+    }
     $installerCreatedClone = $true
     $head = (Invoke-NativeCommand git @("-C", $VAULT_ROOT, "rev-parse", "HEAD") -CaptureOutput).Trim()
     if ($head -ne $commit) { Fail "Checked-out commit does not match LLM_WIKI_COMMIT" }
@@ -546,7 +579,7 @@ uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
 switch ($LASTEXITCODE) {
     0 { Ok "Pinned model weights present" }
     2 { Info "Semantic search not installed; model weights are fetched once it is" }
-    default { Warn "Model weights incomplete; run: uv run python scripts/install_models.py" }
+    default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
 }
 
 # --- 8b. Reliability V3 adoption ---------------------------------
@@ -565,14 +598,18 @@ $adoptionState = Get-AdoptionState
 $adoptCommand = "uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
 if ($adoptionState -eq "adopted") {
     Ok "Reliability V3 adopted"
-} elseif ($adoptionState -in @("fresh", "upgrade-required")) {
-    uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped *> $null
+} elseif ($adoptionState -in @("fresh", "upgrade-required", "partial")) {
+    # `partial` is an interrupted adoption, which the repair resumes. Its report names
+    # the reason of a failure, so it is kept in a log rather than thrown away.
+    $adoptionLog = Join-Path $STATE_ROOT "logs\install-adoption.log"
+    uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped *> $adoptionLog
     if ($LASTEXITCODE -eq 0) {
         Ok "Reliability V3 adopted (was $adoptionState); session capture is enabled"
     } else {
         $syncWarning = $true
         Warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
         Warn "  $adoptCommand"
+        Warn "  the report is in $adoptionLog"
     }
 } else {
     $syncWarning = $true
@@ -604,6 +641,7 @@ if ($schedulerWarning) {
 } else {
     Write-Host "Maintenance: Task Scheduler (nightly + weekly; logged-on user only)"
 }
+Write-Host "Code updates: $(Get-CodeUpdateNote $VAULT_ROOT)"
 Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. Restart terminal"

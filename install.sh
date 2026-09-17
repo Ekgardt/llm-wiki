@@ -40,6 +40,22 @@ ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 
+# `mapfile` is bash 4.0 and an empty array under `set -u` is an error before 4.4.
+# macOS ships 3.2, where this installer used to die at step 3 with "mapfile: command
+# not found". Asked before the first such construct runs.
+# See docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it-did.md.
+bash_runs_this_installer() {
+  local major="$1" minor="$2"
+  if [ "$major" -gt 4 ]; then
+    return 0
+  fi
+  [ "$major" -eq 4 ] && [ "$minor" -ge 4 ]
+}
+SHELL_VERSION="${BASH_VERSION:-0.0}"
+SHELL_MINOR="${SHELL_VERSION#*.}"
+bash_runs_this_installer "${SHELL_VERSION%%.*}" "${SHELL_MINOR%%.*}" || \
+  fail "bash 4.4 or newer is required; this is bash ${BASH_VERSION:-unknown}. macOS ships 3.2: run 'brew install bash', then start the installer with it: \"\$(brew --prefix)/bin/bash\" ./install.sh"
+
 for argument in "$@"; do
   if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
     SCHEDULER_MODE="$argument"
@@ -91,7 +107,7 @@ codex_inline_hooks_state() {
   # disables the feature, already carries our handlers, nor contradicts them.
   local vault_root="$1"
   local codex_dir="$2"
-  uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
     hooks-state \
     --source "$vault_root/integrations/codex/hooks.json" \
     --config "$codex_dir/config.toml" 2>/dev/null || echo "unknown"
@@ -101,7 +117,7 @@ configure_codex_mcp() {
   local vault_root="$1"
   local config="$2"
   local state vault_json block
-  state="$(uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+  state="$(uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
     config-state --config "$config" --vault-root "$vault_root")" || return 1
   case "$state" in
     equivalent)
@@ -135,6 +151,65 @@ configure_codex_mcp() {
   esac
 }
 
+# The status line used to say "active automatic" whatever happened to the MCP
+# entry, and an entry pointing at another vault passed a plain grep. The file is
+# only read here: it is Claude Code's live state and is never rewritten in place.
+claude_mcp_state() {
+  local config="$1" vault_root="$2"
+  if [ ! -f "$config" ]; then
+    echo missing
+    return 0
+  fi
+  python3 - "$config" "$vault_root" <<'PY' 2>/dev/null || echo unreadable
+import json, sys
+entry = json.load(open(sys.argv[1], encoding="utf-8")).get("mcpServers", {}).get("llm-wiki")
+states = {True: "current", False: "elsewhere"}
+print("absent" if entry is None else states[sys.argv[2] in entry.get("args", [])])
+PY
+}
+
+claude_status_line() {
+  case "$1" in
+    current) echo "Claude Code: active automatic" ;;
+    elsewhere) echo "Claude Code: hooks active; MCP entry points at another vault" ;;
+    *) echo "Claude Code: hooks active; MCP server not registered" ;;
+  esac
+}
+
+# A remote bootstrap pins one commit, and the nightly update skips a detached head.
+# Nothing said so, and such a vault silently never updated.
+code_update_note() {
+  if git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    echo "nightly fast-forward of the checked-out branch"
+    return 0
+  fi
+  echo "none - this checkout is pinned to one commit, which the nightly update skips; update it by hand with git"
+}
+
+# A failed fetch used to leave the directory `git init` had made, and the next
+# attempt stopped at "already exists" with no way forward. The directory is ours
+# alone here — the caller checked that it did not exist — so a failure takes it back.
+fetch_pinned_checkout() {
+  local target="$1" url="$2" commit="$3"
+  if git init "$target" \
+    && git -C "$target" remote add origin "$url" \
+    && git -C "$target" fetch --depth 1 origin "$commit" \
+    && git -C "$target" checkout --detach "$commit"; then
+    return 0
+  fi
+  rm -rf -- "$target"
+  return 1
+}
+
+existing_target_advice() {
+  local target="$1"
+  if [ -f "$target/install.sh" ] && [ -f "$target/pyproject.toml" ]; then
+    echo "Remote install target already exists: $target. It holds a checkout; continue from it: bash \"$target/install.sh\""
+    return 0
+  fi
+  echo "Remote install target already exists: $target. It is not an LLM-Wiki checkout; move it away and run the same command again"
+}
+
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -156,11 +231,9 @@ else
     fail "Remote bootstrap requires LLM_WIKI_COMMIT as a full 40-hex commit OID"
   LLM_WIKI_COMMIT_NORMALIZED="$(printf '%s' "$LLM_WIKI_COMMIT" | tr 'ABCDEF' 'abcdef')"
   INSTALL_DIR="$HOME/LLM-wiki"
-  [[ ! -e "$INSTALL_DIR" ]] || fail "Remote install target already exists: $INSTALL_DIR"
-  git init "$INSTALL_DIR"
-  git -C "$INSTALL_DIR" remote add origin "$REPOSITORY_URL"
-  git -C "$INSTALL_DIR" fetch --depth 1 origin "$LLM_WIKI_COMMIT_NORMALIZED"
-  git -C "$INSTALL_DIR" checkout --detach "$LLM_WIKI_COMMIT_NORMALIZED"
+  [[ ! -e "$INSTALL_DIR" ]] || fail "$(existing_target_advice "$INSTALL_DIR")"
+  fetch_pinned_checkout "$INSTALL_DIR" "$REPOSITORY_URL" "$LLM_WIKI_COMMIT_NORMALIZED" || \
+    fail "Could not fetch $LLM_WIKI_COMMIT_NORMALIZED; nothing was left behind, so the same command can be run again"
   VAULT_ROOT="$(cd "$INSTALL_DIR" && pwd -P)"
   INSTALLER_CREATED_CLONE=1
   [[ "$(git -C "$VAULT_ROOT" rev-parse HEAD)" == "$LLM_WIKI_COMMIT_NORMALIZED" ]] || \
@@ -551,15 +624,16 @@ fi
 
 # Claude Code — hooks and env are owned by the install transaction (step 6)
 if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
-  CLAUDE_AUTOMATIC=1
   ok "Claude settings owned by the install transaction → ~/.claude/settings.json"
   # v4.0: MCP server config for Claude Code
   CLAUDE_MCP="$HOME/.claude.json"
-  if [ ! -f "$CLAUDE_MCP" ]; then
+  CLAUDE_MCP_STATE="$(claude_mcp_state "$CLAUDE_MCP" "$VAULT_ROOT")"
+  if [ "$CLAUDE_MCP_STATE" = "missing" ]; then
     info "Adding MCP server config for Claude Code..."
     printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
+    CLAUDE_MCP_STATE="current"
     ok "Claude MCP config: ~/.claude.json"
-  elif ! grep -q '"llm-wiki"' "$CLAUDE_MCP" 2>/dev/null; then
+  elif [ "$CLAUDE_MCP_STATE" = "absent" ]; then
     # `~/.claude.json` is Claude Code's live state file and it writes to it
     # while running, so this must not read-modify-write it. Its own CLI adds
     # the entry safely; without the CLI the only honest option is to say what
@@ -567,17 +641,18 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
     if command -v claude &>/dev/null && claude mcp add --scope user llm-wiki \
         -- uv run --locked --no-sync --directory "$VAULT_ROOT" python scripts/mcp_server.py \
         >/dev/null 2>&1; then
+      CLAUDE_MCP_STATE="current"
       ok "Claude MCP server registered: llm-wiki"
     else
       warn "Existing ~/.claude.json found without llm-wiki; add it with:"
       warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
     fi
+  elif [ "$CLAUDE_MCP_STATE" = "elsewhere" ]; then
+    warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
+    warn "  claude mcp remove --scope user llm-wiki"
+    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
   fi
-  if [ "$CLAUDE_AUTOMATIC" -eq 1 ]; then
-    AGENT_STATUSES+=("Claude Code: active automatic")
-  else
-    AGENT_STATUSES+=("Claude Code: conflict or unverified")
-  fi
+  AGENT_STATUSES+=("$(claude_status_line "$CLAUDE_MCP_STATE")")
 fi
 
 if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
@@ -607,7 +682,7 @@ uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODE
 case "$MODELS_EXIT" in
   0) ok "Pinned model weights present" ;;
   2) info "Semantic search not installed; model weights are fetched once it is" ;;
-  *) warn "Model weights incomplete; run: uv run python scripts/install_models.py" ;;
+  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
 # ─── 8b. Reliability V3 adoption ───────────────────────────────────
@@ -643,8 +718,10 @@ adoption_tail() {
 }
 case "$ADOPTION_STATE" in
   adopted) ok "Reliability V3 adopted" ;;
-  fresh|upgrade-required)
-    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >/dev/null 2>>"$ADOPTION_ERR"; then
+  # `partial` is an adoption that was interrupted; the repair resumes it. The
+  # report on standard output names the reason of a failure, so it is kept too.
+  fresh|upgrade-required|partial)
+    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
       ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
     else
       SYNC_WARNING=1
@@ -689,6 +766,7 @@ else
   printf '  - %s\n' "${AGENT_STATUSES[@]}"
 fi
 echo "Maintenance:    $SCHEDULER_BACKEND (nightly 03:00 + weekly Sun 04:00)"
+echo "Code updates:   $(code_update_note "$VAULT_ROOT")"
 echo ""
 echo "Next steps:"
 echo "  1. Restart your terminal (to pick up env vars)"
@@ -696,10 +774,10 @@ echo "  2. Open a project in your agent"
 echo "  3. Review the integration states above; automatic capture runs only for active automatic entries"
 echo ""
 echo "Useful commands:"
-echo "  uv run python scripts/search_memory.py 'your query'  # search vault"
-echo "  uv run python scripts/build_advisory.py              # proactive advisory"
-echo "  uv run python scripts/build_guardrails.py             # learned rules"
-echo "  uv run python benchmark/run_benchmark.py              # run benchmark"
+echo "  uv run --locked --no-sync python scripts/search_memory.py 'your query'  # search vault"
+echo "  uv run --locked --no-sync python scripts/build_advisory.py              # proactive advisory"
+echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
+echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
 echo ""
 echo "MCP baseline: 12 local task-shaped tools (installed)"
 echo "Optional enhancements:"
