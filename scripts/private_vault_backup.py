@@ -1441,7 +1441,9 @@ def _destination_state(source: Path, destination: Path) -> str:
     return "conflict"
 
 
-def _planned_publication(pairs: list[tuple[Path, Path]]) -> tuple[list[tuple[Path, Path]], int]:
+def _planned_publication(
+    pairs: list[tuple[Path, Path]], image: Path
+) -> tuple[list[tuple[Path, Path]], int]:
     """(the files to write, how many are already identical); refused before any write.
 
     See `docs/research/2026-09-14-a-publication-is-all-or-nothing.md`.
@@ -1449,35 +1451,50 @@ def _planned_publication(pairs: list[tuple[Path, Path]]) -> tuple[list[tuple[Pat
     grouped: dict[str, list[tuple[Path, Path]]] = {"absent": [], "identical": [], "conflict": []}
     for source, destination in pairs:
         grouped[_destination_state(source, destination)].append((source, destination))
-    _refuse_conflicts(grouped["conflict"])
+    _refuse_conflicts(grouped["conflict"], image)
     return grouped["absent"], len(grouped["identical"])
 
 
-def _refuse_conflicts(conflicts: list[tuple[Path, Path]]) -> None:
+def _publish_conflict(source: Path, image: Path) -> BackupError:
+    """The refusal names the file by its place in the image, the same on every machine.
+
+    See `docs/research/2026-09-17-a-refused-publication-names-its-file.md`.
+    """
+    return BackupError("publish_conflict", (source.relative_to(image).as_posix(),))
+
+
+def _refuse_conflicts(conflicts: list[tuple[Path, Path]], image: Path) -> None:
     if conflicts:
-        raise BackupError("publish_conflict", (str(conflicts[0][1]),))
+        raise _publish_conflict(conflicts[0][0], image)
 
 
 def _write_new(source: Path, destination: Path) -> None:
     """Create exclusively and make it durable: the file and the entry that names it."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(destination, "xb") as handle:
-            handle.write(source.read_bytes())
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError:
-        raise BackupError("publish_conflict", (str(destination),)) from None
+    with open(destination, "xb") as handle:
+        handle.write(source.read_bytes())
+        handle.flush()
+        os.fsync(handle.fileno())
     fsync_directory(destination.parent)
 
 
-def _write_all_or_none(pairs: list[tuple[Path, Path]], deadline: float) -> None:
+def _write_or_refuse(source: Path, destination: Path, image: Path) -> None:
+    """A file that appeared since the plan is the same refusal, not an overwrite."""
+    try:
+        _write_new(source, destination)
+    except FileExistsError:
+        raise _publish_conflict(source, image) from None
+
+
+def _write_all_or_none(
+    pairs: list[tuple[Path, Path]], deadline: float, image: Path
+) -> None:
     """Every file, or none: a failure part-way removes what this run created."""
     written: list[Path] = []
     try:
         for source, destination in pairs:
             _deadline(deadline)
-            _write_new(source, destination)
+            _write_or_refuse(source, destination, image)
             written.append(destination)
     except BaseException:
         for path in written:
@@ -1505,8 +1522,8 @@ def publish_restored_image(
     staged = Path(image).resolve(strict=True)
     _validate_restored_image(staged, expected_manifest_sha256, deadline=deadline)
     pairs = _publication_targets(staged, Path(vault_root).resolve(), Path(state_root).resolve())
-    to_write, identical = _planned_publication(pairs)
-    _write_all_or_none(to_write, deadline)
+    to_write, identical = _planned_publication(pairs, staged)
+    _write_all_or_none(to_write, deadline, staged)
     _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
     return {
         "schema_version": "private-vault-publish-receipt/v1",
@@ -1601,12 +1618,16 @@ def _run_cli_command(
     )
 
 
+# A stable code, or a place inside the image (`vault/...`, `state/...`): the
+# same on every machine, so it says nothing about where this vault lives.
+_SAFE_DETAIL = re.compile(
+    r"[a-z0-9_:-]{1,128}"
+    r"|(?:vault|state)(?:/(?!\.{1,2}(?:/|$))[^/\\\x00-\x1f\x7f]{1,255}){1,64}"
+)
+
+
 def _safe_error_details(details: tuple[str, ...]) -> list[str]:
-    safe = []
-    for detail in details:
-        if re.fullmatch(r"[a-z0-9_:-]{1,128}", detail):
-            safe.append(detail)
-    return safe
+    return [detail for detail in details if _SAFE_DETAIL.fullmatch(detail)]
 
 
 def _print_json(value: dict[str, object]) -> None:
