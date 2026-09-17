@@ -77,6 +77,7 @@ from evidence_resolver import (  # noqa: E402
 from llm_client import (  # noqa: E402
     call_candidate,
     call_ceiling,
+    forced_provider,
     probe_candidate,
     provider_candidates,
 )
@@ -997,8 +998,7 @@ def resolve_compile_plan(
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
     attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
-    forced = os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
-    for candidate in provider_candidates(forced, max_tokens=4000):
+    for candidate in provider_candidates(forced_provider(), max_tokens=4000):
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved

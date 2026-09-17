@@ -8350,9 +8350,10 @@ def _guarded_generation_refresh(
 
 
 def _ready_capabilities() -> set[str]:
-    from llm_client import probe_candidate, provider_candidates
+    from llm_client import forced_provider, probe_candidate, provider_candidates
 
-    if not any(probe_candidate(item) for item in provider_candidates()):
+    # The provider the calls will use, not any provider that happens to be installed.
+    if not any(probe_candidate(item) for item in provider_candidates(forced_provider())):
         return set()
     return {"llm.compile", "llm.flush", "llm.query"}
 

@@ -184,6 +184,16 @@ def _candidate_descriptor(
         return _unresolved_descriptor(provider, index)
 
 
+def forced_provider() -> str:
+    """The provider the operator chose in `MEMORY_LLM_PROVIDER`, normalised; "" for automatic.
+
+    The one reader of that variable for choosing candidates: a readiness check
+    that skipped it answered about providers the calls would never use.
+    Research: docs/research/2026-09-17-repair-asks-about-the-provider-the-operator-chose.md
+    """
+    return os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
+
+
 def provider_candidates(
     forced: str = "",
     *,
@@ -586,7 +596,7 @@ def call_llm_result(
     if _llm_prompt_is_empty(prompt):
         return None
 
-    forced = os.environ.get("MEMORY_LLM_PROVIDER", "").lower().strip()
+    forced = forced_provider()
     lineage: tuple[str, ...] = ()
     for candidate in provider_candidates(forced, max_tokens=max_tokens):
         descriptor = replace(candidate, fallback_from=lineage)
