@@ -138,9 +138,10 @@ def _memory_publications(catalog: GenerationCatalog) -> set[str]:
 
     A code generation is only ever registered, never activated: code answers find
     it through `GenerationCatalog.code_generation_for_repository`, not the
-    pointer. Its lifecycle belongs to the collectors that know its readers
-    (`repository_retention`), so it is never an abandoned publication, and neither
-    is a registration whose manifest cannot be read. See
+    pointer. Its lifecycle belongs to the collector that knows its readers
+    (`repository_retention`, the vault's checkout included since 2026-09-17), so
+    it is never an abandoned publication, and neither is a registration whose
+    manifest cannot be read. See
     `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
     """
     return {

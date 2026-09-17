@@ -1,7 +1,7 @@
 """Retention of foreign repository generations (#24, D1).
 
 Per checkout, by identity: a gone or marked checkout loses every generation
-and its hint table; a live one keeps its newest two. The vault's own
+and its hint table; a live one keeps its newest two. The vault's memory
 generations are never considered, and every discard runs under the
 per-repository fence.
 """

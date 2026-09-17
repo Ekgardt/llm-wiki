@@ -16,7 +16,10 @@ decides per checkout, by identity, never by age:
 Every discard is `GenerationCatalog.discard_unactivated`, which refuses a
 generation that is active or was ever activated, and runs under the same
 per-repository lease a refresh takes, so it cannot race a refresh of that
-repository. The vault's own generations are never considered. A hint table
+repository. The vault's memory generations are never considered; its code
+generations are retired like any checkout's, because no other pass collects
+them (`docs/research/2026-09-17-the-vault-code-generations-have-a-collector.md`).
+A hint table
 whose checkout has no generation left is removed with it. Only `cache/` is
 touched; `run/` is not. Research:
 `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
@@ -55,13 +58,23 @@ def _is_vault(scope: Mapping, vault: Path) -> bool:
     return Path(str(scope.get("checkout_root", ""))).resolve() == vault
 
 
+def _vault_memory(manifest: Mapping, scope: Mapping, vault: Path) -> bool:
+    """A vault generation holding no code: a memory publication, `prune_generations`' to judge."""
+    return _is_vault(scope, vault) and not manifest.get("code_roots")
+
+
 def _foreign_groups(manifests, activated: frozenset[str]) -> dict[str, dict]:
-    """checkout_id -> {scope, generations newest first}; vault and activated excluded."""
+    """checkout_id -> {scope, generations newest first}; vault memory and activated excluded.
+
+    The vault's code generations are grouped like any checkout's: nothing else
+    collects them. See
+    `docs/research/2026-09-17-the-vault-code-generations-have-a-collector.md`.
+    """
     vault = _vault_root()
     groups: dict[str, dict] = {}
     for identifier, _registered_at, manifest in manifests:
         scope = _scope_of(manifest)
-        if scope is None or identifier in activated or _is_vault(scope, vault):
+        if scope is None or identifier in activated or _vault_memory(manifest, scope, vault):
             continue
         group = groups.setdefault(str(scope.get("checkout_id")), {"scope": scope, "generations": []})
         group["generations"].append(identifier)
