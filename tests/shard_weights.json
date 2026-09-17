@@ -58,7 +58,6 @@
   "test_graph_retrieval.py": 0.5,
   "test_grounded_qa.py": 0.5,
   "test_guardrails.py": 0.5,
-  "test_ide_hook_integrations.py": 0.5,
   "test_impact_analysis.py": 1.02,
   "test_install_control.py": 2.83,
   "test_install_pyright.py": 1.48,
