@@ -42,6 +42,22 @@ def isolated_capture_state(tmp_path, monkeypatch):
     return state_root
 
 
+@pytest.fixture(autouse=True)
+def _own_state_file(tmp_path, monkeypatch):
+    """Each test counts and rate-limits in its own state file.
+
+    The rate limit is thirty seconds of wall clock: with one state file shared by
+    every run, a second run of this module inside that window found the first
+    run's claims and wrote nothing.
+    """
+    import memory_state
+
+    run = tmp_path / "own-state"
+    monkeypatch.setattr(memory_state, "STATE_DIR", run)
+    monkeypatch.setattr(memory_state, "STATE_FILE", run / "state.json")
+    monkeypatch.setattr(memory_state, "LOCK_FILE", run / "state.json.lock")
+
+
 def _run_capture_with_stdin(module_name: str, stdin_payload: dict | str) -> int:
     """Helper: invoke capture script's main() with simulated stdin."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -246,8 +262,6 @@ def test_prompt_capture_writes_line_for_real_prompt(
     monkeypatch.setattr(
         user_prompt_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug"
     )
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *a: False)
-    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *a: True)
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *args: 1)
 
     # Use a cwd that's NOT the fake_root (so it's not skipped as vault-internal).
@@ -298,7 +312,6 @@ def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, t
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
     monkeypatch.setattr(user_prompt_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug")
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *args: 1)
-    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *args: True)
     monkeypatch.setattr(user_prompt_capture, "build_event_envelope", observed_build)
     monkeypatch.setattr(user_prompt_capture, "_append_prompt_tag", observed_append)
 
@@ -339,7 +352,6 @@ def test_prompt_capture_retries_after_failed_append(monkeypatch, tmp_path):
         user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
     )
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
     monkeypatch.setattr(
         user_prompt_capture,
         "_claim_prompt_operation",
@@ -379,9 +391,6 @@ def test_prompt_capture_replay_after_commit_appends_one_marked_record(
         user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
     )
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
-    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *_a: True)
-    monkeypatch.setattr(user_prompt_capture, "_record_dedupe", lambda *_a: None)
     payload = {
         "prompt": "Replay this committed prompt",
         "session_id": "session-1",
@@ -411,7 +420,6 @@ def test_prompt_capture_distinguishes_explicit_host_occurrences(monkeypatch, tmp
         user_prompt_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
     )
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *_a: 1)
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *_a: False)
     monkeypatch.setattr(
         user_prompt_capture,
         "_claim_prompt_operation",
@@ -425,7 +433,6 @@ def test_prompt_capture_distinguishes_explicit_host_occurrences(monkeypatch, tmp
         "_append_prompt_tag",
         lambda *_args, operation_id=None: operations.append(operation_id) or True,
     )
-    monkeypatch.setattr(user_prompt_capture, "_record_dedupe", lambda *_a: None)
     payload = {
         "prompt": "Repeat this meaningful prompt",
         "session_id": "session-1",
@@ -476,8 +483,8 @@ def test_prompt_capture_rejection_has_no_side_effects(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         user_prompt_capture,
-        "_claim_prompt_dedupe",
-        lambda *args: calls.append("dedupe") or True,
+        "_claim_prompt_operation",
+        lambda *args, **kwargs: calls.append("claim") or "user-prompt:claimed",
     )
     monkeypatch.setattr(
         user_prompt_capture,
@@ -588,13 +595,12 @@ def test_prompt_bookkeeping_fails_open_quickly_when_state_lock_is_held(
     count_elapsed = time.perf_counter() - started
 
     started = time.perf_counter()
-    claimed = user_prompt_capture._claim_prompt_dedupe("project-a", "hash-a")
-    dedupe_elapsed = time.perf_counter() - started
+    claimed = user_prompt_capture._claim_prompt_operation("project-a", "hash-a")
+    claim_elapsed = time.perf_counter() - started
 
-    assert count == 0
-    assert claimed is True
-    assert count_elapsed < 0.75
-    assert dedupe_elapsed < 0.75
+    # Fails open: the prompt is still written, under a fallback operation id.
+    assert (count, claimed is not None) == (0, True)
+    assert (count_elapsed < 0.75, claim_elapsed < 0.75) == (True, True)
 
 
 # The twentieth prompt is pinned by
@@ -613,9 +619,7 @@ def test_tenth_prompt_injects_short_advisory_with_hook_output_contract(
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
     monkeypatch.setattr(user_prompt_capture, "_increment_prompt_count", lambda *args: 10)
     monkeypatch.setattr(user_prompt_capture, "_build_advisory_refresh", lambda: "42 pages; 3 stale.")
-    monkeypatch.setattr(user_prompt_capture, "_rate_limited", lambda *a: False)
     monkeypatch.setattr(user_prompt_capture, "_append_prompt_tag", lambda *a: None)
-    monkeypatch.setattr(user_prompt_capture, "_claim_prompt_dedupe", lambda *a: True)
 
     _run_capture_with_stdin(
         "user_prompt_capture",
@@ -688,8 +692,6 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
     monkeypatch.setattr(
         post_tool_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug"
     )
-    monkeypatch.setattr(post_tool_capture, "_rate_limited", lambda *a: False)
-    monkeypatch.setattr(post_tool_capture, "_record_dedupe", lambda *a: None)
 
     project_cwd = tmp_path / "project"
     project_cwd.mkdir()
@@ -736,8 +738,6 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
 
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug")
-    monkeypatch.setattr(post_tool_capture, "_rate_limited", lambda *args: False)
-    monkeypatch.setattr(post_tool_capture, "_record_dedupe", lambda *args: None)
     monkeypatch.setattr(post_tool_capture, "build_event_envelope", observed_build)
     monkeypatch.setattr(post_tool_capture, "_append_tool_tag", observed_append)
 
@@ -780,7 +780,6 @@ def test_tool_capture_retries_after_failed_append(monkeypatch, tmp_path):
     monkeypatch.setattr(
         post_tool_capture, "_compute_slug_from_cwd", lambda _cwd: "test-slug"
     )
-    monkeypatch.setattr(post_tool_capture, "_rate_limited", lambda *_a: False)
     monkeypatch.setattr(
         post_tool_capture,
         "_claim_tool_operation",
@@ -1130,8 +1129,6 @@ def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):
 
     monkeypatch.setattr(post_tool_capture, "DAILY_DIR", tmp_path / "daily")
     monkeypatch.setattr(post_tool_capture, "ROOT", tmp_path / "vault")
-    monkeypatch.setattr(post_tool_capture, "_rate_limited", lambda *a: False)
-    monkeypatch.setattr(post_tool_capture, "_record_dedupe", lambda *a: None)
 
     # "pwd" is below MIN_BASH_CMD_CHARS — should be skipped.
     rc = _run_capture_with_stdin(
@@ -1171,32 +1168,11 @@ def test_tool_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
     assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
-# ---------------------------------------------------------------------------
-# Rate-limit helpers
-# ---------------------------------------------------------------------------
+# The rate-limit window itself is pinned above, through the live claim
+# (`test_capture_operation_reservation_retries_and_then_advances`).
 
 
-def test_prompt_capture_rate_limit_window(tmp_path, monkeypatch):
-    """Verify rate-limit check returns True within window, False outside."""
-    from datetime import datetime, timedelta
-
-    import user_prompt_capture  # noqa: WPS433
-
-    state_file = tmp_path_state(tmp_path, monkeypatch, user_prompt_capture)
-    # Pre-populate dedupe with an entry 5 seconds ago (within 30s window).
-    recent = (datetime.now() - timedelta(seconds=5)).isoformat(timespec="seconds")
-    state = {"prompt_capture_dedupe": {"slug::abc": recent}}
-    state_file.write_text(json.dumps(state), encoding="utf-8")
-    assert user_prompt_capture._rate_limited("slug", "abc") is True
-
-    # Old entry — outside window.
-    old = (datetime.now() - timedelta(seconds=120)).isoformat(timespec="seconds")
-    state = {"prompt_capture_dedupe": {"slug::xyz": old}}
-    state_file.write_text(json.dumps(state), encoding="utf-8")
-    assert user_prompt_capture._rate_limited("slug", "xyz") is False
-
-
-def test_prompt_capture_dedupe_claim_is_atomic_under_concurrency(tmp_path, monkeypatch):
+def test_prompt_capture_claim_is_one_reservation_under_concurrency(tmp_path, monkeypatch):
     import memory_state
     import user_prompt_capture
 
@@ -1212,25 +1188,12 @@ def test_prompt_capture_dedupe_claim_is_atomic_under_concurrency(tmp_path, monke
     with ThreadPoolExecutor(max_workers=16) as pool:
         claims = list(
             pool.map(
-                lambda _: user_prompt_capture._claim_prompt_dedupe("slug", "same-hash"),
+                lambda _: user_prompt_capture._claim_prompt_operation("slug", "same-hash"),
                 range(64),
             )
         )
 
-    assert sum(claims) == 1
-
-
-def tmp_path_state(tmp_path: Path, monkeypatch, module):
-    """Point a capture module's STATE_ROOT at pytest's tmp_path, return state_file.
-
-    Uses pytest's built-in tmp_path fixture (auto-cleaned per test) instead
-    of a sibling directory under tests/ — that older variant left a
-    `_tmp_state_dir/` artifact in the repo after the suite ran.
-    """
-    state_dir = tmp_path / "run"
-    state_dir.mkdir()
-    monkeypatch.setattr(module, "STATE_ROOT", tmp_path)
-    return state_dir / "state.json"
+    assert (len(set(claims)), None in claims) == (1, False)
 
 
 def test_a_failed_direct_spawn_leaves_a_capture_failure_trace(monkeypatch, capsys):

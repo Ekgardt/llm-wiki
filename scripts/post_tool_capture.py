@@ -150,45 +150,6 @@ def _extract_target(tool_name: str, tool_input: dict) -> str:
     return readers.get(tool_name, lambda _value: "")(tool_input)
 
 
-def _rate_limited(slug: str, tool: str, target: str) -> bool:
-    try:
-        state_file = STATE_ROOT / "run" / "state.json"
-        if not state_file.exists():
-            return False
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return False
-    key = f"{slug}::{tool}::{target[:80]}"
-    last = state.get("tool_capture_dedupe", {}).get(key)
-    if not last:
-        return False
-    try:
-        age = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
-        return age < RATE_LIMIT_SECONDS
-    except (ValueError, TypeError):
-        return False
-
-
-def _record_dedupe(slug: str, tool: str, target: str) -> None:
-    try:
-        key = f"{slug}::{tool}::{target[:80]}"
-        now = datetime.now().isoformat(timespec="seconds")
-
-        def _mutate(state: dict) -> None:
-            state.setdefault("tool_capture_dedupe", {})[key] = now
-            if len(state["tool_capture_dedupe"]) > 200:
-                items = sorted(
-                    state["tool_capture_dedupe"].items(),
-                    key=lambda kv: kv[1],
-                    reverse=True,
-                )[:200]
-                state["tool_capture_dedupe"] = dict(items)
-
-        update_state(_mutate)
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def _tool_operation_key(slug: str, tool: str, target: str) -> str:
     return f"{slug}::{tool}::{target[:80]}"
 

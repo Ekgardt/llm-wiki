@@ -135,47 +135,6 @@ def _compute_slug_from_cwd(cwd: str) -> str:
             return "unknown"
 
 
-def _rate_limited(slug: str, prompt_hash: str) -> bool:
-    """True if this (slug, prompt) was logged in the last RATE_LIMIT_SECONDS."""
-    try:
-        state_file = STATE_ROOT / "run" / "state.json"
-        if not state_file.exists():
-            return False
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return False
-    key = f"{slug}::{prompt_hash}"
-    last = state.get("prompt_capture_dedupe", {}).get(key)
-    if not last:
-        return False
-    try:
-        age = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
-        return age < RATE_LIMIT_SECONDS
-    except (ValueError, TypeError):
-        return False
-
-
-def _record_dedupe(slug: str, prompt_hash: str) -> None:
-    """Record this (slug, prompt) in the dedupe map. Best-effort."""
-    try:
-        key = f"{slug}::{prompt_hash}"
-        now = datetime.now().isoformat(timespec="seconds")
-
-        def _mutate(state: dict) -> None:
-            state.setdefault("prompt_capture_dedupe", {})[key] = now
-            if len(state["prompt_capture_dedupe"]) > 100:
-                items = sorted(
-                    state["prompt_capture_dedupe"].items(),
-                    key=lambda kv: kv[1],
-                    reverse=True,
-                )[:100]
-                state["prompt_capture_dedupe"] = dict(items)
-
-        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        pass  # never fail the hook on dedupe-bookkeeping
-
-
 def _claim_prompt_operation(
     slug: str, prompt_hash: str, *, source_event_id: str | None = None
 ) -> str | None:
@@ -203,36 +162,6 @@ def _complete_prompt_operation(
         operation_id=operation_id,
         now=datetime.now(),
     )
-
-
-def _claim_prompt_dedupe(slug: str, prompt_hash: str) -> bool:
-    """Atomically reserve a prompt key; return True only for the first caller."""
-    claimed = False
-    key = f"{slug}::{prompt_hash}"
-    now = datetime.now()
-
-    def _mutate(state: dict) -> None:
-        nonlocal claimed
-        dedupe = state.setdefault("prompt_capture_dedupe", {})
-        last = dedupe.get(key)
-        if last:
-            try:
-                if (now - datetime.fromisoformat(last)).total_seconds() < RATE_LIMIT_SECONDS:
-                    return
-            except (ValueError, TypeError):
-                pass
-        claimed = True
-        dedupe[key] = now.isoformat(timespec="seconds")
-        if len(dedupe) > 100:
-            state["prompt_capture_dedupe"] = dict(
-                sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:100]
-            )
-
-    try:
-        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        return True
-    return claimed
 
 
 def _prompt_counter_key(session_id: str, slug: str) -> str:
