@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -230,14 +230,73 @@ def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -
     return True
 
 
-def _append_failure_line(record: dict[str, str]) -> bool:
-    """Add one line with a single append-mode write; True when it was written.
+# A trim reads every line and replaces the whole file, so it must not cross an
+# append: the replaced inode carries the appended line away with it. The lock
+# lives on a sidecar file, as `run/state.json`'s does, because a lock taken on
+# the trail itself is a lock on a file the trim is about to rename away.
+# Research: `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
+TRAIL_LOCK_SUFFIX = ".lock"
 
-    Reading the trail, adding a line and writing the whole file back lost a line
-    whenever two hooks failed together, which is when hooks fail. See
-    `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
+
+def _trail_lock_path() -> Path:
+    """Read from `FAILURE_LOG` at the call: the trail's path is a module setting."""
+    return FAILURE_LOG.with_name(FAILURE_LOG.name + TRAIL_LOCK_SUFFIX)
+
+
+def _hold_trail_lock(descriptor: int) -> None:
+    """One non-blocking exclusive OS lock attempt on the sidecar's first byte."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _await_trail_lock(descriptor: int, pause) -> bool:
+    """True once the sidecar lock is ours; False when the bounded wait ran out."""
+    for _ in range(TRAIL_LOCK_ATTEMPTS):
+        try:
+            _hold_trail_lock(descriptor)
+        except OSError:
+            pause(TRAIL_LOCK_PAUSE_SECONDS)
+            continue
+        return True
+    return False
+
+
+def _open_trail_lock() -> int | None:
+    path = _trail_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        return os.open(path, flags, 0o600)
+    except OSError:
+        return None
+
+
+@contextmanager
+def trail_lock(pause=time.sleep):
+    """Exclusive access to the trail file; yields whether the lock was taken.
+
+    Closing the descriptor releases the lock on both systems, so nothing is left
+    held by a process that died holding it.
     """
-    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    descriptor = _open_trail_lock()
+    if descriptor is None:
+        yield False
+        return
+    try:
+        yield _await_trail_lock(descriptor, pause)
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+
+
+def _write_failure_line(line: str) -> bool:
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
     try:
         FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -252,17 +311,41 @@ def _append_failure_line(record: dict[str, str]) -> bool:
         os.close(descriptor)
 
 
+def _append_failure_line(record: dict[str, str]) -> bool:
+    """Add one line with a single append-mode write; True when it was written.
+
+    Reading the trail, adding a line and writing the whole file back lost a line
+    whenever two hooks failed together, which is when hooks fail. See
+    `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
+
+    The trail's own lock is taken around the open and the write, so the file this
+    line is appended to is not one a trim has already replaced. A line is never
+    lost to that lock: when the bounded wait runs out the line is written anyway.
+    """
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    with trail_lock():
+        return _write_failure_line(line)
+
+
+def _trim_under_lock() -> None:
+    if FAILURE_LOG.stat().st_size <= MAX_FAILURE_LOG_BYTES:
+        return
+    kept = _trimmed_tail(_existing_lines(FAILURE_LOG), MAX_FAILURE_LOG_BYTES * 3 // 4)
+    atomic_write(FAILURE_LOG, "\n".join(kept) + "\n")
+
+
 def _trim_failure_log() -> None:
     """Cut an overgrown trail to three quarters of its cap, in one step.
 
-    Called only under the state lock, so two trims never cross; the cut is below
-    the cap so it happens once per quarter-cap of failures, not on every line.
+    Only ever under the trail's lock: reading every line and writing the file back
+    would otherwise erase an append that landed in between. A trim that cannot take
+    the lock leaves the trail alone and the next recorded failure trims instead —
+    the cut is below the cap, so it is owed once per quarter-cap of failures.
     """
     try:
-        if FAILURE_LOG.stat().st_size <= MAX_FAILURE_LOG_BYTES:
-            return
-        kept = _trimmed_tail(_existing_lines(FAILURE_LOG), MAX_FAILURE_LOG_BYTES * 3 // 4)
-        atomic_write(FAILURE_LOG, "\n".join(kept) + "\n")
+        with trail_lock() as held:
+            if held:
+                _trim_under_lock()
     except OSError:
         return
 
