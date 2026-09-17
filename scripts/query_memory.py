@@ -1834,7 +1834,7 @@ def _counted_again(
     from aggregation_pass import COUNTING_RULE
 
     answer, context = current
-    widened = _widened(answer, context, len(pool), fetch)
+    widened = _widened(answer, context, fetch)
     more = _merged(pool, widened, _gathered(answer, single, search))
     note = _entity_note(answer, single)
     if more is None and not note:
@@ -1899,18 +1899,20 @@ def _aggregated(answer: Mapping[str, object]) -> bool:
 def _widened(
     answer: Mapping[str, object],
     context: GroundedContext,
-    first_count: int,
     fetch: Callable[[int], Iterable[object]] | None,
 ) -> tuple | None:
-    """More candidates when the count reached the edge of retrieval, else None."""
+    """More candidates when the count reached the edge of retrieval, else None.
+
+    Whether any of them is new is `_merged`'s question, answered by identity.
+    It used to be guessed here from two lengths, the wider fetch against the
+    pool — and the pool also holds what the dated and keys legs found, so a
+    fetch that brought a new piece was dropped for not being longer.
+    """
     from aggregation_pass import reaches_the_edge
 
     if fetch is None or not reaches_the_edge(answer, context.ranked_paths):
         return None
-    rows = tuple(fetch(WIDENED_CANDIDATES))
-    if len(rows) <= first_count:
-        return None
-    return rows
+    return tuple(fetch(WIDENED_CANDIDATES)) or None
 
 
 def _gathered(
