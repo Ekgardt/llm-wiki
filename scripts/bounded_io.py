@@ -19,6 +19,16 @@ _READ_CHUNK_BYTES = 64 * 1024
 MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
 
 
+class SourceChangedDuringRead(PermissionError):
+    """The file was written or replaced while it was being read.
+
+    Still a `PermissionError`, so every caller refuses as before. The type is
+    for the caller that must tell "somebody is writing here, try again" from
+    "this path is not safe to read". Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+
+
 def _validated_deadline(deadline: float | None) -> float | None:
     if deadline is None:
         return None
@@ -111,8 +121,10 @@ def _require_opened_identity(
     descriptor: int, identity: tuple[int, int, int, int], label: str
 ) -> None:
     opened = os.fstat(descriptor)
-    if not stat.S_ISREG(opened.st_mode) or identity != _file_identity(opened):
+    if not stat.S_ISREG(opened.st_mode):
         raise PermissionError(f"{label} changed before open")
+    if identity != _file_identity(opened):
+        raise SourceChangedDuringRead(f"{label} changed before open")
 
 
 def _read_bounded_chunks(
@@ -141,11 +153,19 @@ def _require_unchanged_after_read(
     label: str,
 ) -> None:
     after = os.fstat(descriptor)
-    current = path.lstat()
     if identity != _file_identity(after):
-        raise PermissionError(f"{label} changed during read")
-    if identity[:2] != (current.st_dev, current.st_ino) or path.is_symlink():
+        raise SourceChangedDuringRead(f"{label} changed during read")
+    _require_same_file_at_path(path, identity, label)
+
+
+def _require_same_file_at_path(
+    path: Path, identity: tuple[int, int, int, int], label: str
+) -> None:
+    current = path.lstat()
+    if path.is_symlink():
         raise PermissionError(f"{label} was replaced during read")
+    if identity[:2] != (current.st_dev, current.st_ino):
+        raise SourceChangedDuringRead(f"{label} was replaced during read")
 
 
 def _read_open_descriptor(

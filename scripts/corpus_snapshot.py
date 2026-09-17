@@ -18,7 +18,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
-from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
+from bounded_io import (
+    MAX_KNOWLEDGE_PAGE_BYTES,
+    SourceChangedDuringRead,
+    read_stable_bytes,
+)
 from code_languages import language_for_path
 from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
@@ -921,6 +925,36 @@ def _seal_path(
     return seal
 
 
+def _seal_source_file(
+    vault: Path, path: Path, max_components: int
+) -> tuple[_PathIdentity, ...]:
+    """The seal of one source read by path: its ancestors, then the file itself.
+
+    An ancestor that moved between the two looks is still a `PermissionError`.
+    The file itself moving is somebody writing it, which the descriptor walk
+    calls `CorpusChanged`, so this one does too. Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+    seal = _build_path_seal(
+        vault, path, target_directory=False, max_components=max_components
+    )
+    _verify_seal(seal[:-1], changed_error=PermissionError)
+    _require_source_as_sealed(seal[-1])
+    return seal
+
+
+def _require_source_as_sealed(expected: _PathIdentity) -> None:
+    try:
+        current = _identity(expected.path, _safe_info(expected.path))
+    except FileNotFoundError as exc:
+        raise CorpusChanged(f"corpus source vanished: {expected.path.name}") from exc
+    if current != expected:
+        raise CorpusChanged(
+            f"corpus source changed: {expected.path.name} "
+            f"({_identity_delta(expected, current)})"
+        )
+
+
 def _relative_within(vault: Path, path: Path) -> Path:
     try:
         return path.relative_to(vault)
@@ -1197,12 +1231,7 @@ class _Discovery:
                 os.close(descriptor)
             self._store(path, kind, project, (), content)
             return
-        seal = _seal_path(
-            self.vault,
-            path,
-            target_directory=False,
-            max_components=self.max_depth + 3,
-        )
+        seal = _seal_source_file(self.vault, path, self.max_depth + 3)
         self._store(path, kind, project, seal, None)
 
     def _store(
@@ -2548,9 +2577,25 @@ def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str
     if candidate.content is not None:
         return candidate.content
     _verify_seal(candidate.seal)
-    content = read_stable_bytes(candidate.path, policy.max_file_bytes, label=label)
+    content = _sealed_source_bytes(candidate.path, policy.max_file_bytes, label)
     _verify_seal(candidate.seal)
     return content
+
+
+def _sealed_source_bytes(path: Path, max_bytes: int, label: str) -> bytes:
+    """A source read by path, where a file being written is a changed corpus.
+
+    This is the reader where directory descriptors are not available. The
+    descriptor walk already calls a file that moves under it `CorpusChanged`,
+    which is retried and then named; here the same event arrived as a bare
+    `PermissionError`, so the capture died on the first write and the refusal
+    blamed the repository's size. Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+    try:
+        return read_stable_bytes(path, max_bytes, label=label)
+    except SourceChangedDuringRead as error:
+        raise CorpusChanged(f"corpus source changed during read: {path.name}") from error
 
 
 def _captured_record(
