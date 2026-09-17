@@ -14,9 +14,16 @@ See knowledge/notes/automatic-code-update-decision.md.
 """
 from __future__ import annotations
 
+import re
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - 3.10 reads the same documents through tomli
+    import tomli as tomllib
 
 from secret_redact import describe_error
 
@@ -243,7 +250,66 @@ def _dependency_state(root: Path) -> str:
     return "stale"
 
 
+def _requirement_names(requirements: list) -> set[str]:
+    """The distribution each requirement names, without its version or marker."""
+    heads = [str(requirement).split(";")[0].strip() for requirement in requirements]
+    return {re.split(r"[<>=!~\[ ]", head, maxsplit=1)[0] for head in heads if head}
+
+
+def _installed_distributions() -> set[str]:
+    from importlib.metadata import distributions
+
+    named = (distribution.metadata["Name"] for distribution in distributions())
+    return {name for name in named if name}
+
+
+def _declared_extras(root: Path) -> dict[str, set[str]]:
+    """Each optional extra and the distributions it names, the project itself aside."""
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8")).get("project", {})
+    own = str(project.get("name", ""))
+    extras = project.get("optional-dependencies", {})
+    return {name: _requirement_names(list(values)) - {own} for name, values in extras.items()}
+
+
+def _installed_extras(root: Path) -> tuple[str, ...]:
+    """The optional extras the baseline sync leaves behind, because it names none of them.
+
+    Every distribution of the extra must be present, not any: `numpy` alone would
+    report `hybrid` installed on a development checkout, whose dev group holds it.
+    """
+    present = _installed_distributions()
+    declared = _declared_extras(root)
+    return tuple(sorted(name for name, names in declared.items() if names and names <= present))
+
+
+# What the installer renders owned resources from — units, plists, task settings,
+# agent hook blocks, the OpenCode plugin. A change here reaches an installed vault
+# only when the operator reruns the installer; a maintenance pass must not write
+# the operator's shell profile or agent configuration by itself.
+_OWNED_RESOURCE_SOURCES = (
+    "scripts/install_control.py",
+    "scripts/installer_config.py",
+    "scripts/integration_hook_config.py",
+    "scripts/install-scheduled-tasks.ps1",
+    "integrations/",
+)
+
+
+def _resource_state(changed: set[str]) -> str:
+    if any(path.startswith(_OWNED_RESOURCE_SOURCES) for path in changed):
+        return "rerun_installer"
+    return "current"
+
+
+def _stale_extras(root: Path, changed: set[str]) -> tuple[str, ...]:
+    """Extras the baseline sync did not upgrade, named only when the lock moved."""
+    if "uv.lock" not in changed:
+        return ()
+    return _installed_extras(root)
+
+
 def _merged_update(root: Path, head: str, fetched: str) -> dict:
+    changed = _changed_paths(root, head, fetched)
     _git(root, "merge", "--ff-only", fetched)
     return _outcome(
         "updated",
@@ -251,6 +317,8 @@ def _merged_update(root: Path, head: str, fetched: str) -> dict:
         commit=_git(root, "rev-parse", "HEAD"),
         previous=head,
         dependencies=_dependency_state(root),
+        extras=_stale_extras(root, changed),
+        resources=_resource_state(changed),
     )
 
 

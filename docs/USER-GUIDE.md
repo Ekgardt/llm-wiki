@@ -313,6 +313,14 @@ NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   fetch any missing pinned model weights → compact retrieval telemetry →
   prune old reports → fast-forward the checkout
 
+The fast-forward brings new code in; it does not bring everything into force. Optional
+extras are never upgraded unattended (the `reranker` extra alone pins gigabytes), and owned
+resources — scheduler entries, agent hook blocks, shell profile lines — are written only by
+an explicit install. So when the update moves `uv.lock` the report names the extras you have
+installed, and when it changes what the installer renders it says `owned resources
+rerun_installer`. Resync an extra with `uv sync --locked --no-default-groups --inexact
+--extra <name>`, and re-render owned resources by running the installer again.
+
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
 ```

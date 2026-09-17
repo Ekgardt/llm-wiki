@@ -575,6 +575,19 @@ def _update_code(log) -> None:
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
         log(f"  update: {outcome['detail']}")
+    _log_update_aftermath(log, outcome)
+
+
+def _log_update_aftermath(log, outcome: dict) -> None:
+    """What the update brought in but did not bring into force.
+
+    See `docs/research/2026-09-17-an-update-says-what-it-did-not-bring-into-force.md`.
+    """
+    if outcome.get("status") != "updated":
+        return
+    extras = ", ".join(outcome.get("extras") or ()) or "none"
+    log(f"  update: dependencies {outcome.get('dependencies')}; extras not upgraded: {extras}")
+    log(f"  update: owned resources {outcome.get('resources')}")
 
 
 def _prune_reports(log) -> None:
