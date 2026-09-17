@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import copy
 import ctypes
+import functools
 import getpass
 import hashlib
 import json
@@ -4521,17 +4523,55 @@ def _harden_windows_acl(path: Path) -> None:
     identity = _windows_acl_identity()
     permission = _acl_permission(path, identity)
     verified = _apply_windows_acl(path, permission)
-    output = _acl_output_text(verified.stdout)
-    acl_lines = [line.strip() for line in output.splitlines() if ":(" in line]
+    acl_lines = _acl_lines_naming(verified.stdout, identity)
     owner_lines = [line for line in acl_lines if identity.casefold() in line.casefold()]
     _verified_owner_acl_line(path, owner_lines)
     _verify_no_other_acl(path, acl_lines, identity)
 
 
-def _acl_output_text(value: bytes | str | None) -> str:
+def _console_code_page() -> tuple[str, ...]:
+    """The console's output code page as a codec, when there is a console and a codec."""
+    name = f"cp{_windows_kernel32().GetConsoleOutputCP()}"
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return ()
+    return (name,)
+
+
+def _acl_output_encodings() -> tuple[str, ...]:
+    """The code pages `icacls` may have written its pipe in, most likely first.
+
+    No API reports which one it used, and a user name need not be ASCII. See
+    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
+    """
+    if sys.platform != "win32":  # the `oem` and `mbcs` codecs exist on Windows only
+        return ("utf-8",)
+    return tuple(dict.fromkeys((*_console_code_page(), "oem", "mbcs")))
+
+
+def _acl_output_text(value: bytes | str | None, encoding: str | None = None) -> str:
     if isinstance(value, bytes):
-        return value.decode("ascii", errors="ignore")
+        return value.decode(encoding or _acl_output_encodings()[0], errors="replace")
     return value or ""
+
+
+def _acl_entry_lines(output: str) -> list[str]:
+    return [line.strip() for line in output.splitlines() if ":(" in line]
+
+
+def _names_identity(acl_lines: list[str], identity: str) -> bool:
+    return any(identity.casefold() in line.casefold() for line in acl_lines)
+
+
+def _acl_lines_naming(stdout: bytes | str | None, identity: str) -> list[str]:
+    """The ACL entries, read under the first code page in which the owner is named."""
+    readings = [
+        _acl_entry_lines(_acl_output_text(stdout, encoding))
+        for encoding in _acl_output_encodings()
+    ]
+    named = [lines for lines in readings if _names_identity(lines, identity)]
+    return (named or readings)[0]
 
 
 def _harden_owner_only(path: Path, mode: int) -> None:
@@ -4560,9 +4600,54 @@ class _WindowsDispositionInformation(ctypes.Structure):
     _fields_ = [("delete_file", wintypes.BOOL)]
 
 
+_WINDOWS_KERNEL32_PROTOTYPES = (
+    (
+        "CreateFileW",
+        wintypes.HANDLE,
+        (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ),
+    ),
+    ("CloseHandle", wintypes.BOOL, (wintypes.HANDLE,)),
+    (
+        "GetFileInformationByHandle",
+        wintypes.BOOL,
+        (wintypes.HANDLE, ctypes.POINTER(_WindowsFileInformation)),
+    ),
+    (
+        "SetFileInformationByHandle",
+        wintypes.BOOL,
+        (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD),
+    ),
+    ("GetConsoleOutputCP", wintypes.UINT, ()),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_kernel32():
+    """kernel32 with its last error kept by ctypes and every handle at full width.
+
+    `ctypes.windll` keeps no last error and returns a C int, so a sharing
+    violation read as 0 and an invalid 64-bit handle went unnoticed. See
+    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    for name, restype, argtypes in _WINDOWS_KERNEL32_PROTOTYPES:
+        function = getattr(kernel32, name)
+        function.restype = restype
+        function.argtypes = argtypes
+    return kernel32
+
+
 def _require_windows_directory_identity(handle: int, path: Path) -> None:
     """Refuse a handle that cannot be identified or that is a reparse point."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     information = _WindowsFileInformation()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         error = ctypes.get_last_error()
@@ -4574,17 +4659,7 @@ def _require_windows_directory_identity(handle: int, path: Path) -> None:
 
 
 def _open_windows_directory(path: Path) -> int:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    )
-    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32 = _windows_kernel32()
     file_read_attributes = 0x80
     file_share_read = 0x1
     file_share_write = 0x2
@@ -4608,12 +4683,12 @@ def _open_windows_directory(path: Path) -> int:
 
 
 def _close_windows_handle(handle: int) -> None:
-    if not ctypes.windll.kernel32.CloseHandle(handle):
+    if not _windows_kernel32().CloseHandle(handle):
         raise OSError(ctypes.get_last_error(), "cannot close Windows directory handle")
 
 
 def _open_windows_file_for_mutation(path: Path) -> int:
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     generic_read = 0x80000000
     delete_access = 0x00010000
     share_read = 0x1
@@ -4637,14 +4712,14 @@ def _open_windows_file_for_mutation(path: Path) -> int:
 def _delete_windows_handle(file_handle: int) -> None:
     information = _WindowsDispositionInformation(True)
     file_disposition_info = 4
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     if not kernel32.SetFileInformationByHandle(
         file_handle,
         file_disposition_info,
         ctypes.byref(information),
         ctypes.sizeof(information),
     ):
-        raise OSError(kernel32.GetLastError(), "cannot delete Windows target")
+        raise OSError(ctypes.get_last_error(), "cannot delete Windows target")
 
 
 class MarkdownCoordinator:
