@@ -153,14 +153,33 @@ def _write_new_token(path: Path) -> str:
     with contextlib.suppress(OSError):
         os.chmod(path.parent, TOKEN_DIR_MODE)
     token = secrets.token_urlsafe(TOKEN_ENTROPY_BYTES)
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, TOKEN_FILE_MODE
-    )
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
+    temporary = path.with_name(f".{path.name}-{secrets.token_hex(8)}")
+    _write_private_file(temporary, token + "\n")
+    os.replace(temporary, path)
     with contextlib.suppress(OSError):
         os.chmod(path, TOKEN_FILE_MODE)
     return token
+
+
+_NEW_PRIVATE_FILE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Create `path` anew with mode 0600; never open something already there.
+
+    Audit 3, B6: the token used to be written with `O_TRUNC`, through any link
+    that sat at its path. Research:
+    `docs/research/2026-09-17-a-new-token-never-lands-in-someone-elses-file.md`.
+    """
+    descriptor = os.open(path, _NEW_PRIVATE_FILE_FLAGS, TOKEN_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def ensure_token(path: Path) -> str:
