@@ -56,10 +56,21 @@ _WINDOWS_RESERVED = frozenset(
     }
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?ai)(?<![a-z0-9_])(?P<quote>[\"']?)[a-z0-9_]*"
-    r"(?:api_key|authorization|password|secret|token)"
+    r"(?ai)(?<![a-z0-9_.-])(?P<quote>[\"']?)[a-z0-9_.-]*"
+    r"(?:api[_.-]?key|authorization|cookie|passwd|password|"
+    r"private[_.-]?key|secret|token)"
     r"(?P=quote)\s*[:=]\s*"
 )
+# Secrets whose own shape names them, with no key written beside them.
+_STANDALONE_SECRET = re.compile(
+    r"(?ai)(?<![a-z0-9_.-])"
+    r"(?:(?P<scheme>bearer|basic)\s+[a-z0-9._~+/-]{8,}={0,2}"
+    r"|sk-[a-z0-9-]{16,}"
+    r"|gh[pousr]_[a-z0-9]{16,}"
+    r"|xox[abposr]-[a-z0-9-]{10,})"
+)
+
+
 class PathContainmentError(ValueError):
     """A source path cannot be proven to remain in its repository checkout."""
 
@@ -1153,6 +1164,18 @@ def _redact_assignments(value: str) -> str:
         cursor = _assignment_value_end(value, match.end())
     pieces.append(value[cursor:])
     return "".join(pieces)
+
+
+def _standalone_replacement(match: re.Match[str]) -> str:
+    """Keep the scheme word that introduced the secret, never the secret."""
+    scheme = match.group("scheme")
+    if scheme is None:
+        return "<redacted>"
+    return f"{scheme} <redacted>"
+
+
+def _redact_standalone_secrets(value: str) -> str:
+    return _STANDALONE_SECRET.sub(_standalone_replacement, value)
 
 
 def _scheme_character(character: str) -> bool:
@@ -3129,7 +3152,10 @@ def redact_lsp_text(
     repository = _require_redaction_input(value, repository)
     if _oversized_for_redaction(value):
         return _OVERSIZED_REDACTION_MARKER
-    redacted = _redact_url_userinfo(_redact_assignments(_normalize_log_text(value)))
+    normalized = _normalize_log_text(value)
+    redacted = _redact_url_userinfo(
+        _redact_standalone_secrets(_redact_assignments(normalized))
+    )
     if repository is not None:
         redacted = _redact_path(redacted, Path(repository.checkout_root), "<repository>")
     return _normalize_log_text(_redact_home(redacted))[:1024]

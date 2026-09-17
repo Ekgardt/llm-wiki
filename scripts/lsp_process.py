@@ -43,6 +43,7 @@ from lsp_protocol import (
     _LocalRequestViolation,
     _ProtocolStartupCleanupError,
 )
+from lsp_security import redact_lsp_text
 from operational_ownership import OwnerLease, OwnershipRegistry
 
 ProcessTree = _lsp_process_tree.ProcessTree
@@ -85,6 +86,9 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
 _MAX_EVIDENCE_BYTES = 4096
+# The redacted last words of a failed server, as JSON encodes them. The rest of
+# the record is under 300 bytes, so the whole file stays well inside its bound.
+_STDERR_TAIL_BYTES = 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
@@ -1138,6 +1142,7 @@ class _FailureEvidenceIdentity:
     owner_nonce: str
     generation_nonce: str
     pid: int | None
+    stderr_tail: str | None = None
 
 
 @dataclass(slots=True)
@@ -2052,7 +2057,22 @@ def _monitor_generation_exit(
     except BaseException as error:
         _queue_generation_failure(coordinator, generation, str(error))
         return
+    _await_last_words(generation)
     _fail_on_unexpected_exit(coordinator, generation)
+
+
+def _await_last_words(generation: _Generation) -> None:
+    """Let the drain thread finish before the exit is reported.
+
+    The server is gone, so its end of the pipe is closed and the thread is
+    about to see end-of-file. Waiting here is what puts the server's last
+    words in the failure evidence instead of a race. The bound is the one
+    cleanup itself uses; a process that escaped the group and kept the write
+    end open costs that much and no more, on a thread that holds no lock.
+    """
+    _join_owned_thread(
+        generation.stderr_thread, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    )
 
 
 def _fail_on_unexpected_exit(coordinator: _LifecycleCoordinator, generation: _Generation) -> None:
@@ -4291,7 +4311,41 @@ def _failure_identity(
         _failure_owner_nonce(instance, owner),
         generation_nonce,
         _failure_server_pid(instance, generation),
+        _failure_stderr_tail(generation),
     )
+
+
+def _failure_stderr_tail(generation: _Generation | None) -> str | None:
+    """The last words the failed server wrote, redacted, or None when it wrote none.
+
+    This is the only thing a failed start leaves an operator to read, so it
+    goes through `redact_lsp_text` before it is written and is bounded so the
+    evidence record stays inside `_MAX_EVIDENCE_BYTES`.
+    """
+    if generation is None:
+        return None
+    with generation.stderr_lock:
+        written = b"".join(generation.stderr)
+    return _bounded_stderr_tail(written[-_STDERR_TAIL_BYTES:])
+
+
+def _redacted_lines(tail: bytes) -> str:
+    """Every non-empty line, redacted on its own.
+
+    A credential assignment runs to the end of its line, so the redactor is
+    given one line at a time: one `authorization:` must not swallow every
+    message the server printed after it.
+    """
+    lines = tail.decode("utf-8", errors="replace").splitlines()
+    return "\n".join(redact_lsp_text(line) for line in lines if line)
+
+
+def _bounded_stderr_tail(tail: bytes) -> str | None:
+    """The tail as the record will carry it, halved until its encoding fits."""
+    text = _redacted_lines(tail)
+    while text and len(json.dumps(text)) > _STDERR_TAIL_BYTES:
+        text = text[len(text) // 2 :]
+    return text or None
 
 
 def _remember_mandatory_terminal_failure(
@@ -5052,6 +5106,7 @@ def _write_failure_evidence_once(
             owner_nonce=identity.owner_nonce,
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
+            stderr_tail=identity.stderr_tail,
         )
     except FileExistsError:
         _validate_failure_record(
@@ -5060,6 +5115,7 @@ def _write_failure_evidence_once(
             owner_nonce=identity.owner_nonce,
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
+            stderr_tail=identity.stderr_tail,
         )
         owner.sync_directory()
 
@@ -6886,6 +6942,7 @@ def _write_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None = None,
 ) -> None:
     failure_record: dict[str, object] = {
         "code": code,
@@ -6895,12 +6952,15 @@ def _write_failure_record(
     }
     if pid is not None:
         failure_record["server_pid"] = pid
+    if stderr_tail is not None:
+        failure_record["stderr_tail"] = stderr_tail
     _validate_failure_record(
         failure_record,
         code=code,
         owner_nonce=owner_nonce,
         generation_nonce=generation_nonce,
         pid=pid,
+        stderr_tail=stderr_tail,
     )
     # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
     owner_directory.write_record("failure.json", failure_record)
@@ -6926,9 +6986,13 @@ def _is_server_pid(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+_FAILURE_OPTIONAL_FIELDS = frozenset({"server_pid", "stderr_tail"})
+
+
 def _validate_failure_shape(record: Mapping[str, object]) -> None:
-    allowed = (_FAILURE_REQUIRED_FIELDS, _FAILURE_REQUIRED_FIELDS | {"server_pid"})
-    if frozenset(record) not in allowed:
+    names = frozenset(record)
+    known = _FAILURE_REQUIRED_FIELDS | _FAILURE_OPTIONAL_FIELDS
+    if not _FAILURE_REQUIRED_FIELDS <= names or not names <= known:
         raise ValueError("LSP failure evidence has an invalid shape")
 
 
@@ -6975,6 +7039,7 @@ def _expected_failure_identity(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None,
 ) -> dict[str, object]:
     """The exact field values this terminal record has to carry."""
     identity: dict[str, object] = {
@@ -6982,8 +7047,8 @@ def _expected_failure_identity(
         "owner_nonce": owner_nonce,
         "generation_nonce": generation_nonce,
     }
-    if pid is not None:
-        identity["server_pid"] = pid
+    optional = (("server_pid", pid), ("stderr_tail", stderr_tail))
+    identity.update({name: value for name, value in optional if value is not None})
     return identity
 
 
@@ -6991,9 +7056,19 @@ def _validate_failure_identity(
     record: Mapping[str, object], expected: Mapping[str, object]
 ) -> None:
     observed = {name: record.get(name) for name in expected}
-    expected_fields = _FAILURE_REQUIRED_FIELDS | (frozenset(expected) & {"server_pid"})
+    expected_fields = _FAILURE_REQUIRED_FIELDS | (
+        frozenset(expected) & _FAILURE_OPTIONAL_FIELDS
+    )
     if observed != dict(expected) or frozenset(record) != expected_fields:
         raise ValueError("LSP failure evidence does not match expected terminal identity")
+
+
+def _validate_failure_tail(record: Mapping[str, object]) -> None:
+    if "stderr_tail" not in record:
+        return
+    tail = record["stderr_tail"]
+    if not isinstance(tail, str) or not 0 < len(json.dumps(tail)) <= _STDERR_TAIL_BYTES:
+        raise ValueError("LSP failure evidence has an invalid stderr_tail")
 
 
 def _validate_failure_record(
@@ -7003,12 +7078,14 @@ def _validate_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None = None,
 ) -> None:
     _validate_failure_shape(record)
     _validate_failure_code(record)
     _validate_failure_nonces(record)
     _validate_failure_timestamp(record)
     _validate_failure_pid(record)
+    _validate_failure_tail(record)
     _validate_failure_identity(
         record,
         _expected_failure_identity(
@@ -7016,6 +7093,7 @@ def _validate_failure_record(
             owner_nonce=owner_nonce,
             generation_nonce=generation_nonce,
             pid=pid,
+            stderr_tail=stderr_tail,
         ),
     )
 

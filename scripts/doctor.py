@@ -2853,6 +2853,10 @@ _LSP_LEASE_FIELDS = {
     "state",
 }
 _LSP_FAILURE_FIELDS = {"code", "generation_nonce", "owner_nonce", "timestamp"}
+# `stderr_tail` is the redacted last kilobyte the failed server wrote, bounded
+# by its JSON encoding in `lsp_process._STDERR_TAIL_BYTES`.
+_LSP_FAILURE_TAIL_CHARS = 1024
+_LSP_FAILURE_KNOWN_FIELDS = _LSP_FAILURE_FIELDS | {"server_pid", "stderr_tail"}
 _LSP_OWNER_ENTRY_NAMES = {"cancellation", "failure.json", "lease.json", "owner.json"}
 _LSP_RECORD_NAMES = {"failure.json", "lease.json", "owner.json"}
 
@@ -2978,8 +2982,22 @@ def _valid_lsp_failure_evidence(record: dict[str, Any], owner_nonce: str) -> boo
     )
 
 
+def _valid_lsp_failure_tail(record: dict[str, Any]) -> bool:
+    """The redacted last words of the failed server, if the writer kept any."""
+    if "stderr_tail" not in record:
+        return True
+    tail = record["stderr_tail"]
+    return isinstance(tail, str) and 0 < len(tail) <= _LSP_FAILURE_TAIL_CHARS
+
+
+def _valid_lsp_failure_shape(record: dict[str, Any]) -> bool:
+    """Every required field, and nothing this reader does not know."""
+    names = set(record)
+    return _LSP_FAILURE_FIELDS <= names and names <= _LSP_FAILURE_KNOWN_FIELDS
+
+
 def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
-    if set(record) not in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"}):
+    if not _valid_lsp_failure_shape(record) or not _valid_lsp_failure_tail(record):
         return False
     if not _valid_lsp_failure_evidence(record, owner_nonce):
         return False
