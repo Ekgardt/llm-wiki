@@ -610,11 +610,11 @@ def _record_days(vault: Path) -> list[str]:
 
 
 def pending_days(vault: Path, state: dict, today: str | None = None) -> list[str]:
-    """Days before today that have records and were never consolidated, oldest first.
+    """Days before today whose records are not all consolidated yet, oldest first.
 
     Today is never pending: its sessions are still being written, and closing it
     at noon would leave its evening unread. A day whose records changed since it
-    was consolidated is pending again.
+    was consolidated — a session captured late, for instance — is pending again.
     """
     before = _today_or(today)
     return [day for day in _record_days(vault) if _pending(vault, day, before, state)]

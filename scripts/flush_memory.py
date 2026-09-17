@@ -1405,7 +1405,7 @@ def _keep_session_record(
     evidence = record.get("evidence")
     if not isinstance(evidence, Sequence):
         return
-    captured_at = _capture_time_text(now)
+    captured_at = _session_time(record, now).isoformat()
     write_session_evidence(
         ROOT,
         intent_fields(record, captured_at),
@@ -1420,6 +1420,47 @@ def _capture_time_text(now: Callable[[], datetime]) -> str:
         return _require_capture_time(now()).isoformat()
     except Exception:  # noqa: BLE001
         return datetime.now(timezone.utc).isoformat()
+
+
+# How far from now an intent's own timestamp may sit and still be believed. Beyond
+# this it is a broken clock rather than a late session, and filing by it would
+# scatter entries across arbitrary days. See
+# `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
+MAX_BACKDATED_CAPTURE_DAYS = 30
+
+
+def _believable_session_time(occurred: datetime, moment: datetime) -> datetime | None:
+    if abs((moment - occurred).days) > MAX_BACKDATED_CAPTURE_DAYS:
+        return None
+    return occurred.astimezone()
+
+
+def _intent_time(record: Mapping[str, object]) -> datetime | None:
+    """The moment the session itself ended, when the intent carries one."""
+    raw = record.get("occurred_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        occurred = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if occurred.tzinfo is None:
+        return None
+    return occurred
+
+
+def _session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> datetime:
+    """The session's own time when it has a believable one, else the worker's clock.
+
+    Both the session record's day and the daily entry's day come from here, so a
+    backlog drained the next morning files each session under the day it happened and
+    a retry after midnight chooses the same day as the first attempt.
+    """
+    moment = _require_capture_time(now())
+    occurred = _intent_time(record)
+    if occurred is None:
+        return moment
+    return _believable_session_time(occurred, moment) or moment
 
 
 def _keep_transcript_record(args: argparse.Namespace) -> None:
@@ -1470,7 +1511,7 @@ def process_new_capture(
             result, tier, body = _call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
-            chosen_at = _require_capture_time(now())
+            chosen_at = _session_time(record, now)
         resolved = _publish_capture_decision(
             queue,
             coordinator,

@@ -2669,6 +2669,19 @@ def _capture_nullable_text(value: object, label: str) -> str | None:
     return value
 
 
+def _capture_occurred_at(envelope: EventEnvelope) -> str | None:
+    """When the session ended, as the envelope recorded it.
+
+    The worker files the session record and the daily entry by this, so a queue
+    drained the next morning does not file yesterday's sessions under today. See
+    `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
+    """
+    occurred = getattr(envelope, "occurred_at", None)
+    if not isinstance(occurred, datetime):
+        return None
+    return occurred.isoformat()
+
+
 def _capture_source_record(
     envelope: EventEnvelope,
     slug: str | None,
@@ -2679,7 +2692,7 @@ def _capture_source_record(
     return {
         "source_occurrence_id": envelope.event_id,
         "source_event_id": envelope.source_event_id or envelope.event_id,
-        "occurred_at": None,
+        "occurred_at": _capture_occurred_at(envelope),
         "host": envelope.agent or "unknown",
         "event": envelope.event_type,
         "session": _capture_nullable_text(envelope.session, "capture session"),
