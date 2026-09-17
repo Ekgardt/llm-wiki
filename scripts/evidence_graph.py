@@ -4573,9 +4573,10 @@ WITH RECURSIVE walk(node_id, depth, node_ids, assertion_ids, seen, edge_order) A
   ORDER BY 2, 1, 6
   LIMIT ?
 )
-SELECT node_ids, assertion_ids, depth, (SELECT count(*) FROM walk) AS work_count
-FROM walk WHERE node_id=? AND depth > 0
-ORDER BY depth, assertion_ids LIMIT ?
+SELECT found.node_ids, found.assertion_ids, found.depth, size.work_count
+FROM (SELECT count(*) AS work_count FROM walk) AS size
+LEFT JOIN walk AS found ON found.node_id=? AND found.depth > 0
+ORDER BY found.depth, found.assertion_ids LIMIT ?
 """,
             (
                 source_id,
@@ -4588,8 +4589,10 @@ ORDER BY depth, assertion_ids LIMIT ?
             max_rows=max_rows,
             deadline=deadline,
         )
-        if rows and rows[0]["work_count"] - 1 > work_limit:
-            raise ValueError("Evidence Graph recursive work ceiling exceeded")
+        # The walk's size rides on every row, and one row comes back even when
+        # nothing reached the target: a walk the limit cut is refused, never read
+        # as "no path". `docs/research/2026-09-17-a-cut-walk-is-not-no-path.md`.
+        _require_work_bound(rows, work_limit)
         return [
             {
                 "node_ids": json.loads(row["node_ids"]),
@@ -4597,6 +4600,7 @@ ORDER BY depth, assertion_ids LIMIT ?
                 "depth": row["depth"],
             }
             for row in rows
+            if row["node_ids"] is not None
         ]
 
     def evidence(
