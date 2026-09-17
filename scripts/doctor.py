@@ -7166,7 +7166,13 @@ class _MaintenanceHeartbeat:
         return result
 
     def cleanup(self, operation, /, *args, **kwargs):
-        _require_maintenance_owner(self.coordinator, self.lease)
+        """Release first, report the fence after.
+
+        Cleanup is the releasing half of a repair — today only the index lock,
+        whose release is token-checked and so can never touch another owner's
+        lock. Requiring the fence first meant a fence lost mid-rebuild left our
+        own lock file on disk until its staleness rule expired it.
+        """
         result = operation(*args, **kwargs)
         _require_maintenance_owner(self.coordinator, self.lease)
         return result
@@ -8638,15 +8644,25 @@ def _repair_archives_action(guard: Any, context: _RepairContext) -> None:
         return
     if archive_before["status"] == "ok":
         return
+    _record_recovered_archives(_recovered_archives(guard, context), context)
+
+
+def _recovered_archives(guard: Any, context: _RepairContext) -> list:
     from archive_daily import DailyArchiver
 
-    guard.run(
+    return guard.run(
         lambda: DailyArchiver(context.root_path, context.state_path).recover(
             deadline=context.deadline,
             cancelled=guard.cancelled,
         )
     )
-    context.repaired.append({"action": "recover_archives"})
+
+
+def _record_recovered_archives(recovered: list, context: _RepairContext) -> None:
+    """A repair that recovered nothing is not recorded as work that was done."""
+    if not recovered:
+        return
+    context.repaired.append({"action": "recover_archives", "count": len(recovered)})
 
 
 def _claim_sources(root_path: Path) -> list[Path]:
@@ -8692,11 +8708,34 @@ def _repair_queue_followups(
     # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
 
 
-def _run_selected_repairs(selected: set[str], ordered: tuple) -> None:
-    """Run each named repair the caller selected, in the order given."""
+def _run_selected_repairs(
+    selected: set[str], ordered: tuple, context: _RepairContext
+) -> None:
+    """Run each named repair the caller selected, in the order given.
+
+    The repairs are independent, so one that raises is recorded under its own
+    name and the rest still run: a `ValueError` from the generation catalog used
+    to skip the transactions, the queue, the index, the archives and the claims,
+    and the report called all of that "Runtime repair failed". A lost fence and a
+    reached deadline are the exception and end the pass — no repair may work
+    without the fence. See
+    `docs/research/2026-09-17-one-failed-repair-does-not-cancel-the-others.md`.
+    """
     for name, action in ordered:
         if name in selected:
-            action()
+            _repair_or_record(name, action, context)
+
+
+def _repair_or_record(name: str, action, context: _RepairContext) -> None:
+    try:
+        action()
+    except (MaintenanceFenceLost, TimeoutError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - one repair's fault is its own
+        context.repair_errors.setdefault(name, []).append(
+            f"{name} repair failed: {describe_error(exc)}"
+        )
+        context.repair_deferred.update(_DEFERRED_BY_ACTION[name])
 
 
 def _repair_state_actions(
@@ -8711,10 +8750,22 @@ def _repair_state_actions(
             guard, coordinator, context
         )),
     )
-    _run_selected_repairs(context.selected_repairs, ordered)
+    _run_selected_repairs(context.selected_repairs, ordered, context)
     if "queue" not in context.selected_repairs:
         return False
-    return _repair_queue_action(guard, context)
+    return _queue_state_repair(guard, context)
+
+
+def _queue_state_repair(guard: Any, context: _RepairContext) -> bool:
+    """The queue's own repair, whose failure is the queue's and nobody else's."""
+    ready = False
+
+    def run_queue() -> None:
+        nonlocal ready
+        ready = _repair_queue_action(guard, context)
+
+    _repair_or_record("queue", run_queue, context)
+    return ready
 
 
 def _repair_derived_actions(
@@ -8726,7 +8777,7 @@ def _repair_derived_actions(
         ("indexes", lambda: _repair_claims_action(guard, context)),
         ("queue", lambda: _repair_queue_followups(guard, context, queue_v2_ready)),
     )
-    _run_selected_repairs(context.selected_repairs, ordered)
+    _run_selected_repairs(context.selected_repairs, ordered, context)
 
 
 def _release_unentered_maintenance(
