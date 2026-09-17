@@ -21,6 +21,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -167,6 +169,67 @@ def _existing_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
+# Where an append is a seek and then a write (the Windows C runtime), two
+# writers that seek to the same end overwrite each other, so there the write is
+# made under a one-byte lock. The byte is far past the trail's cap and not byte
+# 0: a Windows lock is mandatory, and a lock on real bytes would fail a reader
+# while a line is being added. The wait is short and bounded because this runs
+# inside hooks with budgets of a few seconds. Research:
+# `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+TRAIL_LOCK_OFFSET = 1 << 30
+TRAIL_LOCK_ATTEMPTS = 20
+TRAIL_LOCK_PAUSE_SECONDS = 0.025
+
+
+def _append_locking():
+    """The byte-range locking module where append is not atomic, else None."""
+    if os.name != "nt":
+        return None
+    import msvcrt
+
+    return msvcrt
+
+
+def _lock_trail(descriptor: int, locking, pause) -> bool:
+    """Take the trail's lock byte, or say within a bounded wait that it is held."""
+    for _ in range(TRAIL_LOCK_ATTEMPTS):
+        os.lseek(descriptor, TRAIL_LOCK_OFFSET, os.SEEK_SET)
+        try:
+            locking.locking(descriptor, locking.LK_NBLCK, 1)
+        except OSError:
+            pause(TRAIL_LOCK_PAUSE_SECONDS)
+            continue
+        return True
+    return False
+
+
+def _unlock_trail(descriptor: int, locking) -> None:
+    # Closing the descriptor releases the byte too, so a failed unlock is not a
+    # failed write and must not turn one line into two.
+    with suppress(OSError):
+        os.lseek(descriptor, TRAIL_LOCK_OFFSET, os.SEEK_SET)
+        locking.locking(descriptor, locking.LK_UNLCK, 1)
+
+
+def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -> bool:
+    """One append-mode write, serialized where the system does not do it itself.
+
+    The descriptor is in append mode, so the write lands at the end wherever the
+    lock left the file pointer. False means the lock was never free: nothing was
+    written, and nothing of anyone else's was overwritten.
+    """
+    if locking is None:
+        os.write(descriptor, data)
+        return True
+    if not _lock_trail(descriptor, locking, pause):
+        return False
+    try:
+        os.write(descriptor, data)
+    finally:
+        _unlock_trail(descriptor, locking)
+    return True
+
+
 def _append_failure_line(record: dict[str, str]) -> bool:
     """Add one line with a single append-mode write; True when it was written.
 
@@ -182,12 +245,11 @@ def _append_failure_line(record: dict[str, str]) -> bool:
     except OSError:
         return False
     try:
-        os.write(descriptor, line.encode("utf-8"))
+        return _write_trail_line(descriptor, line.encode("utf-8"), _append_locking())
     except OSError:
         return False
     finally:
         os.close(descriptor)
-    return True
 
 
 def _trim_failure_log() -> None:

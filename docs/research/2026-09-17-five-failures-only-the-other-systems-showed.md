@@ -89,8 +89,10 @@ job. Each failure was read from its job log, then traced in the code.
   after. The byte is at offset 2^30, far past the 256 KiB cap, not byte 0: Windows locks
   are mandatory, and a lock on byte 0 would make a reader of the trail fail while a line
   is being added. The write still lands at the end because the descriptor is in append
-  mode. The lock is `LK_NBLCK` in a bounded loop (40 attempts, 25 ms apart: 1 second),
+  mode. The lock is `LK_NBLCK` in a bounded loop (20 attempts, 25 ms apart: half a second),
   not `LK_LOCK`, whose ten one-second attempts are longer than a hook's 3-second budget.
+  A failure can try the append twice (under the state lock, then without it), so the worst
+  case is 0.5 + 0.5 + 0.5 s of `STATE_LOCK_TIMEOUT`, which a test keeps under that budget.
   If the lock is never obtained the line is not written and the function returns False,
   as it already does for any other write failure; it never raises. POSIX keeps the single
   append write. The locking module is a parameter, so the order lock, write, unlock and
