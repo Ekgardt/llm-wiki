@@ -1961,7 +1961,27 @@ def _request_worktree_follow(checkout: Path) -> str:
         stdout_path=out_log,
         stderr_path=err_log,
     )
-    return "worktree_follow_started" if pid is not None else "spawn_failed"
+    if pid is None:
+        _forget_follow_request(checkout)
+        return "spawn_failed"
+    return "worktree_follow_started"
+
+
+def _forget_follow_request(checkout: Path) -> None:
+    """A spawn that failed was not a request: the next question tries again.
+
+    Audit 3, B2. Research:
+    `docs/research/2026-09-17-a-refresh-that-never-started-is-asked-for-again.md`.
+    """
+    with _REFRESH_REQUESTED_LOCK:
+        _FOLLOW_REQUESTED.discard(str(checkout))
+
+
+def _forget_refresh_request(checkout) -> None:
+    """Take back this commit's mark, and only this commit's."""
+    with _REFRESH_REQUESTED_LOCK:
+        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+            del _REFRESH_REQUESTED[checkout.repository_id]
 
 
 def _repository_freshness(resolved: Path) -> dict | None:
@@ -2028,7 +2048,10 @@ def _request_repository_refresh(resolved: Path, checkout) -> str:
         stdout_path=out_log,
         stderr_path=err_log,
     )
-    return "started" if pid is not None else "spawn_failed"
+    if pid is None:
+        _forget_refresh_request(checkout)
+        return "spawn_failed"
+    return "started"
 
 
 def _get_architecture_mode(
