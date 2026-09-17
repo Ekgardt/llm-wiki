@@ -2256,11 +2256,30 @@ def _run_maintenance_command(script: str, argument: str) -> None:
 def _run_session_start_maintenance() -> int:
     _run_maintenance_command("integration_adapter.py", "--capture-worker")
     _run_maintenance_command("memory_queue.py", "work")
+    _catch_up_missed_nightly()
     try:
         spawn_compile_if_idle()
     except Exception:  # noqa: BLE001
         pass
     return 0
+
+
+def _catch_up_missed_nightly() -> None:
+    """Ask for the nightly when the scheduler's run did not happen today.
+
+    This pass is detached, so the claim and the spawn cost the hook nothing. The
+    schedulers catch up where they can — a systemd timer with `Persistent=true`, a
+    LaunchAgent at wake, a Windows task with `-StartWhenAvailable` after sign-in — but
+    a machine signed out at 03:00 and the explicit cron fallback never do, and until
+    now no shipped hook reached this code at all. See
+    `docs/research/2026-09-17-a-missed-nightly-is-caught-up-and-codex-keeps-its-stop.md`.
+    """
+    try:
+        from session_start_context import maybe_spawn_nightly_catchup
+
+        maybe_spawn_nightly_catchup()
+    except Exception:  # noqa: BLE001 - maintenance is best effort, like its neighbours
+        pass
 
 
 def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> Sequence[Any]:

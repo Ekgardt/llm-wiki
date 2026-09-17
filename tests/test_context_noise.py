@@ -177,7 +177,7 @@ def test_session_start_spawns_scheduled_nightly_nonblocking_only_for_catchup(
         session_start_context, "spawn_detached", lambda args: spawned.append(args) or 321
     )
 
-    session_start_context._maybe_spawn_nightly_catchup("2026-07-12")
+    session_start_context.maybe_spawn_nightly_catchup("2026-07-12")
 
     assert spawned == [[
         sys.executable,
@@ -226,7 +226,7 @@ def test_failed_nightly_spawn_releases_quickly_when_state_lock_is_held(
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
 
     started = time.perf_counter()
-    session_start_context._maybe_spawn_nightly_catchup("2026-07-13")
+    session_start_context.maybe_spawn_nightly_catchup("2026-07-13")
 
     assert time.perf_counter() - started < 0.75
 
@@ -800,7 +800,7 @@ def test_session_start_recovers_transactions_before_health_context(monkeypatch):
         "build_context",
         lambda: events.append("context") or "context",
     )
-    monkeypatch.setattr(session_start_context, "_maybe_spawn_nightly_catchup", lambda: None)
+    monkeypatch.setattr(session_start_context, "maybe_spawn_nightly_catchup", lambda: None)
     monkeypatch.setattr(session_start_context, "latest_daily", lambda: None)
     monkeypatch.setattr(session_start_context, "write_debug", lambda *args: None)
     monkeypatch.setattr("sys.argv", ["session_start_context.py", "--output-file", "out"])

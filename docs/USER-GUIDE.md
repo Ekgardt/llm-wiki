@@ -310,6 +310,9 @@ signs in; it does not run under a logged-out account. Linux user-systemd timers 
 persistent catch-up after the user manager starts. The product does not claim
 wake-from-sleep or logged-out execution. Explicit cron fallback follows the host's
 cron and sleep policy.
+When a night is missed entirely, the next session start asks for it: the maintenance
+pass a session start already spawns runs that day's nightly once, claimed in
+`run/state.json` so two sessions cannot both run it.
 
 If the LLM is offline, work is queued
 in `run/queue.sqlite3` and drained by a short-lived worker at the next session.

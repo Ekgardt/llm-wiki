@@ -146,7 +146,17 @@ def _release_nightly_claim(today: str) -> None:
         pass
 
 
-def _maybe_spawn_nightly_catchup(today: str | None = None) -> None:
+def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
+    """Run the nightly once from a session when the scheduler's run did not happen.
+
+    Called by the detached session-start maintenance pass, not by the hook itself:
+    every shipped hook goes through the adapter, which never reached this module's
+    `main()`. The schedulers catch up on their own where they can — a systemd timer
+    with `Persistent=true`, a LaunchAgent at wake, a Windows task with
+    `-StartWhenAvailable` after sign-in — but a machine signed out at 03:00, and the
+    explicit cron fallback, never do. See
+    `docs/research/2026-09-17-a-missed-nightly-is-caught-up-and-codex-keeps-its-stop.md`.
+    """
     if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
         return
     today = _today_iso(today)
@@ -1111,7 +1121,7 @@ def main() -> int:
     args = p.parse_args()
 
     _recover_transactions()
-    _maybe_spawn_nightly_catchup()
+    maybe_spawn_nightly_catchup()
     additional = build_context()
     daily = latest_daily()
     write_debug(additional, daily.name if daily else "(none)")
