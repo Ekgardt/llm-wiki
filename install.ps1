@@ -549,6 +549,37 @@ switch ($LASTEXITCODE) {
     default { Warn "Model weights incomplete; run: uv run python scripts/install_models.py" }
 }
 
+# --- 8b. Reliability V3 adoption ---------------------------------
+# Session capture writes through the V3 queue, and a vault that has not adopted
+# V3 refuses every capture with `legacy_protocol_unquiesced` (issue #17). This
+# installer had no such step, so a fresh Windows install never captured. The
+# check exits 1 for a fresh vault, so its output is read whatever it exited
+# with. See docs/research/2026-09-17-a-fresh-install-adopts-the-queue.md.
+function Get-AdoptionState {
+    $report = uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --check --json 2>$null
+    try { return [string](($report | Out-String | ConvertFrom-Json).details.adoption_state) } catch { return "unknown" }
+}
+
+Info "Checking Reliability V3 adoption..."
+$adoptionState = Get-AdoptionState
+$adoptCommand = "uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+if ($adoptionState -eq "adopted") {
+    Ok "Reliability V3 adopted"
+} elseif ($adoptionState -in @("fresh", "upgrade-required")) {
+    uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Ok "Reliability V3 adopted (was $adoptionState); session capture is enabled"
+    } else {
+        $syncWarning = $true
+        Warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
+        Warn "  $adoptCommand"
+    }
+} else {
+    $syncWarning = $true
+    Warn "Reliability V3 state is '$adoptionState'; session capture is disabled until adoption runs:"
+    Warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+}
+
 # --- 9. Summary ---------------------------------------------------
 
 Write-Host ""

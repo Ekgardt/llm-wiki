@@ -623,7 +623,18 @@ info "Checking Reliability V3 adoption..."
 ADOPTION_ERR="$STATE_ROOT/logs/install-adoption.err.log"
 mkdir -p "$STATE_ROOT/logs"
 : > "$ADOPTION_ERR"
-ADOPTION_STATE="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown)"
+# The check exits 1 for a fresh or upgrade-required vault, because both are
+# reported as degraded. Under `pipefail` a fallback written after the pipe
+# fired even though the parser had already answered, and the state became two
+# lines that matched no branch: no fresh install ever adopted. What the check
+# printed and how it exited are read apart here; only unparsable output is
+# `unknown`. See docs/research/2026-09-17-a-fresh-install-adopts-the-queue.md.
+adoption_state_of() {
+  local report
+  report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
+  printf '%s' "$report" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+}
+ADOPTION_STATE="$(adoption_state_of)"
 adoption_tail() {
   if [ -s "$ADOPTION_ERR" ]; then
     warn "  last lines of $ADOPTION_ERR:"
