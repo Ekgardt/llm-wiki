@@ -5137,12 +5137,15 @@ def test_multimegabyte_document_below_frame_limit_can_be_opened(
         session.close(deadline=time.monotonic() + 5)
 
 
-def test_document_count_limit_rejects_without_partial_session_state(
+def test_document_count_limit_closes_the_oldest_without_partial_session_state(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,
     semantic_pyright: SemanticPyrightFixture,
 ) -> None:
+    # Before 2026-09-17 the document past the count limit raised and the
+    # precise tier was over for every new file; it now closes the one
+    # untouched longest and takes its place. See finding K-A12.
     first_path = repository / "first.py"
     second_path = repository / "second.py"
     first_path.write_text("first = 1\n", encoding="utf-8")
@@ -5155,18 +5158,20 @@ def test_document_count_limit_rejects_without_partial_session_state(
     )
     session = _session(repository, state_root, semantic_pyright)
     try:
-        first = session.open_document("first.py", deadline=time.monotonic() + 10)
-        target = session._readiness_target_uri
-        with pytest.raises(RuntimeError, match="document count"):
-            session.open_document("second.py", deadline=time.monotonic() + 10)
-
-        assert session._documents == {first.source.uri: first}
-        assert session._readiness_target_uri == target
-        assert session._document_bytes == len(first.content)
-        assert sum(
-            event.get("method") == "textDocument/didOpen"
-            for event in semantic_pyright.events()
-        ) == 1
+        session.open_document("first.py", deadline=time.monotonic() + 10)
+        second = session.open_document("second.py", deadline=time.monotonic() + 10)
+        methods = [event.get("method") for event in semantic_pyright.events()]
+        assert (
+            session._documents,
+            session._readiness_target_uri,
+            session._document_bytes,
+            (methods.count("textDocument/didOpen"), methods.count("textDocument/didClose")),
+        ) == (
+            {second.source.uri: second},
+            second.source.uri,
+            len(second.content),
+            (2, 1),
+        )
     finally:
         session.close(deadline=time.monotonic() + 5)
 

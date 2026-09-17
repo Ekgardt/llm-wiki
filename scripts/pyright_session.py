@@ -888,6 +888,30 @@ def _validated_entry_size(entry: object) -> int:
     return size
 
 
+def _documents_fit(count: int, used: int) -> bool:
+    """Whether this many open documents of this size are within both bounds."""
+    if count > _MAX_OPEN_DOCUMENTS:
+        return False
+    return used <= _MAX_OPEN_DOCUMENT_BYTES
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """What a file would have to keep for its bytes to still be the same bytes.
+
+    Device and inode say it is the same file; size and nanosecond modification
+    time say it was not rewritten. A rewrite that keeps all four -- the same
+    length written inside one clock tick -- is the one change this misses, and
+    it is what `synchronize` trades for not re-reading every open document on
+    every query. The workspace revision is still authoritative about what
+    changed: this only decides whether the second, confirming read is needed.
+    """
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
 def _retained_document_bytes(entry: object, document: OpenDocument) -> int:
     """The revision's size for a document that must stay open."""
     if _entry_missing(entry):
@@ -2013,6 +2037,12 @@ class LanguageServerSession:
         self._process: LspProcess | None = None
         self._documents: dict[str, OpenDocument] = {}
         self._document_bytes = 0
+        # What each open document's file looked like when its bytes were last
+        # confirmed against the workspace revision. See `_file_identity`.
+        self._document_identities: dict[str, tuple[int, int, int, int]] = {}
+        # Use order, for eviction only: a counter per URI, highest used last.
+        self._document_use = 0
+        self._document_used: dict[str, int] = {}
         self._workspace_revision: WorkspaceRevision | None = None
         self._synchronize_epoch = 0
         self._readiness_target_uri: str | None = None
@@ -3668,6 +3698,112 @@ class LanguageServerSession:
         self._document_bytes = document_bytes
         self._readiness_target_uri = uri
         self._ready_uri_generations.pop(uri, None)
+        self._note_document_use_locked(uri)
+
+    def _evictable_document_locked(self, document: OpenDocument) -> bool:
+        """Whether closing this document would cut across work in flight."""
+        uri = document.source.uri
+        return not any(key[1] == uri for key in self._wire_sending)
+
+    def _documents_by_use_locked(self) -> list[OpenDocument]:
+        """The open documents, the one untouched longest first."""
+        return sorted(
+            self._documents.values(),
+            key=lambda document: self._document_used.get(document.source.uri, 0),
+        )
+
+    def _crowded_documents_locked(self, incoming_bytes: int) -> list[OpenDocument]:
+        """The least recently used documents to close so one more fits.
+
+        An empty list means one more already fits within both bounds -- or, for
+        a document larger than the whole budget, that no amount of closing
+        would help, so nothing is given up to make room it could not use.
+        """
+        if incoming_bytes > _MAX_OPEN_DOCUMENT_BYTES:
+            return []
+        crowded: list[OpenDocument] = []
+        count = len(self._documents) + 1
+        used = self._document_bytes + incoming_bytes
+        for document in self._documents_by_use_locked():
+            if _documents_fit(count, used):
+                break
+            if self._evictable_document_locked(document):
+                crowded.append(document)
+                count -= 1
+                used -= len(document.content)
+        return crowded
+
+    def _forget_wire_uri_locked(self, uri: str) -> None:
+        """Forget that this URI was announced; a reopen has to announce it again."""
+        generation = self._wire_generation
+        if generation is None:
+            return
+        self._wire_opened = _without_wire_uri(self._wire_opened, generation, uri)
+        self._wire_failed = _without_wire_uri(self._wire_failed, generation, uri)
+
+    def _forget_document_locked(self, document: OpenDocument) -> None:
+        """Drop a closed document and everything else keyed to its URI."""
+        uri = document.source.uri
+        if self._documents.get(uri) is not document:
+            return
+        del self._documents[uri]
+        self._document_bytes -= len(document.content)
+        self._document_identities.pop(uri, None)
+        self._document_used.pop(uri, None)
+        self._ready_uri_generations.pop(uri, None)
+        self._forget_wire_uri_locked(uri)
+        snapshot = self._diagnostics.pop(uri, None)
+        self._diagnostic_bytes -= 0 if snapshot is None else snapshot.retained_bytes
+        self._forget_readiness_target_locked(uri)
+
+    def _forget_readiness_target_locked(self, uri: str) -> None:
+        """A session whose proven document is gone is only initialized again."""
+        if self._readiness_target_uri != uri:
+            return
+        self._readiness_target_uri = None
+        self._relax_readiness_locked(self._documents, None)
+
+    def _close_evicted_document(
+        self, document: OpenDocument, process: LspProcess, deadline: float
+    ) -> None:
+        """Tell the server we are done with a document, then forget it.
+
+        The notification is best effort, as `didOpen` is: a server that refused
+        it, or a generation that has since been replaced, will not be holding
+        the document either way.
+        """
+        params = {"textDocument": {"uri": document.source.uri}}
+        generation = self._current_generation_nonce()
+        if generation is not None:
+            self._try_process_did_close(process, params, generation, deadline)
+        with self._lock:
+            self._forget_document_locked(document)
+
+    @staticmethod
+    def _try_process_did_close(
+        process: LspProcess,
+        params: dict[str, object],
+        generation_nonce: str,
+        deadline: float,
+    ) -> None:
+        try:
+            process.notify_generation(
+                "textDocument/didClose",
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+        except (ProtocolViolation, RuntimeError, TimeoutError):
+            return
+
+    def _make_room_for_document(
+        self, incoming_bytes: int, process: LspProcess, deadline: float
+    ) -> None:
+        """Close the least recently used documents until one more would fit."""
+        with self._lock:
+            crowded = self._crowded_documents_locked(incoming_bytes)
+        for document in crowded:
+            self._close_evicted_document(document, process, deadline)
 
     def _open_new_document(
         self,
@@ -3679,6 +3815,7 @@ class LanguageServerSession:
     ) -> OpenDocument:
         document = OpenDocument(source, content, digest, 1)
         _check_did_open_encodable(self._did_open_params(document))
+        self._make_room_for_document(len(content), process, deadline)
         with self._lock:
             self._register_document_locked(document, content)
         sent = self._try_process_did_open(document, process, deadline)
@@ -3688,13 +3825,30 @@ class LanguageServerSession:
         self._probe_document(document, process, deadline=deadline)
         return document
 
+    def _reused_document_locked(self, uri: str) -> OpenDocument | None:
+        """The document already held for this URI, marked as used just now."""
+        document = self._documents.get(uri)
+        if document is None:
+            return None
+        self._note_document_use_locked(uri)
+        return document
+
+    def _note_document_use_locked(self, uri: str) -> None:
+        """Order documents by use without reordering `self._documents` itself.
+
+        Replay after a restart walks `self._documents`, and that has to stay the
+        order the documents were opened in; only eviction cares about use.
+        """
+        self._document_use += 1
+        self._document_used[uri] = self._document_use
+
     def _open_document_within_operation(
         self, path: str, deadline: float
     ) -> OpenDocument:
         self.start(deadline=deadline)
         source, content, digest = self._document_source_bytes(path, deadline)
         with self._lock:
-            current = self._documents.get(source.uri)
+            current = self._reused_document_locked(source.uri)
             process = self._process
             ready = self._document_ready_locked(source.uri)
         if process is None:
@@ -4761,6 +4915,20 @@ class LanguageServerSession:
             *(("didOpen",) if next_documents else ()),
         )
 
+    def _projected_document_identities(
+        self, plan: _SyncPlan
+    ) -> dict[str, tuple[int, int, int, int]]:
+        """The file identities that still describe the content we will hold."""
+        replaced = {
+            document.source.uri for document, _next, _params in plan.changed_replacements
+        }
+        kept = set(plan.next_documents) - replaced
+        return {
+            uri: identity
+            for uri, identity in self._document_identities.items()
+            if uri in kept
+        }
+
     def _apply_synchronize_commit_locked(self, plan: _SyncPlan) -> None:
         """Publish the planned state; the caller holds the session and wire locks."""
         next_diagnostics, next_ready, next_target = self._projected_readiness(plan)
@@ -4768,6 +4936,12 @@ class LanguageServerSession:
         self._wire_condition.notify_all()
         self._documents = plan.next_documents
         self._document_bytes = plan.projected_document_bytes
+        self._document_identities = self._projected_document_identities(plan)
+        self._document_used = {
+            uri: used
+            for uri, used in self._document_used.items()
+            if uri in plan.next_documents
+        }
         self._ready_uri_generations = next_ready
         self._diagnostics = next_diagnostics
         self._diagnostic_bytes = sum(
@@ -4865,15 +5039,45 @@ class LanguageServerSession:
         *,
         deadline: float,
     ) -> dict[str, bytes]:
-        """Re-read every retained document and check it against the revision."""
+        """Check every retained document against the revision, re-reading it
+        only when its file has moved since the last check."""
         contents: dict[str, bytes] = {}
         for path, document in snapshot.open_by_path.items():
             if path in closing_paths:
                 continue
-            contents[path] = _verified_document_content(
-                entries[path], document, deadline=deadline
+            content = self._retained_content(
+                document, entries[path], deadline=deadline
             )
+            if content is not None:
+                contents[path] = content
         return contents
+
+    def _retained_content(
+        self, document: OpenDocument, entry: object, *, deadline: float
+    ) -> bytes | None:
+        """The document re-read and checked, or None when its file has not moved.
+
+        Without this, every query paid one read and one SHA-256 for every open
+        document, because `synchronize` runs before each one.
+        """
+        path = document.source.absolute_path
+        before = _file_identity(path)
+        with self._lock:
+            known = self._document_identities.get(document.source.uri)
+        if before is not None and before == known:
+            return None
+        content = _verified_document_content(entry, document, deadline=deadline)
+        self._record_document_identity(document.source.uri, path, before)
+        return content
+
+    def _record_document_identity(
+        self, uri: str, path: Path, before: tuple[int, int, int, int] | None
+    ) -> None:
+        """Keep the file's identity only when the read saw one state throughout."""
+        if before is None or _file_identity(path) != before:
+            return
+        with self._lock:
+            self._document_identities[uri] = before
 
     def _changed_replacement(
         self,
@@ -5137,6 +5341,8 @@ class LanguageServerSession:
         self._reset_readiness_locked()
         self._documents.clear()
         self._document_bytes = 0
+        self._document_identities.clear()
+        self._document_used.clear()
         self._readiness_target_uri = None
         self._forget_generation_locked()
         self._progress_events.clear()
