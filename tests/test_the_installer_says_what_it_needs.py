@@ -67,17 +67,8 @@ def test_every_uv_run_is_pinned_to_the_lock(text: str) -> None:
     assert unpinned == []
 
 
-def _names_the_adoptable_states(line: str) -> bool:
-    if line.lstrip().startswith("#"):
-        return False
-    return "upgrade-required" in line and "fresh" in line
-
-
-@pytest.mark.parametrize("text", [INSTALL_SH, INSTALL_PS1], ids=["install.sh", "install.ps1"])
-def test_an_interrupted_adoption_is_resumed(text: str) -> None:
-    adoptable = list(filter(_names_the_adoptable_states, text.splitlines()))
-
-    assert ["partial" in line for line in adoptable] == [True]
+# That an interrupted adoption (`partial`) is resumed is now asked of the installers' own
+# plan function: `tests/test_the_installer_does_not_vouch_for_agents_it_cannot_see.py`.
 
 
 @needs_bash

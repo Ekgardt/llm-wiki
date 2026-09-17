@@ -202,8 +202,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
 partial、adopted 或 conflicting 状态，并且不会创建 `run/`。提供 offline apply 参数
 （`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`）时，该命令会在全新或
-静止的 vault 上执行 v3 切换；安装程序会自动运行它，因为切换前会话捕获会被拒绝
-（issue #17）。该命令绝不会删除 `run/`、knowledge、retired
+静止的 vault 上执行 v3 切换；在全新 vault 上安装程序会自动运行它，因为切换前会话捕获会被拒绝
+（issue #17）。对于已经持有旧队列的 vault，只有当你亲自告诉安装程序没有 agent 正在运行时
+（`--confirm-all-agents-stopped`，PowerShell 为 `-ConfirmAllAgentsStopped`）才会切换；
+否则安装程序只会给出命令，不动队列。该命令绝不会删除 `run/`、knowledge、retired
 databases、legacy caches 或 compatibility markers。
 
 可选 extras 以 additive 方式安装，并保留操作员已选择的包：

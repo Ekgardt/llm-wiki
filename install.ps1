@@ -23,7 +23,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$ProtectPush
+    [switch]$ProtectPush,
+    [switch]$ConfirmAllAgentsStopped
 )
 
 $ErrorActionPreference = "Stop"
@@ -247,6 +248,7 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $VAULT_ROOT "install.ps1")
     )
     if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
+    if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
     try {
         & $hostExecutable @reexecArguments
         $nativeExit = $LASTEXITCODE
@@ -607,11 +609,29 @@ function Get-AdoptionState {
 Info "Checking Reliability V3 adoption..."
 $adoptionState = Get-AdoptionState
 $adoptCommand = "uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
-if ($adoptionState -eq "adopted") {
+# `--confirm-all-agents-stopped` is the operator's statement, and the installer makes it
+# only where it can see that it is true: a `fresh` vault holds no legacy database an agent
+# could be writing. A vault that holds them (`upgrade-required`, or a `partial` cutover,
+# which the repair resumes) is adopted only when the operator said so to the installer.
+# See docs/research/2026-09-17-the-installer-does-not-vouch-for-agents-it-cannot-see.md.
+function Get-AdoptionPlan([string]$State, [bool]$Confirmed) {
+    if ($State -eq "adopted") { return "adopted" }
+    if ($State -eq "fresh") { return "adopt" }
+    if ($State -notin @("upgrade-required", "partial")) { return "unknown" }
+    if ($Confirmed) { return "adopt" }
+    return "ask"
+}
+$adoptionPlan = Get-AdoptionPlan -State $adoptionState -Confirmed ([bool]$ConfirmAllAgentsStopped)
+if ($adoptionPlan -eq "adopted") {
     Ok "Reliability V3 adopted"
-} elseif ($adoptionState -in @("fresh", "upgrade-required", "partial")) {
-    # `partial` is an interrupted adoption, which the repair resumes. Its report names
-    # the reason of a failure, so it is kept in a log rather than thrown away.
+} elseif ($adoptionPlan -eq "ask") {
+    $syncWarning = $true
+    Warn "Reliability V3 state is '$adoptionState': this vault holds the earlier queue, and the installer cannot see whether an agent is using it."
+    Warn "Close every agent session, then either rerun the installer with -ConfirmAllAgentsStopped or run:"
+    Warn "  $adoptCommand"
+    Warn "Session capture stays disabled until then."
+} elseif ($adoptionPlan -eq "adopt") {
+    # The report names the reason of a failure, so it is kept in a log rather than thrown away.
     $adoptionLog = Join-Path $STATE_ROOT "logs\install-adoption.log"
     uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped *> $adoptionLog
     if ($LASTEXITCODE -eq 0) {

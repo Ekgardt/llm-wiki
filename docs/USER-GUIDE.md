@@ -109,10 +109,14 @@ knowledge, operational state, retired databases, legacy caches, tombstones, or
 compatibility markers. It reports Reliability V3 fresh, upgrade-required, partial,
 adopted, and conflict evidence in a closed JSON envelope.
 
-Mutating Reliability V3 adoption remains disabled until the v3 queue mutation and
-canonical ownership tasks are complete. Supplying the full offline apply gate currently
-fails closed with `reliability_v3_runtime_activation_incomplete`; do not treat that as a
-successful cutover and do not remove v2 state manually.
+The offline apply gate (`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`)
+performs the cutover on a fresh, upgrade-required, or partly adopted vault, and resumes an
+interrupted one. The installer runs it by itself only on a fresh vault, where no earlier
+queue exists that a running agent could be writing. On a vault that already holds the
+earlier queue, close every agent session and either rerun the installer with
+`--confirm-all-agents-stopped` (PowerShell `-ConfirmAllAgentsStopped`) or run the command
+above; the flag is your statement, not something the installer can check for you. Never
+remove v2 state by hand.
 
 ### Option B: Manual setup
 

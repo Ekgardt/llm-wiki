@@ -208,9 +208,13 @@ The repair command is read-only by default and reports fresh, upgrade-required,
 partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
 With the offline apply flags (`--apply --adopt-ownership-v3
 --confirm-all-agents-stopped`) it performs the v3 cutover on a fresh or quiescent
-vault; the installer runs it, because session capture is refused until adoption
-has happened (issue #17). It never deletes `run/`, knowledge, retired databases,
-legacy caches, or compatibility markers.
+vault; the installer runs it on a fresh vault, because session capture is refused
+until adoption has happened (issue #17). A vault that already holds the earlier
+queue is adopted only when you tell the installer yourself that no agent is
+running (`--confirm-all-agents-stopped`, PowerShell `-ConfirmAllAgentsStopped`);
+otherwise the installer names the command and leaves the queue alone. It never
+deletes `run/`, knowledge, retired databases, legacy caches, or compatibility
+markers.
 
 Optional extras are additive and preserve packages already selected by the operator:
 

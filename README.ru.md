@@ -212,8 +212,11 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
 `run/`. С offline apply-флагами (`--apply --adopt-ownership-v3
 --confirm-all-agents-stopped`) команда выполняет переход на v3 для свежего или
-неактивного хранилища; установщик делает это сам, потому что до перехода захват сессий
-отклоняется (issue #17). Команда никогда не удаляет
+неактивного хранилища; на свежем хранилище установщик делает это сам, потому что до
+перехода захват сессий отклоняется (issue #17). Хранилище, в котором уже есть прежняя
+очередь, переходит на v3 только когда вы сами сказали установщику, что ни один агент не
+запущен (`--confirm-all-agents-stopped`, в PowerShell `-ConfirmAllAgentsStopped`); иначе
+установщик называет команду и очередь не трогает. Команда никогда не удаляет
 `run/`, knowledge, retired databases, legacy caches или compatibility markers.
 
 Опциональные extras добавляются без удаления уже выбранных оператором пакетов:

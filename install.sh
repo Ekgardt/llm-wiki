@@ -32,6 +32,7 @@ REPOSITORY_URL="https://github.com/Ekgardt/llm-wiki.git"
 CALLER_CWD="$(pwd -P)"
 INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
 PROTECT_PUSH=0
+AGENTS_STOPPED=0
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 
@@ -53,6 +54,7 @@ for argument in "$@"; do
   fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
+    --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
     --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     *) fail "Unknown installer argument: $argument" ;;
@@ -714,17 +716,40 @@ adoption_tail() {
     tail -n 5 "$ADOPTION_ERR" | sed 's/^/    /' >&2
   fi
 }
-case "$ADOPTION_STATE" in
+# `--confirm-all-agents-stopped` is the operator's statement, and the installer makes it
+# only where it can see that it is true: a `fresh` vault holds no legacy database an agent
+# could be writing. A vault that holds them (`upgrade-required`, or a `partial` cutover,
+# which the repair resumes) is adopted only when the operator said so to the installer.
+# See docs/research/2026-09-17-the-installer-does-not-vouch-for-agents-it-cannot-see.md.
+adoption_plan() {
+  local state="$1" confirmed="$2"
+  case "$state" in
+    adopted) echo adopted ;;
+    fresh) echo adopt ;;
+    upgrade-required|partial)
+      if [ "$confirmed" -eq 1 ]; then echo adopt; else echo ask; fi
+      ;;
+    *) echo unknown ;;
+  esac
+}
+ADOPT_COMMAND="uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
   adopted) ok "Reliability V3 adopted" ;;
-  # `partial` is an adoption that was interrupted; the repair resumes it. The
-  # report on standard output names the reason of a failure, so it is kept too.
-  fresh|upgrade-required|partial)
+  ask)
+    SYNC_WARNING=1
+    warn "Reliability V3 state is '${ADOPTION_STATE}': this vault holds the earlier queue, and the installer cannot see whether an agent is using it."
+    warn "Close every agent session, then either rerun the installer with --confirm-all-agents-stopped or run:"
+    warn "  $ADOPT_COMMAND"
+    warn "Session capture stays disabled until then."
+    ;;
+  # The report on standard output names the reason of a failure, so it is kept too.
+  adopt)
     if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
       ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
     else
       SYNC_WARNING=1
       warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
-      warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+      warn "  $ADOPT_COMMAND"
       adoption_tail
     fi
     ;;
