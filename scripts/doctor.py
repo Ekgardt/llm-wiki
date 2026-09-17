@@ -4465,6 +4465,13 @@ def _identity_stale(facts: _GenerationFacts, complete_v2: bool) -> bool:
     return facts.graph_extraction_state != "current" or not complete_v2
 
 
+# The search artifact family a validated generation carries. The artifact names its own
+# version (`corpus-search/v1` without the keys column, `/v2` with it) and the validator
+# accepts both, so health names the family rather than guessing one version for all.
+# See `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+_SEARCH_SCHEMA_FAMILY = "corpus-search"
+
+
 def _generation_search_fields(complete_v2: bool) -> dict:
     if not complete_v2:
         return {
@@ -4474,7 +4481,7 @@ def _generation_search_fields(complete_v2: bool) -> dict:
         }
     return {
         "search_index": "valid",
-        "search_schema": "corpus-search/v1",
+        "search_schema": _SEARCH_SCHEMA_FAMILY,
         "search_integrity": "valid",
     }
 
@@ -4585,7 +4592,7 @@ def _diagnose_invalid_generation(
         return
     if diagnostic.get("schema_version") != "corpus-generation/v2":
         return
-    state["invalid_details"]["search_schema"] = "corpus-search/v1"
+    state["invalid_details"]["search_schema"] = _SEARCH_SCHEMA_FAMILY
     state["invalid_details"].update(
         _diagnostic_search_state(generation_path, diagnostic, state_root, deadline)
     )

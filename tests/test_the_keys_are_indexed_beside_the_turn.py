@@ -52,33 +52,44 @@ def _built(tmp_path: Path, snapshot, keys) -> Path:
     return directory / search_memory.GENERATION_FTS_ARTIFACT
 
 
-def _key_rows(artifact: Path, query: str) -> list[tuple[str, str]]:
+def _searched(artifact: Path, query: str) -> list[dict]:
+    """The product's own lexical leg over the artifact, not a query written for the test."""
+    manifest = {"generation_id": "generation-test"}
     with sqlite3.connect(f"file:{artifact}?mode=ro", uri=True) as database:
-        return database.execute(
-            "SELECT chunks.chunk_id, chunks.content FROM chunk_keys "
-            "JOIN chunks ON chunks.chunk_id = chunk_keys.chunk_id WHERE chunk_keys MATCH ?",
-            (query,),
-        ).fetchall()
+        return search_memory._generation_fts_search(
+            query, manifest, database, scope="all", limit=5, project=None, since=None, as_of=None
+        )
 
 
 def test_a_turn_is_found_under_its_keys_and_read_without_them(tmp_path) -> None:
     root = _vault(tmp_path)
     snapshot = corpus_snapshot.collect_corpus(root, daily_paths=("knowledge/daily/2023-05-26.md",))
-    keys = _keyed_store(tmp_path, snapshot)
-    artifact = _built(tmp_path, snapshot, keys)
+    artifact = _built(tmp_path, snapshot, _keyed_store(tmp_path, snapshot))
 
-    found = _key_rows(artifact, "menagerie")
+    found = _searched(artifact, "menagerie")
 
     assert len(found) == 1
-    assert "Glass Menagerie" not in found[0][1]
-    assert "production last night" in found[0][1]
+    assert "Glass Menagerie" not in str(found[0]["content"])
+    assert "production last night" in str(found[0]["content"])
 
 
-def test_a_vault_that_never_keyed_anything_builds_the_same_artifact(tmp_path) -> None:
+def test_a_vault_that_never_keyed_anything_finds_nothing_under_a_key(tmp_path) -> None:
     root = _vault(tmp_path)
     snapshot = corpus_snapshot.collect_corpus(root, daily_paths=("knowledge/daily/2023-05-26.md",))
 
     artifact = _built(tmp_path, snapshot, None)
 
-    with sqlite3.connect(f"file:{artifact}?mode=ro", uri=True) as database:
-        assert database.execute("SELECT COUNT(*) FROM chunk_keys").fetchone()[0] == 0
+    assert (_searched(artifact, "menagerie"), len(_searched(artifact, "production"))) == ([], 1)
+
+
+def test_an_artifact_written_before_the_keys_column_is_still_valid(tmp_path) -> None:
+    artifact = tmp_path / "search.sqlite3"
+    legacy_ddl = search_memory._GENERATION_FTS_DDL.replace("                keys,\n", "")
+    with sqlite3.connect(artifact) as database:
+        database.executescript(legacy_ddl)
+        database.execute(
+            "INSERT INTO generation_metadata(key, value) VALUES ('schema_version', ?)",
+            (search_memory.LEGACY_SEARCH_SCHEMA_VERSION,),
+        )
+        database.commit()
+        assert search_memory._valid_fts_schema(database) is True

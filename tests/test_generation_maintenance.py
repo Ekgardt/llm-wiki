@@ -203,7 +203,7 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
     assert built["status"] == "built"
     assert result["status"] == "ok"
     assert result["details"]["search_index"] == "valid"
-    assert result["details"]["search_schema"] == "corpus-search/v1"
+    assert result["details"]["search_schema"] == "corpus-search"
     assert result["details"]["search_integrity"] == "valid"
 
 
@@ -233,7 +233,7 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
     assert result["details"]["catalog"] == "valid"
     assert result["details"]["generation_schema"] == "evidence-graph/v2"
     assert result["details"]["search_index"] == damage
-    assert result["details"]["search_schema"] == "corpus-search/v1"
+    assert result["details"]["search_schema"] == "corpus-search"
     assert result["details"]["search_integrity"] == (
         "missing" if damage == "missing" else "invalid"
     )

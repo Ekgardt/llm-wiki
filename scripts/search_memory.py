@@ -81,7 +81,12 @@ MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
 )
-GENERATION_SEARCH_SCHEMA_VERSION = "corpus-search/v1"
+# v2 adds one indexed column, `keys`: the nightly fact keys of the turn, matched beside its
+# text under one BM25 and never returned to a reader. A v1 artifact has no such column and
+# stays readable. See `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+GENERATION_SEARCH_SCHEMA_VERSION = "corpus-search/v2"
+LEGACY_SEARCH_SCHEMA_VERSION = "corpus-search/v1"
+GENERATION_KEYS_COLUMN = "keys"
 GENERATION_TOKENIZER = "porter unicode61"
 GENERATION_TOKENIZER_VERSION = "sqlite-fts5/porter-unicode61/v1"
 GENERATION_TOKENIZER_CONFIG_SHA256 = hashlib.sha256(
@@ -363,10 +368,6 @@ _GENERATION_FTS_DDL = """
                 language UNINDEXED,
                 title,
                 content,
-                tokenize = 'porter unicode61'
-            );
-            CREATE VIRTUAL TABLE chunk_keys USING fts5(
-                chunk_id UNINDEXED,
                 keys,
                 tokenize = 'porter unicode61'
             );
@@ -427,15 +428,11 @@ def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
     )
 
 
-def _key_rows(snapshot: CorpusSnapshot, keys: Mapping[str, str] | None):
-    """One row per chunk whose turn the nightly pass keyed, and none otherwise."""
+def _keys_of(chunk: object, keys: Mapping[str, str] | None) -> str:
+    """The fact keys the nightly pass wrote for this chunk's turn, or nothing."""
     if not keys:
-        return []
-    return [
-        (chunk.id, keys[chunk.span_sha256])
-        for chunk in snapshot.chunks
-        if chunk.span_sha256 in keys
-    ]
+        return ""
+    return keys.get(chunk.span_sha256, "")
 
 
 def _write_generation_fts(
@@ -458,14 +455,11 @@ def _write_generation_fts(
     def rows():
         for order, chunk in enumerate(snapshot.chunks):
             _check_generation_stop(deadline, cancelled)
-            yield _generation_chunk_row(chunk, order)
+            yield (*_generation_chunk_row(chunk, order), _keys_of(chunk, keys))
 
     database.executemany(
-        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(22)) + ")",
+        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(23)) + ")",
         rows(),
-    )
-    database.executemany(
-        "INSERT INTO chunk_keys(chunk_id, keys) VALUES (?, ?)", _key_rows(snapshot, keys)
     )
     database.commit()
     if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
@@ -3087,29 +3081,51 @@ _FTS_CHUNK_SELECT = (
 )
 
 
-def _valid_table_shapes(connection: sqlite3.Connection) -> bool:
+def _indexed_columns(version: str | None) -> tuple[str, ...] | None:
+    """The indexed columns an artifact of this version declares, or None for an unknown one."""
+    if version == GENERATION_SEARCH_SCHEMA_VERSION:
+        return ("title", "content", GENERATION_KEYS_COLUMN)
+    if version == LEGACY_SEARCH_SCHEMA_VERSION:
+        return ("title", "content")
+    return None
+
+
+def _declared_version(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        "SELECT value FROM generation_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    if not row:
+        return None
+    return str(row[0])
+
+
+def _expected_chunk_columns(indexed: tuple[str, ...]) -> tuple[str, ...]:
+    return (*GENERATION_FTS_COLUMNS[:-2], *indexed)
+
+
+def _valid_table_shapes(connection: sqlite3.Connection, indexed: tuple[str, ...]) -> bool:
     metadata_schema = tuple(
         (row[1], row[2].upper(), row[3], row[5])
         for row in connection.execute("PRAGMA table_info(generation_metadata)")
     )
     chunk_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(chunks)"))
-    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == GENERATION_FTS_COLUMNS
+    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == _expected_chunk_columns(indexed)
 
 
 def _valid_fts_schema(connection: sqlite3.Connection) -> bool:
-    """Integrity, table shapes, and the exact FTS5 declaration."""
+    """Integrity, table shapes, and the exact FTS5 declaration of the artifact's own version."""
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         return False
-    if not _valid_table_shapes(connection):
+    indexed = _indexed_columns(_declared_version(connection))
+    if indexed is None or not _valid_table_shapes(connection, indexed):
         return False
-    return _valid_fts_declaration(connection)
+    return _valid_fts_declaration(connection, indexed)
 
 
-def _expected_fts_arguments() -> list[str]:
+def _expected_fts_arguments(indexed: tuple[str, ...]) -> list[str]:
     return [
         *(f"{column} unindexed" for column in GENERATION_FTS_COLUMNS[:-2]),
-        "title",
-        "content",
+        *indexed,
         "tokenize = 'porter unicode61'",
     ]
 
@@ -3135,8 +3151,8 @@ def _declared_fts_arguments(connection: sqlite3.Connection) -> list[str] | None:
     ]
 
 
-def _valid_fts_declaration(connection: sqlite3.Connection) -> bool:
-    return _declared_fts_arguments(connection) == _expected_fts_arguments()
+def _valid_fts_declaration(connection: sqlite3.Connection, indexed: tuple[str, ...]) -> bool:
+    return _declared_fts_arguments(connection) == _expected_fts_arguments(indexed)
 
 
 def _valid_metadata_rows(rows: list[tuple[object, object]]) -> bool:
@@ -3163,8 +3179,9 @@ def _generation_metadata(connection: sqlite3.Connection) -> dict[str, str] | Non
 def _metadata_matches_manifest(
     metadata: Mapping[str, str], manifest: Mapping[str, object]
 ) -> bool:
+    if _indexed_columns(metadata.get("schema_version")) is None:
+        return False
     expected = {
-        "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
         "collector_version": manifest.get("collector_version"),
         "extractor_version": manifest.get("extractor_version"),
         "tokenizer_version": GENERATION_TOKENIZER_VERSION,
@@ -3822,38 +3839,18 @@ def _generation_matched_rows(
     values: Sequence[object],
     limit: int,
 ) -> list[sqlite3.Row]:
-    """Chunks the words match, then chunks whose keys match; the caller deduplicates."""
-    matched = connection.execute(
+    """One BM25 over a chunk's title, text and — in a v2 artifact — its fact keys.
+
+    Key expansion, the shape LongMemEval measured as the good one: a turn is found under
+    the facts it states as well as under its text, and what the reader gets is still the
+    turn. The keys are a column of this table, so they are ranked on the same scale as the
+    text. Research: `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+    """
+    return connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
         [_fts_query(query), *values, limit * 5],
     ).fetchall()
-    return matched + _key_matched_rows(connection, query, filters, values, limit)
-
-
-def _key_matched_rows(
-    connection: sqlite3.Connection,
-    query: str,
-    filters: str,
-    values: Sequence[object],
-    limit: int,
-) -> list[sqlite3.Row]:
-    """Chunks found under the facts their turn states, when the nightly pass keyed them.
-
-    Key expansion, the shape LongMemEval measured as the good one: the turn is found under
-    its facts as well as its text, and what the reader gets is still the turn. An artifact
-    built before the keys existed simply has no rows here. Research:
-    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
-    """
-    try:
-        return connection.execute(
-            f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunk_keys) AS rank FROM chunk_keys "
-            "JOIN chunks ON chunks.chunk_id = chunk_keys.chunk_id "
-            f"WHERE chunk_keys MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-            [_fts_query(query), *values, limit],
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
 
 
 def _deduplicated_results(

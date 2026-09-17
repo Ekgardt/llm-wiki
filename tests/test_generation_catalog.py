@@ -1515,7 +1515,7 @@ def test_v2_rejects_extra_well_formed_stale_chunk_after_hash_recomputed(tmp_path
         row = list(database.execute("SELECT * FROM chunks LIMIT 1").fetchone())
         row[0] = "d" * 64
         row[1] = 1
-        database.execute("INSERT INTO chunks VALUES (" + ",".join("?" * 22) + ")", row)
+        database.execute("INSERT INTO chunks VALUES (" + ",".join("?" * len(row)) + ")", row)
         database.execute(
             "UPDATE generation_metadata SET value='2' WHERE key='chunk_count'"
         )
