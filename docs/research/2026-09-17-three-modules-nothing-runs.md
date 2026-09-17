@@ -54,5 +54,9 @@ refactor had to be applied to them as well.
   references extracted from the compiled page must resolve to the three observations.
 - Leave `build_context.py` in place. Whether the project `context.md` file stays a
   documented part of the layout is the owner's decision.
+- Corrected the same day, at the merge: `tool_breadcrumb_append.py` is restored with its tests
+  and matrix rows. `integrations/README.md` says the OpenCode plugin is installed from outside
+  this repository and calls this helper; nothing inside the repository can prove that plugin
+  does not. Only `loop_detector.py` and `agent_timeline.py` stay removed.
 - Dated history (research notes, plans, the changelog, benchmark result files, the
   2026-08-14 audit status) keeps its mentions: it records what existed then.

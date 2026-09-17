@@ -61,9 +61,10 @@ def test_the_prompt_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
     import user_prompt_capture
 
     seen: list[float] = []
+    # By name: the hook imports the module at call time, and another test file may have
+    # reloaded it since this file imported its own copy.
     monkeypatch.setattr(
-        daily_log_append,
-        "append_daily",
+        "daily_log_append.append_daily",
         lambda *_a, deadline=math.inf, **_k: seen.append(_remaining(deadline)),
     )
 
@@ -76,9 +77,10 @@ def test_the_tool_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
     import post_tool_capture
 
     seen: list[float] = []
+    # By name: the hook imports the module at call time, and another test file may have
+    # reloaded it since this file imported its own copy.
     monkeypatch.setattr(
-        daily_log_append,
-        "append_daily",
+        "daily_log_append.append_daily",
         lambda *_a, deadline=math.inf, **_k: seen.append(_remaining(deadline)),
     )
 

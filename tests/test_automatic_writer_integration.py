@@ -54,6 +54,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/reflection.py:reflect_page",
     "scripts/session_end_project_tag.py:_append_entry",
     "scripts/session_start_project_state.py:_create_project_state",
+    "scripts/tool_breadcrumb_append.py:_append_breadcrumb",
     "scripts/user_prompt_capture.py:_append_prompt_tag",
 }
 
@@ -211,6 +212,7 @@ def test_scanner_writer_set_equals_behavioral_matrix():
                 "reflection.py",
                 "session_end_project_tag.py",
                 "session_start_project_state.py",
+                "tool_breadcrumb_append.py",
                 "user_prompt_capture.py",
             },
         )
@@ -438,6 +440,11 @@ def _drive_session_start_project_state(d: _Drive) -> None:
     d.function(vault, projects_dir, project, "demo", projects_dir / "demo" / "state.md")
 
 
+def _drive_tool_breadcrumb_append(d: _Drive) -> None:
+    d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
+    d.function({"slug": "demo", "sessionId": "s1", "tool": "bash", "target": d.secret})
+
+
 def _drive_user_prompt_capture(d: _Drive) -> None:
     d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
     d.function("demo", "s1", d.secret, "event-1")
@@ -460,6 +467,7 @@ _WRITER_DRIVERS = {
     "reflection": _drive_reflection,
     "session_end_project_tag": _drive_session_end_project_tag,
     "session_start_project_state": _drive_session_start_project_state,
+    "tool_breadcrumb_append": _drive_tool_breadcrumb_append,
     "user_prompt_capture": _drive_user_prompt_capture,
 }
 
