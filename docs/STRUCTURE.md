@@ -216,6 +216,15 @@ snapshot ID plus manifest digest; restore requires both, runs `restic check`, an
 keeps a validated `vault/` + `state/` image only on success. It does not publish over
 an installed vault. Restic repositories must be outside the vault and staging tree.
 
+The image carries what Git does not (decided 2026-09-17): the knowledge, the runtime
+half, untracked files, and tracked files modified since `HEAD`. Paths git holds
+identically are skipped, as are `cache/`, `logs/`, `run/`, `.git/`, `.venv/` and
+regenerable tool caches (`__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+`node_modules`); directories left holding nothing are not part of the image. Where git
+cannot answer, nothing is skipped on git's word. This is what lets `publish` — which
+overwrites nothing — land in a fresh clone. See
+`docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md`.
+
 Windows Task Scheduler remains the native Windows scheduler. macOS uses a per-user
 LaunchAgent and Linux uses a per-user systemd timer; cron is explicit degraded
 fallback only. Blackboard tables reuse `markdown-transactions-v3.sqlite3`, capture

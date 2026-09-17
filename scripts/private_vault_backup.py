@@ -37,6 +37,17 @@ from reliable_memory import (
 _MAX_ENTRIES = 1_000_000
 _CHUNK_BYTES = 1024 * 1024
 _MAX_REPOSITORY_FILE_BYTES = 16 * 1024
+_MAX_GIT_LISTING_BYTES = 8 * 1024 * 1024
+
+# What the image never carries. `cache/`, `logs/` and `run/` are the runtime
+# (the `run/` half is staged separately); a clone restores `.git`, `uv sync`
+# restores `.venv`, and the rest are tool caches — the class Restic's own
+# `--exclude-caches` is for. Research:
+# docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md
+_EXCLUDED_TOP_LEVEL = frozenset({"cache", "logs", "run", ".git", ".venv"})
+_REGENERABLE_DIRECTORY_NAMES = frozenset(
+    {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"}
+)
 _RESTIC_VERSION = "0.19.1"
 _ACTIVE_DATABASES = (
     "markdown-transactions-v3.sqlite3",
@@ -309,10 +320,13 @@ def _skip_source_entry(
     name: str,
     excluded_top_level: frozenset[str],
     excluded_files: frozenset[str],
+    carried: frozenset[str] = frozenset(),
 ) -> bool:
     if not relative.parts and name in excluded_top_level:
         return True
-    return name in excluded_files
+    if name in excluded_files:
+        return True
+    return (relative / name).as_posix() in carried
 
 
 def _stable_file_entry(
@@ -378,6 +392,7 @@ def _scan_tree(
     deadline: float,
     excluded_top_level: frozenset[str] = frozenset(),
     excluded_files: frozenset[str] = frozenset(),
+    carried: frozenset[str] = frozenset(),
 ) -> tuple[_Entry, ...]:
     entries: list[_Entry] = []
 
@@ -386,7 +401,7 @@ def _scan_tree(
         for child in _directory_children(directory):
             _deadline(deadline)
             if _skip_source_entry(
-                relative, child.name, excluded_top_level, excluded_files
+                relative, child.name, excluded_top_level, excluded_files, carried
             ):
                 continue
             child_path = Path(child.path)
@@ -727,6 +742,70 @@ def _require_runtime_valid(
         raise BackupError(code, invalid)
 
 
+def _git_paths(root: Path, arguments: tuple[str, ...], deadline: float) -> frozenset[str] | None:
+    """The NUL-separated paths one git query lists; None when git cannot answer.
+
+    A missing binary, a root that is no repository, a listing past the bound:
+    all mean the same thing here — nothing may be left out on git's word.
+    """
+    try:
+        result = _run_bounded(
+            ["git", "-C", str(root), *arguments],
+            cwd=root,
+            deadline=deadline,
+            max_output_bytes=_MAX_GIT_LISTING_BYTES,
+        )
+    except BackupError:
+        return None
+    if result.returncode != 0:
+        return None
+    listing = result.stdout.decode("utf-8", errors="replace").split("\0")
+    return frozenset(item for item in listing if item)
+
+
+def _git_carried_paths(root: Path, deadline: float) -> frozenset[str]:
+    """Vault-relative paths Git holds exactly as they are on disk.
+
+    A fresh clone already has these, so the image carries everything else — the
+    memory, the owner's untracked files, and any tracked file modified since the
+    last commit, because uncommitted work is what a backup is for. Research:
+    docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md
+    """
+    tracked = _git_paths(root, ("ls-files", "-z"), deadline)
+    if tracked is None:
+        return frozenset()
+    modified = _git_paths(root, ("diff", "--name-only", "-z", "HEAD"), deadline)
+    return tracked - (modified or frozenset())
+
+
+def _logical_prefixes(logical: str) -> Iterator[str]:
+    parts = logical.split("/")
+    for index in range(1, len(parts)):
+        yield "/".join(parts[:index])
+
+
+def _without_empty_directories(entries: tuple[_Entry, ...]) -> tuple[_Entry, ...]:
+    """Drop the directories the image would hold nothing in.
+
+    Whole trees of the product are left out because Git carries them; their
+    directories would otherwise stand in the image as empty shapes.
+    """
+    kept = _directories_on_the_way(entries)
+    return tuple(entry for entry in entries if _entry_belongs(entry, kept))
+
+
+def _directories_on_the_way(entries: tuple[_Entry, ...]) -> set[str]:
+    """Every directory that leads to something the image carries."""
+    leaves = [entry.path for entry in entries if entry.kind != "directory"]
+    return {prefix for path in leaves for prefix in _logical_prefixes(path)}
+
+
+def _entry_belongs(entry: _Entry, kept: set[str]) -> bool:
+    if entry.kind != "directory":
+        return True
+    return entry.path in kept
+
+
 def _source_entries(
     root: Path, state_root: Path, deadline: float
 ) -> tuple[tuple[_Entry, ...], tuple[_Entry, ...]]:
@@ -734,7 +813,9 @@ def _source_entries(
         root,
         prefix="vault",
         deadline=deadline,
-        excluded_top_level=frozenset({"cache", "logs", "run"}),
+        excluded_top_level=_EXCLUDED_TOP_LEVEL,
+        excluded_files=_REGENERABLE_DIRECTORY_NAMES,
+        carried=_git_carried_paths(root, deadline),
     )
     runtime_entries = _scan_tree(
         state_root / "run",
@@ -742,7 +823,7 @@ def _source_entries(
         deadline=deadline,
         excluded_files=frozenset(_ACTIVE_DATABASES) | _DATABASE_SIDECARS,
     )
-    return vault_entries, runtime_entries
+    return _without_empty_directories(vault_entries), runtime_entries
 
 
 def _create_image_structure(image: Path) -> None:

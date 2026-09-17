@@ -14,6 +14,92 @@ import pytest
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
+def _not_a_repository(backup):
+    """What git answers for a fixture vault: the image then leaves nothing out."""
+    return backup.CommandResult(1, b"", b"not a repository")
+
+
+def _restic_backup_reply(backup, command, cwd: Path, state_root: Path):
+    if command[-1] == "version":
+        return backup.CommandResult(
+            0, b"restic 0.19.1 compiled with go1.25.1 on windows/amd64\n", b""
+        )
+    if "backup" in command:
+        return _summary_of_staged_backup(backup, cwd, state_root)
+    assert "check" in command
+    return backup.CommandResult(0, b"no errors were found\n", b"")
+
+
+def _summary_of_staged_backup(backup, cwd: Path, state_root: Path):
+    """The image restic is handed is complete, and the live owner row is gone."""
+    assert (
+        backup.validate_backup_image(cwd)["database_count"],
+        _owner_rows(state_root / "run/markdown-transactions-v3.sqlite3"),
+    ) == (2, (0,))
+    return backup.CommandResult(
+        0,
+        (
+            b'{"message_type":"status","percent_done":1}\n'
+            + b'{"message_type":"summary","snapshot_id":"'
+            + b"a" * 64
+            + b'"}\n'
+        ),
+        b"",
+    )
+
+
+def _restic_restore_reply(backup, command, snapshot: Path, target: Path, snapshot_id: str):
+    if command[-1] == "version":
+        return backup.CommandResult(0, b"restic 0.19.1 fixture\n", b"")
+    if command[-1] == "check":
+        return backup.CommandResult(0, b"no errors were found\n", b"")
+    assert (
+        "restore" in command,
+        command[command.index("restore") + 1],
+        command[command.index("--target") + 1],
+    ) == (True, snapshot_id, str(target))
+    shutil.copytree(snapshot, target, dirs_exist_ok=True, symlinks=True)
+    return backup.CommandResult(
+        0,
+        b'{"message_type":"summary","total_files":7,'
+        b'"files_restored":7,"files_skipped":0,"files_deleted":0,'
+        b'"total_bytes":42,"bytes_restored":42,"bytes_skipped":0}\n',
+        b"",
+    )
+
+
+def _owner_rows(path: Path) -> tuple:
+    with contextlib.closing(sqlite3.connect(path)) as database:
+        return database.execute("SELECT COUNT(*) FROM maintenance_owners").fetchone()
+
+
+def _integrity(path: Path) -> tuple:
+    with contextlib.closing(sqlite3.connect(path)) as database:
+        return database.execute("PRAGMA integrity_check").fetchone()
+
+
+def _staged_image_facts(backup, image: Path, state_root: Path) -> tuple:
+    """Everything one staged image is judged on, in one comparable shape."""
+    manifest = json.loads((image / "manifest.json").read_text(encoding="utf-8"))
+    coordinator_copy = image / "state/run/markdown-transactions-v3.sqlite3"
+    note_entry = next(
+        item
+        for item in manifest["entries"]
+        if item["path"] == "vault/knowledge/notes/private.md"
+    )
+    return (
+        _owner_rows(state_root / "run/markdown-transactions-v3.sqlite3"),
+        (image / "vault/knowledge/notes/private.md").read_bytes(),
+        (image / "vault/cache").exists(),
+        (image / "state/logs").exists(),
+        (_integrity(coordinator_copy), _owner_rows(coordinator_copy)),
+        _integrity(image / "state/run/queue-v3.sqlite3"),
+        (manifest["schema_version"], manifest["created_at"]),
+        note_entry,
+        backup.validate_backup_image(image)["entry_count"] == len(manifest["entries"]),
+    )
+
+
 def test_staged_backup_image_uses_online_databases_and_manifest(tmp_path: Path) -> None:
     import private_vault_backup as backup
 
@@ -35,44 +121,24 @@ def test_staged_backup_image_uses_online_databases_and_manifest(tmp_path: Path) 
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
         deadline=time.monotonic() + 30,
     ) as image:
-        with contextlib.closing(
-            sqlite3.connect(state_root / "run/markdown-transactions-v3.sqlite3")
-        ) as source_database:
-            assert source_database.execute(
-                "SELECT COUNT(*) FROM maintenance_owners"
-            ).fetchone() == (0,)
-        assert (image / "vault/knowledge/notes/private.md").read_bytes() == (
-            b"private knowledge\n"
-        )
-        assert not (image / "vault/cache").exists()
-        assert not (image / "state/logs").exists()
-        coordinator_copy = image / "state/run/markdown-transactions-v3.sqlite3"
-        queue_copy = image / "state/run/queue-v3.sqlite3"
-        with contextlib.closing(sqlite3.connect(coordinator_copy)) as database:
-            assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-            assert database.execute(
-                "SELECT COUNT(*) FROM maintenance_owners"
-            ).fetchone() == (0,)
-        with contextlib.closing(sqlite3.connect(queue_copy)) as database:
-            assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
-        manifest = json.loads((image / "manifest.json").read_text(encoding="utf-8"))
-        assert manifest["schema_version"] == "private-vault-backup/v1"
-        assert manifest["created_at"] == "2026-08-15T00:00:00Z"
-        note_entry = next(
-            item
-            for item in manifest["entries"]
-            if item["path"] == "vault/knowledge/notes/private.md"
-        )
-        assert note_entry == {
+        facts = _staged_image_facts(backup, image, state_root)
+
+    assert facts == (
+        (0,),
+        b"private knowledge\n",
+        False,
+        False,
+        (("ok",), (0,)),
+        ("ok",),
+        ("private-vault-backup/v1", "2026-08-15T00:00:00Z"),
+        {
             "path": "vault/knowledge/notes/private.md",
             "kind": "file",
             "size": 18,
             "sha256": "8175e7747329a432d40fa3b96f6c323fec3101ae4bbdbc9c26d48672ca057126",
-        }
-        assert backup.validate_backup_image(image)["entry_count"] == len(
-            manifest["entries"]
-        )
-
+        },
+        True,
+    )
     assert list(staging_parent.iterdir()) == []
 
 
@@ -203,33 +269,10 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
     calls = []
 
     def run(command, *, cwd, deadline, max_output_bytes=1024 * 1024):
+        if command[0] == "git":
+            return _not_a_repository(backup)
         calls.append((command, cwd, deadline, max_output_bytes))
-        if command[-1] == "version":
-            return backup.CommandResult(
-                0,
-                b"restic 0.19.1 compiled with go1.25.1 on windows/amd64\n",
-                b"",
-            )
-        if "backup" in command:
-            assert backup.validate_backup_image(cwd)["database_count"] == 2
-            with contextlib.closing(
-                sqlite3.connect(state_root / "run/markdown-transactions-v3.sqlite3")
-            ) as database:
-                assert database.execute(
-                    "SELECT COUNT(*) FROM maintenance_owners"
-                ).fetchone() == (0,)
-            return backup.CommandResult(
-                0,
-                (
-                    b'{"message_type":"status","percent_done":1}\n'
-                    + b'{"message_type":"summary","snapshot_id":"'
-                    + b"a" * 64
-                    + b'"}\n'
-                ),
-                b"",
-            )
-        assert "check" in command
-        return backup.CommandResult(0, b"no errors were found\n", b"")
+        return _restic_backup_reply(backup, command, cwd, state_root)
 
     monkeypatch.setattr(backup, "_run_bounded", run)
 
@@ -242,6 +285,7 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
         deadline=time.monotonic() + 30,
     )
+    backup_command = calls[1][0]
 
     assert receipt == {
         "schema_version": "private-vault-backup-receipt/v1",
@@ -249,15 +293,18 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         "created_at": "2026-08-15T00:00:00Z",
         "manifest_sha256": receipt["manifest_sha256"],
     }
-    assert len(receipt["manifest_sha256"]) == 64
-    assert calls[0][0][-1] == "version"
-    assert calls[2][0][-1] == "check"
-    backup_command = calls[1][0]
-    assert "backup" in backup_command
-    assert backup_command[-1] == "."
-    assert "--json" in backup_command
-    assert "llm-wiki-private-v1" in backup_command
-    assert calls[1][1] == staging
+    assert (len(receipt["manifest_sha256"]), calls[0][0][-1], calls[2][0][-1]) == (
+        64,
+        "version",
+        "check",
+    )
+    assert (
+        "backup" in backup_command,
+        backup_command[-1],
+        "--json" in backup_command,
+        "llm-wiki-private-v1" in backup_command,
+        calls[1][1],
+    ) == (True, ".", True, True, staging)
     assert list(staging.iterdir()) == []
 
 
@@ -277,6 +324,8 @@ def test_backup_private_vault_rejects_restic_incomplete_exit_and_cleans_staging(
     calls = []
 
     def run(command, **kwargs):
+        if command[0] == "git":
+            return _not_a_repository(backup)
         calls.append(command)
         if command[-1] == "version":
             return backup.CommandResult(0, b"restic 0.19.1 fixture\n", b"")
@@ -425,22 +474,10 @@ def test_restore_private_vault_restores_exact_snapshot_to_clean_target(
     calls = []
 
     def run(command, *, cwd, deadline, max_output_bytes=1024 * 1024):
+        if command[0] == "git":
+            return _not_a_repository(backup)
         calls.append((command, cwd, deadline, max_output_bytes))
-        if command[-1] == "version":
-            return backup.CommandResult(0, b"restic 0.19.1 fixture\n", b"")
-        if command[-1] == "check":
-            return backup.CommandResult(0, b"no errors were found\n", b"")
-        assert "restore" in command
-        assert command[command.index("restore") + 1] == snapshot_id
-        assert command[command.index("--target") + 1] == str(target)
-        shutil.copytree(snapshot, target, dirs_exist_ok=True, symlinks=True)
-        return backup.CommandResult(
-            0,
-            b'{"message_type":"summary","total_files":7,'
-            b'"files_restored":7,"files_skipped":0,"files_deleted":0,'
-            b'"total_bytes":42,"bytes_restored":42,"bytes_skipped":0}\n',
-            b"",
-        )
+        return _restic_restore_reply(backup, command, snapshot, target, snapshot_id)
 
     monkeypatch.setattr(backup, "_run_bounded", run)
 
@@ -461,11 +498,11 @@ def test_restore_private_vault_restores_exact_snapshot_to_clean_target(
         "entry_count": receipt["entry_count"],
         "database_count": 2,
     }
-    assert isinstance(receipt["entry_count"], int)
-    assert (target / "vault/knowledge/notes/private.md").read_bytes() == (
-        b"restored private\n"
-    )
-    assert [call[0][-1] for call in calls[:2]] == ["version", "check"]
+    assert (
+        isinstance(receipt["entry_count"], int),
+        (target / "vault/knowledge/notes/private.md").read_bytes(),
+        [call[0][-1] for call in calls[:2]],
+    ) == (True, b"restored private\n", ["version", "check"])
 
 
 def test_restore_private_vault_rejects_tampered_content_and_cleans_target(
@@ -627,12 +664,15 @@ def test_cli_backup_uses_runtime_roots_and_prints_canonical_receipt(
         ]
     )
 
-    assert result == 0
-    assert json.loads(capsys.readouterr().out) == run()
-    assert captured["root"] == root.resolve()
-    assert captured["state_root"] == state_root.resolve()
-    assert captured["staging_parent"] == staging
-    assert captured["deadline"] > time.monotonic()
+    printed = json.loads(capsys.readouterr().out)
+
+    assert (result, printed) == (0, run())
+    assert (
+        captured["root"],
+        captured["state_root"],
+        captured["staging_parent"],
+        captured["deadline"] > time.monotonic(),
+    ) == (root.resolve(), state_root.resolve(), staging, True)
 
 
 def test_cli_restore_reports_stable_error_without_paths(

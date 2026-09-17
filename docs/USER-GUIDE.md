@@ -523,6 +523,14 @@ plaintext staging image is removed after Restic finishes. Backup refuses live or
 unknown owners, source races, invalid Reliability-v3 state, corrupt databases,
 overlapping repository/staging paths, partial Restic exit, or failed repository check.
 
+The image holds what Git does not: the knowledge, the runtime databases, every
+untracked file, and any tracked file you have modified since the last commit. A
+tracked file identical to `HEAD` is left out — a clone brings it back — and so are
+`cache/`, `logs/`, `run/` (staged separately), `.git/`, `.venv/`, and tool caches such
+as `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache` and `node_modules`. A
+vault that is not a git checkout, or a machine without `git`, is backed up whole.
+Recovery is therefore: clone the repository, install, restore, publish.
+
 Restore only to a pre-existing empty directory:
 
 ```bash
