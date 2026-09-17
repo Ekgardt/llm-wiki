@@ -101,6 +101,9 @@ _WRITER_RETRY_CAP_SECONDS = 0.05
 _ADOPTION_VALIDATION_SECONDS = 30.0
 _ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
 _ADOPTION_VALIDATION_LOCK = threading.Lock()
+# Nested gate releases that failed in this process: (database, owner token, fencing epoch).
+# Set operations are atomic under the interpreter lock; an entry is proof the row is residue.
+_UNRELEASED_PROJECTIONS: set[tuple[str, str, int]] = set()
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -7725,15 +7728,47 @@ class MarkdownCoordinator:
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
+            self._drop_own_stale_projection(database, owner)
             self._reclaim_dead_writer_projection(database, registry)
             self._insert_writer_projection(database, owner)
         self._enter_gate(owner)
         try:
             yield owner
         finally:
+            self._leave_nested_gate(owner)
+
+    def _leave_nested_gate(self, owner: OwnerLease) -> None:
+        """Delete the projection, and clear this thread's gate whatever the delete did.
+
+        A delete that raised — `database is locked` after the busy timeout — used to leave
+        the thread believing it was still inside the gate, and the row shut every other
+        process out until this one exited. The row it may leave behind is removed on the
+        next entry (`_drop_own_stale_projection`). Research:
+        `docs/research/2026-09-17-a-failed-release-does-not-keep-the-gate.md`.
+        """
+        residue = (str(self.database_path), owner.token, owner.epoch)
+        _UNRELEASED_PROJECTIONS.add(residue)
+        try:
             with self._connect() as database, begin_immediate(database):
                 self._delete_writer_projection(database, owner)
+            _UNRELEASED_PROJECTIONS.discard(residue)
+        finally:
             self._clear_gate()
+
+    def _drop_own_stale_projection(self, database: sqlite3.Connection, owner: OwnerLease) -> None:
+        """Remove the row a failed release of this very lease left behind.
+
+        Only a release recorded as failed in this process is proof; a row that merely
+        looks like ours may be a live gate held through another coordinator.
+        """
+        residue = (str(self.database_path), owner.token, owner.epoch)
+        if residue not in _UNRELEASED_PROJECTIONS:
+            return
+        database.execute(
+            "DELETE FROM writer_owners WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?",
+            (owner.token, owner.epoch),
+        )
+        _UNRELEASED_PROJECTIONS.discard(residue)
 
     def _reentered_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
         """A nested gate belongs to the same owner or it is not the same gate."""
