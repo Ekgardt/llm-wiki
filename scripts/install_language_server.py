@@ -33,6 +33,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,13 +112,18 @@ def _member_path_escapes(path: Path) -> bool:
     return path.is_absolute() or any(part in {"..", "/"} for part in path.parts)
 
 
-def _member_relative(member: tarfile.TarInfo) -> Path:
-    path = Path(member.name)
+def _relative_member_path(name: str) -> Path:
+    """One archive entry's path, tar or zip: bounded, relative, with no `..`."""
+    path = Path(name)
     if not path.parts or len(path.parts) > MAX_PATH_COMPONENTS:
-        raise InstallError(f"member path is unusable: {member.name!r}")
+        raise InstallError(f"member path is unusable: {name!r}")
     if _member_path_escapes(path):
-        raise InstallError(f"member path escapes the archive: {member.name!r}")
+        raise InstallError(f"member path escapes the archive: {name!r}")
     return Path(*path.parts)
+
+
+def _member_relative(member: tarfile.TarInfo) -> Path:
+    return _relative_member_path(member.name)
 
 
 def _require_plain_member(member: tarfile.TarInfo, limit: int = MAX_MEMBER_BYTES) -> None:
@@ -203,9 +209,98 @@ def _extract_member(
     return _extract_file(archive, member, target)
 
 
+ZIP_MODE = "zip"
+_ZIP_KIND_MASK = 0o170000
+# 0: the archive was made where there are no Unix modes, which is how Go's own
+# Windows zip is written; then `ZipInfo.is_dir()` tells the two apart.
+_ZIP_PLAIN_KINDS = frozenset({0, 0o100000, 0o040000})
+
+
 def _archive_mode(url: str) -> str:
-    """Gzip or xz, by the pinned URL's own suffix. npm ships one, Rust the other."""
+    """Zip, xz or gzip, by the pinned URL's own suffix.
+
+    npm ships gzip, Rust xz, and Go's Windows toolchain is a zip, which used to
+    be opened as a tarball and always failed (audit 3, B18). Research:
+    `docs/research/2026-09-17-a-pinned-zip-is-unpacked-as-a-zip.md`.
+    """
+    if url.endswith(".zip"):
+        return ZIP_MODE
     return "r:xz" if url.endswith(".xz") else "r:gz"
+
+
+def _zip_unix_mode(info: zipfile.ZipInfo) -> int:
+    return info.external_attr >> 16
+
+
+def _require_plain_zip_entry(info: zipfile.ZipInfo, limit: int) -> None:
+    """The zip twin of `_require_plain_member`: a file or a directory, bounded."""
+    if _zip_unix_mode(info) & _ZIP_KIND_MASK not in _ZIP_PLAIN_KINDS:
+        raise InstallError(f"member is not a regular file or directory: {info.filename!r}")
+    if info.file_size > limit:
+        raise InstallError(f"member exceeds its bound: {info.filename!r}")
+
+
+def _copy_declared_bytes(source, handle, declared: int, name: str) -> None:
+    """Copy one entry and refuse it the moment it outgrows what it declared."""
+    copied = 0
+    while True:
+        chunk = source.read(64 * 1024)
+        if not chunk:
+            return
+        copied += len(chunk)
+        if copied > declared:
+            raise InstallError(f"member is larger than it declares: {name!r}")
+        handle.write(chunk)
+
+
+def _write_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, target: Path) -> int:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with archive.open(info) as source, open(target, "wb") as handle:
+        _copy_declared_bytes(source, handle, info.file_size, info.filename)
+    if _zip_unix_mode(info) & 0o111:
+        target.chmod(target.stat().st_mode | 0o755)
+    return info.file_size
+
+
+def _extract_zip_entry(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    root: Path,
+    placement: _Placement,
+    member_limit: int,
+) -> int:
+    _require_plain_zip_entry(info, member_limit)
+    destination = placement.target(_relative_member_path(info.filename))
+    if destination is None:
+        return 0
+    target = root / destination
+    if info.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        return 0
+    return _write_zip_entry(archive, info, target)
+
+
+def _unpack_zip(scratch, root: Path, placement: _Placement, limits: tuple[int, int, int]) -> None:
+    total_limit, members_limit, member_limit = limits
+    written = 0
+    with zipfile.ZipFile(scratch) as archive:
+        entries = archive.infolist()
+        if len(entries) > members_limit:
+            raise InstallError("archive exceeds the member bound")
+        for info in entries:
+            written += _extract_zip_entry(archive, info, root, placement, member_limit)
+            _require_total(written, total_limit)
+
+
+def _unpack_tar(
+    scratch, mode: str, root: Path, placement: _Placement, limits: tuple[int, int, int]
+) -> None:
+    total_limit, members_limit, member_limit = limits
+    written = 0
+    with tarfile.open(fileobj=scratch, mode=mode) as archive:
+        for member in _bounded_members(archive, members_limit):
+            written += _extract_member(archive, member, root, placement, member_limit)
+            _require_total(written, total_limit)
 
 
 def _extract(
@@ -217,18 +312,19 @@ def _extract(
     mode: str = "r:gz",
     member_limit: int = MAX_MEMBER_BYTES,
 ) -> None:
-    """Unpack a bounded, contained archive under `root`."""
-    written = 0
+    """Unpack a bounded, contained archive under `root`.
+
+    The scratch file is read through its own handle, never reopened by name:
+    Windows refuses a second open of a delete-on-close temporary file.
+    """
+    limits = (limit, members_limit, member_limit)
     with tempfile.NamedTemporaryFile(suffix=".archive") as scratch:
         scratch.write(content)
-        scratch.flush()
-        with tarfile.open(scratch.name, mode=mode) as archive:
-            members = _bounded_members(archive, members_limit)
-            for member in members:
-                written += _extract_member(
-                    archive, member, root, placement, member_limit
-                )
-                _require_total(written, limit)
+        scratch.seek(0)
+        if mode == ZIP_MODE:
+            _unpack_zip(scratch, root, placement, limits)
+            return
+        _unpack_tar(scratch, mode, root, placement, limits)
 
 
 def _bounded_members(
@@ -385,6 +481,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+# What an install can fail with and still end as `install failed: ...`, exit 1.
+_INSTALL_FAILURES = (
+    InstallError,
+    SourceBuildError,
+    OSError,
+    tarfile.TarError,
+    zipfile.BadZipFile,
+    ValueError,
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(argv)
     profile = REGISTRY.get(arguments.profile)
@@ -398,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
             server_artifact=arguments.artifact,
             runtime_artifact=arguments.runtime_artifact,
         )
-    except (InstallError, SourceBuildError, OSError, tarfile.TarError, ValueError) as error:
+    except _INSTALL_FAILURES as error:
         print(f"install failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps({"profile": profile.name, "root": str(root)}, indent=2))
