@@ -122,7 +122,6 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - Python 3.10+
 - git
 - [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
-- bash 4.4+ for `install.sh` — macOS ships 3.2, so `brew install bash` first
 - An AI agent you already use (Claude Code, OpenCode, or Codex)
 
 ### Source install

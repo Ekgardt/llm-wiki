@@ -40,21 +40,10 @@ ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 
-# `mapfile` is bash 4.0 and an empty array under `set -u` is an error before 4.4.
-# macOS ships 3.2, where this installer used to die at step 3 with "mapfile: command
-# not found". Asked before the first such construct runs.
-# See docs/research/2026-09-17-the-installer-says-what-it-needs-and-what-it-did.md.
-bash_runs_this_installer() {
-  local major="$1" minor="$2"
-  if [ "$major" -gt 4 ]; then
-    return 0
-  fi
-  [ "$major" -eq 4 ] && [ "$minor" -ge 4 ]
-}
-SHELL_VERSION="${BASH_VERSION:-0.0}"
-SHELL_MINOR="${SHELL_VERSION#*.}"
-bash_runs_this_installer "${SHELL_VERSION%%.*}" "${SHELL_MINOR%%.*}" || \
-  fail "bash 4.4 or newer is required; this is bash ${BASH_VERSION:-unknown}. macOS ships 3.2: run 'brew install bash', then start the installer with it: \"\$(brew --prefix)/bin/bash\" ./install.sh"
+# This installer runs on bash 3.2, the shell macOS ships: no `mapfile` (bash 4.0), and a
+# possibly empty array is expanded in the `+` form (see IDE_HOOK_ARGS) because a bare
+# expansion under `set -u` is an error before bash 4.4.
+# See docs/research/2026-09-17-the-installer-runs-on-the-bash-macos-ships.md.
 
 for argument in "$@"; do
   if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
@@ -313,7 +302,9 @@ SYNC_PLAN="$(python3 "$VAULT_ROOT/scripts/installer_config.py" sync-args \
   --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
 PROJECT_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
 SYNC_ARGS=()
-mapfile -t SYNC_ARGS < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+while IFS= read -r sync_argument; do
+  SYNC_ARGS+=("$sync_argument")
+done < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
 export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
 uv "${SYNC_ARGS[@]}"
 ok "Production dependencies installed (MCP included)"
@@ -536,7 +527,7 @@ INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" py
   --home "$HOME" \
   --scheduler "$SCHEDULER_MODE" \
   --profile "$PROFILE" \
-  "${IDE_HOOK_ARGS[@]}")" || fail "Install ownership transaction failed"
+  ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"})" || fail "Install ownership transaction failed"
 SCHEDULER_BACKEND="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
 case "$SCHEDULER_BACKEND" in
   launchd|systemd_user|cron) ;;

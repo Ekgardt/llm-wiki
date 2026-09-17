@@ -122,7 +122,6 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - Python 3.10+
 - git
 - [uv](https://docs.astral.sh/uv/) 必须是 0.12.3 —— 两个安装脚本都会拒绝其他版本
-- `install.sh` 需要 bash 4.4+ —— macOS 自带 3.2，请先 `brew install bash`
 - 一个你已在使用的 AI 智能体（Claude Code、OpenCode 或 Codex）
 
 ### 从源码安装

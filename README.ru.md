@@ -123,7 +123,6 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - Python 3.10+
 - git
 - [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
-- bash 4.4+ для `install.sh` — в macOS стоит 3.2, сначала `brew install bash`
 - AI-агент, которым вы уже пользуетесь (Claude Code, OpenCode или Codex)
 
 ### Установка из исходников

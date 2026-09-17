@@ -36,19 +36,28 @@ def _call(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _code_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+
+def test_the_installer_holds_no_construct_the_bash_of_macos_lacks() -> None:
+    """bash 3.2: no `mapfile`, and an array that may be empty is expanded with the `+` form.
+
+    Research: `docs/research/2026-09-17-the-installer-runs-on-the-bash-macos-ships.md`.
+    """
+    newer = ("mapfile", "readarray", "declare -A", '  "${IDE_HOOK_ARGS[@]}"')
+    found = [word for word in newer for line in _code_lines(INSTALL_SH) if word in line]
+
+    assert found == []
+
+
 @needs_bash
-@pytest.mark.parametrize(
-    ("major", "minor", "accepted"),
-    [("3", "2", False), ("4", "3", False), ("4", "4", True), ("5", "0", True)],
-)
-def test_a_shell_older_than_the_installer_needs_is_refused(major, minor, accepted) -> None:
-    assert (_call("bash_runs_this_installer", major, minor).returncode == 0) is accepted
+def test_an_empty_array_in_the_plus_form_is_no_argument_under_nounset() -> None:
+    script = 'set -euo pipefail\nEMPTY=()\nset -- before ${EMPTY[@]+"${EMPTY[@]}"} after\necho "$#"\n'
 
+    result = subprocess.run([_bash(), "-c", script], capture_output=True, text=True, check=False)
 
-def test_the_shell_is_asked_before_the_first_construct_it_lacks() -> None:
-    guard = INSTALL_SH.index('bash_runs_this_installer "${SHELL_VERSION%%.*}"')
-
-    assert guard < min(INSTALL_SH.index("mapfile -t"), INSTALL_SH.index('for argument in "$@"'))
+    assert (result.returncode, result.stdout.strip()) == (0, "2")
 
 
 @pytest.mark.parametrize("text", [INSTALL_SH, INSTALL_PS1], ids=["install.sh", "install.ps1"])

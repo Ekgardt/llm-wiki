@@ -312,6 +312,7 @@ def test_install_sh_no_undefined_vars():
         assigned.add(m.group(1))
     assigned.update(re.findall(r"\blocal\s+([A-Za-z_]\w*)", content))
     assigned.update(re.findall(r"\bfor\s+([A-Za-z_]\w*)\s+in\b", content))
+    assigned.update(re.findall(r"\bread\s+(?:-\w+\s+)*([A-Za-z_]\w*)", content))
 
     undefined = sorted(refs - assigned - skip)
     assert not undefined, f"Undefined bash vars in install.sh: {undefined}"
