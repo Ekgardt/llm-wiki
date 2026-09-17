@@ -35,7 +35,17 @@ MAX_STEP_HEAD_BYTES = 8 * 1024
 REPORT_RETENTION_DAYS = 30
 REPORT_RETENTION_FILES = 60
 REPORT_RETENTION_BYTES = 32 * 1024 * 1024
-MAINTENANCE_REPORT_PATTERNS = ("nightly-*.md", "weekly-*.md", "lint-*.md")
+# The scheduler's own logs are appended to for the life of the vault (launchd's
+# StandardOutPath, the cron `>>`) and nothing rotates them, so the family size rule
+# above is their only bound. See
+# docs/research/2026-09-17-the-scheduler-log-is-bounded-and-the-hard-kill-is-named.md.
+MAINTENANCE_REPORT_PATTERNS = (
+    "nightly-*.md",
+    "weekly-*.md",
+    "lint-*.md",
+    "scheduled-*.log",
+    "cron-*.log",
+)
 ARTIFACT_PATTERN = "*.log"
 # The files a scheduler redirects a pass into: launchd writes the first pair,
 # cron the second. They are append-only and nothing else names them, so they

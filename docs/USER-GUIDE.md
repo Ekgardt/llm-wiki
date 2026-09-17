@@ -336,6 +336,14 @@ When a night is missed entirely, the next session start asks for it: the mainten
 pass a session start already spawns runs that day's nightly once, claimed in
 `run/state.json` so two sessions cannot both run it.
 
+Two of the four backends can kill a pass that overruns: the systemd timer carries
+`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 3 hours nightly and 5 hours
+weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
+bounds only how long it waits after asking a job to stop — so there a hung pass ends when its
+maintenance lease is reclaimed, not on a clock. The scheduler's own log
+(`logs/scheduled-*.log`, `logs/cron-*.log`) is kept by the same retention as the maintenance
+reports: 30 days, 60 files, 32 MB per family.
+
 If the LLM is offline, work is queued
 in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
 
