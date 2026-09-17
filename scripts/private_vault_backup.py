@@ -1203,6 +1203,7 @@ def _restic_backup(base: list[str], image: Path, deadline: float) -> str:
         + [
             "backup",
             "--json",
+            "--quiet",
             "--tag",
             "llm-wiki-private-v1",
             ".",
@@ -1254,7 +1255,8 @@ def _restore_inputs(
 
 
 def _validate_restore_counter(summary: dict[str, object], key: str) -> None:
-    value = summary.get(key)
+    """Restic leaves a zero counter out of its summary (`omitempty`)."""
+    value = summary.setdefault(key, 0)
     if type(value) is not int:
         raise BackupError("restic_restore_output_invalid")
     if value < 0:
@@ -1313,6 +1315,7 @@ def _run_restore(
             "restore",
             snapshot_id,
             "--json",
+            "--quiet",
             "--target",
             str(target),
         ],
