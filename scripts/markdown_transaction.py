@@ -7607,7 +7607,7 @@ class MarkdownCoordinator:
         wait_seconds: float | None = None,
     ) -> Iterator[OwnerLease]:
         if owner is not None:
-            yield from self._nested_writer_gate(owner)
+            yield from self._nested_writer_gate(owner, wait_seconds)
             return
         depth = getattr(self._local, "gate_depth", 0)
         if depth:
@@ -7847,23 +7847,52 @@ class MarkdownCoordinator:
         if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
             raise RuntimeError("canonical writer projection requires a v3 coordinator")
 
-    def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+    def _nested_writer_gate(
+        self, owner: OwnerLease, wait_seconds: float | None = None
+    ) -> Iterator[OwnerLease]:
         self._require_nested_gate_owner(owner)
+        _require_wait_seconds(wait_seconds)
         if getattr(self._local, "gate_depth", 0):
             yield from self._reentered_writer_gate(owner)
             return
 
+        self._project_nested_owner(owner, wait_seconds)
+        self._enter_gate(owner)
+        try:
+            yield owner
+        finally:
+            self._leave_nested_gate(owner)
+
+    def _project_nested_owner(
+        self, owner: OwnerLease, wait_seconds: float | None
+    ) -> None:
+        """Take the gate row for this owner, waiting out a live writer as the canonical gate does.
+
+        The wait used to be ignored: one attempt, then `owner_busy`, so a project
+        checkpoint that met a running compile failed at once. When the window
+        closes the `owner_busy` it was given is what the caller sees.
+        """
+        from operational_ownership import OperationalOwnershipError
+
+        deadline = time.monotonic() + _writer_wait_window(wait_seconds)
+        attempt = 0
+        while True:
+            try:
+                return self._project_nested_owner_once(owner)
+            except OperationalOwnershipError as exc:
+                delay = _writer_retry_delay(attempt, deadline)
+                if exc.code != "owner_busy" or delay <= 0:
+                    raise
+            time.sleep(delay)
+            attempt += 1
+
+    def _project_nested_owner_once(self, owner: OwnerLease) -> None:
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             registry.require(database, owner)
             self._drop_own_stale_projection(database, owner)
             self._reclaim_dead_writer_projection(database, registry)
             self._insert_writer_projection(database, owner)
-        self._enter_gate(owner)
-        try:
-            yield owner
-        finally:
-            self._leave_nested_gate(owner)
 
     def _leave_nested_gate(self, owner: OwnerLease) -> None:
         """Delete the projection, and clear this thread's gate whatever the delete did.
