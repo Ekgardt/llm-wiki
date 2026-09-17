@@ -4493,6 +4493,40 @@ def _require_adopted_retry_policy(
         _refuse_legacy_only_api("fail(retry_policy_override)")
 
 
+_ORDINARY_PURGEABLE_STATES = frozenset({"succeeded", "cancelled", "dead"})
+
+
+def _ordinary_purge_selection(include_dead: bool) -> str:
+    """Which finished rows an ordinary purge takes; one query for both readers.
+
+    Attempts-exhausted work is retained by default and leaves only when an
+    operator asks for it by name (`--include-dead`). A row demoted to
+    `dead / payload_hash_mismatch` is never taken here whatever the caller asks:
+    its payload no longer hashes to its record, so it cannot be exported, and
+    `quarantine-corrupt` is the route the product has for it. See
+    `docs/research/2026-09-17-the-adopted-queue-settles-its-own-attempts-and-can-let-the-dead-go.md`.
+    """
+    if not include_dead:
+        return "SELECT * FROM tasks WHERE state IN ('succeeded','cancelled') AND updated_at<?"
+    return (
+        "SELECT * FROM tasks WHERE (state IN ('succeeded','cancelled') "
+        "OR (state='dead' AND error_code IS NOT 'payload_hash_mismatch')) "
+        "AND updated_at<?"
+    )
+
+
+def _require_adopted_attempt_limit(max_attempts: int) -> None:
+    """An attempt limit belongs to the queue, so a caller's own number is refused.
+
+    `claim` used to take the caller's number while `fail` refused it and the
+    terminal test settled by the contract's: one option with two answers, and a
+    worker that could claim a task it could not then fail. See
+    `docs/research/2026-09-17-the-adopted-queue-settles-its-own-attempts-and-can-let-the-dead-go.md`.
+    """
+    if max_attempts != DEFAULTS.queue_max_attempts:
+        _refuse_legacy_only_api("claim(max_attempts_override)")
+
+
 def _attempt_histories(
     connection: sqlite3.Connection, rows: Sequence[sqlite3.Row]
 ) -> dict[str, list[sqlite3.Row]]:
@@ -4632,6 +4666,7 @@ def _check_claim_arguments(
     _validate_retry_policy(
         max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
     )
+    _require_adopted_attempt_limit(max_attempts)
 
 
 def _retire_exhausted_history(
@@ -10995,13 +11030,7 @@ class _QueueV3CandidateReader:
     def _validate_capture_claim(
         owner: str, lease_seconds: int, max_attempts: int
     ) -> None:
-        if not owner:
-            raise ValueError("owner must be non-empty")
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
-        _validate_retry_policy(
-            max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
-        )
+        _check_claim_arguments(owner, lease_seconds, max_attempts)
 
     @staticmethod
     def _capture_claim_row(
@@ -11610,13 +11639,10 @@ class _QueueV3CandidateReader:
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
     ) -> PurgeReceipt:
-        # The adopted plan selects succeeded and cancelled, which is exactly
-        # what `include_dead=False` means; retiring dead work has no adopted
-        # implementation, so ask for it and be refused rather than obeyed in part.
-        if include_dead:
-            _refuse_legacy_only_api("purge(include_dead=True)")
         _require_active(deadline, cancelled)
-        plan = self._ordinary_purge_plan(terminal_before, export_path)
+        plan = self._ordinary_purge_plan(
+            terminal_before, export_path, include_dead=include_dead
+        )
         manifest_bytes = self._publish_ordinary_purge_export(
             plan, deadline=deadline, cancelled=cancelled
         )
@@ -11632,7 +11658,7 @@ class _QueueV3CandidateReader:
         return PurgeReceipt(len(plan.task_ids), plan.task_ids)
 
     def _ordinary_purge_plan(
-        self, terminal_before: datetime, export_path: Path
+        self, terminal_before: datetime, export_path: Path, *, include_dead: bool
     ) -> _OrdinaryPurgePlan:
         retention_cutoff = _utc_now() - timedelta(
             days=DEFAULTS.queue_result_retention_days
@@ -11643,9 +11669,9 @@ class _QueueV3CandidateReader:
             raise QueueOperationError("export_verification_failed")
         if export.exists():
             return self._load_ordinary_purge_plan(cutoff, export)
-        return self._new_ordinary_purge_plan(cutoff, export)
+        return self._new_ordinary_purge_plan(cutoff, export, include_dead)
 
-    def _demote_corrupt_finished_tasks(self, cutoff: str) -> None:
+    def _demote_corrupt_finished_tasks(self, cutoff: str, include_dead: bool) -> None:
         """Move corrupt finished rows out of the purge selection, and commit it.
 
         One corrupt row used to refuse the whole plan, and nothing else can move
@@ -11655,23 +11681,19 @@ class _QueueV3CandidateReader:
         now = _utc_now()
         with closing(self._connect()) as database, begin_immediate(database):
             rows = database.execute(
-                """SELECT * FROM tasks
-                   WHERE state IN ('succeeded','cancelled') AND updated_at<?""",
-                (cutoff,),
+                _ordinary_purge_selection(include_dead), (cutoff,)
             ).fetchall()
             for row in rows:
                 self._require_valid_task_payload(database, row, now=now, parse=True)
 
     def _new_ordinary_purge_plan(
-        self, cutoff: str, export: Path
+        self, cutoff: str, export: Path, include_dead: bool
     ) -> _OrdinaryPurgePlan:
-        self._demote_corrupt_finished_tasks(cutoff)
+        self._demote_corrupt_finished_tasks(cutoff, include_dead)
         with closing(self._connect()) as database:
             database.execute("BEGIN")
             rows = database.execute(
-                """SELECT * FROM tasks
-                   WHERE state IN ('succeeded','cancelled') AND updated_at<?
-                   ORDER BY created_at,id""",
+                f"{_ordinary_purge_selection(include_dead)} ORDER BY created_at,id",
                 (cutoff,),
             ).fetchall()
             records = tuple(
@@ -12405,9 +12427,15 @@ class _QueueV3CandidateReader:
 
     @staticmethod
     def _require_ordinary_purge_task(row: sqlite3.Row | None, cutoff: str) -> None:
+        """Still a finished row an ordinary purge may take, still older than the cutoff.
+
+        Which of those states this particular purge planned for is pinned by the
+        exported record, compared field for field a moment later, so this guard
+        names the states the operation can take at all and no narrower.
+        """
         if (
             row is None
-            or row["state"] not in {"succeeded", "cancelled"}
+            or row["state"] not in _ORDINARY_PURGEABLE_STATES
             or row["updated_at"] >= cutoff
         ):
             raise QueueOperationError("purge_selection_changed")
@@ -15374,6 +15402,24 @@ def _drive_worker(
             return
 
 
+def _require_policy_this_queue_takes(
+    queue: MemoryQueue | _QueueV3CandidateReader, policy: Mapping[str, int]
+) -> None:
+    """Refuse a retry policy the queue will not take, before any task is claimed.
+
+    The adopted queue settles its own attempts, so a worker told otherwise would
+    claim a task and only then find it cannot record the failure.
+    """
+    if isinstance(queue, MemoryQueue):
+        return
+    _require_adopted_attempt_limit(policy["max_attempts"])
+    _require_adopted_retry_policy(
+        policy["max_attempts"],
+        policy["retry_base_seconds"],
+        policy["retry_cap_seconds"],
+    )
+
+
 def run_worker(
     processor: Callable[[dict], bool | DeferredResult],
     *,
@@ -15420,6 +15466,7 @@ def run_worker(
         retry_base_seconds=retry_base_seconds,
         retry_cap_seconds=retry_cap_seconds,
     )
+    _require_policy_this_queue_takes(queue, policy)
     _drive_worker(
         queue,
         processor,
