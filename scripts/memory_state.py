@@ -5,12 +5,11 @@ Three-zone layout: vault holds code + knowledge + gitignored runtime dirs.
     <vault>/
       run/state.json     # compile hashes, dedupe, heartbeats
       run/compile.pid    # maybe_compile lock
-      run/queue/         # deferred LLM tasks
+      run/queue-v3.sqlite3   # deferred LLM tasks (run/queue/*.json: migration input only)
       logs/              # lint / nightly reports
-      cache/             # FTS5/vector/graph indexes
-                       # cache/cognee/ — optional semantic graph
+      cache/             # FTS5/vector/graph indexes (cache/cognee/ is retired)
 
-`cache/` (incl. `cache/cognee/`), `logs/`, `run/` are gitignored — they live inside the
+`cache/`, `logs/`, `run/` are gitignored — they live inside the
 vault for single-checkout portability but git never tracks their churn.
 Override the root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 
@@ -103,24 +102,42 @@ def _is_pid_alive(pid: int) -> bool:
     return process_liveness.pid_alive(pid)
 
 
+def _decoded_state(raw: bytes) -> dict[str, Any] | None:
+    """The state these bytes hold, or None: not UTF-8, not JSON, or not an object.
+
+    One definition of "readable" for the reader and the writer. See
+    `docs/research/2026-09-17-a-torn-state-file-is-recovered-whatever-its-bytes.md`.
+    """
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _keep_corrupt_copy(raw: bytes) -> None:
+    """Preserve the corrupt bytes for forensics; do not silently clobber."""
+    try:
+        bak = STATE_FILE.with_suffix(".json.corrupt")
+        bak.write_bytes(raw)
+        err_log = REPORTS_DIR / "hook-errors.log"
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with err_log.open("a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
+    except OSError:
+        pass
+
+
 def load_state() -> dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
         return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        # Preserve corrupt file for forensics; do not silently clobber.
-        try:
-            bak = STATE_FILE.with_suffix(".json.corrupt")
-            bak.write_bytes(STATE_FILE.read_bytes())
-            err_log = REPORTS_DIR / "hook-errors.log"
-            REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-            with err_log.open("a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
-        except OSError:
-            pass
+    raw = STATE_FILE.read_bytes()
+    state = _decoded_state(raw)
+    if state is None:
+        _keep_corrupt_copy(raw)
         return {}
+    return state
 
 
 # What a reader of `run/state.json` is willing to read. `doctor` refuses a state
@@ -398,10 +415,10 @@ def _previous_state_file() -> Path:
 
 def _parsed_state(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raw = path.read_bytes()
+    except OSError:
         return None
-    return value if isinstance(value, dict) else None
+    return _decoded_state(raw)
 
 
 def _state_for_update() -> tuple[dict[str, Any], bool]:
