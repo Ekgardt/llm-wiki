@@ -118,6 +118,11 @@ MAX_NODE_VERSION_BYTES = 128
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
 NODE_PROBE_CLEANUP_SECONDS = 0.5
 _MAX_NODE_PROBE_OWNERS = 8
+# How long one `node --version` answer stands for the executable it was taken
+# from. A version-manager shim can change what it runs without changing itself,
+# so the answer is not kept for the life of the process.
+NODE_PROBE_CACHE_SECONDS = 300.0
+_MAX_NODE_PROBE_CACHE = 8
 
 _NODE_ENV_ALLOWLIST = frozenset(
     {
@@ -175,6 +180,12 @@ _NODE_PROBE_OWNERS_LOCK = threading.Lock()
 _NODE_PROBE_DRAIN_LOCK = threading.Lock()
 _NODE_PROBE_OWNERS: set[object] = set()
 _PENDING_NODE_PROBE_CLEANUPS: dict[object, object] = {}
+_NODE_PROBE_CACHE_LOCK = threading.Lock()
+# executable identity -> (expiry, (node, version, major)). Successful probes
+# only; bounded by `_MAX_NODE_PROBE_CACHE`, cleared whole when it is reached.
+_NODE_PROBE_CACHE: dict[
+    tuple[object, ...], tuple[float, tuple[Path | None, str | None, int | None]]
+] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1389,18 +1400,80 @@ def _run_probe(tree: object, owner: object, probe_deadline: float, hard_cleanup_
     return run
 
 
+def _node_probe_key(node: Path | None) -> tuple[object, ...] | None:
+    """What a probe answer is true of: this executable, unchanged."""
+    if node is None:
+        return None
+    try:
+        info = os.stat(node)
+    except OSError:
+        return None
+    return (str(node), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _cached_node_probe(
+    key: tuple[object, ...] | None,
+) -> tuple[Path | None, str | None, int | None, set[str]] | None:
+    """A recent answer for this exact executable, if there is one."""
+    if key is None:
+        return None
+    with _NODE_PROBE_CACHE_LOCK:
+        entry = _NODE_PROBE_CACHE.get(key)
+    if entry is None or entry[0] <= time.monotonic():
+        return None
+    node, version, major = entry[1]
+    return node, version, major, set()
+
+
+def _remember_node_probe(
+    key: tuple[object, ...] | None,
+    result: tuple[Path | None, str | None, int | None, set[str]],
+) -> None:
+    """Keep a successful probe. A failed one is never kept: it may be the load."""
+    if key is None or result[3]:
+        return
+    with _NODE_PROBE_CACHE_LOCK:
+        if len(_NODE_PROBE_CACHE) >= _MAX_NODE_PROBE_CACHE:
+            _NODE_PROBE_CACHE.clear()
+        _NODE_PROBE_CACHE[key] = (
+            time.monotonic() + NODE_PROBE_CACHE_SECONDS,
+            result[:3],
+        )
+
+
 def _probe_node(
     deadline: float | None,
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
-    """Probe Node within its deadline plus one fixed tree-cleanup allowance."""
+    """Probe Node within its deadline plus one fixed tree-cleanup allowance.
+
+    Every `manager.get()` reaches here, and spawning a process per navigation
+    query is a cost the answer does not need: the answer belongs to the Node
+    executable, so it is kept for it while the file stays as it was.
+    """
     _check_deadline(deadline)
     environment, node, code = _located_node(deadline)
     if code is not None:
         return node, None, None, {code}
+    key = _node_probe_key(node)
+    cached = _cached_node_probe(key)
+    if cached is not None:
+        return cached
+    return _fresh_node_probe(node, environment, key, deadline)
+
+
+def _fresh_node_probe(
+    node: Path | None,
+    environment: dict | None,
+    key: tuple[object, ...] | None,
+    deadline: float | None,
+) -> tuple[Path | None, str | None, int | None, set[str]]:
+    """Spawn `node --version`, and keep the answer when it was one."""
     window = _probe_window(deadline)
     if window is None:
         return node, None, None, {"pyright_node_probe_timeout"}
-    return _probe_in_window(node, environment, window)
+    result = _probe_in_window(node, environment, window)
+    _remember_node_probe(key, result)
+    return result
 
 
 def _probe_in_window(

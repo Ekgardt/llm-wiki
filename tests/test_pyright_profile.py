@@ -3187,14 +3187,18 @@ def test_repeated_node_probes_reap_processes_and_close_output(
         monkeypatch, tmp_path, lambda: _FakeNodeProcess(b"v22.23.1\n")
     )
 
-    results = [
-        discover_pyright(
-            scope,
-            state_root=state_root,
-            candidates=PyrightCandidates((server,), (), ()),
+    results = []
+    for _index in range(3):
+        # Since 2026-09-17 one answer stands for the executable it was taken
+        # from (finding K-B15), so each probe here is made to be a fresh one.
+        pyright_profile._NODE_PROBE_CACHE.clear()
+        results.append(
+            discover_pyright(
+                scope,
+                state_root=state_root,
+                candidates=PyrightCandidates((server,), (), ()),
+            )
         )
-        for _index in range(3)
-    ]
 
     assert {result.status for result in results} == {"qualified"}
     assert len(processes) == 3
