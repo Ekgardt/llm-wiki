@@ -89,6 +89,7 @@ from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
     _is_pid_alive,
+    daily_logs,
     load_state,
     update_state,
 )
@@ -3605,16 +3606,13 @@ def parse_args() -> argparse.Namespace:
 # lint and the session-start context already filter on this name; compile did
 # not, so that one file entered the candidate list and failed the whole pass
 # on `logical_path must name a canonical daily source`.
-DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+# The rule itself lives in `memory_state` (`DAILY_LOG_NAME`, `daily_logs`), so
+# that no reader of the directory can miss it again.
 
 
 def _canonical_dailies() -> list[Path]:
     """Every daily log in the vault, and nothing else that lives beside them."""
-    return sorted(
-        path
-        for path in DAILY_DIR.glob("*.md")
-        if DAILY_LOG_NAME.fullmatch(path.name) is not None
-    )
+    return daily_logs(DAILY_DIR)
 
 
 def _receipt_predicate(

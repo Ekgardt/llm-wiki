@@ -1149,8 +1149,10 @@ def _retrieval_degradations() -> dict[str, str]:
 
 
 def _daily_files(root: Path) -> list[Path]:
+    from memory_state import daily_logs
+
     try:
-        return list((root / "knowledge" / "daily").glob("*.md"))
+        return daily_logs(root / "knowledge" / "daily")
     except OSError:
         return []
 

@@ -39,6 +39,7 @@ from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
     atomic_write,
+    daily_logs,
     file_hash,
     load_state,
     retire_stale_lock,
@@ -239,13 +240,10 @@ def _has_pending_work() -> bool:
     """
     state = load_state()
     compiled_hashes = state.get("compiled_daily_hashes", {}) or {}
-    daily_dir = ROOT / "knowledge" / "daily"
-    if not daily_dir.exists():
-        return False
-    for p in daily_dir.glob("*.md"):
-        if compiled_hashes.get(p.name) != file_hash(p):
-            return True
-    return False
+    return any(
+        compiled_hashes.get(p.name) != file_hash(p)
+        for p in daily_logs(ROOT / "knowledge" / "daily")
+    )
 
 
 def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:

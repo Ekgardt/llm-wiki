@@ -364,10 +364,9 @@ def _resident_encoder():
 
 
 def _daily_paths(vault: Path) -> list[str]:
-    daily = vault / "knowledge" / "daily"
-    if not daily.is_dir():
-        return []
-    return sorted(path.relative_to(vault).as_posix() for path in daily.glob("*.md"))
+    from memory_state import daily_logs
+
+    return [path.relative_to(vault).as_posix() for path in daily_logs(vault / "knowledge" / "daily")]
 
 
 def _provider_ask(prompt: str, system_prompt: str) -> str | None:

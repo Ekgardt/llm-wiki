@@ -56,7 +56,14 @@ from evidence_resolver import (  # noqa: E402
     EvidenceResolver,
     extract_evidence_references,
 )
-from memory_state import REPORTS_DIR, ROOT, STATE_ROOT, file_hash, load_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    ROOT,
+    STATE_ROOT,
+    daily_logs,
+    file_hash,
+    load_state,
+)
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import (
     INBOX_TYPES,  # noqa: E402
@@ -363,18 +370,9 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
     ]
 
 
-DAILY_LOG_NAME_RE = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
-
-
 def _daily_logs() -> list[Path]:
     """Only `YYYY-MM-DD.md` is a daily log; `README.md` next to them is not."""
-    if not DAILY_DIR.exists():
-        return []
-    return sorted(
-        path
-        for path in DAILY_DIR.glob("*.md")
-        if DAILY_LOG_NAME_RE.fullmatch(path.name) is not None
-    )
+    return daily_logs(DAILY_DIR)
 
 
 def check_orphan_daily_logs(state: dict) -> list[str]:

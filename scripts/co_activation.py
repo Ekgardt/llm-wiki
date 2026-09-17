@@ -38,7 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from memory_state import ROOT, STATE_ROOT, daily_logs  # noqa: E402
 
 TABLE_PATH = STATE_ROOT / "cache" / "co-activation.json"
 
@@ -119,7 +119,7 @@ def build(vault: Path | None = None, today: date | None = None) -> dict[str, dic
     root = Path(vault or ROOT)
     when = today or datetime.now(timezone.utc).date()
     table: dict[str, dict[str, float]] = {}
-    for entry in sorted((root / "knowledge" / "daily").glob("*.md")):
+    for entry in daily_logs(root / "knowledge" / "daily"):
         accumulate(table, _entry_text(entry), entry.stem, when)
     return {name: _trimmed(neighbours) for name, neighbours in table.items()}
 

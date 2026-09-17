@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -450,6 +451,22 @@ def _keep_previous(readable: bool) -> None:
         os.replace(staged, _previous_state_file())
     except OSError:
         staged.unlink(missing_ok=True)
+
+
+# `knowledge/daily/` also holds a tracked `README.md`. It is not a daily log:
+# it has no date and is never compiled. Every reader of that directory asks
+# here, so the rule has one home and no reader can forget it.
+# Research: docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md
+DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def daily_logs(daily_dir: Path) -> list[Path]:
+    """The `YYYY-MM-DD.md` files of a daily directory, oldest first; none if it is absent."""
+    if not daily_dir.is_dir():
+        return []
+    return sorted(
+        path for path in daily_dir.glob("*.md") if DAILY_LOG_NAME.fullmatch(path.name) is not None
+    )
 
 
 def file_hash(path: Path) -> str:
