@@ -662,34 +662,17 @@ else
   printf '  - %s\n' "${AGENT_STATUSES[@]}"
 fi
 
-# ─── 8. Bounded runtime sync ───────────────────────────────────────
-
-info "Synchronizing runtime state and derived indexes..."
-SYNC_EXIT=0
-SYNC_WARNING=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply || SYNC_EXIT=$?
-case "$SYNC_EXIT" in
-  0) ok "Runtime state synchronized" ;;
-  1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
-  *) fail "Runtime synchronization failed" ;;
-esac
-
-# ─── 8a. Pinned model weights ──────────────────────────────────────
-# The read path loads weights local-only. With the semantic extra installed,
-# fetch the two pinned models now, verified; without it, nothing is expected.
-MODELS_EXIT=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
-case "$MODELS_EXIT" in
-  0) ok "Pinned model weights present" ;;
-  2) info "Semantic search not installed; model weights are fetched once it is" ;;
-  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
-esac
-
-# ─── 8b. Reliability V3 adoption ───────────────────────────────────
+# ─── 8. Reliability V3 adoption ────────────────────────────────────
 # Session capture writes through the V3 queue, and a vault that has not
 # adopted V3 refuses every capture with `legacy_protocol_unquiesced` (issue
 # #17). A fresh vault, or one whose legacy pair the check finds quiescent,
 # is adopted here; any other state is named with the command to run.
+#
+# This comes before the runtime sync: that sync opens the pre-adoption
+# coordinator, which leaves half a legacy pair and a vault the cutover can no
+# longer adopt. A real end-to-end install finished with capture disabled that
+# way. See docs/research/2026-09-17-the-queue-is-adopted-before-anything-writes-to-it.md.
+SYNC_WARNING=0
 
 info "Checking Reliability V3 adoption..."
 # Whatever the check or the adoption says on stderr lands in one log and its
@@ -759,6 +742,28 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
     adoption_tail
     ;;
+esac
+
+# ─── 8a. Bounded runtime sync ──────────────────────────────────────
+
+info "Synchronizing runtime state and derived indexes..."
+SYNC_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply || SYNC_EXIT=$?
+case "$SYNC_EXIT" in
+  0) ok "Runtime state synchronized" ;;
+  1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
+  *) fail "Runtime synchronization failed" ;;
+esac
+
+# ─── 8b. Pinned model weights ──────────────────────────────────────
+# The read path loads weights local-only. With the semantic extra installed,
+# fetch the two pinned models now, verified; without it, nothing is expected.
+MODELS_EXIT=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+case "$MODELS_EXIT" in
+  0) ok "Pinned model weights present" ;;
+  2) info "Semantic search not installed; model weights are fetched once it is" ;;
+  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────

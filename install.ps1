@@ -573,34 +573,17 @@ if ($agents.Count -eq 0) {
     $agents | ForEach-Object { Info "  - $_" }
 }
 
-# --- 8. Bounded runtime sync --------------------------------------
-
-Info "Synchronizing runtime state and derived indexes..."
-uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply
-$syncExit = $LASTEXITCODE
-$syncWarning = $false
-switch ($syncExit) {
-    0 { Ok "Runtime state synchronized" }
-    1 { $syncWarning = $true; Warn "Runtime synchronization completed with warnings" }
-    default { Fail "Runtime synchronization failed" }
-}
-
-# --- 8a. Pinned model weights ------------------------------------
-# The read path loads weights local-only; with the semantic extra installed,
-# fetch the two pinned models now, verified.
-uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
-switch ($LASTEXITCODE) {
-    0 { Ok "Pinned model weights present" }
-    2 { Info "Semantic search not installed; model weights are fetched once it is" }
-    default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
-}
-
-# --- 8b. Reliability V3 adoption ---------------------------------
+# --- 8. Reliability V3 adoption -----------------------------------
 # Session capture writes through the V3 queue, and a vault that has not adopted
 # V3 refuses every capture with `legacy_protocol_unquiesced` (issue #17). This
 # installer had no such step, so a fresh Windows install never captured. The
 # check exits 1 for a fresh vault, so its output is read whatever it exited
 # with. See docs/research/2026-09-17-a-fresh-install-adopts-the-queue.md.
+#
+# This comes before the runtime sync: that sync opens the pre-adoption
+# coordinator, which leaves half a legacy pair and a vault the cutover can no
+# longer adopt. See docs/research/2026-09-17-the-queue-is-adopted-before-anything-writes-to-it.md.
+$syncWarning = $false
 function Get-AdoptionState {
     $report = uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --check --json 2>$null
     try { return [string](($report | Out-String | ConvertFrom-Json).details.adoption_state) } catch { return "unknown" }
@@ -646,6 +629,27 @@ if ($adoptionPlan -eq "adopted") {
     $syncWarning = $true
     Warn "Reliability V3 state is '$adoptionState'; session capture is disabled until adoption runs:"
     Warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+}
+
+# --- 8a. Bounded runtime sync -------------------------------------
+
+Info "Synchronizing runtime state and derived indexes..."
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply
+$syncExit = $LASTEXITCODE
+switch ($syncExit) {
+    0 { Ok "Runtime state synchronized" }
+    1 { $syncWarning = $true; Warn "Runtime synchronization completed with warnings" }
+    default { Fail "Runtime synchronization failed" }
+}
+
+# --- 8b. Pinned model weights ------------------------------------
+# The read path loads weights local-only; with the semantic extra installed,
+# fetch the two pinned models now, verified.
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
+switch ($LASTEXITCODE) {
+    0 { Ok "Pinned model weights present" }
+    2 { Info "Semantic search not installed; model weights are fetched once it is" }
+    default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
 }
 
 # --- 9. Summary ---------------------------------------------------
