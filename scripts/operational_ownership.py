@@ -1166,6 +1166,24 @@ def _marker_pid(path: Path, state_root: Path) -> int:
         raise OperationalOwnershipError("marker_identity_invalid") from exc
 
 
+def _marker_payload() -> bytes:
+    """What a scheduled marker records: this PID, and this process.
+
+    The registry's own rows have carried the start identity all along; the
+    marker beside them named only a number, which the next process to be given
+    that number would have inherited (audit Q-L7). Research:
+    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_start_identity()}\n".encode("ascii", errors="replace")
+
+
+def _own_start_identity() -> str:
+    try:
+        return process_start_identity(os.getpid()) or ""
+    except (OperationalOwnershipError, OSError, ValueError):
+        return ""
+
+
 def _pid_exists(pid: int) -> bool:
     """Whether a process with this PID exists; doubt refuses by name."""
     try:
@@ -1274,7 +1292,7 @@ def acquire_scheduled_owner(
     now = utc_now().replace(microsecond=0)
     actor_id = ownership_actor_identity(role, "global")
     token = secrets.token_hex(16)
-    payload = str(os.getpid()).encode("ascii")
+    payload = _marker_payload()
     if registry is None:
         registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
     marker = _publish_marker_reclaiming(

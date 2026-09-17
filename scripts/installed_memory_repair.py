@@ -1540,15 +1540,20 @@ def _compile_marker_pid(payload: bytes) -> int:
 
 
 def _require_compile_marker_lines(lines: list[str]) -> None:
-    if len(lines) not in {2, 3}:
+    """2 or 3 lines before 2026-09-17; a fourth names the owner's process."""
+    if len(lines) not in {2, 3, 4}:
         raise ValueError("compile marker shape is invalid")
-    if len(lines) == 3 and not lines[2]:
+    if len(lines) >= 3 and not lines[2]:
         raise ValueError("compile marker owner token is empty")
 
 
 def _maintenance_marker_pid(payload: bytes) -> int:
+    """One line before 2026-09-17; a second names the owner's process.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
     lines = _ascii_marker_lines(payload)
-    if len(lines) != 1:
+    if len(lines) not in {1, 2}:
         raise ValueError("maintenance marker shape is invalid")
     return _positive_pid(lines[0])
 

@@ -30,11 +30,13 @@ import argparse
 import os
 import secrets
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import operational_ownership as _operational_ownership  # noqa: E402
+import process_liveness  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
@@ -44,9 +46,6 @@ from memory_state import (  # noqa: E402
     load_state,
     retire_stale_lock,
     spawn_detached,
-)
-from memory_state import (  # noqa: E402
-    _is_pid_alive as _os_pid_alive,
 )
 
 acquire_compile_owner = _operational_ownership.acquire_compile_owner
@@ -71,7 +70,7 @@ def _is_pid_alive(pid: int) -> bool:
     """Cross-platform 'is this PID still running?' check; PID 0 is the placeholder."""
     if pid == 0:
         return True
-    return _os_pid_alive(pid)
+    return process_liveness.pid_alive(pid)
 
 
 def _lock_bytes() -> bytes | None:
@@ -82,10 +81,13 @@ def _lock_bytes() -> bytes | None:
 
 
 def _read_lock() -> dict | None:
-    """The lock as {pid, started_at, owner}, or None when absent or unreadable.
+    """The lock as {pid, started_at, owner, identity}, or None when unreadable.
 
     The optional third line is a random owner token written by
     `_write_lock`/`_try_claim_lock`; older 2-line lock files have owner=None.
+    The optional fourth line is the owner's process start identity, so a PID
+    handed on to another process is not mistaken for this compile. Research:
+    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
     """
     payload = _lock_bytes()
     if payload is None:
@@ -100,16 +102,48 @@ def _parse_lock(lines: list[str]) -> dict | None:
         pid = int(lines[0])
     except ValueError:
         return None
-    owner = lines[2].strip() if len(lines) >= 3 else ""
-    return {"pid": pid, "started_at": lines[1], "owner": owner or None}
+    return {
+        "pid": pid,
+        "started_at": lines[1],
+        "owner": _lock_line(lines, 2) or None,
+        "identity": _lock_line(lines, 3),
+    }
 
 
-def _write_lock(pid: int) -> None:
+def _lock_line(lines: list[str], index: int) -> str:
+    """The optional line at `index`; empty when a shorter lock file has none."""
+    if len(lines) <= index:
+        return ""
+    return lines[index].strip()
+
+
+def _identity_of(pid: int) -> str:
+    """The start identity of a running process, empty when unsettled or gone."""
+    try:
+        return process_liveness.process_start_identity(pid) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _file_age(path: Path) -> float:
+    """Seconds since `path` was last written; a missing file is infinitely old."""
+    try:
+        return max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return float("inf")
+
+
+def _write_lock(pid: int, token: str | None = None) -> None:
+    """Record the lock for `pid`, naming that process and keeping `token` if given.
+
+    The spawner writes the child's PID here, so the identity recorded is the
+    child's; keeping the placeholder token lets the child recognise the lock
+    written for it whichever of the two gets there first.
+    """
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(
-        LOCK_FILE,
-        f"{pid}\n{datetime.now().isoformat(timespec='seconds')}\n{secrets.token_hex(8)}\n",
-    )
+    stamp = datetime.now().isoformat(timespec="seconds")
+    owner = token or secrets.token_hex(8)
+    atomic_write(LOCK_FILE, f"{pid}\n{stamp}\n{owner}\n{_identity_of(pid)}\n")
 
 
 def _try_claim_lock() -> bool:
@@ -174,7 +208,7 @@ def _owner_state(lock: dict) -> tuple[str, str]:
     pid = lock["pid"]
     if pid == 0:
         return _placeholder_state(lock)
-    if not _is_pid_alive(pid):
+    if not process_liveness.owner_alive(pid, lock.get("identity")):
         return ("stale", f"stale lock (pid {pid} dead)")
     return ("live", f"running pid={pid} since {lock['started_at']}")
 
@@ -185,8 +219,20 @@ def _lock_state() -> tuple[str, str]:
         return ("absent", "no lock file")
     lock = _read_lock()
     if lock is None:
-        return ("stale", "stale lock (unreadable)")
+        return _unparsed_state()
     return _owner_state(lock)
+
+
+def _unparsed_state() -> tuple[str, str]:
+    """An empty lock inside the spawn window is a write in progress, not a ruin.
+
+    Where hard links are unsupported the lock is created and then written, so
+    there is a moment in which it is empty and its writer is very much alive.
+    """
+    empty = not (_lock_bytes() or b"").strip()
+    if empty and _file_age(LOCK_FILE) <= _PID0_TTL_SECONDS:
+        return ("live", "lock being written")
+    return ("stale", "stale lock (unreadable)")
 
 
 def lock_owner_token() -> str | None:
@@ -297,10 +343,19 @@ def _claim_lock() -> bool:
 
 
 def _spawn_claimed() -> tuple[bool, bool, str]:
-    # The placeholder's token is ours to clear if the spawn fails.
-    placeholder = lock_owner_token()
+    # The placeholder's token is ours to clear if the spawn fails, and the
+    # child's proof that the lock it finds was written for it — whether it
+    # looks before or after the PID below is replaced.
+    placeholder = lock_owner_token() or ""
     pid = spawn_detached(
-        [sys.executable, str(COMPILE_SCRIPT), "--trigger", "auto"],
+        [
+            sys.executable,
+            str(COMPILE_SCRIPT),
+            "--trigger",
+            "auto",
+            "--lock-token",
+            placeholder,
+        ],
         stdout_path=LOG_OUT,
         stderr_path=LOG_ERR,
     )
@@ -308,7 +363,7 @@ def _spawn_claimed() -> tuple[bool, bool, str]:
         _clear_lock(placeholder)
         return (False, False, "spawn failed")
     # Replace the placeholder PID (0) with the real one; the child owns it now.
-    _write_lock(pid)
+    _write_lock(pid, token=placeholder)
     return (True, False, f"spawned compile pid={pid}")
 
 

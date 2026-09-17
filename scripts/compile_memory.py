@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
+import process_liveness  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
@@ -91,7 +92,6 @@ from memory_queue import active_or_legacy_memory_queue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
-    _is_pid_alive,
     daily_logs,
     load_state,
     update_state,
@@ -3594,6 +3594,12 @@ def parse_args() -> argparse.Namespace:
         help="Source of invocation. 'auto' is set by flush_memory when a hook "
         "fires the compile; any direct CLI run defaults to 'manual'.",
     )
+    p.add_argument(
+        "--lock-token",
+        default=None,
+        help="The compile lock written for this run by the process that spawned "
+        "it. Passed by maybe_compile; a direct CLI run has none.",
+    )
     return p.parse_args()
 
 
@@ -4031,9 +4037,19 @@ def _lock_lines(lock_file: Path) -> list[str] | None:
         return None
     text = lock_file.read_text(encoding="utf-8").strip()
     if not text:
-        lock_file.unlink()
+        _remove_abandoned_empty_lock(lock_file)
         return None
     return text.splitlines()
+
+
+def _remove_abandoned_empty_lock(lock_file: Path) -> None:
+    """An empty lock inside the spawn window belongs to a writer still writing it.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    if maybe_compile._file_age(lock_file) <= maybe_compile._PID0_TTL_SECONDS:
+        return
+    _unlink_quietly(lock_file)
 
 
 def _lock_is_ours(lines: list[str]) -> bool:
@@ -4043,7 +4059,14 @@ def _lock_is_ours(lines: list[str]) -> bool:
         return True
     if pid == 0:
         return False
-    return not _is_pid_alive(pid)
+    return not process_liveness.owner_alive(pid, _lock_identity(lines))
+
+
+def _lock_identity(lines: list[str]) -> str:
+    """The owner's process start identity, absent in a lock of three lines."""
+    if len(lines) <= 3:
+        return ""
+    return lines[3].strip()
 
 
 def _lock_pid(lines: list[str]) -> int | None:
@@ -4095,7 +4118,7 @@ def _compile_under_lock(
     overwrote the status of the compile still running.
     Research: docs/research/2026-09-17-every-compile-takes-the-compile-lock.md
     """
-    lock_token, refusal = _acquire_compile_lock()
+    lock_token, refusal = _acquire_compile_lock(getattr(args, "lock_token", None))
     if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
         _mark_refused(args.trigger, refusal)
@@ -4114,7 +4137,7 @@ def _compile_under_lock(
 SPAWNED_LOCK = "spawned"
 
 
-def _acquire_compile_lock() -> tuple[str | None, str]:
+def _acquire_compile_lock(spawn_token: str | None = None) -> tuple[str | None, str]:
     """Claim the compile lock for a direct run: (lock handle, reason).
 
     The handle is the owner token when this run claimed the lock,
@@ -4128,7 +4151,7 @@ def _acquire_compile_lock() -> tuple[str | None, str]:
     try:
         if maybe_compile._try_claim_lock():
             return (_claim_direct_lock(), "claimed")
-        if _spawned_lock_is_ours(maybe_compile):
+        if _spawned_lock_is_ours(maybe_compile, spawn_token):
             return (SPAWNED_LOCK, "spawned")
         return (None, f"lock held by another compile ({maybe_compile._lock_state()[1]})")
     except Exception as exc:  # noqa: BLE001 - any lock failure refuses the run
@@ -4141,9 +4164,21 @@ def _claim_direct_lock() -> str:
     return maybe_compile.lock_owner_token() or ""
 
 
-def _spawned_lock_is_ours(maybe_compile: object) -> bool:
+def _spawned_lock_is_ours(maybe_compile: object, spawn_token: str | None = None) -> bool:
+    """The lock the spawner wrote for us: our PID, or the token it handed us.
+
+    A child that reaches the lock before its spawner replaced the PID-0
+    placeholder used to refuse itself, and the night lost that compile.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
     lock = maybe_compile._read_lock()
-    return bool(lock) and lock.get("pid") == os.getpid()
+    if not lock:
+        return False
+    return lock.get("pid") == os.getpid() or _token_matches(lock, spawn_token)
+
+
+def _token_matches(lock: dict, spawn_token: str | None) -> bool:
+    return bool(spawn_token) and lock.get("owner") == spawn_token
 
 
 def _release_compile_lock(lock_token: str | None) -> None:

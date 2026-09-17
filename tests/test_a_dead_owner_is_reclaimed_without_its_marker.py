@@ -9,7 +9,6 @@ See docs/research/2026-09-17-a-dead-owner-is-reclaimed-without-its-marker.md.
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -73,7 +72,7 @@ def test_a_dead_nightly_whose_marker_is_gone_is_reclaimed(tmp_path):
     try:
         assert lease.epoch == dead.epoch + 1
         assert _roles(candidate) == ["nightly"]
-        assert (state_root / MARKER).read_bytes() == str(os.getpid()).encode("ascii")
+        assert (state_root / MARKER).read_bytes() == ownership._marker_payload()
     finally:
         ownership.release_marker_owner(lease, marker)
 

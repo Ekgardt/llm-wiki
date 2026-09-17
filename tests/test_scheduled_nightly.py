@@ -87,9 +87,13 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
 
 
 @pytest.mark.parametrize("role", ["nightly", "weekly"])
-def test_maintenance_marker_remains_one_ascii_decimal_pid(
+def test_the_maintenance_marker_names_the_pid_and_the_process_in_ascii(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
+    """Two ASCII lines since 2026-09-17: the PID, then its start identity.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
     import markdown_transaction
     import operational_ownership
 
@@ -100,8 +104,10 @@ def test_maintenance_marker_remains_one_ascii_decimal_pid(
     real_acquire = operational_ownership.OwnershipRegistry.acquire
     parser = (
         "import os,pathlib,sys; raw=pathlib.Path(sys.argv[1]).read_bytes();"
-        "assert raw.isascii() and raw.isdigit() and b'\\n' not in raw;"
-        "assert int(raw)==int(sys.argv[2]); print('running')"
+        "lines=raw.splitlines();"
+        "assert raw.isascii() and raw.endswith(b'\\n') and len(lines)==2;"
+        "assert lines[0].isdigit() and int(lines[0])==int(sys.argv[2]);"
+        "print('running')"
     )
     observed: list[str] = []
 
@@ -125,7 +131,7 @@ def test_maintenance_marker_remains_one_ascii_decimal_pid(
     )
     try:
         assert observed == ["running"]
-        assert marker_path.read_bytes() == str(os.getpid()).encode("ascii")
+        assert marker_path.read_bytes() == operational_ownership._marker_payload()
     finally:
         operational_ownership.release_marker_owner(lease, marker)
     assert not marker_path.exists()

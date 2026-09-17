@@ -210,14 +210,32 @@ def _contention(exc: PermissionError, observed_contention: bool) -> bool:
     return observed_contention
 
 
-def _claim_lock(owner_pid: str) -> int | None:
+def _claim_lock(payload: bytes) -> int | None:
     """The lock descriptor when it was ours to take, None while contended."""
     try:
         fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
     except FileExistsError:
         return None
-    os.write(fd, owner_pid.encode("utf-8"))
+    os.write(fd, payload)
     return fd
+
+
+def _own_process_identity() -> str:
+    """This process's start identity, or empty when the probe cannot settle it."""
+    try:
+        return process_liveness.process_start_identity(os.getpid()) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _lock_payload() -> bytes:
+    """Who holds the lock: the PID, and the identity that outlives PID reuse.
+
+    A PID alone cannot say whether its owner died and its number was handed to
+    another process. Research:
+    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_process_identity()}\n".encode()
 
 
 def _lock_age() -> float:
@@ -234,12 +252,48 @@ def _lock_bytes() -> bytes | None:
         return None
 
 
+def _lock_owner(payload: bytes | None) -> tuple[int, str] | None:
+    """(PID, start identity) the lock records; None when it records neither.
+
+    The identity line is absent in a lock written before this release, and the
+    answer for such a file is the PID probe, exactly as it was.
+    """
+    if not payload:
+        return None
+    return _owner_from_lines(payload.decode("utf-8", errors="replace").splitlines())
+
+
+def _owner_from_lines(lines: list[str]) -> tuple[int, str] | None:
+    if not lines:
+        return None
+    try:
+        pid = int(lines[0].strip())
+    except ValueError:
+        return None
+    return (pid, lines[1].strip() if len(lines) > 1 else "")
+
+
 def _owner_alive(payload: bytes | None) -> bool:
     """True when the recorded owner is a live process; corrupt reads say no."""
-    try:
-        return _is_pid_alive(int((payload or b"").decode("utf-8").strip()))
-    except ValueError:
+    owner = _lock_owner(payload)
+    if owner is None:
         return False
+    return process_liveness.owner_alive(*owner)
+
+
+def _named_owner_is_dead(payload: bytes | None) -> bool:
+    """A finished lock file that names a provably dead owner — no age needed.
+
+    A writer that died holding the lock used to stop every other writer for the
+    30 s staleness window, while their own wait is 10 s (audit Q-L6). A lock
+    ending in its newline is a finished write, so what it names can be judged.
+    """
+    if not payload or not payload.endswith(b"\n"):
+        return False
+    owner = _lock_owner(payload)
+    if owner is None or not owner[1]:
+        return False
+    return not process_liveness.owner_alive(*owner)
 
 
 # How long a stealer waits for another stealer to finish judging the same lock.
@@ -326,24 +380,36 @@ def _wait_for_slow_owner(deadline: float, poll: float) -> None:
 
 def _await_lock_turn(deadline: float, poll: float) -> None:
     """One turn of waiting: retire a dead lock, wait out a live one."""
+    payload = _lock_bytes()
+    if _named_owner_is_dead(payload):
+        retire_stale_lock(LOCK_FILE, payload)
+        return
+    _judge_by_age(payload, deadline, poll)
+
+
+def _judge_by_age(payload: bytes | None, deadline: float, poll: float) -> None:
+    """The rule for a lock that does not name its owner: wait, then judge by age."""
     if _lock_age() > _STALE_LOCK_SECONDS:
-        payload = _lock_bytes()
-        if _owner_alive(payload):
-            _wait_for_slow_owner(deadline, poll)
-            return
-        if payload is not None:
-            retire_stale_lock(LOCK_FILE, payload)
+        _retire_or_wait(payload, deadline, poll)
         return
     if time.time() > deadline:
         raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
     time.sleep(poll)
 
 
-def _acquire_state_lock(owner_pid: str, deadline: float, poll: float) -> int:
+def _retire_or_wait(payload: bytes | None, deadline: float, poll: float) -> None:
+    if _owner_alive(payload):
+        _wait_for_slow_owner(deadline, poll)
+        return
+    if payload is not None:
+        retire_stale_lock(LOCK_FILE, payload)
+
+
+def _acquire_state_lock(payload: bytes, deadline: float, poll: float) -> int:
     observed_contention = False
     while True:
         try:
-            fd = _claim_lock(owner_pid)
+            fd = _claim_lock(payload)
         except PermissionError as exc:
             if not _contention(exc, observed_contention):
                 raise
@@ -354,7 +420,7 @@ def _acquire_state_lock(owner_pid: str, deadline: float, poll: float) -> int:
         _await_lock_turn(deadline, poll)
 
 
-def _release_state_lock(fd: int, owner_pid: str) -> None:
+def _release_state_lock(fd: int, payload: bytes) -> None:
     """Close the descriptor and unlink only while the lock is still ours.
 
     A stale-lock thief may have deleted our lock and another process may hold a
@@ -365,7 +431,7 @@ def _release_state_lock(fd: int, owner_pid: str) -> None:
     except OSError:
         pass
     try:
-        if LOCK_FILE.read_text(encoding="utf-8").strip() == owner_pid:
+        if LOCK_FILE.read_bytes() == payload:
             LOCK_FILE.unlink()
     except OSError:
         pass
@@ -380,12 +446,12 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
     the owner is alive but slow, we wait instead of killing its write.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    owner_pid = str(os.getpid())
-    fd = _acquire_state_lock(owner_pid, time.time() + timeout, poll)
+    payload = _lock_payload()
+    fd = _acquire_state_lock(payload, time.time() + timeout, poll)
     try:
         yield
     finally:
-        _release_state_lock(fd, owner_pid)
+        _release_state_lock(fd, payload)
 
 
 def update_state(

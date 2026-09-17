@@ -28,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
+import process_liveness  # noqa: E402
 from doctor import (  # noqa: E402
     DEFAULT_GENERATION_SOURCE_LIMIT,
     run_generation_maintenance,
@@ -678,16 +679,45 @@ def run_nightly(
 
 
 def _write_marker(marker: Path) -> bool:
-    """Create the marker exclusively and stamp it with this PID."""
+    """Create the marker exclusively and stamp it with this process."""
     try:
         descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         return False
     try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        os.write(descriptor, marker_payload())
     finally:
         os.close(descriptor)
     return True
+
+
+def marker_payload() -> bytes:
+    """The PID, and the identity that tells this process from the next one to
+    carry its number.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_identity()}\n".encode("ascii", errors="replace")
+
+
+def _own_identity() -> str:
+    """This process's start identity, empty when the probe cannot settle it."""
+    try:
+        return process_liveness.process_start_identity(os.getpid()) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _marker_owner(payload: bytes) -> tuple[int, str] | None:
+    """(PID, identity) a marker records; one written before this release has none."""
+    lines = payload.decode("utf-8", errors="replace").strip().splitlines()
+    if not lines:
+        return None
+    try:
+        pid = int(lines[0].strip())
+    except ValueError:
+        return None
+    return (pid, lines[1].strip() if len(lines) > 1 else "")
 
 
 def _abandoned_marker_bytes(marker: Path) -> bytes | None:
@@ -697,14 +727,14 @@ def _abandoned_marker_bytes(marker: Path) -> bytes | None:
     2026-09-10); this legacy marker serves only vaults without a V3
     coordinator, where the registry's reclaim is unavailable.
     """
-    from memory_state import _is_pid_alive
-
     try:
         payload = marker.read_bytes()
-        old_pid = int(payload.decode("utf-8").strip())
-    except (OSError, ValueError):
+    except OSError:
         return None
-    return None if _is_pid_alive(old_pid) else payload
+    owner = _marker_owner(payload)
+    if owner is None or process_liveness.owner_alive(*owner):
+        return None
+    return payload
 
 
 def _steal_marker(marker: Path) -> bool:
@@ -725,8 +755,9 @@ def _acquire_legacy_maintenance_marker() -> Path | None:
 
 
 def _release_legacy_maintenance_marker(marker: Path) -> None:
+    """Remove the marker only while it is still the one this process wrote."""
     try:
-        if marker.read_text(encoding="utf-8").strip() == str(os.getpid()):
+        if _marker_owner(marker.read_bytes()) == (os.getpid(), _own_identity()):
             marker.unlink()
     except OSError:
         pass
