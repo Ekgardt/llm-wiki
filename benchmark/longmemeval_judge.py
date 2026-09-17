@@ -107,11 +107,32 @@ def needs_judging(row: dict) -> bool:
     return row.get("status") == "answered" and bool(row.get("hypothesis"))
 
 
+JUDGE_ATTEMPTS = 2
+
+
+def _asked_until_readable(row: dict, call) -> str | None:
+    """The judge's reply; a reply that is no verdict is asked for once more.
+
+    See `docs/research/2026-09-17-the-task-is-named-to-the-model.md`.
+    """
+    raw = None
+    for _ in range(JUDGE_ATTEMPTS):
+        raw = call(judge_prompt(row), system_prompt_for(row), 10)
+        if _verdict_of(raw) is not None:
+            return raw
+    return raw
+
+
+def _unreadable(rows: list[dict]) -> int:
+    """Rows the judge was asked about and gave no verdict on."""
+    return sum(1 for row in rows if "judge_raw" in row and row.get("judge_correct") is None)
+
+
 def _judged_row(row: dict, call) -> dict:
     if not needs_judging(row):
         return {**row, "judge_correct": None, "judge_seconds": None}
     started = time.monotonic()
-    raw = call(judge_prompt(row), system_prompt_for(row), 10)
+    raw = _asked_until_readable(row, call)
     return {
         **row,
         "judge_correct": _verdict_of(raw),
@@ -299,7 +320,11 @@ def _judge_pending(rows: list[dict], out_path: Path, call, judge=_judged_row) ->
 def _report_for(protocol: str, rows: list[dict]) -> dict:
     """The stand's report, or the authors' figures with the judge named."""
     if protocol == "ours":
-        return {**_judge_accuracy(rows), "efficiency": efficiency(rows, protocol)}
+        return {
+            **_judge_accuracy(rows),
+            "judge_unreadable": _unreadable(rows),
+            "efficiency": efficiency(rows, protocol),
+        }
     from longmemeval_official import official_accuracy
 
     return {

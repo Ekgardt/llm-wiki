@@ -48,5 +48,12 @@ The sample is small; it shows the direction, not a rate.
 - The banner itself costs about 300 input tokens in every product call on this machine; that
   is reported to the owner, the product does not touch the hook.
 
-Files: `scripts/llm_client.py`, `tests/test_the_task_is_named_to_the_model.py`,
+- The stand's judge used to take a reply that is neither "yes" nor "no" as no verdict and
+  silently fell back to the deterministic score, and the report did not say how often. It now
+  asks once more (two attempts in all), and the report carries `judge_unreadable`, so a
+  contaminated run is visible in its own report. This is the project's own decision; no
+  outside source is claimed for it.
+
+Files: `scripts/llm_client.py`, `benchmark/longmemeval_judge.py`,
+`tests/test_an_unreadable_verdict_is_asked_again.py`, `tests/test_the_task_is_named_to_the_model.py`,
 `docs/research/2026-09-17-the-task-is-named-to-the-model.md`.
