@@ -39,6 +39,7 @@ try:
         EMPTY_REGISTRY,
         SymbolRegistry,
         build_python_symbol_registry,
+        directory_skipped,
         resolve_python_imports_and_calls,
     )
 except ImportError:
@@ -47,6 +48,7 @@ except ImportError:
         EMPTY_REGISTRY,
         SymbolRegistry,
         build_python_symbol_registry,
+        directory_skipped,
         resolve_python_imports_and_calls,
     )
 
@@ -896,39 +898,18 @@ def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
     return tuple(groups[name] for name in _SYMBOL_KINDS)
 
 
-_PYTHON_CALL_KEYWORDS = {"if", "for", "while", "def", "class", "print"}
 _SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}
 
 
 def _regex_python_definitions(
     line: str, number: int, functions: list, classes: list
 ) -> None:
-    match = re.match(r"\s*def\s+(\w+)", line)
+    match = re.match(r"\s*(?:async\s+)?def\s+(\w+)", line)
     if match:
         functions.append(_regex_function(match.group(1), line, number))
     match = re.match(r"\s*class\s+(\w+)", line)
     if match:
         classes.append({"name": match.group(1), "line": number, "end_line": number})
-
-
-def _regex_python_call(line: str, number: int, calls: list) -> None:
-    match = re.match(r"\s*(\w+)\s*\(", line)
-    if match and match.group(1) not in _PYTHON_CALL_KEYWORDS:
-        calls.append({"name": match.group(1), "line": number})
-
-
-def _regex_python_import(line: str, number: int, imports: list) -> None:
-    match = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
-    if match:
-        imports.append({"name": match.group(1), "line": number})
-
-
-def _regex_parse_python_line(
-    line: str, number: int, functions: list, classes: list, calls: list, imports: list
-) -> None:
-    _regex_python_definitions(line, number, functions, classes)
-    _regex_python_call(line, number, calls)
-    _regex_python_import(line, number, imports)
 
 
 def _regex_parse_python(
@@ -939,13 +920,13 @@ def _regex_parse_python(
     functions: list,
     classes: list,
 ) -> tuple[list, list]:
-    """Python calls and imports come from the resolver, not from the regex pass."""
-    calls: list = []
-    imports: list = []
+    """Python calls and imports come from the resolver, not from the regex pass.
+
+    The pass therefore collects definitions only; it used to match a call and an
+    import pattern on every line and throw both lists away (audit 3, C7).
+    """
     for number, line in enumerate(content.splitlines(), 1):
-        _regex_parse_python_line(
-            line, number, functions, classes, calls, imports
-        )
+        _regex_python_definitions(line, number, functions, classes)
     imports, calls = resolve_python_imports_and_calls(
         file_path, registry, workspace_root
     )
@@ -1027,6 +1008,71 @@ def _regex_parse_by_language(
     return imports, calls
 
 
+# Audit 3, B24. The regex fallback used to write `end_line = line`, so no call
+# was ever inside a function: live `callees` answered `[]` and live `dead_code`
+# named called functions as dead. A block now has an end: by indentation where
+# the language delimits by indentation, by brace depth elsewhere. Research:
+# `docs/research/2026-09-17-graph-one-live-walk-one-parse.md`.
+_INDENT_BLOCK_LANGUAGES = frozenset({"python", "ruby"})
+
+
+def _indent_of(text: str) -> int:
+    return len(text) - len(text.lstrip())
+
+
+def _header_end(lines: list[str], start: int) -> int:
+    """The line where the declaration's own parentheses close (1-based)."""
+    depth = 0
+    for number in range(start, len(lines) + 1):
+        depth += sum(_paren_delta(char) for char in lines[number - 1])
+        if depth <= 0:
+            return number
+    return start
+
+
+def _indent_block_end(lines: list[str], start: int) -> int:
+    base = _indent_of(lines[start - 1])
+    end = _header_end(lines, start)
+    for number in range(end + 1, len(lines) + 1):
+        text = lines[number - 1]
+        if not text.strip():
+            continue
+        if _indent_of(text) <= base:
+            break
+        end = number
+    return end
+
+
+def _first_brace_line(lines: list[str], start: int) -> int | None:
+    """The declaration line, or the next one when it opens the block alone."""
+    if "{" in lines[start - 1]:
+        return start
+    if start < len(lines) and lines[start].lstrip().startswith("{"):
+        return start + 1
+    return None
+
+
+def _brace_block_end(lines: list[str], start: int) -> int:
+    opening = _first_brace_line(lines, start)
+    if opening is None:
+        return start
+    depth = 0
+    for number in range(opening, len(lines) + 1):
+        text = lines[number - 1]
+        depth += text.count("{") - text.count("}")
+        if depth <= 0:
+            return number
+    return start
+
+
+def _close_regex_blocks(lines: list[str], lang: str, symbols: list[dict]) -> None:
+    block_end = _brace_block_end
+    if lang in _INDENT_BLOCK_LANGUAGES:
+        block_end = _indent_block_end
+    for symbol in symbols:
+        symbol["end_line"] = block_end(lines, symbol["line"])
+
+
 def _regex_parse(
     file_path: Path, lang: str, registry: SymbolRegistry, workspace_root: Path
 ) -> dict:
@@ -1047,6 +1093,7 @@ def _regex_parse(
         calls,
         imports,
     )
+    _close_regex_blocks(content.splitlines(), lang, [*functions, *classes])
     git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
@@ -1223,15 +1270,40 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
         imports.append({"name": name.strip(), "line": line_number})
 
 
-_INDEX_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv"})
+def _parsable_names(parent: Path, names: list[str]) -> list[Path]:
+    found = [parent / name for name in names]
+    return [
+        path for path in found
+        if path.suffix.lower() in LANGUAGE_MAP and path.is_file()
+    ]
 
 
-def _indexable_source(path: Path, extensions: set) -> bool:
-    if not path.is_file():
-        return False
-    if path.suffix.lower() not in extensions:
-        return False
-    return not any(skip in path.parts for skip in _INDEX_SKIP_DIRS)
+def _live_source_files(directory: Path) -> list[Path]:
+    """Every source the live fallback parses, under one directory rule.
+
+    Audit 3, B27. Three walkers used to disagree here: one did not know `venv`,
+    only one pruned hidden directories (so live `callers` still parsed every
+    `.claude/` agent worktree), and all three tested the *absolute* path, so a
+    repository checked out under `/x/venv/` had no definitions at all. The rule
+    is `import_resolver.directory_skipped`, applied where `os.walk` meets a
+    directory below the root: a skipped tree is never listed, and a name on the
+    way to the root is never judged. Research:
+    `docs/research/2026-09-17-graph-one-live-walk-one-parse.md`.
+    """
+    collected: list[Path] = []
+    for current, directories, files in os.walk(directory):
+        directories[:] = [name for name in directories if not directory_skipped(name)]
+        collected.extend(_parsable_names(Path(current), files))
+    return sorted(collected)
+
+
+def _parsed_live_sources(directory: Path) -> list[tuple[Path, dict]]:
+    """The workspace parsed once; every live answer and its report share it."""
+    registry = build_python_symbol_registry(directory)
+    return [
+        (path, _parse_file(path, registry, directory))
+        for path in _live_source_files(directory)
+    ]
 
 
 def _accumulate_index_stats(stats: dict, result: dict) -> None:
@@ -1260,11 +1332,8 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
     if not directory.exists():
         return stats
-    extensions = set(LANGUAGE_MAP.keys())
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if _indexable_source(path, extensions):
-            _accumulate_index_stats(stats, _parse_file(path, registry, directory))
+    for _path, result in _parsed_live_sources(directory):
+        _accumulate_index_stats(stats, result)
     if verbose:
         _print_index_stats(stats)
     return stats
@@ -1922,15 +1991,6 @@ def _store_walk_calls(
         graph.close()
 
 
-_SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
-
-
-def _searchable_source(path: Path) -> bool:
-    if not path.is_file() or path.suffix.lower() not in set(LANGUAGE_MAP.keys()):
-        return False
-    return not any(skip in path.parts for skip in _SEARCH_SKIP_PARTS)
-
-
 def _named_function(result: dict, function_name: str) -> dict | None:
     return next(
         (item for item in result["functions"] if item["name"] == function_name), None
@@ -2059,15 +2119,11 @@ def _live_unresolved_fields(unresolved: list[dict]) -> dict[str, object]:
 
 
 def _live_caller_scan(
-    directory: Path, function_name: str
+    parsed: list[tuple[Path, dict]], function_name: str
 ) -> tuple[list[dict], list[dict]]:
     callers: list[dict] = []
     unresolved: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if not _searchable_source(path):
-            continue
-        result = _parse_file(path, registry, directory)
+    for path, result in parsed:
         callers.extend(_live_callers_in_file(path, result, function_name))
         unresolved.extend(_live_unresolved_in_file(path, result, function_name))
     return callers, unresolved
@@ -2097,8 +2153,12 @@ def find_callers(
         stored = _stored_callers(function_name, directory, with_report, max_depth)
         if stored is not None:
             return stored
-    callers, unresolved = _live_caller_scan(directory, function_name)
-    report = {**_live_report(directory), **_live_unresolved_fields(unresolved)}
+    parsed = _parsed_live_sources(directory)
+    callers, unresolved = _live_caller_scan(parsed, function_name)
+    report = {
+        **_live_report(directory, parsed),
+        **_live_unresolved_fields(unresolved),
+    }
     return _with_report("callers", callers, report, with_report)
 
 
@@ -2163,12 +2223,7 @@ def _stored_callees(
     return _store_find_callees(function_name, directory)
 
 
-def _live_callees_in_file(
-    path: Path, registry, directory: Path, function_name: str
-) -> list[dict]:
-    if not _searchable_source(path):
-        return []
-    result = _parse_file(path, registry, directory)
+def _live_callees_in_file(path: Path, result: dict, function_name: str) -> list[dict]:
     func_def = _named_function(result, function_name)
     if func_def is None:
         return []
@@ -2193,10 +2248,12 @@ def find_callees(
         if stored is not None:
             return stored
     callees: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        callees.extend(_live_callees_in_file(path, registry, directory, function_name))
-    return _with_report("callees", callees, _live_report(directory), with_report)
+    parsed = _parsed_live_sources(directory)
+    for path, result in parsed:
+        callees.extend(_live_callees_in_file(path, result, function_name))
+    return _with_report(
+        "callees", callees, _live_report(directory, parsed), with_report
+    )
 
 
 def _stored_callee_row(graph, edge, directory: Path) -> dict | None:
@@ -2951,16 +3008,10 @@ def detect_communities(
         stored = _stored_detect_communities(directory, symbol, with_report)
         if stored is not None:
             return stored
-    communities, counts = _detect_live_communities(directory, symbol)
-    report = {**_live_report(directory), **counts}
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    communities, counts = _live_community_answer(definitions, edges, symbol)
+    report = {**_live_report(directory, parsed), **counts}
     return _with_report("communities", communities, report, with_report)
-
-
-def _detect_live_communities(
-    directory: Path, symbol: str | None = None
-) -> tuple[list, dict]:
-    _parsed, definitions, edges = _workspace_call_graph(directory)
-    return _live_community_answer(definitions, edges, symbol)
 
 
 def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
@@ -3405,36 +3456,6 @@ def _find_live_paths(
     return paths
 
 
-_WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
-
-
-def _inside_hidden_directory(path: Path, directory: Path) -> bool:
-    """A hidden directory under the workspace root, the file itself aside.
-
-    The one directory rule the vault's other walkers already agree on:
-    `corpus_snapshot._directory_excluded` and
-    `import_resolver._directory_skipped` both prune every hidden directory,
-    which is why the corpus and the symbol registry never see `.claude` agent
-    worktrees. This walk did not, and it was the whole of NEW-110: measured on
-    the live vault, 7,686 parsable files of which 7,261 — 94% — sit under
-    `.claude/`, throwaway checkouts belonging to other agents. A hidden name
-    on the file itself is not a directory and stays admissible.
-    """
-    try:
-        relative = path.relative_to(directory)
-    except ValueError:
-        return False
-    return any(part.startswith(".") for part in relative.parts[:-1])
-
-
-def _parsable_workspace_file(path: Path, directory: Path) -> bool:
-    if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
-        return False
-    if _inside_hidden_directory(path, directory):
-        return False
-    return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
-
-
 def _index_workspace_definitions(
     path: Path,
     result: dict,
@@ -3514,19 +3535,19 @@ def _workspace_call_edges(
 def _workspace_call_graph(
     directory: Path,
 ) -> tuple[list[tuple[Path, dict]], dict[str, dict], list[dict]]:
-    """Parse a workspace and resolve calls to canonical path/owner/name IDs."""
+    """Parse a workspace and resolve calls to canonical path/owner/name IDs.
+
+    The hidden-directory rule of `_live_source_files` was the whole of NEW-110:
+    measured on the live vault, 7,686 parsable files of which 7,261 — 94% — sat
+    under `.claude/`, throwaway checkouts belonging to other agents.
+    """
     directory = directory.resolve()
-    registry = build_python_symbol_registry(directory)
-    parsed: list[tuple[Path, dict]] = []
+    parsed = _parsed_live_sources(directory)
     definitions: dict[str, dict] = {}
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
-    for path in sorted(directory.rglob("*")):
-        if not _parsable_workspace_file(path, directory):
-            continue
-        result = _parse_file(path, registry, directory)
+    for path, result in parsed:
         _annotate_function_ids(path, result, directory)
-        parsed.append((path, result))
         _index_workspace_definitions(
             path, result, directory, definitions, by_name, by_qualified
         )

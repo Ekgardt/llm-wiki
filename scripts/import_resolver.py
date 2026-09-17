@@ -21,13 +21,14 @@ EMPTY_REGISTRY = SymbolRegistry(frozenset(), frozenset())
 # The one directory rule the vault's walkers already agree on (NEW-110): the
 # corpus walker prunes every hidden directory (`corpus_snapshot.
 # _directory_excluded`), which is why the graph index never indexes `.claude`
-# agent worktrees, and `code_graph._WORKSPACE_SKIP_PARTS` names the workspace
-# caches. Without this rule the registry walked 7,549 files on the live vault
-# (7,215 under `.claude/`) and died of MemoryError.
+# agent worktrees. Without this rule the registry walked 7,549 files on the
+# live vault (7,215 under `.claude/`) and died of MemoryError. It is public
+# because `code_graph`'s live walk obeys the same rule (audit 3, B27): a name is
+# judged where the walk meets it below the root, never on the way to the root.
 _SKIPPED_DIRECTORY_NAMES = frozenset({"node_modules", "venv", "__pycache__"})
 
 
-def _directory_skipped(name: str) -> bool:
+def directory_skipped(name: str) -> bool:
     return name.startswith(".") or name in _SKIPPED_DIRECTORY_NAMES
 
 
@@ -56,7 +57,7 @@ def _check_registry_stop(
 
 
 def _kept_subdirectories(directories: list[str]) -> list[str]:
-    return sorted(name for name in directories if not _directory_skipped(name))
+    return sorted(name for name in directories if not directory_skipped(name))
 
 
 def _python_files_in(parent: Path, files: list[str]) -> list[Path]:
