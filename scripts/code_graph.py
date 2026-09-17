@@ -1774,11 +1774,40 @@ def _call_walk_depth(max_depth: int | None) -> int:
     return max(1, min(int(max_depth), CALL_WALK_MAX_DEPTH))
 
 
+# Audit 3, A5-A7: a name is resolved, cut and sliced on this side of the reader,
+# whose own bounds refuse by name instead of truncating. Research:
+# `docs/research/2026-09-17-a-name-is-resolved-before-the-graph-is-asked.md`.
+SEED_LOOKUP_ROWS = 10_000  # evidence_graph.MAX_ROWS
+
+
+def _in_node_chunks(node_ids: list[str], ask) -> list:
+    """Every row `ask` returns for these ids, asked in slices the reader accepts."""
+    rows: list = []
+    for index in range(0, len(node_ids), _LOCATION_CHUNK):
+        rows.extend(ask(node_ids[index : index + _LOCATION_CHUNK]))
+    return rows
+
+
+def _named_node_ids(graph, kinds: tuple[str, ...], name: str) -> list[str]:
+    """Every node of these kinds with this name, in the reader's own order.
+
+    Asked up to the reader's row ceiling: a seed limit passed as `max_rows` is a
+    refusal for every common name (`main`, `__init__`), not a cut.
+    """
+    nodes = graph.find_nodes(kinds=kinds, name=name, max_rows=SEED_LOOKUP_ROWS)
+    return [str(item["node_id"]) for item in nodes]
+
+
+def _seed_cut_report(matched: list[str], limit: int) -> dict[str, object]:
+    """Nothing for a whole answer; the size of the cut when there was one."""
+    if len(matched) <= limit:
+        return {}
+    return {"matching_symbol_nodes": len(matched), "symbol_nodes_truncated": True}
+
+
 def _walk_seeds(graph, function_name: str) -> list[str]:
-    nodes = graph.find_nodes(
-        kinds=("function", "method"), name=function_name, max_rows=10_000
-    )
-    return sorted({str(item["node_id"]) for item in nodes})[:CALL_WALK_MAX_SEEDS]
+    """Every node the name resolves to, sorted; the walk cuts and reports."""
+    return sorted(set(_named_node_ids(graph, ("function", "method"), function_name)))
 
 
 def _keep_shallowest(merged: dict, row: dict) -> None:
@@ -1866,13 +1895,15 @@ def _store_walk_calls(
     if graph is None:
         return None
     try:
-        seeds = _walk_seeds(graph, function_name)
+        matched = _walk_seeds(graph, function_name)
+        seeds = matched[:CALL_WALK_MAX_SEEDS]
         rows = _walked_rows(
             graph, _walked_nodes(graph, seeds, direction, depth), function_name, direction
         )
         report = {
             **_store_report(graph),
             **_walk_report(graph, function_name, direction, seeds, rows, depth),
+            **_seed_cut_report(matched, CALL_WALK_MAX_SEEDS),
         }
         key = "callers" if direction == "in" else "callees"
         return _with_report(key, rows, report, with_report)
@@ -2090,12 +2121,12 @@ def _store_find_callers(
     if graph is None:
         return None
     try:
-        targets = graph.find_nodes(
-            kinds=("function", "method"), name=function_name, max_rows=10_000
-        )
-        target_ids = sorted({item["node_id"] for item in targets})
-        edges = graph.edges(
-            edge_types=("CALLS",), target_node_ids=target_ids, max_rows=10_000
+        target_ids = _walk_seeds(graph, function_name)
+        edges = _in_node_chunks(
+            target_ids,
+            lambda ids: graph.edges(
+                edge_types=("CALLS",), target_node_ids=ids, max_rows=10_000
+            ),
         )
         rows = [
             _stored_caller_row(graph, edge, function_name, directory) for edge in edges
@@ -2182,12 +2213,12 @@ def _store_find_callees(
     if graph is None:
         return None
     try:
-        sources = graph.find_nodes(
-            kinds=("function", "method"), name=function_name, max_rows=10_000
-        )
-        source_ids = sorted({item["node_id"] for item in sources})
-        edges = graph.edges(
-            edge_types=("CALLS",), source_node_ids=source_ids, max_rows=10_000
+        source_ids = _walk_seeds(graph, function_name)
+        edges = _in_node_chunks(
+            source_ids,
+            lambda ids: graph.edges(
+                edge_types=("CALLS",), source_node_ids=ids, max_rows=10_000
+            ),
         )
         rows = [_stored_callee_row(graph, edge, directory) for edge in edges]
         results = _sorted_stored_rows(rows, _callee_sort_key)
@@ -2997,12 +3028,14 @@ def _dependency_seed_nodes(graph, symbol: str) -> list[str]:
     A path is accepted too, because "what does this file depend on" is the
     question this mode is asked with — `scripts/retrieval.py`, not
     `scripts.retrieval` — and a module node carries both.
+
+    Every match is returned; the caller cuts to its seed limit and reports the
+    cut (`_seed_cut_report`). Asking the reader for only that many rows made it
+    refuse every common name (audit 3, A6).
     """
-    by_name = graph.find_nodes(
-        kinds=DEPENDENCY_SEED_KINDS, name=symbol, max_rows=DEPENDENCY_SEED_LIMIT
-    )
+    by_name = _named_node_ids(graph, DEPENDENCY_SEED_KINDS, symbol)
     if by_name:
-        return [str(item["node_id"]) for item in by_name]
+        return by_name
     return _dependency_seed_by_path(graph, symbol)
 
 
@@ -3097,13 +3130,15 @@ def _store_find_dependencies(
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:DEPENDENCY_SEED_LIMIT]
         depth = _dependency_depth(max_depth)
         rows = _stored_dependency_rows(graph, seeds, reverse, depth)
         report = {
             **_store_report(graph),
             **_dependency_resolution(symbol, seeds),
             **_dependency_reach(rows, depth),
+            **_seed_cut_report(matched, DEPENDENCY_SEED_LIMIT),
         }
         return _with_report("dependencies", rows, report, with_report)
     finally:
@@ -3159,6 +3194,54 @@ def find_dependencies(
     )
 
 
+PATH_MAX_ENDPOINTS = 5
+PATH_MAX_ROWS = 10
+
+
+def _paths_between(graph, sources: list[str], targets: list[str]) -> list[dict]:
+    """Paths for every resolved pair of ends, until the answer is full."""
+    paths: list[dict] = []
+    pairs = [(source, target) for source in sources for target in targets]
+    for source, target in pairs:
+        if len(paths) >= PATH_MAX_ROWS:
+            break
+        paths.extend(
+            graph.path(
+                source, target, max_depth=8, max_rows=PATH_MAX_ROWS, max_work=10_000
+            )
+        )
+    return paths[:PATH_MAX_ROWS]
+
+
+def _path_end_report(label: str, matched: list[str]) -> dict[str, object]:
+    report: dict[str, object] = {f"{label}_resolved_nodes": len(matched)}
+    if len(matched) > PATH_MAX_ENDPOINTS:
+        report[f"{label}_nodes_truncated"] = True
+    return report
+
+
+def _store_find_paths(
+    source: str, target: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        sources = _dependency_seed_nodes(graph, source)
+        targets = _dependency_seed_nodes(graph, target)
+        paths = _paths_between(
+            graph, sources[:PATH_MAX_ENDPOINTS], targets[:PATH_MAX_ENDPOINTS]
+        )
+        report = {
+            **_store_report(graph),
+            **_path_end_report("source", sources),
+            **_path_end_report("target", targets),
+        }
+        return _with_report("paths", paths, report, with_report)
+    finally:
+        graph.close()
+
+
 def find_paths(
     source_node_id: str,
     target_node_id: str,
@@ -3167,21 +3250,15 @@ def find_paths(
     live: bool = False,
     with_report: bool = False,
 ) -> list[dict] | dict:
-    """Find bounded canonical graph paths, preferring the active generation."""
+    """Find bounded canonical graph paths, preferring the active generation.
+
+    Both ends may be a name, a repository-relative path or a node id, resolved
+    the way `dependencies` resolves its symbol (audit 3, A5).
+    """
     if not live:
-        graph = _active_evidence_graph(directory)
-        if graph is not None:
-            try:
-                paths = graph.path(
-                    source_node_id,
-                    target_node_id,
-                    max_depth=8,
-                    max_rows=10,
-                    max_work=10_000,
-                )
-                return _with_report("paths", paths, _store_report(graph), with_report)
-            finally:
-                graph.close()
+        stored = _store_find_paths(source_node_id, target_node_id, directory, with_report)
+        if stored is not None:
+            return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     paths = _find_live_paths(source_node_id, target_node_id, definitions, edges)
     return _with_report(
@@ -3776,7 +3853,10 @@ def _flow_row(graph, edge: dict, depth: int) -> dict | None:
 
 def _flow_hop(graph, frontier: list[str], seen: set[str], depth: int) -> tuple[list[dict], list[str]]:
     """One hop of binding edges, and the nodes it opens for the next hop."""
-    edges = graph.argument_bindings(source_node_ids=frontier, max_rows=FLOW_MAX_ROWS)
+    edges = _in_node_chunks(
+        frontier,
+        lambda ids: graph.argument_bindings(source_node_ids=ids, max_rows=FLOW_MAX_ROWS),
+    )
     return _flow_hop_rows(graph, edges, depth), _flow_hop_reached(edges, seen)
 
 
@@ -3826,12 +3906,15 @@ def find_argument_flows(
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
         rows = _flow_rows(graph, seeds, depth)
-        return _with_report(
-            "flows", rows, _flow_report(graph, symbol, seeds, rows, depth), with_report
-        )
+        report = {
+            **_flow_report(graph, symbol, seeds, rows, depth),
+            **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+        }
+        return _with_report("flows", rows, report, with_report)
     finally:
         graph.close()
 
@@ -3877,8 +3960,11 @@ def _handler_rows(graph, routes: list[str], depth: int) -> list[dict]:
     """Turn around at a route: the handler that exposes it serves the request."""
     if not routes:
         return []
-    edges = graph.edges(
-        edge_types=("EXPOSES",), target_node_ids=routes, max_rows=FLOW_MAX_ROWS
+    edges = _in_node_chunks(
+        routes,
+        lambda ids: graph.edges(
+            edge_types=("EXPOSES",), target_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     rows = [_service_row(graph, _reversed_edge(edge), depth, "handled_by") for edge in edges]
     return [row for row in rows if row is not None]
@@ -3934,8 +4020,11 @@ def _foreign_row(source: dict, observation: dict, match: dict, depth: int) -> di
 
 
 def _foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
-    observations = graph.unresolved_edges(
-        edge_types=("HTTP_CALLS",), source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    observations = _in_node_chunks(
+        frontier,
+        lambda ids: graph.unresolved_edges(
+            edge_types=("HTTP_CALLS",), source_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     return [row for item in observations for row in _foreign_route_rows(graph, item, depth)]
 
@@ -3949,8 +4038,11 @@ def _quiet_foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
 
 
 def _service_hop(graph, frontier: list[str], depth: int) -> list[dict]:
-    edges = graph.edges(
-        edge_types=SERVICE_EDGES, source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    edges = _in_node_chunks(
+        frontier,
+        lambda ids: graph.edges(
+            edge_types=SERVICE_EDGES, source_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     rows = _service_rows_of(graph, edges, depth)
     rows += _handler_rows(graph, _route_node_ids(graph, rows), depth)
@@ -4005,12 +4097,15 @@ def find_service_paths(
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
         rows = _service_walk(graph, seeds, depth)
-        return _with_report(
-            "hops", rows, _service_report(graph, symbol, seeds, rows, depth), with_report
-        )
+        report = {
+            **_service_report(graph, symbol, seeds, rows, depth),
+            **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+        }
+        return _with_report("hops", rows, report, with_report)
     finally:
         graph.close()
 
