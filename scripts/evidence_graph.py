@@ -1777,7 +1777,19 @@ def _published_database(
     publication_generation_id: str | None,
     publication_expected_active: str | None,
     repository_scope: RepositoryScope | None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
+    """Validate under the caller's bound, then link: nothing is published unvalidated.
+
+    Validating a vault-sized database costs about 30 s and used to run outside
+    every bound, so a build whose deadline had passed, or that was cancelled,
+    paid for it and published anyway. The link is the point of no return and it
+    comes after the validation; a stop here leaves only the temporary file, which
+    the caller discards. See
+    `docs/research/2026-09-17-a-publication-that-is-out-of-time-does-not-link.md`.
+    """
     validate_generation_database(
         temporary,
         schema=schema,
@@ -1786,6 +1798,9 @@ def _published_database(
             publication_expected_active if schema is GraphSchema.V3 else _UNSET
         ),
         repository_scope=repository_scope,
+        deadline=deadline,
+        cancelled=cancelled,
+        monotonic=monotonic,
     )
     if temporary.stat().st_size > MAX_DATABASE_BYTES:
         raise ValueError("Evidence Graph database exceeds the supported byte ceiling")
@@ -1861,6 +1876,9 @@ def create_generation_database(
             publication_generation_id,
             publication_expected_active,
             repository_scope,
+            deadline,
+            cancelled,
+            monotonic,
         )
         return schema
     except BaseException:
