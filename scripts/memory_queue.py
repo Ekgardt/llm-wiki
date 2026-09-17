@@ -4432,6 +4432,16 @@ def _retry_after_from_text(value: str, now: datetime) -> float | None:
     return _bounded_retry_until(parsed, now)
 
 
+def _retry_after_seconds(
+    value: float | datetime | str | None, now: datetime
+) -> float | None:
+    """The wait a failure states, in seconds; None when it states none."""
+    for kind, read in _RETRY_AFTER_READERS:
+        if isinstance(value, kind):
+            return read(value, now)
+    return None
+
+
 def _validated_listed_states(states: tuple[str, ...] | None) -> tuple[str, ...]:
     """The states to list; every one of them has to be a real queue state."""
     listed = states or _STATES
@@ -4554,7 +4564,7 @@ def _apply_failure_state(
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
     state, attempts = _failure_state(row, failure, attempt_limit)
-    available_at = _retry_available_at(state, attempts, now)
+    available_at = _retry_available_at(state, attempts, now, failure.retry_after)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -4579,15 +4589,25 @@ def _apply_failure_state(
 _RETRY_RANDOM = random.SystemRandom()
 
 
-def _retry_available_at(state: str, attempts: int, now: datetime) -> datetime:
+def _retry_available_at(
+    state: str,
+    attempts: int,
+    now: datetime,
+    retry_after: float | datetime | str | None = None,
+) -> datetime:
     """A task going back to ready waits a full-jitter backoff, as the legacy queue's do.
 
-    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    A wait the failure states — a provider's Retry-After — is a floor under the
+    backoff, so the task comes back at the later of the two. See
+    `docs/research/2026-09-14-the-small-integrity-gaps.md` and
+    `docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md`.
     """
     if state != "ready":
         return now
     ceiling = min(DEFAULTS.retry_cap_seconds, DEFAULTS.retry_base_seconds * (2 ** max(0, attempts - 1)))
-    return now + timedelta(seconds=_RETRY_RANDOM.uniform(0, ceiling))
+    stated = _retry_after_seconds(retry_after, now)
+    delay = max(_RETRY_RANDOM.uniform(0, ceiling), stated or 0.0)
+    return now + timedelta(seconds=delay)
 
 
 def _failure_is_terminal(
@@ -6057,10 +6077,7 @@ class MemoryQueue:
     def _retry_after_seconds(
         value: float | datetime | str | None, now: datetime
     ) -> float | None:
-        for kind, read in _RETRY_AFTER_READERS:
-            if isinstance(value, kind):
-                return read(value, now)
-        return None
+        return _retry_after_seconds(value, now)
 
     @staticmethod
     def _record_attempt(
