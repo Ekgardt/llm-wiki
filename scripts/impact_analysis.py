@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -855,34 +856,48 @@ def _range_side(prefix: int, end: int, offsets: list[int]) -> dict:
     }
 
 
+class GenerationUnreadable(RuntimeError):
+    """The catalog or the active generation exists but could not be read.
+
+    Separate from "this repository has no active generation", which is None:
+    a corrupt catalog, a generation that keeps changing under the open, or a
+    refused read used to be reported as missing evidence (audit 3, B26).
+    """
+
+
 def _active_graph(root: Path, deadline: float):
+    """The active generation of `root`, None when it has none."""
     try:
-        from evidence_graph import EvidenceGraph
-        from generation_catalog import GenerationCatalog
-        from repository_scope import resolve_repository_scope
-
-        state_root = STATE_ROOT
-        catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
-        if not catalog_path.is_file():
-            return None
-        from code_graph import _opened_code_or_active
-
-        scope = resolve_repository_scope(root, deadline=deadline)
-        # A diff maps to code, so this asks for the checkout's code generation
-        # and falls through to the pointer only when it has none -- the same
-        # two steps every other code reader takes. See
-        # `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
-        return _opened_code_or_active(
-            EvidenceGraph,
-            GenerationCatalog(state_root, catalog_path=catalog_path),
-            scope,
-            deadline,
-            None,
-        )
+        return _opened_active_graph(root, deadline)
     except TimeoutError:
         raise
-    except (OSError, PermissionError, TypeError, ValueError):
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise GenerationUnreadable(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _opened_active_graph(root: Path, deadline: float):
+    from evidence_graph import EvidenceGraph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    state_root = STATE_ROOT
+    catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    if not catalog_path.is_file():
         return None
+    from code_graph import _opened_code_or_active
+
+    scope = resolve_repository_scope(root, deadline=deadline)
+    # A diff maps to code, so this asks for the checkout's code generation and falls
+    # through to the pointer only when it has none — the two steps every other code
+    # reader takes. See
+    # `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    return _opened_code_or_active(
+        EvidenceGraph,
+        GenerationCatalog(state_root, catalog_path=catalog_path),
+        scope,
+        deadline,
+        None,
+    )
 
 
 def _overlaps(occurrence: dict, changed: dict) -> bool:
@@ -1250,17 +1265,23 @@ class _ImpactRun:
             self.public_changes.append({key: change[key] for key in _PUBLIC_CHANGE_KEYS})
 
     def map_changes(self, graph, root: Path) -> None:
-        selected = _selected_graph(graph, root, self.deadline)
+        try:
+            selected = _selected_graph(graph, root, self.deadline)
+        except GenerationUnreadable as exc:
+            self._note_missing_graph(f"The active Evidence Graph is unreadable: {exc}")
+            return
         if selected is None:
-            self._note_missing_graph()
+            self._note_missing_graph(
+                "No valid active Evidence Graph generation is available."
+            )
             return
         self.generation_id = getattr(selected, "generation_id", None)
         self._map_graph(selected, owns_graph=graph is None)
 
-    def _note_missing_graph(self) -> None:
+    def _note_missing_graph(self, reason: str) -> None:
         self.graph_missing = True
         if self.changes:
-            self.warnings.append("No valid active Evidence Graph generation is available.")
+            self.warnings.append(reason)
 
     def _map_graph(self, graph, *, owns_graph: bool) -> None:
         try:
