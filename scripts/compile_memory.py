@@ -4082,6 +4082,24 @@ def main() -> int:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
+    return _compile_under_lock(args)
+
+
+def _compile_under_lock(
+    args: argparse.Namespace,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+    owner: OwnerLease | None = None,
+) -> int:
+    """The one guarded way into `_run`: lock, start stamp, call ceiling, release.
+
+    The command line and the in-process entry (the MCP `compile` tool) both come
+    through here. The in-process one used to call `_run` bare: it ran beside a
+    spawned compile, drafted under the 90s default, and its finish stamp
+    overwrote the status of the compile still running.
+    Research: docs/research/2026-09-17-every-compile-takes-the-compile-lock.md
+    """
     lock_token, refusal = _acquire_compile_lock()
     if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
@@ -4090,7 +4108,7 @@ def main() -> int:
     _mark_started(args.trigger)
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
-            return _run(args)
+            return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise
@@ -4379,7 +4397,7 @@ def run_pending_compile(
     """Compile pending daily logs in-process under caller-owned bounds."""
     if trigger not in {"auto", "manual"}:
         raise ValueError("compile trigger must be auto or manual")
-    return _run(
+    return _compile_under_lock(
         argparse.Namespace(file=None, all=False, dry_run=False, trigger=trigger),
         deadline=deadline,
         cancelled=cancelled,
