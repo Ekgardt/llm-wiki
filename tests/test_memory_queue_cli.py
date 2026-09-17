@@ -691,7 +691,7 @@ def test_cli_quarantine_outputs_only_stable_progress_fields(
             )
 
     monkeypatch.setattr(memory_queue, "_v3_queue_for_cli", Queue)
-    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda: nullcontext("owner"))
+    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda _queue: nullcontext("owner"))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -732,7 +732,7 @@ def test_cli_purge_corrupt_outputs_only_stable_progress_fields(
             )
 
     monkeypatch.setattr(memory_queue, "_v3_queue_for_cli", Queue)
-    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda: nullcontext("owner"))
+    monkeypatch.setattr(memory_queue, "_repair_owner_for_cli", lambda _queue: nullcontext("owner"))
     monkeypatch.setattr(
         sys,
         "argv",

@@ -8072,6 +8072,15 @@ class _QueueV3CandidateReader:
         finally:
             self.release_task_fence(fence)
 
+    def _intent_coordinator(self):
+        """The coordinator that pairs with this queue: adopted, or the candidate."""
+        from markdown_transaction import MarkdownCoordinator
+
+        path = self.coordinator_path
+        if path is None:
+            path = self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+        return MarkdownCoordinator._from_v3_candidate(path, state_root=self.state_root)
+
     @contextmanager
     def _corrupt_intent_fence(
         self, task_id: str, *, owner: OwnerLease
@@ -8084,12 +8093,7 @@ class _QueueV3CandidateReader:
         if binding.intent_id is None:
             yield binding, None
             return
-        from markdown_transaction import MarkdownCoordinator
-
-        coordinator = MarkdownCoordinator._from_v3_candidate(
-            self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3",
-            state_root=self.state_root,
-        )
+        coordinator = self._intent_coordinator()
         fence = coordinator.acquire_intent_fence(
             binding.intent_id, mode="operator", owner=owner
         )
@@ -13665,7 +13669,12 @@ def _queue(
 
 
 def _v3_queue_for_cli() -> _QueueV3CandidateReader:
+    """The v3 queue the repair commands work on: adopted, else the candidate."""
+    from markdown_transaction import _reliability_v3_records_present
+
     state_root = _state_root()
+    if _reliability_v3_records_present(state_root):
+        return active_memory_queue(_vault_root(), state_root)
     return MemoryQueue._from_v3_candidate(
         state_root / "run" / "queue-v3.candidate.sqlite3",
         state_root=state_root,
@@ -13736,10 +13745,9 @@ def active_or_legacy_memory_queue(
 
 
 @contextmanager
-def _repair_owner_for_cli() -> Iterator[OwnerLease]:
-    from operational_ownership import OwnershipRegistry
-
-    registry = OwnershipRegistry(_state_root())
+def _repair_owner_for_cli(queue: _QueueV3CandidateReader) -> Iterator[OwnerLease]:
+    """A repair owner in the registry that pairs with the queue being repaired."""
+    registry = queue.ownership_registry()
     owner = registry.acquire("repair", scope=f"repair:cli:{os.getpid()}")
     try:
         yield owner
@@ -15775,7 +15783,7 @@ def _cli_quarantine_corrupt(args, _parser) -> int:
     if not 1 <= len(args.reason.encode("utf-8")) <= 4096:
         raise ValueError("quarantine reason is invalid")
     queue = _v3_queue_for_cli()
-    with _repair_owner_for_cli() as owner:
+    with _repair_owner_for_cli(queue) as owner:
         progress = queue.quarantine_corrupt(task_id, reason=args.reason, owner=owner)
     print(
         json.dumps(
@@ -15796,7 +15804,7 @@ def _cli_quarantine_corrupt(args, _parser) -> int:
 def _cli_purge_corrupt(args, _parser) -> int:
     task_id = _require_cli_task_id(args)
     queue = _v3_queue_for_cli()
-    with _repair_owner_for_cli() as owner:
+    with _repair_owner_for_cli(queue) as owner:
         progress = queue.purge_quarantined(task_id, owner=owner)
     print(
         json.dumps(
