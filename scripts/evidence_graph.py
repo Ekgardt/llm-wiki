@@ -3188,6 +3188,17 @@ def _validated_graph_database(
 _RETRY = object()
 
 
+def _close_if_opened(graph: EvidenceGraph | None) -> None:
+    """Close a graph an interrupted open may or may not have reached.
+
+    A stop (`TimeoutError`) after the database was opened used to pass through
+    with the connection still held. See
+    `docs/research/2026-09-17-an-open-that-runs-out-of-time-closes-its-database.md`.
+    """
+    if graph is not None:
+        graph.close()
+
+
 def _stop_options(
     deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> dict[str, object]:
@@ -3765,9 +3776,11 @@ class EvidenceGraph:
             return cls._settled_active_open(
                 catalog, manifest, seal, options, deadline, cancelled, graph
             )
+        except TimeoutError:
+            _close_if_opened(graph)
+            raise
         except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
-            if graph is not None:
-                graph.close()
+            _close_if_opened(graph)
             return _RETRY
 
     @staticmethod
@@ -3872,9 +3885,11 @@ class EvidenceGraph:
             )
             graph.repository_scope = generation_scope
             return cls._settled_code_open(catalog, manifest, seal, deadline, cancelled, graph)
+        except TimeoutError:
+            _close_if_opened(graph)
+            raise
         except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
-            if graph is not None:
-                graph.close()
+            _close_if_opened(graph)
             return None
 
     @staticmethod
@@ -3948,9 +3963,11 @@ class EvidenceGraph:
             return cls._settled_repository_open(
                 catalog, manifest, expected_scope, seal, options, deadline, cancelled, graph
             )
+        except TimeoutError:
+            _close_if_opened(graph)
+            raise
         except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
-            if graph is not None:
-                graph.close()
+            _close_if_opened(graph)
             return None
 
     @staticmethod
