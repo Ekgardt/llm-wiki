@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import BinaryIO
 
@@ -2336,12 +2336,12 @@ class LanguageServerSession:
             self._wire_condition.notify_all()
         return retained
 
-    @staticmethod
-    def _did_open_params(document: OpenDocument) -> dict[str, object]:
+    def _did_open_params(self, document: OpenDocument) -> dict[str, object]:
+        suffix = PurePosixPath(document.source.relative_path).suffix
         return {
             "textDocument": {
                 "uri": document.source.uri,
-                "languageId": "python",
+                "languageId": self._profile.language_id_for(suffix),
                 "version": document.version,
                 "text": document.content.decode("utf-8", errors="strict"),
             }

@@ -62,6 +62,23 @@ INTEGRITY_ALGORITHMS = ("sha512-", "sha256-")
 _SHA256_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
+# The identifiers LSP 3.17 recommends for `TextDocumentItem.languageId`, by the
+# suffixes the registered profiles handle.
+LANGUAGE_ID_BY_SUFFIX = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".tsx": "typescriptreact",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascriptreact",
+    ".go": "go",
+    ".rs": "rust",
+}
+
 
 class ProfileError(ValueError):
     """A profile is internally inconsistent, or names something it cannot have."""
@@ -584,6 +601,18 @@ class LanguageServerProfile:
 
     def handles_suffix(self, suffix: str) -> bool:
         return _require_text(suffix, "suffix").casefold() in self.file_suffixes
+
+    def language_id_for(self, suffix: str) -> str:
+        """The LSP `languageId` a file with this suffix is opened under.
+
+        Audit 3, B14: every document used to be announced as `python`, whichever
+        server it went to. Research:
+        `docs/research/2026-09-17-a-document-is-opened-in-its-own-language.md`.
+        """
+        candidate = LANGUAGE_ID_BY_SUFFIX.get(suffix.casefold())
+        if candidate in self.language_ids:
+            return str(candidate)
+        return self.language_ids[0]
 
     def degradation_code(self, reason: str) -> str:
         """Name a startup or capability failure in this profile's namespace."""
