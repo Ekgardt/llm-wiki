@@ -1458,6 +1458,14 @@ def _snapshot_operations(items: Mapping[str, str], limit: int) -> list[dict[str,
     ]
 
 
+# What a rotation snapshot carries per list. Each list keeps the tail a reader
+# can see — except blockers: the session handoff shows every open blocker, so a
+# tail of five silently dropped blockers nobody had closed. A hundred is the
+# event schema's own bound for the field. See
+# `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+_SNAPSHOT_LIST_ITEMS = {**_MAX_LIST_ITEMS, "blockers": 100}
+
+
 def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
     """One delta that reproduces the fold of every sealed event.
 
@@ -1469,7 +1477,7 @@ def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
     for name in _SCALAR_FIELDS:
         delta[name] = {"id": _ROTATION_ID, "action": "close", "value": ""}
         delta[f"{name}_operations"] = _snapshot_operations(active[name], 1)
-    for name, limit in _MAX_LIST_ITEMS.items():
+    for name, limit in _SNAPSHOT_LIST_ITEMS.items():
         delta[name] = _snapshot_operations(active[name], limit)
     return delta
 
