@@ -199,7 +199,6 @@ _RULE_LABELS = {
     "preference": "PREFERENCE",
     "requirement": "REQUIREMENT",
     "instruction": "INSTRUCTION",
-    "pattern_rule": "RULE",
 }
 
 
@@ -218,12 +217,21 @@ def build_guardrails(
     if not corrections:
         return ""
     lines = ["## Guard rails (learned rules — do NOT repeat these mistakes)\n"]
+    unique = _deduplicated(corrections)
     by_type: dict[str, list[dict]] = {}
-    for c in _deduplicated(corrections)[:max_rules]:
+    for c in unique[:max_rules]:
         by_type.setdefault(c["type"], []).append(c)
     for rtype in sorted(by_type.keys()):
         lines.extend(_type_block(rtype, by_type[rtype]))
+    lines.extend(_past_the_ceiling(len(unique), max_rules))
     return "\n".join(lines).strip()
+
+
+def _past_the_ceiling(found: int, max_rules: int) -> list[str]:
+    """What the overall ceiling dropped is said, not implied absent."""
+    if found <= max_rules:
+        return []
+    return [f"({found - max_rules} more rule(s) past the ceiling of {max_rules} are not shown)"]
 
 
 def _deduplicated(corrections: list[dict]) -> list[dict]:
@@ -238,9 +246,23 @@ def _deduplicated(corrections: list[dict]) -> list[dict]:
     return unique
 
 
+MAX_RULES_PER_TYPE = 5
+
+
+def _shown_count(found: int) -> str:
+    """The header used to carry the whole count above five lines.
+
+    Research: docs/research/2026-09-17-the-guard-rails-say-how-many-rules-they-left-out.md
+    """
+    if found <= MAX_RULES_PER_TYPE:
+        return str(found)
+    return f"{MAX_RULES_PER_TYPE} of {found} shown"
+
+
 def _type_block(rtype: str, rules: list[dict]) -> list[str]:
     label = _RULE_LABELS.get(rtype, rtype.upper())
-    return [f"**{label}** ({len(rules)}):", *(f"- {r['summary']}" for r in rules[:5]), ""]
+    shown = (f"- {r['summary']}" for r in rules[:MAX_RULES_PER_TYPE])
+    return [f"**{label}** ({_shown_count(len(rules))}):", *shown, ""]
 
 
 def main() -> int:
