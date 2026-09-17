@@ -4458,6 +4458,28 @@ def _clipped_summary(summary: object) -> str:
     return summary[:120]
 
 
+# The one directory whose file names are identities: pages live flat there, as
+# `<slug>.md`, and the legacy telemetry is keyed by that slug.
+_FLAT_NOTES_ROOT = "knowledge/notes"
+
+
+def legacy_candidate_id(path: object) -> str:
+    """What names a legacy candidate: the slug of a flat note, else the path without its suffix.
+
+    A stem is an identity only where names are unique. Every
+    `knowledge/projects/<slug>/state.md` has the stem `state`, and fusion adds
+    ranks per identifier, so two projects' state pages became one candidate and
+    the second vanished. Research:
+    `docs/research/2026-09-17-two-pages-with-one-file-name-are-two-candidates.md`.
+    """
+    page = Path(str(path or "").replace("\\", "/"))
+    if not page.name:
+        return ""
+    if page.parent.as_posix() == _FLAT_NOTES_ROOT:
+        return page.stem
+    return page.with_suffix("").as_posix()
+
+
 def _legacy_hit(
     path: object,
     title: object,
@@ -4474,7 +4496,7 @@ def _legacy_hit(
         "bm25_score": score,
         "project": project,
         "timestamp": timestamp,
-        "candidate_id": Path(path).stem,
+        "candidate_id": legacy_candidate_id(path),
         "generation": "legacy",
     }
 
@@ -4516,7 +4538,6 @@ def _legacy_hit_rows(
 class _PageRead(NamedTuple):
     """What one Markdown page says about itself, read once."""
 
-    stem: str
     relative_path: str
     raw: bytes
     content: str
@@ -4541,7 +4562,6 @@ def _read_page(page: Path, label: str) -> _PageRead | None:
         return None
     title, summary = _extract_title_and_summary(content, page.stem)
     return _PageRead(
-        stem=page.stem,
         relative_path=relative_path,
         raw=raw,
         content=content,
@@ -4576,7 +4596,7 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "bm25_score": bm25_score,
         "project": read.project,
         "timestamp": read.timestamp,
-        "candidate_id": read.stem,
+        "candidate_id": legacy_candidate_id(read.relative_path),
         "source_sha256": hashlib.sha256(read.raw).hexdigest(),
         "byte_start": 0,
         "byte_end": len(read.raw),
@@ -4906,7 +4926,7 @@ def _direct_markdown_hits(
 def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
     row = dict(item)
     row["vector_score"] = row.get("vector_score", row.get(score_key))
-    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
+    row.setdefault("candidate_id", legacy_candidate_id(row.get("path")))
     row["generation"] = "legacy"
     return row
 
@@ -5110,7 +5130,7 @@ def _vector_hit(
         "score": score,
         "project": row_project,
         "timestamp": vectors_data["timestamps"][index],
-        "candidate_id": Path(path).stem,
+        "candidate_id": legacy_candidate_id(path),
     }
 
 

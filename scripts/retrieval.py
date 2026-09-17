@@ -3772,7 +3772,9 @@ def _first_present(row: Mapping[str, Any], keys: tuple[str, ...], fallback: Any)
 
 
 def _legacy_candidate_id(row: Mapping[str, Any], path: str) -> str:
-    fallback = Path(path).stem or path
+    import search_memory
+
+    fallback = search_memory.legacy_candidate_id(path) or path
     return str(_first_present(row, ("candidate_id", "chunk_id", "slug"), fallback))
 
 
