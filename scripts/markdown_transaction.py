@@ -4080,6 +4080,20 @@ def _classify_settled_append(
 ) -> _AppendAttemptResult:
     if record is None:
         return "retry"
+    if coordinator._artifacts_pruned(record.id):
+        # The images that would prove a duplicate are gone with the undo window,
+        # so this is a new request: the next candidate id carries the write.
+        return "advance"
+    return _classify_comparable_append(coordinator, record, relative, block)
+
+
+def _classify_comparable_append(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord,
+    relative: str,
+    block: bytes,
+) -> _AppendAttemptResult:
+    """A record whose images still exist: the same request, or a different one."""
     if not _append_request_matches(coordinator, record, relative, block):
         raise OperationBoundElsewhereError("operation_id is already bound to a different request")
     return record if record.state == "committed" else "advance"
@@ -9095,6 +9109,15 @@ class MarkdownCoordinator:
             parent_transaction_id=row["parent_transaction_id"],
             error_code=row["error_code"],
         )
+
+    def _artifacts_pruned(self, transaction_id: str) -> bool:
+        """Whether `prune` already removed this transaction's plan and images."""
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT artifacts_pruned_at FROM "transaction" WHERE id = ?',
+                (transaction_id,),
+            ).fetchone()
+        return row is not None and row["artifacts_pruned_at"] is not None
 
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
         with self._connect() as database:
