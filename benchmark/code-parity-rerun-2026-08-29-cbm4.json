@@ -1,6 +1,6 @@
 {
   "version": "code-parity-v1",
-  "directory": "/home/user/llm-wiki",
+  "directory": "<vault>",
   "budget_seconds": 60.0,
   "tasks": [
     {

@@ -71,7 +71,7 @@ MCP_OPERATION_SECONDS = 10.0
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
-# /home/user/agenticos/checkout-claude/main, 436 sources, 1,235 chunks -- took
+# 436 sources, 1,235 chunks -- took
 # 118.9 s end to end, most of it embedding. 600 s leaves room for a repository
 # several times that size; anything larger is refused by name on the deadline
 # rather than half-built, because the build registers only after every artifact

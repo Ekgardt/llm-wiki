@@ -1,7 +1,7 @@
 {
   "version": "code-parity-v2",
   "date": "2026-09-11",
-  "repository": "/home/user/llm-wiki",
+  "repository": "<vault>",
   "notes": [
     "Every gold answer was established by hand from the source on 2026-08-28,",
     "by grep plus reading the cited lines — not by trusting either tool.",
