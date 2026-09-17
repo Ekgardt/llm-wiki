@@ -74,11 +74,15 @@ EVENTS = frozenset(
 )
 
 
-def build_session_start_context() -> Sequence[Any]:
-    """Build structured context without loading SessionStart on unrelated commands."""
+def build_session_start_context(slug: str | None = None) -> Sequence[Any]:
+    """Build structured context without loading SessionStart on unrelated commands.
+
+    The slug is this session's own project, so its advisory and guard rails are not
+    the ones of whichever session wrote the last heartbeat.
+    """
     from session_start_context import build_context_items
 
-    return build_context_items()
+    return build_context_items(slug)
 
 
 OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
@@ -2437,7 +2441,7 @@ def _ingest_session_start(
     )
     result["maintenance_scheduled"] = maintenance_pid is not None
     result["context"] = _append_context(
-        build_session_start_context(),
+        build_session_start_context(slug),
         _recover_project_handoff(slug, project_dir),
         trailing_newline=True,
         code_graph=_code_graph_reminder(project_dir),
@@ -3051,11 +3055,43 @@ def _session_end_trigger(trigger: str | None, payload: Mapping[str, Any]) -> Any
     return payload.get("reason")
 
 
+def _decoded_delegate_report(stdout: object) -> dict[str, Any]:
+    try:
+        reported = json.loads(str(stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return reported if isinstance(reported, dict) else {}
+
+
+def _reported_daily_log(stdout: object) -> bool | None:
+    """The delegate's own answer, or None when it did not give one."""
+    written = _decoded_delegate_report(stdout).get("daily_log_written")
+    if isinstance(written, bool):
+        return written
+    return None
+
+
+def _delegate_wrote_daily_log(tagged: object) -> bool:
+    """What the tag delegate says it did, or its exit code when it says nothing.
+
+    The delegate exits 0 whether it wrote a line or skipped the work (a session
+    inside the vault, a session started in `$HOME`, no vault root), so the exit code
+    alone reported tags that never happened. A delegate from an older install prints
+    nothing and keeps the old reading. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    exited_cleanly = getattr(tagged, "returncode", 0) == 0
+    reported = _reported_daily_log(getattr(tagged, "stdout", ""))
+    if reported is None:
+        return exited_cleanly
+    return exited_cleanly and reported
+
+
 def _tag_session_end(
     payload: Mapping[str, Any], project_dir: Path | None, result: dict[str, Any]
 ) -> None:
     tagged = _run_delegate("session_end_project_tag.py", payload, project_dir=project_dir)
-    result["daily_log_written"] = getattr(tagged, "returncode", 0) == 0
+    result["daily_log_written"] = _delegate_wrote_daily_log(tagged)
     result["returncode"] = getattr(tagged, "returncode", 0)
 
 
@@ -3309,11 +3345,34 @@ def _dispatch_cli_event(
     return _legacy_output(args.source, envelope.event_type, result)
 
 
+# Set by `memory_state.spawn_detached` and by every provider call
+# (`llm_client`): the process under this variable is the memory system itself.
+REENTRY_MARKER = "CLAUDE_INVOKED_BY"
+
+
+def _is_memory_automation() -> bool:
+    """True inside a process the memory system started.
+
+    A host event raised by one of our own calls is our own traffic: capturing it
+    would classify the memory system's prompt as a session, and on a host whose
+    machine-managed settings register these hooks it would do so on every call.
+    The two retired delegates had this guard; the adapter that replaced them did
+    not. The worker and maintenance modes are not host events and never reach
+    here. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    return bool(os.environ.get(REENTRY_MARKER, "").strip())
+
+
+def _require_named_event(args: argparse.Namespace) -> None:
+    if not args.source or not args.event:
+        raise ValueError("invalid integration event")
+
+
 def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
-    if not args.source:
-        raise ValueError("invalid integration event")
-    if not args.event:
-        raise ValueError("invalid integration event")
+    _require_named_event(args)
+    if _is_memory_automation():
+        return None
     raw = _apply_checkpoint_arg(_read_hook_input(), args.checkpoint_type)
     envelope = normalize_occurrence_event(args.source, args.event, raw)
     return _dispatch_cli_event(args, envelope)

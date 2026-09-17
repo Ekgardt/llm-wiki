@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -691,7 +691,34 @@ def metacognitive_block() -> str:
     return "\n".join(lines) + "\n"
 
 
-def advisory_block() -> str:
+def _latest_heartbeat_slug() -> str | None:
+    """The project of the most recent heartbeat — the fallback when none is given.
+
+    It is only a fallback: two sessions that start together would otherwise swap
+    advisories, because the newest heartbeat is whichever session wrote last. The
+    caller that knows the session's own project passes it. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    try:
+        heartbeats = load_state().get("codex_heartbeats", {})
+    except Exception:  # noqa: BLE001 - no state is no slug, never a failed session start
+        return None
+    if not isinstance(heartbeats, dict) or not heartbeats:
+        return None
+    return max(heartbeats.items(), key=lambda kv: _heartbeat_time(kv[1]))[0]
+
+
+def _heartbeat_time(entry: object) -> str:
+    if not isinstance(entry, Mapping):
+        return ""
+    return str(entry.get("at", ""))
+
+
+def _context_slug(slug: str | None) -> str | None:
+    return slug or _latest_heartbeat_slug()
+
+
+def advisory_block(slug: str | None = None) -> str:
     """Proactive advisory — actionable intelligence for the current project.
 
     Unlike the metacognitive block (inventory/backlog), this surfaces
@@ -706,28 +733,13 @@ def advisory_block() -> str:
     except ImportError:
         return ""
 
-    # Try to detect the current project slug from heartbeat state.
-    slug = None
-    try:
-        state = load_state()
-        heartbeats = state.get("codex_heartbeats", {})
-        if heartbeats:
-            # Use the most recent heartbeat's slug
-            latest = max(
-                heartbeats.items(),
-                key=lambda kv: kv[1].get("at", ""),
-            )
-            slug = latest[0]
-    except Exception:
-        pass
-
-    advisory = build_advisory(slug)
+    advisory = build_advisory(_context_slug(slug))
     if not advisory:
         return ""
     return f"## Advisory\n\n{advisory}\n\n"
 
 
-def guardrails_block() -> str:
+def guardrails_block(slug: str | None = None) -> str:
     """Learned rules from past corrections — prevents repeating mistakes.
 
     Reads promoted feedback candidates + correction-type knowledge
@@ -740,18 +752,7 @@ def guardrails_block() -> str:
     except ImportError:
         return ""
 
-    # Try to detect slug from heartbeat
-    slug = None
-    try:
-        state = load_state()
-        heartbeats = state.get("codex_heartbeats", {})
-        if heartbeats:
-            latest = max(heartbeats.items(), key=lambda kv: kv[1].get("at", ""))
-            slug = latest[0]
-    except Exception:
-        pass
-
-    guardrails = build_guardrails(slug)
+    guardrails = build_guardrails(_context_slug(slug))
     if not guardrails:
         return ""
     return f"{guardrails}\n\n"
@@ -1015,14 +1016,19 @@ def _log_section_text() -> str:
     return f"## Recent {LOG_RELATIVE}\n\n{tail}"
 
 
-def build_context_items() -> list[ContextItem]:
-    """Build structured SessionStart items for direct and adapter injection."""
+def build_context_items(slug: str | None = None) -> list[ContextItem]:
+    """Build structured SessionStart items for direct and adapter injection.
+
+    `slug` is the project of the session being started, which the adapter reads from
+    the session's own working directory. Without one the advisory falls back to the
+    most recent heartbeat, which belongs to whichever session wrote last.
+    """
     sections = [
         ("title", "# Project memory context"),
-        ("guardrails", guardrails_block()),
+        ("guardrails", guardrails_block(slug)),
         ("metacognitive", metacognitive_block()),
         ("health", health_block()),
-        ("advisory", advisory_block()),
+        ("advisory", advisory_block(slug)),
         ("impact", _impact_block()),
         ("index", _index_section_text()),
         ("daily", _daily_section_text()),

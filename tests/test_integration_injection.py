@@ -1527,7 +1527,7 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# General memory\n",
+        lambda slug=None: "# General memory\n",
     )
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
     envelope = integration_adapter.normalize_event(
@@ -1573,7 +1573,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
-    monkeypatch.setattr(integration_adapter, "build_session_start_context", lambda: "")
+    monkeypatch.setattr(integration_adapter, "build_session_start_context", lambda slug=None: "")
     envelope = integration_adapter.normalize_event(
         "opencode",
         "session_start",
@@ -1669,7 +1669,7 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# General memory\n",
+        lambda slug=None: "# General memory\n",
     )
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
     monkeypatch.setattr(
@@ -1715,7 +1715,7 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
     monkeypatch.setattr(
-        integration_adapter, "build_session_start_context", lambda: "# General memory\n"
+        integration_adapter, "build_session_start_context", lambda slug=None: "# General memory\n"
     )
     envelope = integration_adapter.normalize_event(
         "opencode", "session_start", {"directory": str(project_dir)}

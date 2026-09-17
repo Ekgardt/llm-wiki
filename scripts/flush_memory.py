@@ -106,11 +106,17 @@ def _tier_token(first_line_raw: str) -> str:
 
 
 def _legacy_ok(stripped: str) -> bool:
-    """The old protocol: a bare FLUSH_OK, alone or on a line of its own."""
-    norm = stripped.strip(" .\n\t*`").upper()
-    if norm in {sentinel.upper() for sentinel in LEGACY_SENTINELS}:
+    """The old protocol: a bare FLUSH_OK, alone or on a line of its own.
+
+    Both comparisons read the same upper-cased set. The per-line one used to test an
+    upper-cased line against the mixed-case sentinels, so `(no durable content)` on a
+    line of its own never matched. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    sentinels = {sentinel.upper() for sentinel in LEGACY_SENTINELS}
+    if stripped.strip(" .\n\t*`").upper() in sentinels:
         return True
-    return any(line.strip().upper() in LEGACY_SENTINELS for line in stripped.splitlines())
+    return any(line.strip().upper() in sentinels for line in stripped.splitlines())
 
 
 def _untiered_response(stripped: str) -> tuple[str, str]:

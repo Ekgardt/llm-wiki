@@ -1449,11 +1449,31 @@ def _require_codex_exited_cleanly(result: subprocess.CompletedProcess) -> None:
     )
 
 
+def provider_environment() -> dict[str, str]:
+    """The child's environment, marked as memory automation.
+
+    A provider call is the memory system's own traffic. The marker is the one
+    `memory_state.spawn_detached` sets, and the integration adapter refuses host
+    events while it is set, so a CLI whose machine-managed settings register our
+    hooks does not capture the memory call as a session. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    environment = os.environ.copy()
+    environment["CLAUDE_INVOKED_BY"] = environment.get(
+        "CLAUDE_INVOKED_BY", "memory-automation"
+    )
+    return environment
+
+
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
             result = _run_cli(
-                command, stdin=stdin_handle, capture_output=True, cwd=neutral
+                command,
+                stdin=stdin_handle,
+                capture_output=True,
+                cwd=neutral,
+                env=provider_environment(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ProviderTimeout(
@@ -1520,6 +1540,7 @@ def _claude_cli_flags() -> frozenset[str]:
                 encoding="utf-8",
                 errors="ignore",
                 cwd=neutral,
+                env=provider_environment(),
             )
     except (subprocess.TimeoutExpired, OSError):
         return frozenset()
@@ -1625,6 +1646,7 @@ def _call_claude(
                 encoding="utf-8",
                 errors="ignore",
                 cwd=neutral,
+                env=provider_environment(),
             )
         return _claude_answer(descriptor, result)
     except subprocess.TimeoutExpired as exc:

@@ -251,9 +251,9 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
         lambda **kwargs: {"overall_status": "degraded", "checks": []},
     )
     monkeypatch.setattr(doctor, "degraded_summary", lambda report: "index: stale")
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
 
     assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
@@ -269,9 +269,9 @@ def test_session_start_retains_3035_byte_advisory_under_shared_token_budget(monk
     import session_start_context
 
     advisory = "A" * 3035
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda: advisory)
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: advisory)
     monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
     monkeypatch.setattr(session_start_context, "health_block", lambda: "")
     # Force the index/daily/log to be tiny so the advisory alone is the
@@ -374,10 +374,10 @@ def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
     import session_start_context
     from context_budget import ContextBudget
 
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
     monkeypatch.setattr(session_start_context, "health_block", lambda: "")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
     monkeypatch.setattr(session_start_context, "trim_index", lambda text: "I" * 200)
     monkeypatch.setattr(
@@ -908,9 +908,9 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
 
 def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
     """Silence every SessionStart section except the log tail."""
-    monkeypatch.setattr(module, "guardrails_block", lambda: "")
+    monkeypatch.setattr(module, "guardrails_block", lambda slug=None: "")
     monkeypatch.setattr(module, "metacognitive_block", lambda: "")
-    monkeypatch.setattr(module, "advisory_block", lambda: "")
+    monkeypatch.setattr(module, "advisory_block", lambda slug=None: "")
     monkeypatch.setattr(module, "_impact_block", lambda: "")
     monkeypatch.setattr(module, "health_block", lambda: "")
     monkeypatch.setattr(module, "trim_index", lambda *_: "")

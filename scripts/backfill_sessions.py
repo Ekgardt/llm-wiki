@@ -22,7 +22,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -59,6 +59,7 @@ class Outcome:
     empty: int = 0
     refused: int = 0
     bytes_written: int = 0
+    unscanned: int = 0
     refused_sessions: list[str] = field(default_factory=list)
 
     def as_lines(self, applied: bool) -> list[str]:
@@ -69,14 +70,28 @@ class Outcome:
             f"already present: {self.present}",
             f"nothing to keep: {self.empty}",
             f"refused by the writer: {self.refused}",
+            *self._cap_lines(),
+        ]
+
+    def _cap_lines(self) -> list[str]:
+        """The cap is named when it cut the scan, so a short pass is never silent."""
+        if not self.unscanned:
+            return []
+        return [
+            f"left unscanned by the {MAX_TRANSCRIPTS}-transcript cap: {self.unscanned}"
+            " (run again after these are recorded)"
         ]
 
 
-def _transcripts(roots: tuple[Path, ...]) -> list[Path]:
+def _found_transcripts(roots: tuple[Path, ...]) -> list[Path]:
     found: list[Path] = []
     for root in roots:
         found.extend(_transcripts_under(root))
-    return sorted(found)[:MAX_TRANSCRIPTS]
+    return sorted(found)
+
+
+def _transcripts(roots: tuple[Path, ...]) -> list[Path]:
+    return _found_transcripts(roots)[:MAX_TRANSCRIPTS]
 
 
 def _transcripts_under(root: Path) -> list[Path]:
@@ -98,14 +113,18 @@ def _memory_call(path: Path) -> bool:
     return PROVIDER_CWD_MARKER in Path(_first_cwd(path)).name
 
 
-def _first_cwd(path: Path) -> str:
-    """The working directory the first records name (Claude `cwd`, Codex `payload.cwd`)."""
+def _head_lines(path: Path) -> list[str]:
+    """The first records of a transcript, as lines; empty when it cannot be read."""
     try:
         with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            heads = [handle.readline(MAX_TRANSCRIPT_BYTES) for _ in range(MAX_HEAD_RECORDS)]
+            return [handle.readline(MAX_TRANSCRIPT_BYTES) for _ in range(MAX_HEAD_RECORDS)]
     except OSError:
-        return ""
-    return next((cwd for cwd in map(_record_cwd, heads) if cwd), "")
+        return []
+
+
+def _first_cwd(path: Path) -> str:
+    """The working directory the first records name (Claude `cwd`, Codex `payload.cwd`)."""
+    return next((cwd for cwd in map(_record_cwd, _head_lines(path)) if cwd), "")
 
 
 def _record_cwd(line: str) -> str:
@@ -125,12 +144,42 @@ def _text(value: object) -> str:
 
 
 def _session_day(path: Path) -> str:
-    """The day the session ended, by the transcript's own timestamp."""
+    """The local day the session ended, by the transcript's own timestamp.
+
+    Local, not UTC: live capture stamps `captured_at` from `datetime.now().astimezone()`,
+    and the record's directory is that day. A UTC day filed the same session under a
+    different directory than live capture would, and "existing records are left alone"
+    then wrote it a second time. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
     try:
         modified = path.stat().st_mtime
     except OSError:
         return "undated"
-    return datetime.fromtimestamp(modified, timezone.utc).date().isoformat()
+    return datetime.fromtimestamp(modified).date().isoformat()
+
+
+def _record_session_id(path: Path) -> str:
+    """The id the session calls itself by, or the file's stem when it names none.
+
+    Live capture names a record by the host's session id. A Codex rollout file is
+    named `rollout-<date>-<uuid>`, so naming the record by the file stem gave the same
+    session two records, one per path.
+    """
+    return _first_session_id(path) or path.stem
+
+
+def _first_session_id(path: Path) -> str:
+    """The session id the first records carry (Claude `sessionId`, Codex `payload.id`)."""
+    return next((found for found in map(_record_session_id_field, _head_lines(path)) if found), "")
+
+
+def _record_session_id_field(line: str) -> str:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return ""
+    return _text(_field(record, "sessionId")) or _text(_field(_field(record, "payload"), "id"))
 
 
 def _read_transcript(path: Path) -> str:
@@ -143,10 +192,12 @@ def _read_transcript(path: Path) -> str:
 
 def _fields(path: Path, day: str) -> dict[str, object]:
     return {
-        "session": path.stem,
+        "session": _record_session_id(path),
         "host": "claude" if ".claude" in path.parts else "codex",
         "event": "backfill",
-        "captured_at": f"{day}T00:00:00+00:00",
+        # The local day, as live capture records it; no offset is claimed for a
+        # timestamp the transcript itself did not carry.
+        "captured_at": f"{day}T00:00:00",
         "source_event_id": None,
     }
 
@@ -159,7 +210,7 @@ def _plan_one(vault: Path, path: Path, outcome: Outcome) -> tuple[str, str] | No
     """(day, transcript) when this session is worth a record, else None."""
     outcome.scanned += 1
     day = _session_day(path)
-    if _record_exists(vault, day, path.stem):
+    if _record_exists(vault, day, _record_session_id(path)):
         outcome.present += 1
         return None
     transcript = _read_transcript(path)
@@ -188,7 +239,9 @@ def _count_one(transcript: str, outcome: Outcome) -> None:
 def backfill(vault: Path, roots: tuple[Path, ...], *, apply: bool) -> Outcome:
     """Write one record per past transcript; existing records are left alone."""
     outcome = Outcome()
-    for path in _transcripts(roots):
+    found = _found_transcripts(roots)
+    outcome.unscanned = max(0, len(found) - MAX_TRANSCRIPTS)
+    for path in found[:MAX_TRANSCRIPTS]:
         planned = _plan_one(vault, path, outcome)
         if planned is None:
             continue

@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import traceback
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -284,14 +285,15 @@ def _session_operation_id(payload: dict) -> str | None:
     return f"session-end:{source_event_id}"
 
 
-def _tag_session() -> None:
+def _tag_session() -> bool:
+    """True when an entry was appended; False for every skip."""
     paths = _vault_paths()
     if paths is None:
-        return
+        return False
     vault, daily_dir = paths
     project_dir = _eligible_project(vault)
     if project_dir is None:
-        return
+        return False
     payload = _read_payload()
     now = datetime.now()
     slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
@@ -301,13 +303,28 @@ def _tag_session() -> None:
         _session_entry(payload, slug, project_dir, now),
         operation_id=_session_operation_id(payload),
     )
+    return True
+
+
+def _report(written: bool) -> None:
+    """Say on stdout whether a line was written; the exit code stays 0 either way.
+
+    A skip (no vault root, a session inside the vault, a session started in `$HOME`)
+    used to be indistinguishable from a write, so `codex_memory daily-log` printed
+    "Daily log tagged" for a day nothing was tagged in. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    with suppress(OSError, ValueError):
+        print(json.dumps({"daily_log_written": written}, ensure_ascii=False))
 
 
 def main() -> int:
+    written = False
     try:
-        _tag_session()
+        written = _tag_session()
     except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
+    _report(written)
     return 0
 
 

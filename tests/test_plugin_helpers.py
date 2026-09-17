@@ -420,7 +420,7 @@ def _wire_session_start_callback(monkeypatch, integration_adapter):
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
+        lambda slug=None: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
     )
     return spawned
 

@@ -361,7 +361,10 @@ When asked to compile or ingest new material:
     (user|ai-derived|web|inferred) when a page makes a claim.** Hierarchy:
     user-stated > web-sourced > ai-derived > inferred. The compile/search
     pipeline uses these fields to rank retrieval results. Without them, pages
-    default to medium / inferred and lose ranking.
+    default to medium / inferred and lose ranking. A raw session record carries
+    a fifth value, `source_authority: session`: the user's own words, unreviewed,
+    so it ranks between `inferred` and `ai-derived` in retrieval and is never a
+    claim authority — a claim compiled from a session record is `ai-derived`.
 
 14. **Track knowledge gaps: when a concept is mentioned but has no page, add
     a stub to `knowledge/notes/`** so the absence is visible, not lost.
