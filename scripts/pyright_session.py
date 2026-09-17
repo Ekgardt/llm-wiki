@@ -75,6 +75,9 @@ STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
 
 _OWNER_CLEANUP_SECONDS = 2.0
+# How much of a caller's time one idle reap may spend. There is no daemon, so
+# the reap rides on a request; it must not become the request's cost.
+_IDLE_REAP_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.01
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
 _MAX_OPEN_DOCUMENTS = 256
@@ -5729,6 +5732,79 @@ class LanguageServerSessionManager:
         finally:
             session._lock.release()
 
+    @staticmethod
+    def _idle_expired_process(
+        session: LanguageServerSession, now: float, deadline: float
+    ) -> bool:
+        """Whether the server this session owns has gone unused past the limit."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            process = session._process
+        finally:
+            session._lock.release()
+        if process is None:
+            return False
+        return process.idle_expired(now)
+
+    def _reserve_if_idle_expired(
+        self, session: LanguageServerSession, now: float, deadline: float
+    ) -> bool:
+        if not self._idle_expired_process(session, now, deadline):
+            return False
+        return session._reserve_idle_close(deadline)
+
+    def _first_reservable_idle(
+        self,
+        key: object,
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]],
+        now: float,
+        deadline: float,
+    ) -> tuple[object, LanguageServerSession] | None:
+        for entry_key, session in live:
+            if entry_key == key:
+                continue
+            if self._reserve_if_idle_expired(session, now, deadline):
+                return entry_key, session
+        return None
+
+    def _reserve_idle_expired(
+        self, key: object, deadline: float
+    ) -> tuple[object, LanguageServerSession] | None:
+        """One server unused past the idle limit, reserved for closing."""
+        now = time.monotonic()
+        self._acquire_manager(deadline)
+        try:
+            live = self._live_entries_locked(deadline)
+        finally:
+            self._lock.release()
+        return self._first_reservable_idle(key, live, now, deadline)
+
+    def _reap_idle_sessions(self, key: object, deadline: float) -> None:
+        """Close one server left unused past the idle limit, on this caller's time.
+
+        There is no daemon, so a request is the only clock the product has. The
+        reap is bounded, it never touches the session being asked for, and it
+        never fails the caller: a close that does not finish leaves a stranded
+        session, which the next caller for that key retries.
+        """
+        reap_deadline = min(deadline, time.monotonic() + _IDLE_REAP_SECONDS)
+        try:
+            reserved = self._reserve_idle_expired(key, reap_deadline)
+        except TimeoutError:
+            return
+        if reserved is None:
+            return
+        self._close_reaped(reserved[1], reap_deadline)
+
+    @staticmethod
+    def _close_reaped(session: LanguageServerSession, deadline: float) -> None:
+        try:
+            session.close(deadline=deadline)
+        except (OSError, RuntimeError, TimeoutError):
+            return
+
     def _admit_manager_locked(self) -> None:
         if self._closed:
             raise RuntimeError("Pyright session manager is closed")
@@ -5953,6 +6029,7 @@ class LanguageServerSessionManager:
         try:
             self._acquire_key_lock(key_lock_state.lock, deadline)
             key_lock_acquired = True
+            self._reap_idle_sessions(key, deadline)
             return self._session_for_key(
                 key, repository, identity, profile, deadline
             )
