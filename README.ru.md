@@ -122,7 +122,8 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
+- bash 4.4+ для `install.sh` — в macOS стоит 3.2, сначала `brew install bash`
 - AI-агент, которым вы уже пользуетесь (Claude Code, OpenCode или Codex)
 
 ### Установка из исходников
@@ -172,7 +173,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 Установить именно этот коммит:
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### Общий транспорт HTTP (необязательно)

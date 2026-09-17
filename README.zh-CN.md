@@ -121,7 +121,8 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) 必须是 0.12.3 —— 两个安装脚本都会拒绝其他版本
+- `install.sh` 需要 bash 4.4+ —— macOS 自带 3.2，请先 `brew install bash`
 - 一个你已在使用的 AI 智能体（Claude Code、OpenCode 或 Codex）
 
 ### 从源码安装
@@ -167,7 +168,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 安装该确切提交：
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### 共享 HTTP 传输（可选）

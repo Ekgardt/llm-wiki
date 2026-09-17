@@ -121,7 +121,8 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
+- bash 4.4+ for `install.sh` — macOS ships 3.2, so `brew install bash` first
 - An AI agent you already use (Claude Code, OpenCode, or Codex)
 
 ### Source install
@@ -169,7 +170,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 Install that exact commit:
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### Shared HTTP transport (optional)
