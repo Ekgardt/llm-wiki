@@ -888,11 +888,31 @@ def _capture_daily_block(
     return redact_secrets(f"{header}{metadata}{body}\n")
 
 
+def _dated_capture_block(
+    record: Mapping[str, object], tier: str, body: str, chosen_at: datetime
+) -> str:
+    """The block, followed by the dates it mentions resolved against its own day.
+
+    The live path never passed through `append_daily`, where that step lived, so no
+    queued entry had its dates resolved. See
+    `docs/research/2026-09-17-a-queued-entry-resolves-its-dates-too.md`.
+    """
+    block = _capture_daily_block(record, tier, body, chosen_at)
+    return _dated_block(chosen_at.strftime("%Y-%m-%d"), block)
+
+
+# `False` is the form every decision stored before 2026-09-17 recorded; it is only
+# ever rebuilt to recognise one of those.
+_CAPTURE_BLOCK_BUILDERS = {True: _dated_capture_block, False: _capture_daily_block}
+
+
 def _capture_operation_plan(
     record: Mapping[str, object],
     tier: str,
     body: str,
     chosen_at: datetime | None,
+    *,
+    dated: bool = True,
 ) -> list[dict[str, object]]:
     from reliable_memory import sha256_bytes
 
@@ -901,7 +921,8 @@ def _capture_operation_plan(
     if chosen_at is None:
         raise ValueError("durable capture decision requires a chosen time")
     chosen = _require_capture_time(chosen_at)
-    block = _capture_daily_block(record, tier, body, chosen)
+    build_block = _CAPTURE_BLOCK_BUILDERS[dated]
+    block = build_block(record, tier, body, chosen)
     path = f"knowledge/daily/{chosen.strftime('%Y-%m-%d')}.md"
     return [
         {
@@ -934,10 +955,13 @@ def _require_capture_decision_semantics(
     expected = (tier, _capture_tier_outcome(tier))
     if actual != expected:
         raise RuntimeError("capture decision outcome is invalid")
-    plan = _capture_operation_plan(
-        intent, tier, body, _capture_decision_time(decision)
-    )
-    if decision["operation_plan"] != plan:
+    chosen_at = _capture_decision_time(decision)
+    # A decision stored before the dates were resolved is still a valid decision.
+    plans = [
+        _capture_operation_plan(intent, tier, body, chosen_at, dated=dated)
+        for dated in (True, False)
+    ]
+    if decision["operation_plan"] not in plans:
         raise RuntimeError("capture decision operation plan is invalid")
 
 
