@@ -177,19 +177,36 @@ def _require_owned_by_caller(root: Path) -> bool:
     return True
 
 
-def _git_text(root: Path, *arguments: str) -> str:
-    """One bounded, non-interactive Git read inside `root`. Never writes."""
+def _git_completed(root: Path, arguments: tuple[str, ...], timeout: float):
+    """The finished Git process, or a named refusal when it outlived its bound.
+
+    `subprocess.TimeoutExpired` is not a `TimeoutError`, so no caller's deferral
+    caught it and one slow checkout ended the whole pass. See
+    `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
     from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
-    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        shell=False,
-        env=sanitized_git_environment(),
-        timeout=GIT_TIMEOUT_SECONDS,
-        check=False,
-    )
+    try:
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            shell=False,
+            env=sanitized_git_environment(),
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise _refuse(
+            "repository_git_probe_timed_out",
+            f"git {arguments[0]} did not finish in {timeout} seconds",
+            directory=str(root),
+        ) from error
+
+
+def _git_text(root: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """One bounded, non-interactive Git read inside `root`. Never writes."""
+    completed = _git_completed(root, arguments, timeout)
     if completed.returncode != 0:
         raise _refuse(
             "repository_git_probe_failed",
@@ -533,7 +550,11 @@ def selected_code_roots(
 
 
 def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
-    from corpus_snapshot import collect_corpus
+    """The captured corpus, or a named refusal: a checkout being written is one too.
+
+    See `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
+    from corpus_snapshot import CorpusChanged, collect_corpus
 
     try:
         return collect_corpus(
@@ -548,6 +569,13 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
         )
     except TimeoutError:
         raise
+    except CorpusChanged as error:
+        raise _refuse(
+            "repository_changed_during_capture",
+            f"the repository was being written while it was read; try again: {error}",
+            directory=str(root),
+            roots=list(roots),
+        ) from error
     except (OSError, ValueError) as error:
         raise _refuse(
             "repository_exceeds_corpus_bounds",
@@ -846,11 +874,23 @@ def _artifact_digest(manifest: Mapping, name: str) -> str | None:
     return None
 
 
+def _source_manifest_bytes(path: Path, generation_id: str) -> bytes:
+    """A registration whose tree is gone is a named refusal, not the end of the pass."""
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise _refuse(
+            "repository_index_unreadable",
+            "the recorded source manifest cannot be read; re-index",
+            generation_id=generation_id,
+        ) from error
+
+
 def _verified_source_manifest(catalog, generation_id: str, manifest: Mapping) -> dict:
     """Read `source-manifest.json` only after its bytes match the manifest digest."""
     path = Path(catalog.generations_path) / generation_id / "source-manifest.json"
     expected = _artifact_digest(manifest, "source-manifest.json")
-    raw = path.read_bytes()
+    raw = _source_manifest_bytes(path, generation_id)
     if expected is None or hashlib.sha256(raw).hexdigest() != expected:
         raise _refuse(
             "repository_index_unreadable",
@@ -1099,8 +1139,15 @@ def run_fenced(
     # from, tolerates a busy database, and releases the owner on exit.
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
     bound = _bounded_deadline(deadline)
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
-        return work(bound, _either_cancelled(beat.cancelled, cancelled))
+    # The heartbeat checks the owner on entry and releases it on exit; both say
+    # `MaintenanceFenceLost` when the lease was taken, and the exit's replaces
+    # the cancelled build's `TimeoutError`. That is a refused fence, not a crash:
+    # `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    try:
+        with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
+            return work(bound, _either_cancelled(beat.cancelled, cancelled))
+    except doctor.MaintenanceFenceLost:
+        return {FENCE_REFUSED: True, "status": "refresh_owned_elsewhere", "reason": "fence_lost"}
 
 
 def _refused_staleness(outcome: dict, staleness) -> dict:
