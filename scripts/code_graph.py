@@ -2476,12 +2476,6 @@ def _dead_code_verdict(
     return (_dead_candidate_row(node, location, called_names, index), None)
 
 
-def _stored_dead_candidate(
-    graph, node: dict, directory: Path, called_names: frozenset[str] | None, index=None
-) -> dict | None:
-    return _dead_code_verdict(graph, node, directory, called_names, index)[0]
-
-
 def _called_names(graph) -> frozenset[str] | None:
     """Every name any call site mentions, or None when the read refused."""
     try:

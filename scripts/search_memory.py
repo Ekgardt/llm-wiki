@@ -594,10 +594,6 @@ def _require_absent_artifacts(destinations: list[Path]) -> None:
             raise FileExistsError(destination)
 
 
-def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
-    return [chunk.text for chunk in snapshot.chunks]
-
-
 def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
     import numpy as np
 
@@ -605,19 +601,6 @@ def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
         raise ValueError("embedder returned a matrix with incompatible shape")
     if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
         raise ValueError("embedder returned a non-finite numeric matrix")
-
-
-def _embedded_matrix(
-    snapshot: CorpusSnapshot, embedder: object, dimensions: int
-) -> object:
-    """The embedder's output, refused unless it is finite and the right shape."""
-    import numpy as np
-
-    matrix = np.asarray(
-        _call_generation_embedder(embedder, _chunk_texts(snapshot))
-    )
-    _require_embedded_shape(matrix, len(snapshot.chunks), dimensions)
-    return np.ascontiguousarray(matrix, dtype=np.float32)
 
 
 # Texts per embedding call, with a stop check before each: `encode` cannot be

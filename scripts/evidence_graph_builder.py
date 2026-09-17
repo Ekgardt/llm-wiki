@@ -34,7 +34,6 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
 
 import corpus_snapshot
 import evidence_graph
@@ -112,14 +111,6 @@ KILL_POINTS: tuple[str, ...] = (
     "before_activation",
     "after_activation",
 )
-KillPoint = Literal[
-    "before_directory_create",
-    "during_extraction",
-    "after_database_commit",
-    "after_validation",
-    "before_activation",
-    "after_activation",
-]
 
 _DEFAULT_POLICY: Mapping[str, object] = {
     "daily_paths": (),

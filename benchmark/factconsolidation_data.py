@@ -110,19 +110,6 @@ class Conflict:
     def key(self) -> str:
         return f"{self.subject}|{self.prop}"
 
-    @property
-    def distinct_values(self) -> tuple[str, ...]:
-        seen: list[str] = []
-        for _, value in self.observations:
-            _append_once(seen, value)
-        return tuple(seen)
-
-
-def _append_once(seen: list[str], value: str) -> None:
-    if value in seen:
-        return
-    seen.append(value)
-
 
 def parse_fact(line: str) -> ParsedFact | None:
     """One numbered line as a fact, or None when no frame claims it."""

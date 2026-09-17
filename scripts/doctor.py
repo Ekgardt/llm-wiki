@@ -3117,24 +3117,6 @@ def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> No
         _extend_unique(codes, ("pyright_version_mismatch",))
 
 
-def _navigation_optional_check(
-    state_root: Path,
-    check_id: str,
-    run_check: Callable[[], dict],
-) -> dict:
-    """Skip navigation diagnostics when the feature is not configured."""
-    lsp_root = state_root / "run" / "lsp"
-    managed = state_root / "cache" / "code-tools" / "pyright"
-    if not lsp_root.exists() and not managed.exists():
-        return _result(
-            check_id,
-            "skipped",
-            "Code navigation is not configured.",
-            {"configured": False},
-        )
-    return run_check()
-
-
 _LSP_RECORD_BYTES = 64 * 1024
 _LSP_READ_CHUNK_BYTES = 4096
 _LSP_JSON_MAX_DEPTH = 32

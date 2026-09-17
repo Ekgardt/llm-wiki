@@ -68,7 +68,6 @@ GENERATED_DIRECTORIES = frozenset({"__pycache__"})
 # the silence of NEW-67 and NEW-135. So they prune only the walks that read
 # this vault's knowledge tree. See the 2026-08-29 note.
 VAULT_SKIP_DIRECTORIES = frozenset({"_template", "gaps", "raw-sources"})
-SKIP_DIRECTORIES = GENERATED_DIRECTORIES | VAULT_SKIP_DIRECTORIES
 _HEADING = re.compile(
     rb"(?m)^[ \t]{0,3}(#{1,6})(?:[ \t]+([^\r\n]*?)|[ \t]*)(?:\r?\n|$)"
 )
@@ -2862,34 +2861,6 @@ def probe_corpus_identity(
     rows = _probe_rows(candidates, selected_deadline)
     newest = max((row[2] for row in rows), default=0)
     return CorpusProbe(entries=tuple(sorted(rows)), newest_mtime_ns=newest)
-
-
-def _override(value: object, fallback: object) -> object:
-    if value is None:
-        return fallback
-    return value
-
-
-def _snapshot_settings(
-    policy: SnapshotPolicy, values: Mapping[str, object]
-) -> dict[str, object]:
-    defaults = {
-        "daily_paths": policy.daily_paths,
-        "code_roots": policy.code_roots,
-        # Revalidation accepts exactly the roots the snapshot recorded, whatever
-        # allowlist produced them. A foreign repository's snapshot must be able
-        # to prove itself against its own policy, not against this vault's names.
-        "approved_code_roots": policy.code_roots,
-        "include_historical": policy.include_historical,
-        "as_of": policy.as_of,
-        "max_files": policy.max_files,
-        "max_file_bytes": policy.max_file_bytes,
-        "max_total_bytes": policy.max_total_bytes,
-        "max_entries": policy.max_entries,
-        "max_directories": policy.max_directories,
-        "max_depth": policy.max_depth,
-    }
-    return {key: _override(values.get(key), default) for key, default in defaults.items()}
 
 
 def validate_live_snapshot(

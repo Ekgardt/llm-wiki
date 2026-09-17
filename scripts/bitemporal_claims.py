@@ -104,18 +104,6 @@ def history(
     return tuple(sorted(resolved, key=_belief_order))
 
 
-def index_as_of(
-    index: object,
-    *,
-    valid_at: object,
-    known_at: object | None = None,
-    subject: str | None = None,
-) -> tuple[Belief, ...]:
-    """The same question asked of a built claim index rather than loose records."""
-    records = index.active_records(subject=subject)
-    return as_of(records, valid_at=valid_at, known_at=known_at)
-
-
 def is_single_valued(relation: object) -> bool:
     """Whether one later value for this relation contradicts an earlier one."""
     return str(relation).strip().casefold() in SINGLE_VALUED_RELATIONS

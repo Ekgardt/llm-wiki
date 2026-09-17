@@ -599,9 +599,6 @@ class LanguageServerProfile:
     def server_path(self, state_root: Path) -> Path:
         return self.managed_root(state_root) / self.server_relative
 
-    def handles_suffix(self, suffix: str) -> bool:
-        return _require_text(suffix, "suffix").casefold() in self.file_suffixes
-
     def language_id_for(self, suffix: str) -> str:
         """The LSP `languageId` a file with this suffix is opened under.
 

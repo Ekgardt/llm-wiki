@@ -55,7 +55,6 @@ MAX_REVISION_FILES = 100_000
 MAX_REVISION_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GIT_STATUS_BYTES = 16 * 1024 * 1024
 GIT_STATUS_TIMEOUT_SECONDS = 5.0
-_MAX_GIT_HEAD_BYTES = 65
 _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -935,27 +934,6 @@ def _git_output(
         run, command, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
 
-def _git_status(
-    root: Path,
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bytes:
-    return _git_output(
-        root,
-        [
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-        ],
-        maximum_bytes=MAX_GIT_STATUS_BYTES,
-        label="Git status",
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-
 
 def _git_state_head_identity(output: bytes) -> bytes:
     """The single HEAD identity git's status reported, or a refusal."""
@@ -1044,32 +1022,6 @@ def _git_state_with_private_index(
         executable=os.fspath(git_executable),
     )
     return _parse_git_state_output(output, allow_missing_head=allow_missing_head)
-
-
-def _git_head(
-    root: Path,
-    *,
-    allow_missing: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> str | None:
-    try:
-        output = _git_output(
-            root,
-            ["rev-parse", "--verify", "HEAD^{commit}"],
-            maximum_bytes=_MAX_GIT_HEAD_BYTES,
-            label="Git HEAD",
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    except subprocess.CalledProcessError:
-        if allow_missing:
-            return None
-        raise
-    value = output.strip()
-    if _GIT_COMMIT_RE.fullmatch(value) is None:
-        raise ValueError("Git HEAD returned an invalid commit identity")
-    return value.decode("ascii")
 
 
 def _status_records(output: bytes) -> list[bytes]:

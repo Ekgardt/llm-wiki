@@ -17,7 +17,7 @@ from enum import Enum, unique
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from code_intelligence import AnalysisIdentity, Capability, PositionEncoding, VerifiedAnalysisBatch
+from code_intelligence import AnalysisIdentity, PositionEncoding, VerifiedAnalysisBatch
 from graph_storable import (  # noqa: F401 - the writer's rules, shared with its readers
     MAX_IDENTITY_KEY_CHARS,
     storable_identity_key,
@@ -2308,68 +2308,6 @@ def validate_persisted_scope(database: sqlite3.Connection, run_id: str) -> None:
     for scope_id, _manifest, _target, _configuration in scopes:
         sources = _require_scope_sources(database, scope_id)
         _require_scope_coverage(database, scope_id, sources, capability_values)
-
-
-def _scope_source_rows(database: sqlite3.Connection, scope_id: str) -> list[dict]:
-    sources = database.execute(
-        "SELECT source_id,source_sha256,disposition FROM expected_source "
-        "WHERE scope_id=? ORDER BY source_id",
-        (scope_id,),
-    ).fetchall()
-    return [
-        {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
-        for row in sources
-    ]
-
-
-def _coverage_misaligned(coverage: list, source_rows: list[dict]) -> bool:
-    return [row[0] for row in coverage] != [row["source_id"] for row in source_rows]
-
-
-def _coverage_complete(coverage: list) -> bool:
-    return all(row[1] in {"complete", "excluded"} and row[2] == 1 for row in coverage)
-
-
-def _closed_world_terms(scope, coverage: list) -> bool:
-    return (
-        scope[2] in {"available", "not-required"}
-        and scope[3] == "complete"
-        and scope[4] == "complete"
-        and _coverage_complete(coverage)
-    )
-
-
-def _scope_closed_world(
-    database: sqlite3.Connection, scope_id: str, capability: Capability, scope
-) -> bool:
-    source_rows = _scope_source_rows(database, scope_id)
-    if len(source_rows) != scope[0] or _set_sha256(source_rows) != scope[1]:
-        return False
-    coverage = database.execute(
-        "SELECT source_id,status,closed_world_eligible FROM coverage "
-        "WHERE scope_id=? AND capability=? ORDER BY source_id",
-        (scope_id, capability.value),
-    ).fetchall()
-    if _coverage_misaligned(coverage, source_rows):
-        return False
-    return _closed_world_terms(scope, coverage)
-
-
-def database_closed_world(
-    database: sqlite3.Connection,
-    scope_id: str,
-    capability: Capability,
-) -> bool:
-    if not isinstance(capability, Capability):
-        return False
-    scope = database.execute(
-        "SELECT expected_source_count,expected_source_set_sha256,generated_sources,"
-        "dependency_resolution,analyzer_support FROM analysis_scope WHERE scope_id=?",
-        (scope_id,),
-    ).fetchone()
-    if scope is None:
-        return False
-    return _scope_closed_world(database, scope_id, capability, scope)
 
 
 def _require_optional_run_digests(row: sqlite3.Row) -> None:

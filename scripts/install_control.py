@@ -813,22 +813,6 @@ def _combined_scheduler_state(file_state: str, service_states: Sequence[str]) ->
     return "conflict"
 
 
-def _systemd_read(
-    *,
-    unit_directory: Path,
-    definitions: Mapping[str, bytes],
-    desired: bytes,
-    runner: CommandRunner,
-    systemctl: str,
-) -> bytes | None:
-    combined = _systemd_projection_state(unit_directory, definitions, runner, systemctl)
-    if combined == "absent":
-        return None
-    if combined == "installed":
-        return desired
-    return b"conflict"
-
-
 def _systemd_projection_state(
     unit_directory: Path,
     definitions: Mapping[str, bytes],
@@ -1257,29 +1241,6 @@ def _launchd_job_state(runner: CommandRunner, launchctl: str, domain: str, label
     if exit_code == 0:
         return "active"
     return "absent"
-
-
-def _launchd_read(
-    *,
-    launch_agents_directory: Path,
-    definitions: Mapping[str, bytes],
-    desired: bytes,
-    runner: CommandRunner,
-    launchctl: str,
-    domain: str,
-) -> bytes | None:
-    combined = _launchd_projection_state(
-        launch_agents_directory,
-        definitions,
-        runner,
-        launchctl,
-        domain,
-    )
-    if combined == "absent":
-        return None
-    if combined == "installed":
-        return desired
-    return b"conflict"
 
 
 def _launchd_projection_state(
@@ -1813,26 +1774,6 @@ def _windows_task_state_value(output: bytes) -> str:
     }:
         raise InstallControlError("install_windows_task_state_invalid")
     return str(value["state"])
-
-
-def _read_windows_tasks(
-    *,
-    desired: bytes,
-    runner: CommandRunner,
-    command: tuple[str, ...],
-) -> bytes | None:
-    exit_code, output = runner((*command, "-StateJson"), None)
-    if exit_code != 0:
-        raise InstallControlError("install_windows_task_state_failed")
-    return _windows_task_snapshot(_windows_task_state_value(output), desired)
-
-
-def _windows_task_snapshot(state: str, desired: bytes) -> bytes | None:
-    if state == "absent":
-        return None
-    if state == "equivalent":
-        return desired
-    return b"conflict"
 
 
 def _write_windows_tasks(

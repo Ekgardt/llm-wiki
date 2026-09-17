@@ -36,7 +36,6 @@ from reliable_memory import (
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
-RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 # The claim tree's ceiling, which is the journal's: a project journal is one of
 # the pages this index reads, and a page the journal accepts must never be one
 # the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile

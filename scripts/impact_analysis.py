@@ -546,25 +546,6 @@ class _ChangeCollector:
 _LEGACY_RANGE = r"([^.]\S*)\.\.([^.]\S*)"
 
 
-def get_changed_files(git_range: str | None = None) -> list[str]:
-    """Compatibility wrapper; ranges are accepted only as explicit commit pairs."""
-    try:
-        return _changed_paths(_changes_for_range(git_range))
-    except (OSError, TimeoutError, ValueError):
-        return []
-
-
-def _changes_for_range(git_range: str | None) -> list[dict]:
-    if git_range is None:
-        return collect_git_changes(ROOT)
-    match = re.fullmatch(_LEGACY_RANGE, git_range)
-    if match is None:
-        return []
-    return collect_git_changes(
-        ROOT, comparison="two-commits", base=match.group(1), target=match.group(2)
-    )
-
-
 def _changed_paths(changes: list[dict]) -> list[str]:
     return sorted({str(item["new_path"] or item["old_path"]) for item in changes})
 

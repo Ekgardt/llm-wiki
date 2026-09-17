@@ -383,19 +383,6 @@ class CompileApplyResult:
     action_key: str
 
 
-def assess_claim_contradictions(
-    source: bytes,
-    extraction: Mapping[str, object],
-    *,
-    pipeline: ContradictionPipeline,
-    benchmark_gate: bool = False,
-):
-    """Run verified claim extraction through the sole lifecycle policy boundary."""
-    return pipeline.assess_raw(
-        source, extraction, benchmark_gate=benchmark_gate
-    )
-
-
 def _logical_path(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 

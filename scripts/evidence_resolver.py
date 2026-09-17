@@ -1256,17 +1256,6 @@ def _parsed_reference(candidate: str) -> EvidenceRef:
         raise ValueError(f"evidence reference is not canonical: {candidate}") from exc
 
 
-def verify_supplied_citation(
-    citation: Mapping[str, object],
-    supplied: Mapping[str, object],
-    *,
-    vault: Path,
-) -> None:
-    """Bind one generated citation to the exact span supplied for generation."""
-    _require_citation_fields(citation, supplied)
-    verify_evidence_span(supplied, vault=vault)
-
-
 def verify_evidence_span(supplied: Mapping[str, object], *, vault: Path) -> None:
     """Bind one supplied evidence span to the source it was cut from.
 
@@ -1280,30 +1269,6 @@ def verify_evidence_span(supplied: Mapping[str, object], *, vault: Path) -> None
     _require_citation_span(supplied, text)
     source = _citation_source_bytes(source_path)
     _require_citation_binding(supplied, source, str(text))
-
-
-_CITATION_FIELDS = frozenset(
-    {
-        "citation_id",
-        "relative_path",
-        "source_sha256",
-        "revision",
-        "byte_start",
-        "byte_end",
-        "line_start",
-        "line_end",
-        "span_sha256",
-    }
-)
-
-
-def _require_citation_fields(
-    citation: Mapping[str, object], supplied: Mapping[str, object]
-) -> None:
-    if set(citation) != _CITATION_FIELDS or any(
-        citation.get(key) != supplied.get(key) for key in _CITATION_FIELDS
-    ):
-        raise EvidenceResolutionError("citation does not match supplied evidence")
 
 
 def _citation_source_path(relative: object, vault: Path) -> Path:

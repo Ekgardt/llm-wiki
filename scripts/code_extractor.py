@@ -2416,6 +2416,3 @@ def _co_change_anchored(change: CoChange, evidence_source: _CapturedSource) -> b
         0 <= change.byte_start < change.byte_end <= len(evidence_source.content)
         and 0.0 <= change.weight <= 1.0
     )
-
-
-extract_sources = extract_code

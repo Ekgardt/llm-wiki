@@ -89,17 +89,3 @@ def editorial_parents_to_skip(wiki_root: Path) -> tuple[Path, ...]:
     return (
         (wiki_root / "projects" / "_template").resolve(),
     )
-
-
-def is_editorial_name(filename: str) -> bool:
-    """True if *filename* is in EDITORIAL_NAMES."""
-    return filename in EDITORIAL_NAMES
-
-
-def is_backlink_exempt(filename: str) -> bool:
-    """True if the page is exempt from the backlink-reciprocity check.
-
-    Editorial names are always backlink-exempt; so are the explicit
-    BACKLINK_EXEMPT_NAMES (workflows and utility syntheses).
-    """
-    return filename in EDITORIAL_NAMES or filename in BACKLINK_EXEMPT_NAMES

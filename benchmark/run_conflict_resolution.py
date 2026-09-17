@@ -66,9 +66,6 @@ from factconsolidation_data import (  # noqa: E402
 )
 
 DEFAULT_FIXTURE = Path(__file__).resolve().parent / "conflict-resolution-v1.json"
-# Serial 0 lands here; serial n lands n // block_size seconds later. The date is
-# arbitrary and only the order it induces is used.
-EPOCH = "2026-01-01T00:00:00Z"
 # Later than any observation this stand can build, so "what is true now" is what
 # survived every supersession in the stream.
 FAR_FUTURE = "2099-01-01T00:00:00Z"

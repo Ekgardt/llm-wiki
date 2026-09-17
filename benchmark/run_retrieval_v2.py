@@ -2063,13 +2063,6 @@ class ModelEmbeddingAdapter:
         if tuple(candidate.evidence_id for candidate in candidates) != self._candidate_ids:
             raise ValueError("dense candidate universe mismatch")
 
-    def prepare_queries(self, query_texts: Sequence[str]) -> None:
-        formatted = [self._format(text, "query") for text in query_texts]
-        vectors, sparse = self._encode_signals(formatted)
-        self._query_vectors.update(zip(formatted, vectors))
-        if sparse is not None:
-            self._query_sparse.update(zip(formatted, sparse))
-
     def _query_signals(self, formatted_query: str):
         query_vector = self._query_vectors.get(formatted_query)
         if query_vector is not None:

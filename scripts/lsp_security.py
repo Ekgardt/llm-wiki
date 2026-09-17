@@ -453,22 +453,6 @@ def _access_posix(
         return _repository_source(repository, relative_path, root.joinpath(*parts)), content
 
 
-def _resolve_posix(
-    repository: RepositoryScope,
-    relative_path: str,
-    parts: tuple[str, ...],
-    *,
-    must_exist: bool,
-) -> RepositorySource:
-    return _access_posix(
-        repository,
-        relative_path,
-        parts,
-        must_exist=must_exist,
-        reader=None,
-    )[0]
-
-
 def _require_valid_windows_entry(entry: object) -> None:
     if (
         not isinstance(entry, windows_workspace.WindowsEntry)
@@ -778,22 +762,6 @@ def _access_windows(
             content = _read_windows_content(walk, reader)
             _revalidate_windows(canonical_root, root_identity, step_tuple, owned)
         return _repository_source(repository, relative_path, absolute_path), content
-
-
-def _resolve_windows(
-    repository: RepositoryScope,
-    relative_path: str,
-    parts: tuple[str, ...],
-    *,
-    must_exist: bool,
-) -> RepositorySource:
-    return _access_windows(
-        repository,
-        relative_path,
-        parts,
-        must_exist=must_exist,
-        reader=None,
-    )[0]
 
 
 def _platform_access(

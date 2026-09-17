@@ -2648,10 +2648,6 @@ class ProjectStore:
             _apply_delta(targets, delta)
         return active
 
-    @staticmethod
-    def _reduce(target: dict[str, str], operation: Mapping[str, object]) -> None:
-        _reduce_operation(target, operation)
-
     def _reserve(
         self,
         slug: str,
