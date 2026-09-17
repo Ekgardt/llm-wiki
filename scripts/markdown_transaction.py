@@ -3236,7 +3236,7 @@ def _deletion_blocker_code(row: sqlite3.Row, now: datetime) -> str | None:
 def _within_undo_retention(row: sqlite3.Row, now: datetime) -> bool:
     if row["state"] != "committed" or row["artifacts_pruned_at"] is not None:
         return False
-    return _parse_timestamp(row["updated_at"]) >= now - timedelta(days=30)
+    return _parse_timestamp(row["updated_at"]) >= now - timedelta(days=UNDO_RETENTION_DAYS)
 
 
 def _require_same_lease_fence(
@@ -8469,8 +8469,10 @@ class MarkdownCoordinator:
             raise RuntimeError("only a committed transaction can be undone")
         if _parse_timestamp(original.updated_at) < datetime.now(
             timezone.utc
-        ) - timedelta(days=30):
-            raise RuntimeError("transaction is outside the 30-day undo window")
+        ) - timedelta(days=UNDO_RETENTION_DAYS):
+            raise RuntimeError(
+                f"transaction is outside the {UNDO_RETENTION_DAYS}-day undo window"
+            )
         self._require_retained_undo_images(transaction_id)
 
     def _require_retained_undo_images(self, transaction_id: str) -> None:
