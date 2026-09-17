@@ -18,7 +18,7 @@
     "seed": {"type": "integer"},
     "dimensions": {"type": "integer", "minimum": 1},
     "queries": {"type": "integer", "minimum": 1},
-    "cells": {"type": "array", "minItems": 100, "maxItems": 100, "items": {"$ref": "#/$defs/cell"}},
+    "cells": {"type": "array", "minItems": 60, "maxItems": 60, "items": {"$ref": "#/$defs/cell"}},
     "crash_matrix": {
       "type": "object",
       "additionalProperties": false,
@@ -63,7 +63,7 @@
       "additionalProperties": false,
       "required": ["adapter", "corpus_size", "selectivity", "status", "reason", "metrics", "metric_provenance", "latency_profiles", "adoption", "filter_methodology", "index"],
       "properties": {
-        "adapter": {"type": "string", "enum": ["exact-numpy", "sqlite-vec", "usearch", "lancedb-flat", "lancedb-ann"]},
+        "adapter": {"type": "string", "enum": ["exact-numpy", "sqlite-vec", "usearch"]},
         "corpus_size": {"type": "integer", "minimum": 1},
         "selectivity": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
         "status": {"type": "string", "enum": ["ok", "skipped", "failed"]},
@@ -144,7 +144,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["indexed_corpus_size", "selected_corpus_size", "application", "equivalent_predicate", "implementation"],
-      "properties": {"indexed_corpus_size": {"type": "integer", "minimum": 1}, "selected_corpus_size": {"type": "integer", "minimum": 1}, "application": {"const": "query_time"}, "equivalent_predicate": {"const": "selected = true"}, "implementation": {"type": "string", "enum": ["numpy-mask", "postfilter", "lancedb-prefilter"]}}
+      "properties": {"indexed_corpus_size": {"type": "integer", "minimum": 1}, "selected_corpus_size": {"type": "integer", "minimum": 1}, "application": {"const": "query_time"}, "equivalent_predicate": {"const": "selected = true"}, "implementation": {"type": "string", "enum": ["numpy-mask", "postfilter"]}}
     },
     "index_status": {
       "type": "object",

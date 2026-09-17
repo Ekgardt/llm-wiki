@@ -47,52 +47,6 @@ MAX_MODEL_DESCRIPTOR_BYTES = 16 * 1024
 _LINE_BREAKING = frozenset("\x00\r\n")
 
 
-def _bounded_text(value: object) -> bool:
-    """A non-empty single-line string of at most 128 characters."""
-    if not isinstance(value, str) or not value:
-        return False
-    return len(value) <= 128 and _LINE_BREAKING.isdisjoint(value)
-
-
-def _bounded_model_value(value: object, label: str) -> str:
-    if not _bounded_text(value):
-        raise ValueError(f"{label} must be a bounded non-empty string")
-    return value
-
-
-def _model_provenance(
-    use_llm: bool, model_descriptor: object | None, model_revision: str | None
-) -> dict[str, object] | None:
-    if not use_llm:
-        _require_no_model(model_descriptor, model_revision)
-        return None
-    if model_descriptor is None or model_revision is None:
-        raise ValueError("LLM generation requires a model descriptor and revision")
-    return _bounded_provenance(model_descriptor, model_revision)
-
-
-def _require_no_model(model_descriptor: object | None, model_revision: str | None) -> None:
-    if model_descriptor is not None or model_revision is not None:
-        raise ValueError("model descriptor and revision require LLM generation")
-
-
-def _bounded_provenance(model_descriptor: object, model_revision: str) -> dict[str, object]:
-    from llm_client import ProviderDescriptor
-
-    if not isinstance(model_descriptor, ProviderDescriptor):
-        raise TypeError("model_descriptor must be a ProviderDescriptor")
-    _bounded_model_value(model_descriptor.provider, "model provider")
-    _bounded_model_value(model_descriptor.model, "model name")
-    revision = _bounded_model_value(model_revision, "model revision")
-    provenance = {**model_descriptor.canonical(), "revision": revision}
-    encoded = json.dumps(
-        provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    if len(encoded) > MAX_MODEL_DESCRIPTOR_BYTES:
-        raise ValueError("model descriptor exceeds the supported bound")
-    return provenance
-
-
 def _body_l0(body: str) -> str | None:
     """The page's one-sentence summary, else its first prose line after the H1."""
     match = SUMMARY_RE.search(body)
@@ -158,6 +112,52 @@ def get_l1(
     if not legacy_path.exists():
         return None
     return legacy_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _bounded_text(value: object) -> bool:
+    """A non-empty single-line string of at most 128 characters."""
+    if not isinstance(value, str) or not value:
+        return False
+    return len(value) <= 128 and _LINE_BREAKING.isdisjoint(value)
+
+
+def _bounded_model_value(value: object, label: str) -> str:
+    if not _bounded_text(value):
+        raise ValueError(f"{label} must be a bounded non-empty string")
+    return value
+
+
+def _model_provenance(
+    use_llm: bool, model_descriptor: object | None, model_revision: str | None
+) -> dict[str, object] | None:
+    if not use_llm:
+        _require_no_model(model_descriptor, model_revision)
+        return None
+    if model_descriptor is None or model_revision is None:
+        raise ValueError("LLM generation requires a model descriptor and revision")
+    return _bounded_provenance(model_descriptor, model_revision)
+
+
+def _require_no_model(model_descriptor: object | None, model_revision: str | None) -> None:
+    if model_descriptor is not None or model_revision is not None:
+        raise ValueError("model descriptor and revision require LLM generation")
+
+
+def _bounded_provenance(model_descriptor: object, model_revision: str) -> dict[str, object]:
+    from llm_client import ProviderDescriptor
+
+    if not isinstance(model_descriptor, ProviderDescriptor):
+        raise TypeError("model_descriptor must be a ProviderDescriptor")
+    _bounded_model_value(model_descriptor.provider, "model provider")
+    _bounded_model_value(model_descriptor.model, "model name")
+    revision = _bounded_model_value(model_revision, "model revision")
+    provenance = {**model_descriptor.canonical(), "revision": revision}
+    encoded = json.dumps(
+        provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) > MAX_MODEL_DESCRIPTOR_BYTES:
+        raise ValueError("model descriptor exceeds the supported bound")
+    return provenance
 
 
 def tier_legacy_cache_path(

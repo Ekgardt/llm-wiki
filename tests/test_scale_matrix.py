@@ -25,8 +25,6 @@ ADAPTER_IDS = (
     "exact-numpy",
     "sqlite-vec",
     "usearch",
-    "lancedb-flat",
-    "lancedb-ann",
 )
 CRASH_POINTS = (
     "before_fsync",
@@ -65,7 +63,7 @@ _EXACT_METRICS = {
     "batch_throughput_qps": 1.0,
 }
 _LATENCY_PROFILE = {"p50_ms": 1.0, "p95_ms": 1.0, "p99_ms": 1.0}
-_ANN_ADAPTERS = {"usearch", "lancedb-ann"}
+_ANN_ADAPTERS = {"usearch"}
 
 
 def _fixture_metrics(exact: bool) -> dict:
@@ -104,8 +102,6 @@ def _fixture_filter(adapter: str, size: int, fraction: float, exact: bool) -> di
 
 
 def _filter_implementation(adapter: str, exact: bool) -> str:
-    if adapter.startswith("lancedb"):
-        return "lancedb-prefilter"
     return "numpy-mask" if exact else "postfilter"
 
 
@@ -244,7 +240,7 @@ def test_recall_uses_true_exact_top_50_ground_truth() -> None:
 def test_optional_adapters_are_fail_closed_when_missing(monkeypatch) -> None:
     runner = _runner()
     corpus = runner.generate_corpus(n_chunks=16, dimensions=4, seed=1)
-    for adapter_id in ("sqlite-vec", "usearch", "lancedb-flat", "lancedb-ann"):
+    for adapter_id in ("sqlite-vec", "usearch"):
         monkeypatch.setattr(runner, "_adapter_available", lambda _id: False)
         result = runner.run_adapter(
             adapter_id,
@@ -711,160 +707,6 @@ def test_optional_adapter_indexes_full_corpus_and_filters_at_query(monkeypatch) 
     assert cell["filter_methodology"]["indexed_corpus_size"] == 64
     assert cell["filter_methodology"]["application"] == "query_time"
     assert cell["filter_methodology"]["implementation"] == "postfilter"
-
-
-@pytest.mark.parametrize(
-    ("reported_type", "indexed_rows", "expected_status"),
-    [("IVF_PQ", 16, "ann"), ("IVF_PQ", 15, "unavailable"), (None, 16, "unavailable")],
-)
-def test_fake_lance_adapter_never_labels_unverified_index_ann(
-    monkeypatch, reported_type, indexed_rows, expected_status
-) -> None:
-    runner = _runner()
-    corpus = runner.generate_corpus(n_chunks=16, dimensions=4, seed=4)
-    captured = {}
-
-    class Query:
-        def where(self, predicate, prefilter):
-            captured["predicate"] = (predicate, prefilter)
-            return self
-
-        def limit(self, value):
-            captured["limit"] = value
-            return self
-
-        def to_list(self):
-            return [
-                {"id": row_id}
-                for row_id, selected in zip(captured["rows"]["id"], captured["rows"]["selected"])
-                if selected
-            ][: captured["limit"]]
-
-    class Table:
-        def create_index(self, *args, **kwargs):
-            captured["create_index"] = (args, kwargs)
-
-        def list_indices(self):
-            return [types.SimpleNamespace(name="vector_idx", index_type=reported_type)]
-
-        def index_stats(self, _name):
-            return types.SimpleNamespace(
-                index_type=reported_type,
-                num_indexed_rows=indexed_rows,
-                num_unindexed_rows=16 - indexed_rows,
-            )
-
-        def search(self, _query):
-            return Query()
-
-    class Database:
-        def create_table(self, _name, rows):
-            captured["rows"] = rows
-            return Table()
-
-    lance = types.ModuleType("lancedb")
-    lance.connect = lambda _path: Database()
-    lance_index = types.ModuleType("lancedb.index")
-
-    class IvfPq:
-        def __init__(self, **kwargs):
-            self.options = kwargs
-
-    lance_index.IvfPq = IvfPq
-    arrow = types.ModuleType("pyarrow")
-    arrow.table = lambda rows: rows
-    monkeypatch.setitem(sys.modules, "lancedb", lance)
-    monkeypatch.setitem(sys.modules, "lancedb.index", lance_index)
-    monkeypatch.setitem(sys.modules, "pyarrow", arrow)
-    monkeypatch.setattr(runner, "_adapter_available", lambda _id: True)
-
-    cell = runner.run_adapter(
-        "lancedb-ann",
-        corpus=corpus,
-        queries=corpus.vectors[:1],
-        k=10,
-        mask=runner.selectivity_mask(corpus, fraction=0.1, seed=4),
-        selectivity=0.1,
-        exact_p95_ms=1000.0,
-    )
-
-    assert len(captured["rows"]["id"]) == 16
-    create_args, create_kwargs = captured["create_index"]
-    assert create_args == ("vector",)
-    assert isinstance(create_kwargs["config"], IvfPq)
-    assert create_kwargs["config"].options["distance_type"] == "cosine"
-    assert cell["index"]["status"] == expected_status
-    if expected_status == "ann":
-        assert captured["predicate"] == ("selected = true", True)
-    else:
-        assert cell["status"] == "skipped"
-
-
-def test_fake_lance_adapter_verifies_the_vector_index_not_the_first_index(monkeypatch) -> None:
-    runner = _runner()
-    corpus = runner.generate_corpus(n_chunks=16, dimensions=4, seed=4)
-
-    class Query:
-        def where(self, _predicate, prefilter):
-            assert prefilter is True
-            return self
-
-        def limit(self, _value):
-            return self
-
-        def to_list(self):
-            return []
-
-    class Table:
-        def create_index(self, *_args, **_kwargs):
-            return None
-
-        def list_indices(self):
-            return [
-                types.SimpleNamespace(name="selected_idx", index_type="BTREE"),
-                types.SimpleNamespace(name="vector_idx", index_type="IVF_PQ"),
-            ]
-
-        def index_stats(self, name):
-            if name == "selected_idx":
-                return types.SimpleNamespace(
-                    index_type="BTREE", num_indexed_rows=16, num_unindexed_rows=0
-                )
-            return types.SimpleNamespace(
-                index_type="IVF_PQ", num_indexed_rows=16, num_unindexed_rows=0
-            )
-
-        def search(self, _query):
-            return Query()
-
-    class Database:
-        def create_table(self, _name, _rows):
-            return Table()
-
-    lance = types.ModuleType("lancedb")
-    lance.connect = lambda _path: Database()
-    lance_index = types.ModuleType("lancedb.index")
-    lance_index.IvfPq = lambda **kwargs: kwargs
-    arrow = types.ModuleType("pyarrow")
-    arrow.table = lambda rows: rows
-    monkeypatch.setitem(sys.modules, "lancedb", lance)
-    monkeypatch.setitem(sys.modules, "lancedb.index", lance_index)
-    monkeypatch.setitem(sys.modules, "pyarrow", arrow)
-    monkeypatch.setattr(runner, "_adapter_available", lambda _id: True)
-
-    cell = runner.run_adapter(
-        "lancedb-ann",
-        corpus=corpus,
-        queries=corpus.vectors[:1],
-        k=10,
-        mask=runner.selectivity_mask(corpus, fraction=0.1, seed=4),
-        selectivity=0.1,
-        exact_p95_ms=1000.0,
-    )
-
-    assert cell["status"] == "ok"
-    assert cell["index"]["status"] == "ann"
-    assert cell["index"]["type"] == "IVF_PQ"
 
 
 @pytest.mark.parametrize(

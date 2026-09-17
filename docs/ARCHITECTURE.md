@@ -77,7 +77,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LOCAL SEARCH + INTELLIGENCE                                        │
 │  validated immutable generation: FTS + Evidence Graph + evidence     │
-│  optional generation vectors; legacy FTS/vector/Lance compatibility  │
+│  optional generation vectors; legacy FTS/vector compatibility        │
 │  retrieval planner + context compiler + grounded QA                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -156,8 +156,8 @@ valid and lint covers them equally.
 ## Unified evidence retrieval architecture
 
 Markdown, Git, and append-only project journals are authoritative. The generation
-catalog, Evidence Graph, FTS, vectors, contextual artifacts, the L1 tier cache,
-telemetry, and model caches are derived runtime state. A derived record may guide
+catalog, Evidence Graph, FTS, vectors, the L1 tier cache, telemetry, and model
+caches are derived runtime state. A derived record may guide
 retrieval, but it cannot override its captured source bytes.
 
 `cache/evidence-graph/catalog.sqlite3` is the single active pointer. A generation
@@ -188,7 +188,8 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
-2. **Vector (weight=1.0)**: LanceDB HNSW compatibility backend (embedded, no daemon, Apache-2.0).
+2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
+   `intfloat/multilingual-e5-small` embedding as the semantic tier (embedded, no daemon).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
 
@@ -202,7 +203,7 @@ allowed until raw EN/RU/ZH quality, latency, RAM, license, regression, and Paret
 evidence passes the selection contract. **Evidence pending.**
 
 **Why no PostgreSQL?** PostgreSQL requires a daemon, which violates Axiom #1.
-SQLite + optional LanceDB preserves a local, zero-daemon deployment shape. This is
+SQLite plus the optional in-process vectors preserves a local, zero-daemon deployment shape. This is
 not a measured quality-equivalence claim against PostgreSQL or another service.
 
 ### Context and token contract
@@ -314,7 +315,7 @@ no environment variables.
 
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
-- **LanceDB hybrid vectors** (`--extra hybrid`): HNSW vector search, embedded, zero-daemon.
+- **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
 - **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;

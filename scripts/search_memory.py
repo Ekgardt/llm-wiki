@@ -3716,7 +3716,7 @@ def apply_hard_filters(
     authority: str | None = None,
     **_ignored: object,
 ) -> list[dict]:
-    """Single hard-filter contract shared by lexical / NumPy / Lance paths."""
+    """Single hard-filter contract shared by the lexical and NumPy paths."""
     return [
         row
         for row in rows

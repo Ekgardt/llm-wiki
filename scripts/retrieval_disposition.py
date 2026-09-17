@@ -177,3 +177,28 @@ def _counted_gates(database: sqlite3.Connection) -> dict[str, int]:
     except sqlite3.Error:
         return {}
     return {str(row[0])[len("refused: "):]: int(row[1]) for row in rows}
+
+
+# The product writes `refused:<gate>` rows on every dropped claim and has no
+# other reader of them, so the counts an operator can act on are printed here.
+MAX_PRINTED_PAGES = 20
+
+
+def _print_counts(title: str, counts: dict[str, int]) -> None:
+    print(title)
+    for name, count in list(counts.items())[:MAX_PRINTED_PAGES]:
+        print(f"  {count:>5}  {name}")
+    if not counts:
+        print("  (nothing recorded yet)")
+
+
+def main() -> int:
+    """What has carried answers, what was refused, and which gate refused it."""
+    _print_counts("cited (a published answer named this page):", cited_counts())
+    _print_counts("present when every claim was refused:", refused_counts())
+    _print_counts("the gate that refused:", refusal_gates())
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

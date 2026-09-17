@@ -36,7 +36,6 @@
   "test_context_compiler.py": 0.5,
   "test_context_noise.py": 1.02,
   "test_context_packing.py": 0.5,
-  "test_contextual_retrieval.py": 0.5,
   "test_contradiction_benchmark.py": 72.75,
   "test_contradiction_pipeline.py": 0.93,
   "test_corpus_snapshot.py": 0.5,

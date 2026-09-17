@@ -3,7 +3,7 @@
   DIRECT  (< 50 wiki pages)    — read knowledge/index.md + target pages.
   BASE    (50–300 wiki pages)  — use SQLite FTS5 BM25 when direct navigation
                                   is ambiguous.
-  HYBRID  (> 300 wiki pages)   — use BM25 + optional local vectors/LanceDB,
+  HYBRID  (> 300 wiki pages)   — use BM25 + optional local vectors,
                                   graph neighbors, and reranking.
 
 Usage:
