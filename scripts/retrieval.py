@@ -3034,6 +3034,23 @@ def _evidence_ordered(
     return tuple(_merged_places(candidates, places, ordered))
 
 
+def _visible_order(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    exact_query: str,
+) -> tuple[RetrievalCandidate, ...]:
+    """The order a caller sees: distinct pages, episodes by lane score, the named file first.
+
+    The promotion is the last step because the two before it know nothing of
+    it: page diversity put a named daily file behind every compiled page, and
+    the lane score then re-sorted it among the episodes, so a file asked for by
+    its date was no longer the answer and the mode no longer said `EXACT`.
+    Research: `docs/research/2026-09-17-a-named-file-stays-first.md`.
+    """
+    ordered = _evidence_ordered(_page_diverse(candidates), display_meta)
+    return _promote_exact_filename(ordered, exact_query)
+
+
 def _episodic_places(candidates: Sequence[RetrievalCandidate]) -> list[int]:
     return [index for index, item in enumerate(candidates) if _is_episodic(item.relative_path)]
 
@@ -3099,8 +3116,8 @@ def _page_diverse(
 ) -> tuple[RetrievalCandidate, ...]:
     """One chunk per page first, then every chunk that repeats a page.
 
-    This is the last word on the order, so it is where a page is stopped from
-    taking several visible slots. Chunks of episodes are not repeats and keep
+    This is the first step of `_visible_order`, and it is where a page is stopped
+    from taking several visible slots. Chunks of episodes are not repeats and keep
     their rank (`_place_by_page`). Nothing is dropped — the repeats follow the
     first pass — so a caller that wanted every chunk of one page still receives
     them, in order. The remedies that compare candidates to each other (maximal
@@ -3330,9 +3347,10 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
         graph_enabled=progress.graph_enabled,
     )
     candidates, display_meta = _partial_candidates(progress, signals)
-    candidates = _promote_exact_filename(candidates, _exact_query(progress.analysis))
+    exact_query = _exact_query(progress.analysis)
+    candidates = _promote_exact_filename(candidates, exact_query)
     return RetrievalResult(
-        candidates=_capped(_evidence_ordered(_page_diverse(candidates), display_meta), progress.limit),
+        candidates=_capped(_visible_order(candidates, display_meta, exact_query), progress.limit),
         trace=_retrieval_trace(
             requested=progress.requested,
             effective=effective,
@@ -3443,7 +3461,7 @@ def _executed_plan(
     candidates = _promote_exact_filename(candidates, exact_query)
     progress.candidates = candidates
     _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(_evidence_ordered(_page_diverse(candidates), display_meta), progress.limit)
+    candidates = _capped(_visible_order(candidates, display_meta, exact_query), progress.limit)
 
     return RetrievalResult(
         candidates=candidates,
