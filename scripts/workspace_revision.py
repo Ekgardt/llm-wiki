@@ -1276,15 +1276,47 @@ def _directory_snapshot_for(scan: _RelevantScan, current: Path) -> _DirectorySna
     return snapshot
 
 
-def _refuse_unsafe_entry(
-    entry: os.DirEntry, info: os.stat_result, relevant_name: bool
-) -> None:
-    """A link or reparse point where it matters stops the walk outright."""
+def _is_linked_directory(entry: os.DirEntry, info: os.stat_result) -> bool:
+    if stat.S_ISDIR(info.st_mode):
+        return True
     try:
-        linked_directory = entry.is_dir(follow_symlinks=True)
+        return entry.is_dir(follow_symlinks=True)
     except OSError:
-        linked_directory = False
-    if relevant_name or linked_directory or stat.S_ISDIR(info.st_mode):
+        return False
+
+
+def _link_stays_inside(entry: os.DirEntry, resolved_root: Path) -> bool:
+    """Whether the link's strictly resolved target lies inside the checkout."""
+    try:
+        target = Path(entry.path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return target.is_relative_to(resolved_root)
+
+
+def _directory_link_leaves(
+    entry: os.DirEntry, info: os.stat_result, resolved_root: Path
+) -> bool:
+    """A linked directory whose target is outside the checkout, or unknowable."""
+    if not _is_linked_directory(entry, info):
+        return False
+    return not _link_stays_inside(entry, resolved_root)
+
+
+def _refuse_unsafe_entry(
+    entry: os.DirEntry,
+    info: os.stat_result,
+    relevant_name: bool,
+    resolved_root: Path,
+) -> None:
+    """A link or reparse point where it matters stops the walk outright.
+
+    A directory link that stays inside the checkout is passed by instead: the
+    walk never follows it and hashes its target at the real path, and every
+    Linux virtual environment holds one (`lib64 -> lib`). See
+    `docs/research/2026-09-17-a-directory-link-inside-the-checkout-is-passed-by.md`.
+    """
+    if relevant_name or _directory_link_leaves(entry, info, resolved_root):
         raise PermissionError(
             "workspace revision relevant path is a symlink or reparse directory"
         )
@@ -1313,7 +1345,7 @@ def _scanned_entry(scan: _RelevantScan, entry: os.DirEntry) -> _ScannedEntry:
     unsafe = entry.is_symlink() or _is_reparse(info)
     relevant_name = _is_relevant_path(relative)
     if unsafe:
-        _refuse_unsafe_entry(entry, info, relevant_name)
+        _refuse_unsafe_entry(entry, info, relevant_name, scan.resolved_root)
     relevant = not unsafe and stat.S_ISREG(info.st_mode) and relevant_name
     _count_scanned_entry(scan, relevant=relevant)
     return _ScannedEntry(entry, path, relative, info, unsafe, relevant)
