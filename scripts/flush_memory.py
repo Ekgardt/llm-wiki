@@ -659,7 +659,10 @@ def _readable_evidence(evidence: object) -> str:
 
 
 def _bounded_classifier_evidence(evidence: str) -> str:
-    """The tail the classifier reads; the durable record still keeps every byte.
+    """The tail the classifier reads; the durable record keeps all the evidence it was given.
+
+    Not "complete": the evidence of a very long session is itself a head and a
+    tail, and says so in a `capture_gap` line.
 
     Measured 2026-08-28 on the 13 live capture intents: the unbounded prompt
     reached a median of 723 288 characters per session — the 60 000-character
@@ -672,7 +675,7 @@ def _bounded_classifier_evidence(evidence: str) -> str:
     dropped = len(evidence) - MAX_TRANSCRIPT_CHARS
     return (
         f"[…{dropped} characters of earlier evidence omitted for "
-        f"classification; the stored record is complete]"
+        f"classification; the stored record keeps them]"
         + evidence[-MAX_TRANSCRIPT_CHARS:]
     )
 

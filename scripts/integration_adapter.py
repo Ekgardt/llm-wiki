@@ -67,7 +67,6 @@ BACKLOG_DRAIN_SECONDS = 120.0
 
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
-CAPTURE_EXCERPT_SIDE_BYTES = MAX_CAPTURE_EVIDENCE_BYTES // 2
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
@@ -2509,11 +2508,11 @@ def _validated_capture_transcript_path(value: object) -> Path:
     return path
 
 
-def _read_transcript_edge(descriptor: int, offset: int) -> bytes:
+def _read_transcript_edge(descriptor: int, offset: int, side: int) -> bytes:
     """One bounded side of an open transcript."""
-    os.lseek(descriptor, offset, os.SEEK_SET)
+    os.lseek(descriptor, max(offset, 0), os.SEEK_SET)
     chunks: list[bytes] = []
-    remaining = CAPTURE_EXCERPT_SIDE_BYTES
+    remaining = side
     while remaining > 0:
         chunk = os.read(descriptor, min(remaining, 64 * 1024))
         if not chunk:
@@ -2530,16 +2529,14 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
         raise ValueError("capture transcript changed while it was read")
 
 
-def _read_transcript_edges(path: Path) -> tuple[bytes, bytes, int]:
+def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
     """Head and tail of a transcript too large to hold whole."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
-        head = _read_transcript_edge(descriptor, 0)
-        tail = _read_transcript_edge(
-            descriptor, before.st_size - CAPTURE_EXCERPT_SIDE_BYTES
-        )
+        head = _read_transcript_edge(descriptor, 0, side)
+        tail = _read_transcript_edge(descriptor, before.st_size - side, side)
         _require_stable_transcript(before, os.fstat(descriptor))
     finally:
         os.close(descriptor)
@@ -2547,10 +2544,10 @@ def _read_transcript_edges(path: Path) -> tuple[bytes, bytes, int]:
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
-    return (
-        f"\n\n_({dropped} bytes of this transcript were not captured; "
-        "the durable record keeps the beginning and the end.)_\n\n"
-    )
+    """One JSONL line of its own, so the record's renderer keeps it."""
+    from session_evidence import capture_gap_line
+
+    return f"\n{capture_gap_line(dropped)}\n"
 
 
 def _whole_lines_head(head: bytes) -> bytes:
@@ -2567,9 +2564,9 @@ def _whole_lines_tail(tail: bytes) -> bytes:
     return tail[tail.find(b"\n") + 1 :] or tail
 
 
-def _capture_excerpt_text(path: Path) -> str:
+def _capture_excerpt_text(path: Path, limit: int) -> str:
     """A bounded excerpt that says, in the evidence itself, what it dropped."""
-    raw_head, raw_tail, size = _read_transcript_edges(path)
+    raw_head, raw_tail, size = _read_transcript_edges(path, limit // 2)
     head = _whole_lines_head(raw_head)
     tail = _whole_lines_tail(raw_tail)
     dropped = size - len(head) - len(tail)
@@ -2580,7 +2577,7 @@ def _capture_excerpt_text(path: Path) -> str:
     )
 
 
-def _capture_transcript_text(path: Path) -> str:
+def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES) -> str:
     """The whole transcript, or a bounded excerpt of it, never nothing.
 
     A `pre_compact` hook fires because the conversation got long, so refusing
@@ -2593,19 +2590,20 @@ def _capture_transcript_text(path: Path) -> str:
     truncation note. Head and tail rather than either alone: the same choice
     already recorded for nightly consolidation, because a long session puts its
     decisions early and its outcome late.
+
+    `limit` is the bound this read keeps to; it is lowered when the text grew too
+    much inside its JSON record (`_fitting_capture_record`).
     """
     from bounded_io import read_stable_utf8
 
-    if path.stat().st_size > MAX_CAPTURE_EVIDENCE_BYTES:
-        return _capture_excerpt_text(path)
-    return read_stable_utf8(
-        path,
-        MAX_CAPTURE_EVIDENCE_BYTES,
-        label="capture transcript",
-    )
+    if path.stat().st_size > limit:
+        return _capture_excerpt_text(path, limit)
+    return read_stable_utf8(path, limit, label="capture transcript")
 
 
-def _capture_path_evidence(value: object) -> str | None:
+def _capture_path_evidence(
+    value: object, limit: int = MAX_CAPTURE_EVIDENCE_BYTES
+) -> str | None:
     """The transcript's text, or None when there is no transcript to read.
 
     `_transcript_present` already handles a vanished transcript on the
@@ -2627,19 +2625,23 @@ def _capture_path_evidence(value: object) -> str | None:
         path = _validated_capture_transcript_path(value)
     except FileNotFoundError:
         return None
-    redacted = redact_secrets(_capture_transcript_text(path))
+    redacted = redact_secrets(_capture_transcript_text(path, limit))
     if not redacted:
         return None
     return redacted
 
 
-def _capture_evidence_text(envelope: EventEnvelope, payload: Mapping[str, Any]) -> str | None:
+def _capture_evidence_text(
+    envelope: EventEnvelope,
+    payload: Mapping[str, Any],
+    limit: int = MAX_CAPTURE_EVIDENCE_BYTES,
+) -> str | None:
     inline = envelope.payload.get("transcript_text")
     if isinstance(inline, str):
         if not inline:
             return None
         return inline
-    return _capture_path_evidence(payload.get("transcript_path"))
+    return _capture_path_evidence(payload.get("transcript_path"), limit)
 
 
 def _capture_nullable_text(value: object, label: str) -> str | None:
@@ -2676,7 +2678,7 @@ def _capture_source_record(
     }
 
 
-def _capture_intent_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
+def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
     from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
     evidence = source["evidence"]
@@ -2700,10 +2702,41 @@ def _capture_intent_record(source: Mapping[str, object]) -> tuple[dict[str, obje
         "chunk_sha256": chunk_digest,
     }
     validate_schema(record, SCRIPTS_DIR / "schemas" / "capture-intent-v1.json")
-    encoded = canonical_json_bytes(record)
-    if len(encoded) > MAX_CAPTURE_INTENT_BYTES:
-        raise ValueError("capture intent exceeds its byte limit")
-    return record, encoded
+    return record, canonical_json_bytes(record)
+
+
+CAPTURE_FIT_ATTEMPTS = 4
+
+
+def _smaller_evidence_limit(limit: int, encoded_size: int) -> int:
+    """The bound scaled by the growth just measured, less a tenth."""
+    return int(limit * MAX_CAPTURE_INTENT_BYTES / encoded_size * 0.9)
+
+
+def _fitting_capture_record(
+    envelope: EventEnvelope,
+    payload: Mapping[str, Any],
+    slug: str | None,
+    trigger: str | None,
+) -> tuple[dict[str, object], bytes] | None:
+    """The record and its bytes, with evidence cut until the encoded record fits.
+
+    Quotes, backslashes and line breaks double inside a JSON string, so a bound on
+    the raw text never bounded the record. See
+    `docs/research/2026-09-17-the-evidence-fits-its-record-and-says-what-it-dropped.md`.
+    """
+    limit = MAX_CAPTURE_EVIDENCE_BYTES
+    for _ in range(CAPTURE_FIT_ATTEMPTS):
+        text = _capture_evidence_text(envelope, payload, limit)
+        if text is None:
+            return None
+        record, encoded = _encoded_capture_record(
+            _capture_source_record(envelope, slug, trigger, text)
+        )
+        if len(encoded) <= MAX_CAPTURE_INTENT_BYTES:
+            return record, encoded
+        limit = _smaller_evidence_limit(limit, len(encoded))
+    raise ValueError("capture intent exceeds its byte limit")
 
 
 def _capture_relative_paths(intent_id: str) -> tuple[str, str]:
@@ -2844,11 +2877,10 @@ def _publish_durable_capture_intent(
     from memory_queue import active_memory_queue
     from reliable_memory import sha256_bytes
 
-    text = _capture_evidence_text(envelope, payload)
-    if text is None:
+    fitted = _fitting_capture_record(envelope, payload, slug, trigger)
+    if fitted is None:
         return None
-    source = _capture_source_record(envelope, slug, trigger, text)
-    record, encoded = _capture_intent_record(source)
+    record, encoded = fitted
     intent_id = str(record["intent_id"])
     intent_sha256 = sha256_bytes(encoded)
     pending_relative, ready_relative = _capture_relative_paths(intent_id)
