@@ -124,7 +124,14 @@ class VerifiedArtifacts:
         self.fresh[_verdict_key(name, digest)] = value
 
     def _merged(self) -> dict:
-        merged = {**self.entries, **self.fresh}
+        """Oldest first: what was loaded, then what this scan verified, each key once.
+
+        The file keeps this order (`_write` does not sort), so the last
+        `MAX_ENTRIES` are the most recently verified. See
+        `docs/research/2026-09-17-the-verdict-cache-forgets-the-oldest-not-the-first-in-the-alphabet.md`.
+        """
+        loaded = {key: value for key, value in self.entries.items() if key not in self.fresh}
+        merged = {**loaded, **self.fresh}
         if len(merged) <= MAX_ENTRIES:
             return merged
         keep = list(merged)[-MAX_ENTRIES:]
@@ -144,7 +151,6 @@ class VerifiedArtifacts:
         payload = json.dumps(
             {"schema_version": SCHEMA_VERSION, "entries": entries},
             ensure_ascii=False,
-            sort_keys=True,
         ).encode("utf-8")
         descriptor, temporary = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=".verified-", suffix=".json"
