@@ -1264,7 +1264,8 @@ def _assert_bounded_icacls(call: tuple, path: Path) -> None:
         str(path),
         "/inheritance:r",
         "/grant:r",
-        "Test User:(R,W)",
+        # Delete included: the transient file is removed once it has been read.
+        "Test User:(R,W,D)",
     ]
     assert call[1]["timeout"] > 0
 

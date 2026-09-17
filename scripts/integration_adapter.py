@@ -2176,7 +2176,10 @@ def _restrict_file_permissions(path: Path) -> None:
                 str(path),
                 "/inheritance:r",
                 "/grant:r",
-                f"{username}:(R,W)",
+                # D: read and write do not include delete, and the transient file
+                # is deleted once it has been read. See
+                # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
+                f"{username}:(R,W,D)",
             ],
             capture_output=True,
             check=False,
