@@ -95,6 +95,9 @@ _LEASE_EXPIRY_SECONDS = 30.0
 _IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
 _RECOVERY_RETRY_SECONDS = 0.05
+# Where the recovery beat stops doubling. A cleanup that is stuck is stuck;
+# past this the retries cost more than they can win back.
+_RECOVERY_RETRY_CEILING_SECONDS = 2.0
 _MAX_PENDING_CHILD_HANDLES = 8
 _MAX_PENDING_TEMP_NAMES = 1
 _MAX_STARTUP_CLEANUP_OWNERS = 8
@@ -3082,10 +3085,26 @@ class _RecoveryState:
 
     request_retry: bool = False
     terminal_retry_code: str | None = None
+    retry_seconds: float = _RECOVERY_RETRY_SECONDS
 
     @property
     def pending(self) -> bool:
         return self.request_retry or self.terminal_retry_code is not None
+
+    def slow_down(self) -> None:
+        """A pass that changed nothing earns a longer wait before the next.
+
+        Cleanup that cannot finish — a descendant that will not die, a handle
+        another process holds — used to be retried twenty times a second for
+        the life of the process, each pass a `killpg` and an `fsync`.
+        """
+        self.retry_seconds = min(
+            self.retry_seconds * 2, _RECOVERY_RETRY_CEILING_SECONDS
+        )
+
+    def quicken(self) -> None:
+        """Nothing is owed: the next retry starts from the short beat again."""
+        self.retry_seconds = _RECOVERY_RETRY_SECONDS
 
 
 def _recovery_wait(
@@ -3093,13 +3112,15 @@ def _recovery_wait(
     coordinator: _LifecycleCoordinator,
     state: _RecoveryState,
 ) -> None:
-    """Wait for work: a short retry beat, or until the next drain deadline."""
+    """Wait for work: a backing-off retry beat, or the next drain deadline."""
     if state.pending:
         coordinator.recovery_wake.clear()
         if coordinator.recovery_stop.is_set():
             return
-        coordinator.recovery_wake.wait(_RECOVERY_RETRY_SECONDS)
+        coordinator.recovery_wake.wait(state.retry_seconds)
+        state.slow_down()
         return
+    state.quicken()
     drain_deadline = _next_drain_deadline(instance)
     wait_for = (
         None
@@ -3745,7 +3766,22 @@ def _require_serving_lifecycle_locked(
     raise RuntimeError("LSP process is closed")
 
 
-def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
+class _GenerationChannel(NamedTuple):
+    """One generation and the two ends of its channel, taken together.
+
+    Cleanup drops `generation.protocol` and `generation.process` on another
+    thread. Reading them after the lifecycle lock is released could therefore
+    see None on a generation that had both when it was chosen. Holding our own
+    references instead means a retire that lands now ends in the protocol's own
+    `ProtocolViolation` — the retry path — not in a broken invariant.
+    """
+
+    generation: _Generation
+    protocol: LspProtocol
+    process: object
+
+
+def _request_generation(instance: LspProcess, deadline: float) -> _GenerationChannel:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
@@ -3755,7 +3791,7 @@ def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
         if generation is None or not _generation_has_channel(generation):
             raise RuntimeError("LSP process generation is unavailable")
         instance.last_used_monotonic = time.monotonic()
-        return generation
+        return _GenerationChannel(generation, generation.protocol, generation.process)
     finally:
         _release_lifecycle(coordinator)
 
@@ -3989,7 +4025,7 @@ def _objectively_fatal(
 
 def _serve_lsp_request(
     instance: LspProcess,
-    generation: _Generation,
+    channel: _GenerationChannel,
     method: str,
     params: object,
     *,
@@ -3998,8 +4034,7 @@ def _serve_lsp_request(
     attempt: int,
 ) -> object:
     """Send the request on this generation, retrying only a fatal one."""
-    protocol = generation.protocol
-    process = generation.process
+    generation, protocol, process = channel
     try:
         return protocol.request(
             method,
@@ -4032,18 +4067,15 @@ def _attempt_lsp_request(
     attempt: int,
 ) -> object:
     """One attempt; the retry sentinel means the generation moved under us."""
-    generation = _request_generation(instance, deadline)
-    protocol = generation.protocol
-    process = generation.process
-    assert protocol is not None and process is not None
-    unusable = _generation_unusable(protocol, process)
+    channel = _request_generation(instance, deadline)
+    unusable = _generation_unusable(channel.protocol, channel.process)
     if unusable is not None:
         return _refuse_unusable_generation(
-            instance, generation, unusable, deadline, attempt
+            instance, channel.generation, unusable, deadline, attempt
         )
     return _serve_lsp_request(
         instance,
-        generation,
+        channel,
         method,
         params,
         deadline=deadline,
@@ -4083,10 +4115,7 @@ def _notify_lsp_process(
     deadline: float,
 ) -> None:
     deadline = _validated_deadline(deadline)
-    generation = _request_generation(instance, deadline)
-    protocol = generation.protocol
-    process = generation.process
-    assert protocol is not None and process is not None
+    generation, protocol, process = _request_generation(instance, deadline)
     unusable = _generation_unusable(protocol, process)
     if unusable is not None:
         _queue_generation_failure(instance._coordinator, generation, unusable)
@@ -4208,7 +4237,7 @@ def _notify_lsp_process_generation(
 ) -> bool:
     deadline = _validated_deadline(deadline)
     _require_generation_nonce(generation_nonce)
-    generation = _request_generation(instance, deadline)
+    generation = _request_generation(instance, deadline).generation
     if generation.nonce != generation_nonce:
         return False
     coordinator = instance._coordinator
@@ -6423,10 +6452,8 @@ def _same_program_name(
 
 
 def _is_inherited_descriptor(name: str, pass_fds: Sequence[int]) -> bool:
-    if not _is_descriptor_path(name):
-        return False
-    number = name.rsplit("/", 1)[-1]
-    return number.isdecimal() and int(number) in tuple(pass_fds)
+    number = _descriptor_number(name)
+    return number is not None and number in tuple(pass_fds)
 
 
 def _check_argument_strings(arguments: Sequence[object]) -> None:
@@ -6461,8 +6488,31 @@ def _checked_arguments(arguments: list[str]) -> list[str]:
 DESCRIPTOR_ROOTS = ("/proc/self/fd/", "/dev/fd/")
 
 
+_DESCRIPTOR_NUMBER = re.compile(r"[0-9]+")
+
+
+def _descriptor_number(name: str) -> int | None:
+    """The descriptor a path names, or None when it names anything else.
+
+    Only `<root><decimal digits>` is a descriptor path. `/proc/self/fd/../../x`
+    begins with the same characters and reaches a file of somebody else's
+    choosing, and `os.stat` on it would follow it there.
+    """
+    for root in DESCRIPTOR_ROOTS:
+        if name.startswith(root):
+            return _decimal_descriptor(name[len(root) :])
+    return None
+
+
+def _decimal_descriptor(tail: str) -> int | None:
+    """The whole remainder as a plain decimal descriptor number, or None."""
+    if _DESCRIPTOR_NUMBER.fullmatch(tail) is None:
+        return None
+    return int(tail)
+
+
 def _is_descriptor_path(name: str) -> bool:
-    return name.startswith(DESCRIPTOR_ROOTS)
+    return _descriptor_number(name) is not None
 
 
 def _resolved_executable(name: str, cwd: Path) -> Path:
