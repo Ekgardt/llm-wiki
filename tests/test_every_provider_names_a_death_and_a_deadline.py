@@ -15,6 +15,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="a shell stub stands in for the CLI")
 
 
@@ -59,7 +61,7 @@ def a_server_that_never_answers():
     thread.start()
     yield f"http://127.0.0.1:{listener.getsockname()[1]}/v1"
     listener.close()
-    thread.join(timeout=5)
+    thread.join(timeout=SHORT_TIMEOUT)
     [connection.close() for connection in held]
 
 
