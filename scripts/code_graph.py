@@ -1520,6 +1520,29 @@ def _leased_active_graph(directory, read_only, deadline, cancelled):
     )
 
 
+# Audit 3, B26. `None` used to mean three different things: this repository has
+# no generation, this repository has one that could not be opened, and a
+# programming error inside the opening path (`TypeError` was caught). The first
+# is normal and falls back to a live parse; the other two are failures and must
+# say so. `PermissionError` was redundant with `OSError`, and `TimeoutError` is
+# itself an `OSError`, which is why its clause stands first. Research:
+# `docs/research/2026-09-17-graph-a-generation-that-cannot-be-read-is-not-a-generation-that-is-absent.md`.
+NO_GENERATION = "no_generation"
+
+
+class GenerationUnreadable(RuntimeError):
+    """This repository has a generation and it could not be opened.
+
+    `reason` names the class of the underlying error and nothing else: no
+    message and no path, so the reason can be carried into an answer without
+    carrying vault content with it.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.reason = f"generation_unreadable:{type(error).__name__}"
+        super().__init__(self.reason)
+
+
 def _active_evidence_graph(
     directory: Path,
     *,
@@ -1531,8 +1554,16 @@ def _active_evidence_graph(
         return _leased_active_graph(directory, read_only, deadline, cancelled)
     except TimeoutError:
         raise
-    except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
-        return None
+    except (OSError, ValueError, sqlite3.Error) as error:
+        raise GenerationUnreadable(error) from error
+
+
+def _stored_or_reason(attempt) -> tuple[object, str]:
+    """The stored answer, and when there is none, why there is none."""
+    try:
+        return attempt(), NO_GENERATION
+    except GenerationUnreadable as error:
+        return None, error.reason
 
 
 def _stored_location(graph, node_id: str, _directory: Path) -> tuple[str, int]:
@@ -1812,13 +1843,16 @@ def _live_unresolved_count(
 
 
 def _live_report(
-    directory: Path, parsed: list[tuple[Path, dict]] | None = None
+    directory: Path,
+    parsed: list[tuple[Path, dict]] | None = None,
+    reason: str = NO_GENERATION,
 ) -> dict[str, object]:
     return {
         "source_generation": None,
         "graph_complete": False,
         "unresolved_count": _live_unresolved_count(directory, parsed),
         "fallback": True,
+        "fallback_reason": reason,
     }
 
 
@@ -2149,14 +2183,17 @@ def find_callers(
     #24, B4); rows then carry `depth`, and the report `depth_applied` and
     `depth_frontier_open`. The live fallback answers one hop and says so.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_callers(function_name, directory, with_report, max_depth)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_callers(function_name, directory, with_report, max_depth)
+        )
+    if stored is not None:
+        return stored
     parsed = _parsed_live_sources(directory)
     callers, unresolved = _live_caller_scan(parsed, function_name)
     report = {
-        **_live_report(directory, parsed),
+        **_live_report(directory, parsed, reason),
         **_live_unresolved_fields(unresolved),
     }
     return _with_report("callers", callers, report, with_report)
@@ -2243,16 +2280,19 @@ def find_callees(
     Returns list of {file, line, callee}. `max_depth` above 1 walks the
     generation's CALLS closure that deep (issue #24, B4).
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_callees(function_name, directory, with_report, max_depth)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_callees(function_name, directory, with_report, max_depth)
+        )
+    if stored is not None:
+        return stored
     callees: list[dict] = []
     parsed = _parsed_live_sources(directory)
     for path, result in parsed:
         callees.extend(_live_callees_in_file(path, result, function_name))
     return _with_report(
-        "callees", callees, _live_report(directory, parsed), with_report
+        "callees", callees, _live_report(directory, parsed, reason), with_report
     )
 
 
@@ -2357,17 +2397,23 @@ def find_dead_code(
     verdict for that name is unchanged — a file that does not mention the name
     cannot reference it — and the report says how many sources were skipped.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_dead_code_result(directory, with_report, symbol)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_dead_code_result(directory, with_report, symbol)
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     incoming = {edge["target"] for edge in edges}
     candidates: list[dict] = []
     for path, result in parsed:
         candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
     candidates = _ordered_dead_candidates(candidates)
-    report = {**_live_report(directory, parsed), **_dead_code_counts(candidates)}
+    report = {
+        **_live_report(directory, parsed, reason),
+        **_dead_code_counts(candidates),
+    }
     return _with_report("candidates", candidates, report, with_report)
 
 
@@ -2771,10 +2817,13 @@ def get_architecture(
 ) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
     bound = summary_listing_limit(limit)
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _store_get_architecture(directory, bound)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _store_get_architecture(directory, bound)
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points, routes = _live_architecture_points(parsed)
     communities, counts = _live_community_answer(definitions, edges)
@@ -2788,7 +2837,7 @@ def get_architecture(
         **counts,
         "graph_complete": False,
     }
-    return {**architecture, **_live_report(directory, parsed)}
+    return {**architecture, **_live_report(directory, parsed, reason)}
 
 
 # Entry points and routes are listed the way hotspots already are: with the
@@ -3004,13 +3053,16 @@ def detect_communities(
     here — see `_communities_holding` for the measurement — so "which module
     does X belong to" needs an anchor, exactly as who-calls does.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_detect_communities(directory, symbol, with_report)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_detect_communities(directory, symbol, with_report)
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     communities, counts = _live_community_answer(definitions, edges, symbol)
-    report = {**_live_report(directory, parsed), **counts}
+    report = {**_live_report(directory, parsed, reason), **counts}
     return _with_report("communities", communities, report, with_report)
 
 
@@ -3231,22 +3283,28 @@ def find_dependencies(
     and therefore answered `[]` for every symbol ever asked — silently, with
     the same `graph_complete: false` caveat a correct answer carries.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _store_find_dependencies(
-            node_id,
-            directory,
-            reverse=reverse,
-            with_report=with_report,
-            max_depth=max_depth,
+        stored, reason = _stored_or_reason(
+            lambda: _store_find_dependencies(
+                node_id,
+                directory,
+                reverse=reverse,
+                with_report=with_report,
+                max_depth=max_depth,
+            )
         )
-        if stored is not None:
-            return stored
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     dependencies = _find_live_dependencies(
         node_id, definitions, edges, reverse=reverse
     )
     return _with_report(
-        "dependencies", dependencies, _live_report(directory, parsed), with_report
+        "dependencies",
+        dependencies,
+        _live_report(directory, parsed, reason),
+        with_report,
     )
 
 
@@ -3311,14 +3369,19 @@ def find_paths(
     Both ends may be a name, a repository-relative path or a node id, resolved
     the way `dependencies` resolves its symbol (audit 3, A5).
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _store_find_paths(source_node_id, target_node_id, directory, with_report)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _store_find_paths(
+                source_node_id, target_node_id, directory, with_report
+            )
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     paths = _find_live_paths(source_node_id, target_node_id, definitions, edges)
     return _with_report(
-        "paths", paths, _live_report(directory, parsed), with_report
+        "paths", paths, _live_report(directory, parsed, reason), with_report
     )
 
 
