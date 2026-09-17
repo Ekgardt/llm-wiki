@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -28,6 +29,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 # so a process that truly hangs still fails as a hang.
 _SHUTDOWN_SECONDS = 2.0
 _HUNG_PROCESS_SECONDS = 5.0
+
+
+def _named_generations(components: dict) -> set:
+    """Every generation the envelope's components name."""
+    return {detail["generation"] for detail in components.values()}
+
+
+def _warned_about(envelope: dict, needle: str) -> bool:
+    return any(needle in warning for warning in envelope["warnings"])
 
 
 def _expected_task_state(action: str) -> str:
@@ -2029,8 +2039,14 @@ class TestHandleToolCall:
             release.set()
             all_done.wait(0.5)
 
-        assert peak <= mcp_server.MCP_WORKER_SLOTS
-        assert all(json.loads(item)["data"] == {"error": "operation_timeout"} for item in results)
+        errors = Counter(json.loads(item)["data"]["error"] for item in results)
+        slots = mcp_server.MCP_WORKER_SLOTS
+        assert (peak <= slots, errors) == (
+            True,
+            Counter(
+                {"operation_timeout": slots, "worker_capacity_exhausted": 12 - slots}
+            ),
+        )
 
     def test_timed_out_blocked_worker_does_not_keep_process_alive(self):
         scripts = Path(__file__).resolve().parent.parent / "scripts"
@@ -2475,16 +2491,18 @@ class TestHandleToolCall:
         envelope = json.loads(self._run("recall", {"query": "missing"}))
 
         trace = envelope["data"]["retrieval_trace"]
-        assert trace["corpus_generation"] == "gen-17"
-        assert trace["signals_used"] == ["lexical", "dense"]
-        assert trace["fallback_reason"] is None
-        assert trace["partial"] is False
-        assert envelope["components"]["dense"] == {"generation": "gen-17", "freshness": "fresh"}
-        assert envelope["components"]["graph"]["freshness"] == "missing"
-        assert all(
-            detail["generation"] == "gen-17"
-            for detail in envelope["components"].values()
-        )
+        components = envelope["components"]
+        assert (
+            trace["corpus_generation"],
+            trace["signals_used"],
+            trace["fallback_reason"],
+            trace["partial"],
+        ) == ("gen-17", ["lexical", "dense"], None, False)
+        assert (
+            components["dense"],
+            components["graph"]["freshness"],
+            _named_generations(components),
+        ) == ({"generation": "gen-17", "freshness": "fresh"}, "missing", {"gen-17"})
 
     def test_recall_rejects_trace_outside_the_closed_schema(self, monkeypatch):
         import mcp_server
@@ -3538,9 +3556,10 @@ class TestCallbackCompatibility:
         assert heartbeat is True
         assert len(result[0].text) >= mcp_server.MAX_MCP_PAGE_BYTES - 2048
 
-    def test_registered_callback_formatter_deadline_returns_cached_timeout(
+    def test_registered_callback_answers_while_the_payload_formatter_is_stuck(
         self, monkeypatch
     ):
+        """The timeout answer never waits for the formatting of the late payload."""
         import threading
 
         import mcp_server
@@ -3565,27 +3584,30 @@ class TestCallbackCompatibility:
         monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
         mcp_server._register_tools(server, [])
         release = threading.Event()
+        finished = threading.Event()
         real_format = mcp_server._format_tool_result
+        payload = json.dumps({"schema_version": "1.0", "data": {"page": "late"}})
 
         def blocked_format(text):
-            release.wait(0.5)
+            if text != payload:
+                return real_format(text)
+            release.wait(SHORT_TIMEOUT)
+            finished.set()
             return real_format(text)
 
         monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.001)
-        monkeypatch.setattr(
-            mcp_server,
-            "_execute_tool_call",
-            lambda *args: mcp_server._timeout_envelope_text(),
-        )
+        monkeypatch.setattr(mcp_server, "_execute_tool_call", lambda *args: payload)
         monkeypatch.setattr(mcp_server, "_format_tool_result", blocked_format)
-        started = time.perf_counter()
         try:
             result = asyncio.run(server.callback("read_page", {"slug": "page"}))
+            answered_first = not finished.is_set()
         finally:
             release.set()
 
-        assert time.perf_counter() - started < 0.2
-        assert json.loads(result[0].text)["data"] == {"error": "operation_timeout"}
+        assert (answered_first, json.loads(result[0].text)["data"]) == (
+            True,
+            {"error": "operation_timeout"},
+        )
 
     @pytest.mark.parametrize(
         ("arguments", "report", "expected_error"),
@@ -6069,8 +6091,7 @@ class TestWarmupIsInTheHealthAnswer:
             "reranker",
             "RuntimeError",
         )
-        assert "retrieval warm-up failed at reranker: RuntimeError: no torch" in capsys.readouterr().err
-
+        printed = capsys.readouterr().err
         monkeypatch.setattr(
             mcp_server,
             "_vault_status",
@@ -6083,9 +6104,12 @@ class TestWarmupIsInTheHealthAnswer:
         )
         envelope = json.loads(mcp_server._handle_resource_read("llm-wiki://health"))
 
-        assert envelope["partial"] is True
-        assert any("warm-up failed at reranker" in w for w in envelope["warnings"])
-        assert envelope["data"]["warmup"]["status"] == "failed"
+        assert (
+            "retrieval warm-up failed at reranker: RuntimeError: no torch" in printed,
+            envelope["partial"],
+            _warned_about(envelope, "warm-up failed at reranker"),
+            envelope["data"]["warmup"]["status"],
+        ) == (True, True, True, "failed")
 
     def test_a_completed_warm_up_records_its_seconds(self, monkeypatch):
         import mcp_server

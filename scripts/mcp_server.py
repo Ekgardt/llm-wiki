@@ -181,12 +181,11 @@ _LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
 def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
-    mode = arguments.get("mode", "summary")
-    if mode in PRECISE_ARCHITECTURE_MODES or _positioned_architecture_call(
-        arguments, mode
-    ):
+    if _is_precise_architecture_request(arguments):
         return MCP_LSP_STARTUP_SECONDS
-    return _LONG_ARCHITECTURE_BUDGETS.get(mode, MCP_OPERATION_SECONDS)
+    return _LONG_ARCHITECTURE_BUDGETS.get(
+        arguments.get("mode", "summary"), MCP_OPERATION_SECONDS
+    )
 
 
 def _operation_cancelled():
@@ -215,13 +214,22 @@ def _cancellation_context():
         _OPERATION_CANCELLED.reset(cancellation_token)
 
 
+class _WorkerCapacityExhausted(TimeoutError):
+    """Every worker slot was busy, so this call never started.
+
+    A `TimeoutError` so that every caller which already bounds a call keeps
+    working, but a distinct one: a lapse means the work ran and did not finish,
+    this means it never ran and an immediate retry is reasonable (audit 3, B4).
+    """
+
+
 def _reserve_mcp_worker(submitted) -> None:
     with _MCP_WORKERS_LOCK:
         _MCP_WORKERS.difference_update(
             future for future in _MCP_WORKERS if future.done()
         )
         if len(_MCP_WORKERS) >= MCP_WORKER_SLOTS:
-            raise TimeoutError("MCP worker capacity exhausted")
+            raise _WorkerCapacityExhausted("MCP worker capacity exhausted")
         _MCP_WORKERS.add(submitted)
 
 
@@ -364,8 +372,17 @@ async def _run_bounded(function, *args, deadline: float):
 
 
 def _timeout_envelope_text() -> str:
+    return _refused_envelope_text("operation_timeout", "operation_timeout")
 
-    error = "operation_timeout"
+
+def _busy_envelope_text() -> str:
+    """The answer to a call that never started because no worker slot was free."""
+    return _refused_envelope_text(
+        "worker_capacity_exhausted", "retry_after_running_calls_finish"
+    )
+
+
+def _refused_envelope_text(error: str, warning: str) -> str:
     envelope = {
         "schema_version": "1.0",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -376,7 +393,7 @@ def _timeout_envelope_text() -> str:
         "confidence": 0.2,
         "fallback": False,
         "partial": True,
-        "warnings": [error],
+        "warnings": [warning],
         "components": {},
         "data": {"error": error},
     }
@@ -2302,11 +2319,7 @@ def _is_precise_architecture_request(arguments: dict) -> bool:
     mode = arguments.get("mode", "summary")
     if mode in PRECISE_ARCHITECTURE_MODES:
         return True
-    if mode in {"callers", "callees"} and all(
-        key in arguments for key in ("path", "line", "character")
-    ):
-        return True
-    return False
+    return _positioned_architecture_call(arguments, mode)
 
 
 def _same_filesystem_path(
@@ -5780,16 +5793,31 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
         _OPERATION_DEADLINE.reset(deadline_token)
 
 
-async def _handle_tool_call(name: str, arguments) -> str:
-    """Handle a tool call without blocking unrelated MCP event-loop work."""
-    operation_seconds = _tool_operation_seconds(name, arguments)
-    operation_deadline = time.monotonic() + operation_seconds
+async def _bounded_tool_call(name: str, arguments, execute, render):
+    """One tool call, off-loop, under its own deadline, with its refusal answers.
+
+    Both entry points share this policy: the registered `call_tool` callback
+    renders formatted results, `_handle_tool_call` renders text. Audit 3, B5:
+    they used to be twins and had already drifted apart.
+    """
+    operation_deadline = time.monotonic() + _tool_operation_seconds(name, arguments)
     try:
         return await _run_bounded(
-            _execute_tool_call, name, arguments, operation_deadline, deadline=operation_deadline
+            execute, name, arguments, operation_deadline, deadline=operation_deadline
         )
+    except _WorkerCapacityExhausted:
+        return render(_busy_envelope_text())
     except TimeoutError:
-        return _tool_timeout_envelope_text(name, arguments)
+        return render(_tool_timeout_envelope_text(name, arguments))
+
+
+def _same_text(text: str) -> str:
+    return text
+
+
+async def _handle_tool_call(name: str, arguments) -> str:
+    """One tool call as envelope text, without blocking unrelated event-loop work."""
+    return await _bounded_tool_call(name, arguments, _execute_tool_call, _same_text)
 
 
 def _build_resource_definitions() -> list:
@@ -5866,6 +5894,8 @@ def _register_resources(server) -> bool:
                 operation_deadline,
                 deadline=operation_deadline,
             )
+        except _WorkerCapacityExhausted:
+            text = _busy_envelope_text()
         except TimeoutError:
             text = _timeout_envelope_text()
         return [
@@ -5945,31 +5975,11 @@ def _register_tools(server, tools):
         if supports_validate_input
         else call_tool_method()
     )
-    timeout_result = _format_tool_result(_timeout_envelope_text())
-
     @decorator
     async def call_tool(name: str, arguments):
-        operation_deadline = time.monotonic() + _tool_operation_seconds(
-            name,
-            arguments,
+        return await _bounded_tool_call(
+            name, arguments, _execute_formatted_tool_call, _format_tool_result
         )
-        try:
-            return await _run_bounded(
-                _execute_formatted_tool_call,
-                name,
-                arguments,
-                operation_deadline,
-                deadline=operation_deadline,
-            )
-        except TimeoutError:
-            if name == "get_architecture" and isinstance(
-                arguments,
-                dict,
-            ) and _is_precise_architecture_request(arguments):
-                return _format_tool_result(
-                    _tool_timeout_envelope_text(name, arguments)
-                )
-            return timeout_result
 
     return call_tool
 
