@@ -553,6 +553,7 @@ force flag. Symlinks and empty directories are not written; the receipt counts t
 uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py unblock <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
 uv run python scripts/memory_queue.py restore --export <path>

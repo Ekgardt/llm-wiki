@@ -5,8 +5,7 @@ child process). The research before the fixes.
 
 Files: scripts/memory_queue.py,
 tests/test_a_child_that_dies_at_start_does_not_halt_the_worker.py,
-tests/test_a_blocked_task_has_a_way_back.py,
-tests/test_a_success_at_the_deadline_is_a_success.py
+tests/test_a_blocked_task_has_a_way_back.py, docs/USER-GUIDE.md
 
 ## What was found
 
@@ -53,5 +52,7 @@ tests/test_a_success_at_the_deadline_is_a_success.py
   state with `unblock_requires_blocked`. The CLI gains `unblock <task_id>`. It is an
   operator's statement that the capability is back — for `process_cleanup`, that the
   leftover processes are gone. No MCP tool is added.
-- L21: a processor that returned a success keeps it; the deadline re-check applies only to
-  an outcome that was not a success.
+- L21 is left as it is. `test_worker_times_out_handler_without_result_or_live_lease` pins
+  the opposite on purpose: a result that arrives at or after the deadline is a late result
+  and is discarded, so the lease is never settled past its bound. Keeping a success that
+  landed late would break that stated rule; it is the owner's to change, not a defect.

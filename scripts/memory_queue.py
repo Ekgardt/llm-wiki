@@ -5161,6 +5161,24 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     return row
 
 
+def _unblock_in(database: sqlite3.Connection, task_id: str, now: datetime) -> None:
+    """Put one blocked task back to ready: the operator says its capability is back.
+
+    A task blocked on `process_cleanup` had no way back but `cancel`, which loses
+    the work. See `docs/research/2026-09-17-a-failed-start-is-not-a-failed-cleanup.md`.
+    """
+    row = database.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(task_id)
+    if row["state"] != "blocked":
+        raise QueueOperationError("unblock_requires_blocked")
+    database.execute(
+        """UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL,
+               updated_at=?,available_at=? WHERE id=? AND state='blocked'""",
+        (_timestamp(now), _timestamp(now), task_id),
+    )
+
+
 def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
@@ -6197,6 +6215,12 @@ class MemoryQueue:
                 (_timestamp(now), task_id),
             )
             return True
+
+    def unblock(self, task_id: str) -> None:
+        """A blocked task goes back to ready; any other state is refused."""
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            _unblock_in(connection, task_id, now)
 
     def redrive(
         self,
@@ -11434,6 +11458,11 @@ class _QueueV3CandidateReader:
             self._raise_payload_mismatch()
         return changed
 
+    def unblock(self, task_id: str) -> None:
+        """A blocked task goes back to ready; any other state is refused."""
+        with closing(self._connect()) as database, begin_immediate(database):
+            _unblock_in(database, task_id, _utc_now())
+
     def _insert_redriven_task(
         self,
         database: sqlite3.Connection,
@@ -15706,6 +15735,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
             "work",
             "cancel",
             "redrive",
+            "unblock",
             "migrate",
             "purge",
             "restore",
@@ -15870,6 +15900,13 @@ def _cli_cancel(args, _parser) -> int:
     return 1
 
 
+def _cli_unblock(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    _queue().unblock(task_id)
+    print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
+    return 0
+
+
 def _cli_redrive(args, _parser) -> int:
     task_id = redrive(_require_cli_task_id(args))
     print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
@@ -15931,6 +15968,7 @@ _CLI_COMMANDS = {
     "purge-corrupt": _cli_purge_corrupt,
     "cancel": _cli_cancel,
     "redrive": _cli_redrive,
+    "unblock": _cli_unblock,
     "purge": _cli_purge,
     "restore": _cli_restore,
 }
