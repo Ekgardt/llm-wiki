@@ -2,7 +2,9 @@
 
 CLI:
     uv run python scripts/compile_memory.py              # compile changed daily logs
-    uv run python scripts/compile_memory.py --all        # compile every daily log
+    uv run python scripts/compile_memory.py --all        # accepted, same as no flag: a
+                                                         # day with a committed receipt
+                                                         # is never compiled again
     uv run python scripts/compile_memory.py --file PATH  # compile one daily log
     uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
     uv run python scripts/compile_memory.py --trigger auto|manual
@@ -3581,7 +3583,14 @@ def _transaction_authority(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--all", action="store_true")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Accepted for old command lines; changes nothing. Every pending daily "
+            "log is compiled by default, and a committed day is never recompiled."
+        ),
+    )
     p.add_argument("--file", type=str, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(

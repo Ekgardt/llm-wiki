@@ -373,9 +373,11 @@ nightly pass refreshes every registered repository. See
 
 ```bash
 uv run python scripts/compile_memory.py              # compile changed daily logs
-uv run python scripts/compile_memory.py --all        # recompile everything
 uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
 ```
+
+There is no "recompile everything": a day whose compile was committed is never
+compiled again (`--all` is still accepted and changes nothing).
 
 Compile runs automatically on MAJOR sessions after the hour cutoff, but you
 can trigger it manually anytime. The pipeline uses VERIFY-BEFORE-WRITE —
