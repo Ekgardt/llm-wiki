@@ -2174,6 +2174,22 @@ def _queue_v3_report(database: sqlite3.Connection) -> dict[str, object]:
     }
 
 
+def require_queue_v3_openable(path: Path, *, state_root: Path) -> None:
+    """What every open of the adopted queue checks: place, contract, schema.
+
+    The whole-file check (`validate_queue_v3_database`) reads every retained row,
+    so it belongs where a file is certified — adoption, backup, a candidate —
+    and not on each hook's open. A bad payload is a fact about one task; the
+    transition that touches that task demotes it, which a veto on open prevents.
+    """
+    _require_inside_state_root(Path(path), Path(state_root))
+    with closing(_open_queue_v3_readonly(Path(path), Path(state_root))) as database:
+        if not _queue_v3_schema_complete(database):
+            raise _migration_error(
+                "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
+            )
+
+
 def validate_queue_v3_database(
     path: Path, *, state_root: Path
 ) -> dict[str, object]:
@@ -12778,7 +12794,7 @@ def _adopted_owner_reader(state_root: Path, role: str) -> Any | None:
     if role not in _ADOPTED_OWNER_ROLES or not _reliability_v3_records_present(state):
         return None
     queue_path = state / "run" / "queue-v3.sqlite3"
-    validate_queue_v3_database(queue_path, state_root=state)
+    require_queue_v3_openable(queue_path, state_root=state)
     return _QueueV3CandidateReader(
         queue_path,
         coordinator_path=state / "run" / "markdown-transactions-v3.sqlite3",
@@ -13665,7 +13681,7 @@ def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReade
     require_reliability_v3_adopted(root=resolved_vault, state_root=state)
     queue_path = state / "run" / "queue-v3.sqlite3"
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
-    validate_queue_v3_database(queue_path, state_root=state)
+    require_queue_v3_openable(queue_path, state_root=state)
     return _QueueV3CandidateReader(
         queue_path, coordinator_path=coordinator_path
     )
