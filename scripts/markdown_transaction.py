@@ -2291,6 +2291,13 @@ def _required_state_hash(value: object) -> str:
     return value
 
 
+def _recovery_still_concerns(row: sqlite3.Row, cutoff: datetime) -> bool:
+    """Every unfinished row, and an aborted one only inside the undo window."""
+    if row["state"] != "aborted":
+        return True
+    return _parse_timestamp(row["updated_at"]) >= cutoff
+
+
 def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
     if selected_state != "preparing" or owner_pid is None:
         return False
@@ -6657,21 +6664,29 @@ class MarkdownCoordinator:
         )
 
     def _incomplete_transaction_rows(self, max_transactions: int | None) -> list[tuple]:
+        """Work that can still move goes first; a fresh abort is checked last.
+
+        An `aborted` row is terminal. It is looked at only while it has no
+        verdict and the undo window is open — the time a crash around its
+        receipt can still matter — so old aborts neither cost every `prepare`
+        nor use up a bounded caller's budget ahead of a crashed `applying` row.
+        See `docs/research/2026-09-17-a-transaction-that-is-over-stays-over.md`.
+        """
         query = (
-            'SELECT id, state, owner_pid FROM "transaction" '
-            "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
-            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
+            'SELECT id, state, owner_pid, updated_at FROM "transaction" '
+            "WHERE state IN ('aborting','preparing','prepared','applying') "
+            "OR (state = 'aborted' AND error_code IS NULL) "
+            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 2 ELSE 1 END, "
             "created_at, id"
         )
-        parameters: tuple[object, ...] = ()
-        if max_transactions is not None:
-            query += " LIMIT ?"
-            parameters = (max_transactions,)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=UNDO_RETENTION_DAYS)
         with self._connect() as database:
-            return [
+            selected = [
                 (row["id"], row["state"], row["owner_pid"])
-                for row in database.execute(query, parameters)
+                for row in database.execute(query)
+                if _recovery_still_concerns(row, cutoff)
             ]
+        return selected if max_transactions is None else selected[:max_transactions]
 
     def _quarantine_dlp(self, transaction_id: str, exc: BaseException) -> None:
         code = "dlp_content_blocked"
@@ -6902,15 +6917,9 @@ class MarkdownCoordinator:
             )
         except (OSError, TypeError, ValueError):
             return False
-        return _abort_receipt_matches(
-            receipt, receipt_bytes, transaction_id, row
-        ) and self._targets_hold_before_state(transaction_id)
-
-    def _targets_hold_before_state(self, transaction_id: str) -> bool:
-        return all(
-            self._operation_hash(operation) == operation["before_hash"]
-            for operation in self._operation_rows(transaction_id)
-        )
+        # Whether the targets still hold their before-state is not asked: that
+        # was true when the abort finished, and any later write makes it false.
+        return _abort_receipt_matches(receipt, receipt_bytes, transaction_id, row)
 
     @staticmethod
     def _recovery_stopped(
