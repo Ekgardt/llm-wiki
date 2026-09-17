@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from path_coverage import _current_sha, _freshness
+from path_coverage import _current_sha, _freshness, contained_scope
 
 MAX_LOCATIONS = 5
 MAX_FILE_BYTES = 1024 * 1024
@@ -152,13 +152,15 @@ def _exact_block(lines: list[str], occurrence: dict) -> dict:
     }
 
 
-def _exact_snippet(graph, directory: Path, node: dict, occurrence: dict, deadline: float) -> dict:
+def _exact_snippet(
+    graph, directory: Path, scope, node: dict, occurrence: dict, deadline: float
+) -> dict:
     relative = str(occurrence["relative_path"])
     lines = _stored_lines(graph, relative, deadline)
     if lines is None:
         return {"path": relative, "error": "stored source unavailable or over 1 MiB", **_node_fields(node)}
     recorded = str(occurrence["source_sha256"])
-    freshness = _freshness(recorded, _current_sha(directory, relative))
+    freshness = _freshness(recorded, _current_sha(scope, relative, deadline))
     return {
         "path": relative,
         **_block_for(directory, relative, lines, occurrence, node, freshness),
@@ -215,11 +217,13 @@ def _heuristic_snippets(directory: Path, node: dict, name: str) -> list[dict]:
     return found
 
 
-def _node_snippets(graph, directory: Path, node: dict, name: str, deadline: float) -> list[dict]:
+def _node_snippets(
+    graph, directory: Path, scope, node: dict, name: str, deadline: float
+) -> list[dict]:
     occurrence = _definition_occurrence(graph, node["node_id"], deadline)
     if occurrence is None:
         return _heuristic_snippets(directory, node, name)
-    return [_exact_snippet(graph, directory, node, occurrence, deadline)]
+    return [_exact_snippet(graph, directory, scope, node, occurrence, deadline)]
 
 
 def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
@@ -229,9 +233,11 @@ def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dic
     except ValueError:
         return {**answer, "snippets": [], "error": "too many symbols share this name; qualify it as owner.name"}
     _, name = _split_symbol(symbol)
+    # One scope per answer: resolving it asks git, so never once per symbol.
+    scope = contained_scope(directory, deadline)
     snippets: list[dict] = []
     for node in nodes:
-        snippets.extend(_node_snippets(graph, directory, node, name, deadline))
+        snippets.extend(_node_snippets(graph, directory, scope, node, name, deadline))
     return {**answer, "snippets": snippets[:MAX_LOCATIONS], "resolved_nodes": len(nodes)}
 
 

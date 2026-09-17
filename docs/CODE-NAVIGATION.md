@@ -108,8 +108,12 @@ reindex. Research:
 
 - **`mode=coverage`, `path=<relative>`** — one generation's word about one
   file: `indexed` and `freshness` (`fresh`, `stale`, `missing_on_disk`,
-  `not_indexed`) come from the generation's own stored source row, the same
-  generation the node count comes from. Before this the manifest was read
+  `not_indexed`, `unreadable`) come from the generation's own stored source row, the same
+  generation the node count comes from. `path` must be a canonical
+  repository-relative path; the file on disk is hashed only through the
+  contained reader the precise modes use, and `unreadable` means that reader
+  refused it (outside the repository, a symlink, a device or FIFO, over
+  16 MiB). Before this the manifest was read
   relative to the repository, which only the vault has, so every foreign
   repository answered `indexed=false` beside a real node count. The `parse`
   block re-parses the stored bytes with the grammar the extractor used and

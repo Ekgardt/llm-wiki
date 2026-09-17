@@ -4007,9 +4007,16 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     return _positioned_architecture_path_error(arguments, mode, positioned)
 
 
+# Modes whose `path` names one file that is then read from disk. `search` is
+# absent on purpose: its `path` is a prefix compared inside the graph, never
+# opened. Audit 3, A2:
+# `docs/research/2026-09-17-coverage-reads-only-inside-the-repository.md`.
+FILE_READING_ARCHITECTURE_MODES = PRECISE_ARCHITECTURE_MODES | {"coverage"}
+
+
 def _positioned_architecture_path_error(arguments: dict, mode: str, positioned: bool):
-    """Only a precise or positioned call carries a path to validate."""
-    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
+    """Every call that opens the file its path names carries a path to validate."""
+    if mode in FILE_READING_ARCHITECTURE_MODES or positioned:
         return _architecture_path_error(arguments)
     return None
 
