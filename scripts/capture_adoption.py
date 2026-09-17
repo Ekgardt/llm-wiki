@@ -66,6 +66,11 @@ from integration_adapter import (  # noqa: E402
 # it: the sweeper runs again on the next capture and again every night.
 MAX_ADOPTED_INTENTS_PER_PASS = 32
 
+# A record that cannot be adopted is skipped and left untouched; it must not use
+# the bound above up, or 32 bad records hide every orphan behind them for good.
+# The pass still ends: after this many skips it stops looking further.
+MAX_SKIPPED_INTENTS_PER_PASS = 256
+
 
 def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
     """Read the record's own bytes and prove they are the ones it names."""
@@ -139,26 +144,59 @@ def _skip(record: dict[str, Any], error: BaseException) -> dict[str, str]:
     }
 
 
-def _adopt_records(
+def _adopt_batch(
     queue: object,
     coordinator: object,
     state_root: Path,
     records: list[dict[str, Any]],
-) -> dict[str, Any]:
-    adopted: list[dict[str, str]] = []
-    skipped: list[dict[str, str]] = []
+    outcome: dict[str, Any],
+) -> None:
     for record in records:
+        outcome["examined"] += 1
         try:
             task_id = _adopt_one(queue, coordinator, state_root, record)
         except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
-            skipped.append(_skip(record, error))
+            outcome["skipped"].append(_skip(record, error))
             continue
-        adopted.append({"intent_id": str(record["intent_id"]), "task_id": task_id})
-    return {
-        "examined": len(records),
-        "adopted": adopted,
-        "skipped": skipped,
-    }
+        outcome["adopted"].append(
+            {"intent_id": str(record["intent_id"]), "task_id": task_id}
+        )
+
+
+def _not_skipped(
+    records: list[dict[str, Any]], skipped: set[str]
+) -> list[dict[str, Any]]:
+    return [record for record in records if str(record["intent_id"]) not in skipped]
+
+
+def _next_records(reader, outcome: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """The orphans still owed to this pass; a skipped record does not use the bound up.
+
+    A skipped record is left untouched, so it is among the oldest again on every
+    read. The window is therefore wider by the skips so far, and the pass goes on
+    to the orphans behind them instead of stalling at a head of bad records.
+    See `docs/research/2026-09-17-bad-intents-do-not-use-up-the-adoption-bound.md`.
+    """
+    remaining = limit - len(outcome["adopted"])
+    skipped = {entry["intent_id"] for entry in outcome["skipped"]}
+    if remaining < 1 or len(skipped) >= MAX_SKIPPED_INTENTS_PER_PASS:
+        return []
+    return _not_skipped(reader(remaining + len(skipped)), skipped)[:remaining]
+
+
+def _adopt_records(
+    queue: object,
+    coordinator: object,
+    state_root: Path,
+    reader,
+    limit: int,
+) -> dict[str, Any]:
+    outcome: dict[str, Any] = {"examined": 0, "adopted": [], "skipped": []}
+    while True:
+        records = _next_records(reader, outcome, limit)
+        if not records:
+            return outcome
+        _adopt_batch(queue, coordinator, state_root, records, outcome)
 
 
 def adopt_orphaned_capture_intents(
@@ -177,7 +215,7 @@ def adopt_orphaned_capture_intents(
     reader = getattr(queue, "ready_capture_intents_without_task", None)
     if reader is None:
         return {"examined": 0, "adopted": [], "skipped": [], "reason": "unsupported"}
-    return _adopt_records(queue, coordinator, Path(state_root), reader(limit))
+    return _adopt_records(queue, coordinator, Path(state_root), reader, limit)
 
 
 def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[str, Any]:
