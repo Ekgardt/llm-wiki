@@ -367,6 +367,24 @@ def _constant_targets(node: ast.Assign | ast.AnnAssign) -> list[ast.Name]:
     return [item for item in names if _is_constant_name(item.id)]
 
 
+# The statement lists a compound statement that is *not* a block can hold.
+# "A block is a piece of Python program text that is executed as a unit. The
+# following are blocks: a module, a function body, and a class definition."
+# (Python Language Reference, Execution model.) An `if`, `try`, `with`, `for`,
+# `while` or `match` is none of those, so a `def` inside one binds its name in
+# the enclosing scope and belongs to the enclosing owner. Audit 3, B23;
+# research: `docs/research/2026-09-17-graph-a-definition-under-a-platform-test-is-still-a-definition.md`.
+_PYTHON_NESTED_FIELDS = ("body", "orelse", "handlers", "finalbody", "cases")
+
+
+def _nested_statements(node: ast.AST) -> list[ast.AST]:
+    """The statements a non-defining compound statement holds, in source order."""
+    collected: list[ast.AST] = []
+    for field in _PYTHON_NESTED_FIELDS:
+        collected.extend(getattr(node, field, None) or ())
+    return collected
+
+
 def _python_target_span(target: ast.Name, offsets: tuple[int, ...]) -> tuple[int, int]:
     start = offsets[target.lineno - 1] + target.col_offset
     return start, start + len(target.id.encode())
@@ -1194,11 +1212,19 @@ class _Collector:
         )
 
     def _walk_python(self, ctx: _PythonFile, body: list[ast.stmt], owner: _PythonOwner) -> None:
-        for node in body:
-            self.check_stop()
-            self._python_definition(ctx, node, owner)
+        """Every definition of one scope, including those under an `if` or a `try`.
 
-    def _definition_handler(self, node: ast.stmt):
+        One explicit stack, so a deeply nested module cannot raise
+        `RecursionError` out of the extractor, and pre-order, so the definitions
+        of a module without nested blocks are still produced in source order.
+        """
+        stack: list[ast.AST] = list(reversed(body))
+        while stack:
+            self.check_stop()
+            nested = self._python_definition(ctx, stack.pop(), owner)
+            stack.extend(reversed(nested))
+
+    def _definition_handler(self, node: ast.AST):
         """The writer for one statement kind, or None when nothing is defined."""
         if isinstance(node, ast.ClassDef):
             return self._python_class
@@ -1206,16 +1232,25 @@ class _Collector:
             return self._python_function
         return self._assignment_handler(node)
 
-    def _assignment_handler(self, node: ast.stmt):
+    def _assignment_handler(self, node: ast.AST):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             return self._python_constant
         return None
 
-    def _python_definition(self, ctx: _PythonFile, node: ast.stmt, owner: _PythonOwner) -> None:
+    def _python_definition(
+        self, ctx: _PythonFile, node: ast.AST, owner: _PythonOwner
+    ) -> list[ast.AST]:
+        """Write what this statement defines; return the blocks still to walk.
+
+        A statement that defines something owns its own body (a class and a
+        function each recurse with the owner they establish), so only a
+        non-defining compound statement hands its nested lists back.
+        """
         handler = self._definition_handler(node)
         if handler is None:
-            return
+            return _nested_statements(node)
         handler(ctx, node, owner)
+        return []
 
     def _python_constant(
         self, ctx: _PythonFile, node: ast.Assign | ast.AnnAssign, owner: _PythonOwner
