@@ -4552,6 +4552,48 @@ def unowned_install_paths(root: Path) -> list[dict[str, str]]:
     ]
 
 
+# Each agent keeps its own MCP registry, and the installers add `llm-wiki` to it outside
+# the ownership transaction: `~/.claude.json` is Claude Code's live state, rewritten while
+# it runs, so restoring a preimage would put a stale copy over newer state. They are
+# reported like the paths above, with the way to remove the entry, never rewritten here.
+# See docs/research/2026-09-17-an-uninstall-names-what-it-leaves.md.
+MAX_REGISTRATION_BYTES = 64 * 1024 * 1024
+
+
+def _agent_registrations(home: Path) -> list[tuple[str, Path, str, str]]:
+    from installer_config import GLOBAL_CONFIG_NAMES
+
+    opencode = _opencode_plugin_destination(home).parent.parent
+    return [
+        ("claude", home / ".claude.json", '"llm-wiki"', "claude mcp remove --scope user llm-wiki"),
+        (
+            "codex",
+            home / ".codex" / "config.toml",
+            "[mcp_servers.llm-wiki]",
+            "delete the [mcp_servers.llm-wiki] table",
+        ),
+        *(
+            ("opencode", opencode / name, '"llm-wiki"', 'delete "llm-wiki" under "mcp"')
+            for name in GLOBAL_CONFIG_NAMES
+        ),
+    ]
+
+
+def _file_mentions(path: Path, marker: str) -> bool:
+    if not path.is_file() or path.stat().st_size > MAX_REGISTRATION_BYTES:
+        return False
+    return marker in path.read_text(encoding="utf-8", errors="replace")
+
+
+def unowned_agent_registrations(home: Path) -> list[dict[str, str]]:
+    """Agent MCP entries the installers wrote and no uninstall takes back."""
+    return [
+        {"agent": agent, "path": str(path), "remove_with": remedy}
+        for agent, path, marker, remedy in _agent_registrations(Path(home))
+        if _file_mentions(path, marker)
+    ]
+
+
 def inspect_install_state(state_root: Path, root: Path | None = None) -> dict[str, object]:
     install_root = Path(state_root) / "run" / "install"
     manifest = "present" if (install_root / "manifest.json").is_file() else "absent"
@@ -5073,11 +5115,19 @@ def _uninstall_from_args(args: argparse.Namespace) -> dict[str, object]:
         state_root=args.state_root.resolve(),
         resources=_resources_from_existing_args(args, "uninstall"),
     )
-    return {"state": result["state"], "status": "uninstalled"}
+    return {
+        "left_behind": unowned_agent_registrations(args.home.resolve()),
+        "state": result["state"],
+        "status": "uninstalled",
+    }
 
 
 def _status_from_args(args: argparse.Namespace) -> dict[str, object]:
-    return inspect_install_state(args.state_root, getattr(args, "root", None))
+    state = inspect_install_state(args.state_root, getattr(args, "root", None))
+    home = getattr(args, "home", None)
+    if home is None:
+        return state
+    return {**state, "agent_registrations": unowned_agent_registrations(home.resolve())}
 
 
 def _add_existing_arguments(parser: argparse.ArgumentParser) -> None:
@@ -5094,6 +5144,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     status = subparsers.add_parser("status")
     status.add_argument("--state-root", type=Path, required=True)
+    status.add_argument("--home", type=Path)
     install = subparsers.add_parser("install")
     install.add_argument("--root", type=Path, required=True)
     install.add_argument("--state-root", type=Path, required=True)

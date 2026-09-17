@@ -412,6 +412,9 @@ $schedulerWarning = $false
 # owned by it: an uninstall has to take back exactly what the install wrote.
 $claudeDetected = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.claude") -or (Test-Path "$env:USERPROFILE\.claude.json"))
 $codexDetected = [bool]((Get-Command codex -ErrorAction SilentlyContinue) -or (Test-Path "$env:USERPROFILE\.codex"))
+# Same reason, and the same test install.sh makes: without this flag the plugin was
+# written only by the OpenCode configuration step, and no uninstall removed it.
+$openCodeDetected = [bool]((Get-Command opencode -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:USERPROFILE ".config\opencode")))
 $codexHooksState = "none"
 if ($codexDetected) {
     New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE ".codex") | Out-Null
@@ -427,6 +430,7 @@ try {
         "--scheduler", "native",
         "--powershell-path", $powerShellPath
     )
+    if ($openCodeDetected) { $installControlArgs += "--opencode-plugin" }
     if ($claudeDetected) { $installControlArgs += "--claude-settings" }
     if ($codexHooksState -eq "absent") { $installControlArgs += "--codex-hooks" }
     $installControlJson = Invoke-NativeCommand uv $installControlArgs -CaptureOutput
