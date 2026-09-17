@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import secrets
+import selectors
 import shutil
 import stat
 import subprocess as _subprocess
@@ -1140,6 +1141,33 @@ class _FailureEvidenceIdentity:
 
 
 @dataclass(slots=True)
+class _StderrWake:
+    """The pipe a POSIX drain thread watches beside stderr; closing it stops the thread.
+
+    A server that left its process group keeps stderr's write end open, so
+    end-of-file is not ours to wait for. The thread owns `read_fd`; cleanup
+    owns `write_fd`.
+    """
+
+    read_fd: int
+    write_fd: int | None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def request(self) -> None:
+        """Ask the drain thread to finish; asking twice is harmless."""
+        with self.lock:
+            descriptor, self.write_fd = self.write_fd, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def abandon(self) -> None:
+        """Both ends, for a drain thread that was never started."""
+        self.request()
+        with contextlib.suppress(OSError):
+            os.close(self.read_fd)
+
+
+@dataclass(slots=True)
 class _Generation:
     nonce: str
     tree: ProcessTree | None
@@ -1151,6 +1179,7 @@ class _Generation:
     stderr_size: list[int] = field(default_factory=lambda: [0])
     stderr_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     stderr_thread: threading.Thread | None = None
+    stderr_wake: _StderrWake | None = None
     exit_thread: threading.Thread | None = None
     expected_exit: threading.Event = field(default_factory=threading.Event, repr=False)
     failure_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -1868,6 +1897,7 @@ def _adopt_generation_tree(
 def _start_stderr_drain(
     generation: _Generation, process: object, generation_nonce: str, deadline: float
 ) -> None:
+    generation.stderr_wake = _new_stderr_wake()
     stderr_thread = threading.Thread(
         target=_drain_stderr,
         args=(
@@ -1875,6 +1905,7 @@ def _start_stderr_drain(
             generation.stderr,
             generation.stderr_size,
             generation.stderr_lock,
+            generation.stderr_wake,
         ),
         name=f"lsp-stderr-{generation_nonce}",
         daemon=True,
@@ -5902,22 +5933,50 @@ def _close_one_pipe(
     return True
 
 
+def _stop_stderr_drain(generation: _Generation, deadline: float) -> bool:
+    """Wake the drain thread and wait for it within the deadline; True once it is gone.
+
+    The thread closes stderr itself. Closing it from here while the thread sat
+    in a read waited for the read, and the read waited for a process outside
+    the group: a cleanup that no deadline covered.
+    """
+    thread = generation.stderr_thread
+    wake = generation.stderr_wake
+    if thread is None or _thread_never_started(thread):
+        if wake is not None:
+            wake.abandon()
+        return True
+    if wake is not None:
+        wake.request()
+    return _join_owned_thread(thread, deadline)
+
+
 def _close_generation_pipes(
     generation: _Generation,
     process_exited: bool,
+    deadline: float,
     result: _CleanupResult,
     errors: list[BaseException],
     flags: _GenerationCleanup,
 ) -> bool:
-    """Close the server's pipes once it is gone; False when one refused."""
+    """Close the server's pipes once it is gone; False when one is still held."""
     process = generation.process
     if process is None or not process_exited:
         return True
-    streams = (process.stdin, process.stdout, process.stderr)
-    closed = True
-    for stream in streams:
-        closed = _close_one_pipe(stream, result, errors, flags) and closed
-    return closed
+    drained = _stop_stderr_drain(generation, deadline)
+    outcomes = [
+        _close_one_pipe(stream, result, errors, flags)
+        for stream in _closable_pipes(process, drained)
+    ]
+    return drained and all(outcomes)
+
+
+def _closable_pipes(process: object, drained: bool) -> list[BinaryIO | None]:
+    """Every pipe of ours; stderr only once its drain thread no longer holds it."""
+    streams = [process.stdin, process.stdout]
+    if drained:
+        streams.append(process.stderr)
+    return streams
 
 
 def _release_posix_tree(
@@ -6064,7 +6123,9 @@ def _release_one_generation(
     _terminate_generation_tree(generation, deadline, result, errors, flags)
     exited = _generation_process_exited(generation, result, errors, flags)
     _finish_generation_protocol(generation, exited, deadline, result, errors, flags)
-    pipes_closed = _close_generation_pipes(generation, exited, result, errors, flags)
+    pipes_closed = _close_generation_pipes(
+        generation, exited, deadline, result, errors, flags
+    )
     _release_posix_tree(generation, result, errors, flags)
     _join_generation_threads(generation, exited, deadline, result, errors, flags)
     ready = _windows_release_ready(generation, exited)
@@ -6700,36 +6761,100 @@ def _canonical_lsp_fields(ownership: OwnerLease) -> dict[str, object]:
     }
 
 
+def _new_stderr_wake() -> _StderrWake | None:
+    """A wake pipe where a pipe can be selected on; Windows ends stderr itself.
+
+    There the Job Object kills every holder of the write end, so end-of-file
+    always arrives and the drain thread needs no second descriptor.
+    """
+    if os.name == "nt":
+        return None
+    read_fd, write_fd = os.pipe()
+    return _StderrWake(read_fd, write_fd)
+
+
+@dataclass(frozen=True, slots=True)
+class _StderrRing:
+    """Where the drain thread keeps the last bytes the server wrote."""
+
+    chunks: deque[bytes]
+    size: list[int]
+    lock: threading.Lock
+
+
 def _drain_stderr(
     stream: BinaryIO,
     chunks: deque[bytes],
     size: list[int],
     lock: threading.Lock,
+    wake: _StderrWake | None = None,
 ) -> None:
+    """Own the server's stderr: read it as it arrives and close it at the end.
+
+    Nothing else reads or closes this stream while the thread lives, so no
+    cleanup can wait behind a read that an escaped process keeps open.
+    """
     try:
-        _read_stderr_forever(stream, chunks, size, lock)
+        _read_stderr_forever(stream, _StderrRing(chunks, size, lock), wake)
     except (OSError, ValueError):
         return
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
+        if wake is not None:
+            with contextlib.suppress(OSError):
+                os.close(wake.read_fd)
+
+
+def _take_stderr_chunk(descriptor: int, ring: _StderrRing) -> bool:
+    """Append what the pipe holds now; False once the stream has ended."""
+    chunk = os.read(descriptor, _STDERR_CHUNK_BYTES)
+    if not chunk:
+        return False
+    with ring.lock:
+        ring.chunks.append(chunk)
+        ring.size[0] += len(chunk)
+        _trim_stderr_chunks(ring.chunks, ring.size)
+    return True
+
+
+def _ready_descriptors(selector: selectors.BaseSelector, timeout: float | None) -> set[int]:
+    return {key.fd for key, _events in selector.select(timeout)}
+
+
+def _take_waiting_stderr(
+    selector: selectors.BaseSelector, descriptor: int, ring: _StderrRing
+) -> None:
+    """After the wake-up: what is already in the pipe, and never more than the ring."""
+    for _ in range(MAX_STDERR_BYTES // _STDERR_CHUNK_BYTES + 1):
+        if descriptor not in _ready_descriptors(selector, 0):
+            return
+        if not _take_stderr_chunk(descriptor, ring):
+            return
+
+
+def _read_stderr_until_woken(
+    selector: selectors.BaseSelector, descriptor: int, wake_fd: int, ring: _StderrRing
+) -> None:
+    while wake_fd not in _ready_descriptors(selector, None):
+        if not _take_stderr_chunk(descriptor, ring):
+            return
+    _take_waiting_stderr(selector, descriptor, ring)
 
 
 def _read_stderr_forever(
-    stream: BinaryIO,
-    chunks: deque[bytes],
-    size: list[int],
-    lock: threading.Lock,
+    stream: BinaryIO, ring: _StderrRing, wake: _StderrWake | None
 ) -> None:
-    """Append every chunk the server writes until its stream ends."""
-    while True:
-        chunk = stream.read(_STDERR_CHUNK_BYTES)
-        if not chunk:
-            return
-        with lock:
-            chunks.append(chunk)
-            size[0] += len(chunk)
-            _trim_stderr_chunks(chunks, size)
+    """Append every chunk the server writes until its stream ends or we are woken."""
+    descriptor = stream.fileno()
+    if wake is None:
+        while _take_stderr_chunk(descriptor, ring):
+            pass
+        return
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_READ)
+        selector.register(wake.read_fd, selectors.EVENT_READ)
+        _read_stderr_until_woken(selector, descriptor, wake.read_fd, ring)
 
 
 def _trim_stderr_chunks(chunks: deque[bytes], size: list[int]) -> None:
