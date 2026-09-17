@@ -14859,9 +14859,9 @@ def _run_processor_child(
     finally:
         receiver.close()
         if started:
-            _terminate_processor_child(
-                process, tracked_descendants=run.tracked_descendants
-            )
+            # Through `stop`, which knows that a tree never tracked — a child
+            # that died before its handshake — is discovered now, not unknown.
+            run.stop()
 
 
 _CLAIM_BUSY_RETRY_SECONDS = 0.05
