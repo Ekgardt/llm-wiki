@@ -31,7 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -257,8 +257,16 @@ def _warm_reranker() -> None:
     _get_reranker_bundle()
 
 
-def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[object, dict]:
-    """Build and activate one generation over the ingested daily evidence."""
+def build_generation(
+    root: Path, state: Path, daily_files: list[str], ask: Callable[[str, str], str | None] | None = None
+) -> tuple[object, dict]:
+    """Build and activate one generation over the ingested daily evidence.
+
+    The turns are keyed before the build, because the build is what indexes
+    the keys: keyed afterwards, the stand's `keys` column was always empty.
+    `ask` replaces the provider for the keying. Research:
+    `docs/research/2026-09-17-the-stand-keys-the-turns-before-it-builds.md`.
+    """
     from corpus_snapshot import collect_corpus
     from doctor import (
         _corpus_policy,
@@ -273,6 +281,7 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
 
     deadline = time.monotonic() + BUILD_DEADLINE_SECONDS
     snapshot = collect_corpus(root, code_roots=(), daily_paths=daily_files, deadline=deadline)
+    keyed = _key_the_haystack(state, snapshot, ask)
     scope = resolve_repository_scope(root)
     catalog = GenerationCatalog(state)
     built = build_incremental_generation(
@@ -300,6 +309,7 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
         "vector_state": active.get("vector_state"),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
+        "keyed_turns": keyed,
     }
     return snapshot, info
 
@@ -307,7 +317,15 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
 FACT_KEYS_ENV = "LLMWIKI_BENCH_FACT_KEYS"
 
 
-def _key_the_haystack(state: Path, snapshot: object) -> int | None:
+def _ask_the_provider(prompt: str, system_prompt: str) -> str | None:
+    from llm_client import call_llm
+
+    return call_llm(prompt, system_prompt, 1500)
+
+
+def _key_the_haystack(
+    state: Path, snapshot: object, ask: Callable[[str, str], str | None] | None = None
+) -> int | None:
     """Extract fact keys for this question's turns when the arm asks for it.
 
     About ten batched provider calls a question; off by default because it is
@@ -316,7 +334,6 @@ def _key_the_haystack(state: Path, snapshot: object) -> int | None:
     if os.environ.get(FACT_KEYS_ENV, "").strip() != "1":
         return None
     import fact_keys
-    from llm_client import call_llm
     from query_memory import _sentence_encoder
 
     store = fact_keys.KeyStore(fact_keys.store_path(state))
@@ -324,7 +341,7 @@ def _key_the_haystack(state: Path, snapshot: object) -> int | None:
         return fact_keys.key_turns(
             store,
             snapshot.chunks,
-            lambda prompt, system_prompt: call_llm(prompt, system_prompt, 1500),
+            ask or _ask_the_provider,
             _sentence_encoder(),
             time.monotonic() + BUILD_DEADLINE_SECONDS,
         )
@@ -755,7 +772,6 @@ def run_question(question: dict, work: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
-    keyed = _key_the_haystack(state, snapshot)
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
@@ -789,7 +805,6 @@ def run_question(question: dict, work: Path) -> dict:
         **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
-        "keyed_turns": keyed,
         **outcome,
         **metrics,
         "ingest_seconds": round(build_started - ingest_started, 2),
