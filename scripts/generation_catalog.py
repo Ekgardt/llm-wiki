@@ -804,6 +804,16 @@ def _selected_token(
     return encoded, sha256_bytes(encoded)
 
 
+def _unlink_manifest(generation_path: Path) -> None:
+    """Remove the one file that makes a tree a publication; a linked directory is left alone."""
+    try:
+        linked = _is_link_or_reparse(generation_path)
+    except FileNotFoundError:
+        return
+    if not linked:
+        (generation_path / "manifest.json").unlink(missing_ok=True)
+
+
 def _still_referenced(database: sqlite3.Connection, identifier: str) -> bool:
     referenced = database.execute(
         "SELECT 1 FROM generations WHERE generation_id = ? "
@@ -2836,6 +2846,20 @@ class GenerationCatalog:
                 return None
             return self._delete_registration(database, identifier)
 
+    def _unseal_unregistered(self, identifier: str) -> None:
+        """Make the unregistered tree unrecoverable before its removal can be stopped.
+
+        The tree removal honours the caller's deadline; this does not. A complete
+        tree with no row used to be registered again by `recover_orphans`, as the
+        newest generation of its checkout. See
+        `docs/research/2026-09-17-a-retired-generation-does-not-come-back.md`.
+        """
+        cleanup_deadline = self._monotonic() + CLEANUP_CATALOG_FENCE_SECONDS
+        with self._write_transaction(cleanup_deadline) as database:
+            if _still_referenced(database, identifier):
+                return
+            _unlink_manifest(self.generations_path / identifier)
+
     @staticmethod
     def _delete_registration(database: sqlite3.Connection, identifier: str) -> bool:
         registered = database.execute(
@@ -2883,6 +2907,7 @@ class GenerationCatalog:
         removed_registration = self._drop_registration(identifier)
         if removed_registration is None:
             return False
+        self._unseal_unregistered(identifier)
 
         # The committed delete cannot be rolled back by filesystem failures. A
         # second writer fence keeps activation and registration from racing the
