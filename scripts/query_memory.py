@@ -1935,11 +1935,17 @@ def _gathered(
 
 
 def _candidate_key(candidate: object) -> object:
-    """What makes two candidates the same piece, by id or else by position."""
-    identity = _first_present(candidate, _CANDIDATE_ID_KEYS)
-    if identity:
-        return identity
-    return (_first_present(candidate, _CANDIDATE_PATH_KEYS), _candidate_field(candidate, "byte_start"))
+    """What makes two candidates the same piece: its place in the source, or else its id.
+
+    The place is the identity every leg's rows carry. A retrieval row has an id
+    as well, a keys-leg row and a cited span do not; keyed by id first, the same
+    piece from two legs never met and never earned its second vote.
+    """
+    path = _first_present(candidate, _CANDIDATE_PATH_KEYS)
+    start = _candidate_field(candidate, "byte_start")
+    if path and start is not None:
+        return (path, start)
+    return _first_present(candidate, _CANDIDATE_ID_KEYS)
 
 
 def _merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple | None:
