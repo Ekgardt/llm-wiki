@@ -29,6 +29,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # The action scans a commit range; a depth-1 clone can leave the
+          # earlier commits of a push unscanned. 81 MB of history, 10-minute job.
+          fetch-depth: 0
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -55,6 +58,24 @@ jobs:
       - run: uv run --locked --no-sync python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
       - run: node --check scripts/llm-wiki-memory-opencode.js
       - run: bash -n install.sh
+      # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
+      # install.ps1 reached a release, and install.sh was never checked beyond
+      # `bash -n`. The owner's complexity gate stays out: it is machine-local
+      # tooling under ~/.claude, not part of this repository.
+      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md.
+      - run: shellcheck install.sh
+      - name: Every tracked PowerShell file parses
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in (git ls-files '*.ps1')) {
+              $errors = $null
+              $tokens = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                  (Resolve-Path -LiteralPath $file).Path, [ref]$tokens, [ref]$errors) | Out-Null
+              if ($errors.Count) { $failed = $true; Write-Host "$file`n$($errors | Out-String)" }
+          }
+          if ($failed) { exit 1 }
 
   pytest-full:
     name: timing::${{ matrix.class }}::py${{ matrix.python }}-s${{ matrix.shard }}
@@ -241,6 +262,11 @@ jobs:
       - run: uv sync --locked --no-default-groups --extra hybrid
       - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
       - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; import numpy as np; path=Path(os.environ['LLM_WIKI_STATE_ROOT'])/'vector.npy'; path.parent.mkdir(parents=True, exist_ok=True); np.save(path, np.array([1,2,3])); assert np.load(path).tolist()==[1,2,3]"
+      # The extra exists for this package and for search; the job used to prove
+      # only that NumPy round-trips an array. Model weights are not fetched here:
+      # the read path is local-only and says so when they are absent.
+      - run: uv run --locked --no-sync python -c "import sentence_transformers"
+      - run: uv run --locked --no-sync python scripts/search_memory.py "installation"
 
   clean-code-graph:
     name: timing::clean::code-graph-py${{ matrix.python }}
@@ -368,6 +394,40 @@ jobs:
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 
+  # Tests whose dependency no job installed, so they skipped everywhere and a skip
+  # is not a pass. `torch` stays out on purpose: the locked wheel pulls the CUDA
+  # stack (73 nvidia packages in uv.lock), gigabytes on every pull request for two
+  # test files; a CPU-only pin is a lock change, not a CI change.
+  # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md.
+  lexical-and-typescript:
+    name: timing::focused::lexical-and-typescript
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-lexical-state
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
+      LLM_WIKI_LSP_TEST_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-typescript-state
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.1"
+      - run: uv python install 3.13
+      - run: uv python pin 3.13
+      - run: uv sync --locked --extra lexical-benchmark
+      - run: uv run --locked --no-sync pytest tests/test_retrieval_v2_benchmark.py -q -k jieba
+      # The explicit operator action, with its pinned tarballs and SRI hashes.
+      - run: uv run --locked --no-sync python scripts/install_language_server.py --state-root "${{ env.LLM_WIKI_LSP_TEST_STATE_ROOT }}" --profile typescript
+      - run: uv run --locked --no-sync pytest tests/test_typescript_navigation.py -q
+
   pyright-navigation:
     name: timing::focused::pyright-${{ matrix.platform }}
     strategy:
@@ -452,6 +512,7 @@ jobs:
       - clean-code-graph
       - installer
       - install-end-to-end
+      - lexical-and-typescript
       - pyright-navigation
     runs-on: ubuntu-24.04
     timeout-minutes: 5

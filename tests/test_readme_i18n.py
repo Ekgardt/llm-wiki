@@ -48,6 +48,11 @@ def _step(job: dict, name: str) -> dict:
     return next(step for step in job["steps"] if step.get("name") == name)
 
 
+def _commands(job: dict) -> str:
+    """Everything one job runs, as one string to look for a command in."""
+    return " ".join(step.get("run", "") for step in job["steps"])
+
+
 def _collect_test_count() -> int:
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
@@ -415,6 +420,27 @@ def test_ci_runs_a_whole_installer_on_every_supported_os_family():
         True,
         False,
     )
+
+
+def test_ci_closes_the_gaps_the_third_audit_named():
+    """Skipped dependencies, an unused extra, unparsed PowerShell, a shallow secret scan.
+
+    Research: `docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md`.
+    """
+    jobs = _workflow()["jobs"]
+    lint, hybrid, lexical = (_commands(jobs[name]) for name in ("lint", "clean-hybrid", "lexical-and-typescript"))
+    checkout = jobs["gitleaks"]["steps"][0]
+    facts = (
+        "shellcheck install.sh" in lint,
+        "System.Management.Automation.Language.Parser" in lint,
+        "import sentence_transformers" in hybrid,
+        "scripts/search_memory.py" in hybrid,
+        "-k jieba" in lexical,
+        "install_language_server.py" in lexical,
+        checkout["with"]["fetch-depth"],
+    )
+
+    assert facts == (True, True, True, True, True, True, 0)
 
 
 def test_docs_state_security_install_and_market_truth():

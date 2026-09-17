@@ -10,20 +10,21 @@
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-  # Ruff — Python static analysis (undefined names, unused imports, style)
-  # TODO: SHA-pin before next release. Look up the commit SHA for v0.6.9
-  # at https://github.com/astral-sh/ruff-pre-commit/releases and replace
-  # rev with the immutable SHA.
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
-    hooks:
-      - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
-        files: ^(?:scripts|tests)/.*\.py$
-
   # Structural lint — fast, local, no API calls, runs on commit
   - repo: local
     hooks:
+      # Ruff — Python static analysis (undefined names, unused imports, style).
+      # The project's own locked ruff, over the directories CI lints, so a commit
+      # and a pull request cannot disagree about what ruff says. The third-party
+      # hook this replaced pinned v0.6.9 while uv.lock held 0.15.21.
+      # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md.
+      - id: ruff-locked
+        name: ruff (the version in uv.lock)
+        entry: uv run --locked --no-sync ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types: [python]
+        files: ^(?:scripts|tests|benchmark)/.*\.py$
+
       - id: lint-memory-structural
         name: structural lint (knowledge, blocking)
         # allowed-categories lists finding types that are pre-existing
@@ -31,7 +32,7 @@ repos:
         # still appear in the lint report for visibility, but the
         # commit proceeds. To force them blocking again, narrow this
         # list back to just `orphan_daily_logs`.
-        entry: uv run python scripts/lint_memory.py --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
+        entry: uv run --locked --no-sync python scripts/lint_memory.py --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
         language: system
         pass_filenames: false
         files: ^knowledge/.*\.md$
@@ -46,19 +47,17 @@ repos:
       # Contradict-check — LLM-judged, paid, runs on push
       - id: lint-memory-contradictions
         name: contradict-check (LLM-judged)
-        entry: uv run python scripts/lint_memory.py --contradictions
+        entry: uv run --locked --no-sync python scripts/lint_memory.py --contradictions
         language: system
         pass_filenames: false
         stages: [pre-push]
         files: ^knowledge/notes/.*\.md$
         description: LLM-judged contradictions across knowledge pages — costs API calls, runs on push only.
 
-  # Gitleaks — secret scanning, runs on commit
-  # TODO: SHA-pin before next release. Look up the commit SHA for v8.30.1
-  # at https://github.com/gitleaks/gitleaks/releases and replace rev with
-  # the immutable SHA.
+  # Gitleaks — secret scanning, runs on commit. Pinned to the immutable commit
+  # of v8.30.1, as every third-party action in CI is pinned by SHA.
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.1
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
     hooks:
       - id: gitleaks
         description: Detect hardcoded secrets — API keys, tokens, credentials.
