@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import (  # noqa: E402
     REPORTS_DIR,
     StateLockTimeout,
+    atomic_write,
     load_state,
     update_state,
 )
@@ -165,16 +167,42 @@ def _existing_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-def _append_failure_line(record: dict[str, str]) -> None:
-    """Append to the trail and trim it back under the cap, best effort."""
-    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+def _append_failure_line(record: dict[str, str]) -> bool:
+    """Add one line with a single append-mode write; True when it was written.
+
+    Reading the trail, adding a line and writing the whole file back lost a line
+    whenever two hooks failed together, which is when hooks fail. See
+    `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
+    """
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
     try:
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        lines = _existing_lines(FAILURE_LOG) + [line]
-        kept = _trimmed_tail(lines, MAX_FAILURE_LOG_BYTES)
-        FAILURE_LOG.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(FAILURE_LOG, flags, 0o600)
     except OSError:
-        pass
+        return False
+    try:
+        os.write(descriptor, line.encode("utf-8"))
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+    return True
+
+
+def _trim_failure_log() -> None:
+    """Cut an overgrown trail to three quarters of its cap, in one step.
+
+    Called only under the state lock, so two trims never cross; the cut is below
+    the cap so it happens once per quarter-cap of failures, not on every line.
+    """
+    try:
+        if FAILURE_LOG.stat().st_size <= MAX_FAILURE_LOG_BYTES:
+            return
+        kept = _trimmed_tail(_existing_lines(FAILURE_LOG), MAX_FAILURE_LOG_BYTES * 3 // 4)
+        atomic_write(FAILURE_LOG, "\n".join(kept) + "\n")
+    except OSError:
+        return
 
 
 def _bump_counter(state: dict, record: dict[str, str]) -> None:
@@ -215,17 +243,30 @@ def record_capture_failure(
     deferred by a writer race; without it, a failure is a loss.
     """
     record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
+    written: list[bool] = []
+
+    def _under_the_state_lock(state: dict) -> None:
+        written.append(_trail_written(record, trim=True))
+        _bump_counter(state, record)
+
     try:
-        _append_failure_line(record)
-    except Exception:  # noqa: BLE001 - the counter still records the loss
+        update_state(_under_the_state_lock, lock_timeout=STATE_LOCK_TIMEOUT)
+    except Exception:  # noqa: BLE001 - the trail below still records the loss
         pass
+    if not any(written):
+        # No lock, no trim: an append alone cannot erase anyone else's line.
+        _trail_written(record, trim=False)
+
+
+def _trail_written(record: dict[str, str], *, trim: bool) -> bool:
+    """Write the trail, whatever it raises: the counter still records the loss."""
     try:
-        update_state(
-            lambda state: _bump_counter(state, record),
-            lock_timeout=STATE_LOCK_TIMEOUT,
-        )
-    except Exception:  # noqa: BLE001
-        pass
+        written = _append_failure_line(record)
+        if trim:
+            _trim_failure_log()
+    except Exception:  # noqa: BLE001 - diagnostics never break a hook
+        return False
+    return written
 
 
 def _counter_entries(state: dict) -> dict[str, dict]:
