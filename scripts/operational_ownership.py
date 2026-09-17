@@ -954,6 +954,24 @@ class OwnershipRegistry:
         role = _validate_role(row["role"])
         self._validate_marker(role, marker, process)
 
+    def _retire_dead_marker(self, row: sqlite3.Row) -> None:
+        """Remove a dead owner's marker only while it is still exactly its own.
+
+        The proof of death is the lease and the OS, never this file. A marker
+        that is gone, or that someone else has published at the same path
+        since, is left alone and does not stand in the way of the reclaim.
+        """
+        marker = _marker_from_row(row)
+        if marker is None:
+            return
+        path = self.state_root / marker.relative_path
+        try:
+            before, content, after = self._read_marker_file(path)
+            _require_marker_match(before, after, content, marker)
+        except OperationalOwnershipError:
+            return
+        _remove_marker_file(path)
+
     @staticmethod
     def _row_matches_lease(row: sqlite3.Row, lease: OwnerLease) -> bool:
         return OwnershipRegistry._exact_parameters(row) == (
@@ -1017,9 +1035,10 @@ class OwnershipRegistry:
         """Release the marker a dead owner left behind, with the registry's proof.
 
         A row for (role, scope) is reclaimed only when its lease lapsed and its
-        process is provably dead, and only while the file still matches what
-        the row recorded; a marker with no row is removed only when the PID it
-        names no longer exists. A live owner refuses by name. No age is read.
+        process is provably dead; the file goes with it only while it is still
+        the file the row recorded, and anyone else's file is left in place. A
+        marker with no row is removed only when the PID it names no longer
+        exists. A live owner refuses by name. No age is read.
         Decision: knowledge/notes/nightly-takes-the-canonical-fence-decision.md
         """
         selected_role = _validate_role(role)
@@ -1032,7 +1051,6 @@ class OwnershipRegistry:
                 return self._remove_orphan_marker(relative_path)
             _require_marker_path_of_row(row, relative_path)
             self._reclaim_or_refuse(database, row, _as_utc(self._clock()), "owner_busy")
-            _remove_marker_file(self.state_root / relative_path)
             return "reclaimed"
 
     def _remove_orphan_marker(self, relative_path: str) -> str:
@@ -1179,7 +1197,7 @@ class OwnershipRegistry:
         """Take over a provably dead owner, or refuse by name — doubt refuses."""
         if not self._expired_owner_is_dead(row, now):
             raise OperationalOwnershipError(refusal)
-        self._lease_marker(row, _row_process(row))
+        self._retire_dead_marker(row)
         _delete_owner_projections(database, row)
         self._delete_row(database, row)
 
