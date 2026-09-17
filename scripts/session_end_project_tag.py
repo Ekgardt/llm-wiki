@@ -50,11 +50,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
-from daily_log_append import (  # noqa: E402
-    LIFECYCLE_APPEND_BUDGET_SECONDS,
-    append_deadline,
-    locked_append,
-)
+from daily_log_append import append_deadline, locked_append  # noqa: E402
 from event_envelope import canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -227,6 +223,9 @@ def _append_entry(
     daily_path: Path, entry: str, operation_id: str | None = None
 ) -> None:
     """Append entry to daily log via canonical locked writer, inside the hook's budget."""
+    # Read at the call, as the two breadcrumb hooks do: the budget is the shared module's.
+    from daily_log_append import LIFECYCLE_APPEND_BUDGET_SECONDS
+
     locked_append(
         daily_path,
         entry,
