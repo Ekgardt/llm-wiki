@@ -3463,11 +3463,14 @@ def _install_v2_under_lock(
     )
 
 
+def _transaction_settled(transaction: Mapping[str, object] | None) -> bool:
+    if transaction is None:
+        return True
+    return transaction.get("state") in {"committed", "reverted"}
+
+
 def _require_settled_transaction(transaction: Mapping[str, object] | None) -> None:
-    if transaction is not None and transaction.get("state") not in {
-        "committed",
-        "reverted",
-    }:
+    if not _transaction_settled(transaction):
         raise InstallControlError("install_transaction_blocks_new_work")
 
 
@@ -4872,16 +4875,12 @@ def _selected_backend(requested: str) -> str:
     return select_scheduler_backend(sys.platform, requested, available)
 
 
-def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
-    root = args.root.resolve()
-    state_root = args.state_root.resolve()
-    uv_path = args.uv_path.resolve()
-    backend = _selected_backend(args.scheduler)
-    resources = build_install_resources(
+def _requested_resources(args: argparse.Namespace, backend: str) -> list[ManagedResource]:
+    return build_install_resources(
         backend=backend,
-        root=root,
-        state_root=state_root,
-        uv_path=uv_path,
+        root=args.root.resolve(),
+        state_root=args.state_root.resolve(),
+        uv_path=args.uv_path.resolve(),
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
@@ -4890,8 +4889,65 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         codex_hooks=args.codex_hooks,
         ownership_metadata=None,
     )
+
+
+def _record_is_requested(
+    requested: Mapping[str, ManagedResource], record: Mapping[str, object]
+) -> bool:
+    resource_id = record.get("id")
+    if not isinstance(resource_id, str) or resource_id not in requested:
+        return False
+    return _resource_identity_matches(record, requested[resource_id])
+
+
+def _settled_manifest(state_root: Path) -> dict[str, object] | None:
+    install_root = state_root / "run" / "install"
+    transaction = _optional_install_record(
+        install_root / "transaction.json", "install-transaction/"
+    )
+    if not _transaction_settled(transaction):
+        return None
+    return _optional_install_record(install_root / "manifest.json", "install-manifest/")
+
+
+def _outgrown_manifest(
+    state_root: Path, resources: Sequence[ManagedResource]
+) -> dict[str, object] | None:
+    """The active manifest, when it names something the new request no longer carries.
+
+    An update can only grow: `_active_resource` fails closed on a recorded resource the
+    request cannot supply. A request that dropped one, swapped the scheduler, or moved
+    the profile to another file is a replacement, not an update. An unsettled
+    transaction is left to the ordinary resume path.
+    See docs/research/2026-09-17-a-rerun-may-ask-for-fewer-things.md.
+    """
+    manifest = _settled_manifest(state_root)
+    if manifest is None:
+        return None
+    requested = _resources_by_id(resources)
+    records = _transaction_resources(manifest)
+    if all(_record_is_requested(requested, record) for record in records):
+        return None
+    return manifest
+
+
+def _replace_outgrown_install(args: argparse.Namespace, backend: str) -> bool:
+    state_root = args.state_root.resolve()
+    manifest = _outgrown_manifest(state_root, _requested_resources(args, backend))
+    if manifest is None:
+        return False
+    uninstall_resources(state_root=state_root, resources=_resources_from_record(args, manifest))
+    return True
+
+
+def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+    root = args.root.resolve()
+    backend = _selected_backend(args.scheduler)
+    replaced = _replace_outgrown_install(args, backend)
+    # Built after the old set is taken back: a resource records what it found on disk.
+    resources = _requested_resources(args, backend)
     manifest = install_resources(
-        state_root=state_root,
+        state_root=args.state_root.resolve(),
         vault_root=root,
         release=build_release_identity(root),
         scheduler_backend=backend,
@@ -4899,6 +4955,7 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         control_version=2,
     )
     return {
+        "replaced": replaced,
         "scheduler_backend": backend,
         "status": "committed",
         "transaction_id": manifest["transaction_id"],
@@ -4941,10 +4998,25 @@ def _record_resource_ids(record: Mapping[str, object]) -> set[str]:
     return {str(resource["id"]) for resource in _transaction_resources(record)}
 
 
+def _recorded_profile(record: Mapping[str, object], fallback: Path | None) -> Path | None:
+    """The profile the record wrote to; the login shell may have changed since."""
+    for resource in _transaction_resources(record):
+        locator = resource.get("locator")
+        if resource.get("id") == "unix-profile" and isinstance(locator, str):
+            return Path(locator)
+    return fallback
+
+
 def _resources_from_existing_args(args: argparse.Namespace, command: str) -> list[ManagedResource]:
+    record = _existing_record(args.state_root.resolve(), command)
+    return _resources_from_record(args, record)
+
+
+def _resources_from_record(
+    args: argparse.Namespace, record: Mapping[str, object]
+) -> list[ManagedResource]:
     root = args.root.resolve()
     state_root = args.state_root.resolve()
-    record = _existing_record(state_root, command)
     _require_record_roots(record, root, state_root)
     identifiers = _record_resource_ids(record)
     return build_install_resources(
@@ -4953,7 +5025,7 @@ def _resources_from_existing_args(args: argparse.Namespace, command: str) -> lis
         state_root=state_root,
         uv_path=args.uv_path.resolve(),
         home=args.home.resolve(),
-        profile=args.profile,
+        profile=_recorded_profile(record, args.profile),
         powershell_path=args.powershell_path,
         retired_cursor_hooks="cursor-user-hooks" in identifiers,
         retired_antigravity_hooks="antigravity-user-hooks" in identifiers,
