@@ -1,8 +1,8 @@
 """A user's own short facts index the turn they came from; the turn is what is read.
 
 LongMemEval's key expansion, +9.4% recall. Keys are extracted at compile in
-batches, kept in a disposable store under cache/, matched lexically and by
-vector, and resolve to the turn's chunk; a key never reaches the model.
+batches and kept in a disposable store under cache/; the generation's search
+table is their one reader (`tests/test_the_keys_are_indexed_beside_the_turn.py`).
 See `docs/research/2026-09-09-fact-keys-beside-the-turn.md`.
 """
 
@@ -12,7 +12,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -20,7 +19,6 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import fact_keys  # noqa: E402
-import query_memory  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
 
 DAILY = "knowledge/daily/2023-05-22.md"
@@ -51,16 +49,6 @@ def _ask(prompt: str, system_prompt: str) -> str:
     return json.dumps(keys)
 
 
-def _about_drums(text: str) -> float:
-    return float("drum" in text.casefold())
-
-
-def _encode(texts, is_query):
-    if is_query:
-        return np.asarray([[1.0, 1.0] for _ in texts])
-    return np.asarray([[_about_drums(text), 1.0] for text in texts])
-
-
 def test_user_turns_are_the_units_keyed(vault: Path) -> None:
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
 
@@ -73,25 +61,6 @@ def test_user_turns_are_the_units_keyed(vault: Path) -> None:
     assert "Korg B1" in turns[1].text
 
 
-def test_keys_are_extracted_once_per_turn_and_found_by_word_and_by_vector(vault: Path, tmp_path: Path) -> None:
-    snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
-    store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
-
-    keyed = fact_keys.key_turns(store, snapshot.chunks, _ask, _encode)
-    again = fact_keys.key_turns(store, snapshot.chunks, _ask, _encode)
-
-    by_word = fact_keys.search(store, "Pearl Export drum", 5)
-    # No word of this question is in any key, so the vector alone decides. With "I own" in it
-    # the drum turn used to lead only because its two keys were counted as two lexical votes.
-    by_vector = fact_keys.search(store, "musical instruments", 5, _encode)
-    drum = next(turn for turn in fact_keys.user_turns(snapshot.chunks) if "drum" in turn.text)
-    counts = (keyed, again, store.count())
-    store.close()
-
-    assert counts == (2, 0, (2, 3))
-    assert (by_word[0]["byte_start"], by_vector[0]["byte_start"]) == (drum.byte_start, drum.byte_start)
-
-
 def test_an_unreadable_reply_keys_nothing_and_leaves_the_turn_to_ask_again(vault: Path, tmp_path: Path) -> None:
     """Since 2026-09-14 a turn the reply did not cover stays pending.
 
@@ -100,39 +69,7 @@ def test_an_unreadable_reply_keys_nothing_and_leaves_the_turn_to_ask_again(vault
     snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
     store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
 
-    fact_keys.key_turns(store, snapshot.chunks, lambda prompt, system_prompt: "not json", None)
-    retried = fact_keys.key_turns(store, snapshot.chunks, _ask, None)
+    fact_keys.key_turns(store, snapshot.chunks, lambda prompt, system_prompt: "not json")
+    retried = fact_keys.key_turns(store, snapshot.chunks, _ask)
 
     assert (retried, store.count()[0]) == (2, 2)
-
-
-def test_the_keys_leg_resolves_to_the_turn_and_never_shows_the_key(vault: Path, tmp_path: Path, monkeypatch) -> None:
-    snapshot = collect_corpus(vault, code_roots=(), daily_paths=[DAILY])
-    state = tmp_path / "state"
-    store = fact_keys.KeyStore(fact_keys.store_path(state))
-    fact_keys.key_turns(store, snapshot.chunks, _ask, None)
-    store.close()
-    monkeypatch.setattr(query_memory, "STATE_ROOT", state, raising=False)
-    import memory_state
-
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state)
-    seen: list[str] = []
-
-    def generate(prompt: str, system_prompt: str, max_tokens: int) -> str:
-        seen.append(prompt)
-        return json.dumps(
-            {"schema_version": "grounded-answer/v1", "status": "insufficient_evidence", "claims": [], "citations": [], "reason": "x"}
-        )
-
-    query_memory.grounded_qa(
-        "Do I own a drum set?",
-        vault=vault,
-        snapshot=snapshot,
-        retrieve=lambda limit: (),
-        search=lambda query, limit, **window: (),
-        generator=generate,
-        profile="BASE",
-    )
-
-    assert "5-piece Pearl Export" in seen[0]
-    assert "I own a 5-piece Pearl Export drum set" not in seen[0]

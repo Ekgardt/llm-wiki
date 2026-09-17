@@ -1610,7 +1610,6 @@ def grounded_qa(
         selected_deadline,
     )
     first_candidates = _with_dated_leg(question, _resolved_candidates(candidates, fetch), seek)
-    first_candidates = _with_keys_leg(question, first_candidates, candidates is None or seek is not None)
     answer, context = _second_look(
         single, first_candidates, single.run(first_candidates), fetch, seek
     )
@@ -1639,27 +1638,6 @@ def _with_dated_leg(
         return candidates
     dated = tuple(search(question, QA_MAX_CANDIDATES, since=span[0], as_of=span[1]))
     return _merged(candidates, None, dated) or candidates
-
-
-def _with_keys_leg(question: str, candidates: tuple, allowed: bool) -> tuple:
-    """The first candidates joined by the turns whose fact keys match the question.
-
-    LongMemEval's key expansion: a user's own short facts, extracted at
-    compile, index the turn they came from. The store under cache/ is
-    disposable and may be absent; then there is no leg. See `fact_keys`.
-    """
-    import fact_keys
-    from memory_state import STATE_ROOT
-
-    path = fact_keys.store_path(STATE_ROOT)
-    if not allowed or not path.exists():
-        return candidates
-    store = fact_keys.KeyStore(path)
-    try:
-        keyed = tuple(fact_keys.search(store, question, QA_MAX_CANDIDATES, _sentence_encoder()))
-    finally:
-        store.close()
-    return _merged(candidates, None, keyed) or candidates
 
 
 def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, object]:
@@ -1905,7 +1883,7 @@ def _widened(
 
     Whether any of them is new is `_merged`'s question, answered by identity.
     It used to be guessed here from two lengths, the wider fetch against the
-    pool — and the pool also holds what the dated and keys legs found, so a
+    pool — and the pool also holds what the dated leg found, so a
     fetch that brought a new piece was dropped for not being longer.
     """
     from aggregation_pass import reaches_the_edge
@@ -1940,7 +1918,7 @@ def _candidate_key(candidate: object) -> object:
     """What makes two candidates the same piece: its place in the source, or else its id.
 
     The place is the identity every leg's rows carry. A retrieval row has an id
-    as well, a keys-leg row and a cited span do not; keyed by id first, the same
+    as well, a cited span does not; keyed by id first, the same
     piece from two legs never met and never earned its second vote.
     """
     path = _first_present(candidate, _CANDIDATE_PATH_KEYS)

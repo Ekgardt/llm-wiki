@@ -65,9 +65,13 @@ def test_lint_reads_numbered_findings_and_refuses_an_unreadable_reply():
 class _Store:
     def __init__(self) -> None:
         self.added: list[str] = []
+        self.noted: list[str] = []
 
-    def add(self, turn, keys, vectors) -> None:
+    def add(self, turn, keys) -> None:
         self.added.append(turn.span_sha256)
+
+    def note_asked(self, turns) -> None:
+        self.noted.extend(turn.span_sha256 for turn in turns)
 
 
 def test_a_turn_the_reply_did_not_cover_is_not_marked_keyed():
@@ -76,6 +80,6 @@ def test_a_turn_the_reply_did_not_cover_is_not_marked_keyed():
     turns = [fact_keys.Turn("d.md", 0, 1, name, "text") for name in ("said", "skipped")]
     store = _Store()
 
-    keyed = fact_keys._key_batch(store, turns, {"said": []}, None)
+    keyed = fact_keys._key_batch(store, turns, {"said": []})
 
-    assert (keyed, store.added) == (1, ["said"])
+    assert (keyed, store.added, store.noted) == (1, ["said"], ["skipped"])

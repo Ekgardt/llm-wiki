@@ -39,7 +39,7 @@ def _keyed_store(tmp_path: Path, snapshot) -> dict[str, str]:
     store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
     try:
         for turn in fact_keys.user_turns(snapshot.chunks):
-            store.add(turn, ["The user attended The Glass Menagerie"], None)
+            store.add(turn, ["The user attended The Glass Menagerie"])
     finally:
         store.close()
     return fact_keys.keys_by_span(tmp_path / "keys.sqlite3")

@@ -330,11 +330,11 @@ def _key_the_haystack(
 
     About ten batched provider calls a question; off by default because it is
     the stand's cost, not the product's, where the nightly step pays it once.
+    Keyed exactly as the nightly keys: words only, read by the index column.
     """
     if os.environ.get(FACT_KEYS_ENV, "").strip() != "1":
         return None
     import fact_keys
-    from query_memory import _sentence_encoder
 
     store = fact_keys.KeyStore(fact_keys.store_path(state))
     try:
@@ -342,7 +342,6 @@ def _key_the_haystack(
             store,
             snapshot.chunks,
             ask or _ask_the_provider,
-            _sentence_encoder(),
             time.monotonic() + BUILD_DEADLINE_SECONDS,
         )
     finally:
