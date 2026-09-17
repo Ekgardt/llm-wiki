@@ -1543,12 +1543,25 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
     worker's job is to drain the queue, and a sweeper that cannot run must never
     be the reason the queue is not drained.
     """
-    from capture_adoption import adopt_orphaned_capture_intents
+    from capture_adoption import (
+        adopt_orphaned_capture_intents,
+        complete_pending_capture_intents,
+    )
 
+    for sweep in (complete_pending_capture_intents, adopt_orphaned_capture_intents):
+        _swept_intents(sweep, queue, coordinator)
+
+
+def _swept_intents(sweep, queue: object, coordinator: object) -> None:
+    """One recovery pass, best effort: a sweeper that fails never stops the drain.
+
+    Two passes run here. One finishes a publication that stopped half way — a
+    `pending` row whose publisher died before it marked the intent ready — and the
+    other gives a task to an intent that was published and never dispatched. See
+    `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+    """
     try:
-        result = adopt_orphaned_capture_intents(
-            queue, coordinator, state_root=Path(STATE_ROOT)
-        )
+        result = sweep(queue, coordinator, state_root=Path(STATE_ROOT))
     except Exception as error:  # noqa: BLE001 - recovery must not break the worker
         _count_dropped_capture("capture_adoption", error, None)
         return

@@ -7612,6 +7612,31 @@ class _QueueV3CandidateReader:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def pending_capture_intents(
+        self, limit: int, older_than: str | None = None
+    ) -> list[dict[str, object]]:
+        """Intents still half-published, oldest first; read-only like the query above.
+
+        A publisher killed between the pending write and `mark_capture_intent_ready`
+        leaves one of these, and the ready-state query cannot see it. `older_than` is
+        an ISO stamp: rows touched more recently belong to a publisher that may still
+        be running. See
+        `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT intent_id,relative_path,intent_sha256,byte_size,updated_at
+                   FROM capture_intents
+                   WHERE publication_state='pending'
+                     AND (? IS NULL OR updated_at < ?)
+                   ORDER BY updated_at ASC, intent_id ASC
+                   LIMIT ?""",
+                (older_than, older_than, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def publish_capture_intent(
         self,
         *,

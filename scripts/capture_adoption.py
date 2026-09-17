@@ -43,6 +43,7 @@ import argparse
 import json
 import sys
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -222,6 +223,89 @@ def adopt_orphaned_capture_intents(
     return _adopt_records(queue, coordinator, Path(state_root), reader, limit)
 
 
+# How long a `pending` row must have sat still before this pass touches it. Twice
+# the 30 s intent fence: inside that window the publisher may still be running, and
+# its own fence would refuse this pass anyway. See
+# `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+PENDING_INTENT_RECOVERY_SECONDS = 60
+
+
+def _stale_pending_cutoff(now: datetime | None = None) -> str:
+    moment = now or datetime.now(timezone.utc)
+    return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat()
+
+
+def _ready_relative_path(record: dict[str, Any]) -> str:
+    return str(record["relative_path"]).replace(
+        "run/capture-intents/pending/", "run/capture-intents/ready/", 1
+    )
+
+
+def _complete_one_pending(
+    queue: object, coordinator: object, state_root: Path, record: dict[str, Any]
+) -> str:
+    """Finish one half-published intent by running the publication sequence again.
+
+    Every step of that sequence is idempotent: the files are create-only and
+    re-publishing identical bytes is a duplicate, the index returns the state the row
+    already holds, and the enqueue is replay-safe. The sequence takes its own owner
+    and fence, so a publisher that is somehow still alive refuses this pass.
+    """
+    from integration_adapter import _publish_capture_files_and_task
+
+    payload = _verified_intent_bytes(state_root, record)
+    intent_id = str(record["intent_id"])
+    _publish_capture_files_and_task(
+        queue,
+        coordinator,
+        intent_id=intent_id,
+        payload=payload,
+        intent_sha256=str(record["intent_sha256"]),
+        pending_relative=str(record["relative_path"]),
+        ready_relative=_ready_relative_path(record),
+    )
+    return intent_id
+
+
+def _complete_pending_batch(
+    queue: object,
+    coordinator: object,
+    state_root: Path,
+    records: list[dict[str, Any]],
+    outcome: dict[str, Any],
+) -> None:
+    for record in records:
+        outcome["examined"] += 1
+        try:
+            intent_id = _complete_one_pending(queue, coordinator, state_root, record)
+        except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
+            outcome["skipped"].append(_skip(record, error))
+            continue
+        outcome["completed"].append({"intent_id": intent_id})
+
+
+def complete_pending_capture_intents(
+    queue: object,
+    coordinator: object,
+    *,
+    state_root: Path,
+    limit: int = MAX_ADOPTED_INTENTS_PER_PASS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Finish intents whose publisher died before it could mark them ready.
+
+    Never raises for a single bad record, exactly as adoption does: a record whose
+    bytes moved, or whose publisher still holds the fence, is a named skip.
+    """
+    outcome: dict[str, Any] = {"examined": 0, "completed": [], "skipped": []}
+    reader = getattr(queue, "pending_capture_intents", None)
+    if reader is None:
+        return {**outcome, "reason": "unsupported"}
+    records = reader(limit, _stale_pending_cutoff(now))
+    _complete_pending_batch(queue, coordinator, Path(state_root), records, outcome)
+    return outcome
+
+
 def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[str, Any]:
     """Run one adoption pass against the installed vault's active runtime."""
     from markdown_transaction import active_markdown_coordinator
@@ -268,11 +352,18 @@ def _dry_run(limit: int) -> int:
     queue = active_memory_queue(
         Path(ROOT).resolve(strict=True), Path(STATE_ROOT).resolve(strict=True)
     )
-    records = queue.ready_capture_intents_without_task(limit)
-    print(f"orphaned capture intents: {len(records)}")
+    _print_records("orphaned capture intents", queue.ready_capture_intents_without_task(limit))
+    _print_records(
+        "half-published capture intents",
+        queue.pending_capture_intents(limit, _stale_pending_cutoff()),
+    )
+    return 0
+
+
+def _print_records(label: str, records: list[dict[str, Any]]) -> None:
+    print(f"{label}: {len(records)}")
     for record in records:
         print(f"  {record['intent_id']} {record['updated_at']} {record['byte_size']}")
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
