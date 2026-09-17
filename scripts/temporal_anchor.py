@@ -59,10 +59,12 @@ _COUNTS = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
 
-_PLAIN = {"today": 0, "yesterday": -1, "tomorrow": 1}
+_PLAIN = {"the day before yesterday": -2, "today": 0, "yesterday": -1, "tomorrow": 1}
 
-_PLAIN_RE = re.compile(r"\b(today|yesterday|tomorrow)\b", re.IGNORECASE)
-_DAY_BEFORE_RE = re.compile(r"\bthe day before yesterday\b", re.IGNORECASE)
+# One pattern, the longest phrase first: matches do not overlap, so the
+# "yesterday" inside "the day before yesterday" is consumed with its phrase and
+# is not dated a second time, a day off.
+_PLAIN_RE = re.compile(r"\b(" + "|".join(_PLAIN) + r")\b", re.IGNORECASE)
 _WEEKDAY_RE = re.compile(
     r"\b(last|next|this past)\s+(" + "|".join(WEEKDAYS) + r")\b", re.IGNORECASE
 )
@@ -109,13 +111,6 @@ def _plain_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     ]
 
 
-def _day_before_hits(text: str, anchor: date) -> list[tuple[str, date]]:
-    return [
-        (match.group(0).casefold(), anchor - timedelta(days=2))
-        for match in _DAY_BEFORE_RE.finditer(text)
-    ]
-
-
 def _weekday_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     return [
         (
@@ -148,10 +143,12 @@ def _last_week_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     ]
 
 
-_FINDERS = (_day_before_hits, _plain_hits, _weekday_hits, _ago_hits, _last_week_hits)
+_FINDERS = (_plain_hits, _weekday_hits, _ago_hits, _last_week_hits)
 
 
-_TURN_RE = re.compile(r"^\*\*(user|assistant):\*\*")
+# Multiline, because an entry begins with its heading: a turn marker opens a
+# line, not the text.
+_TURN_RE = re.compile(r"^\*\*(user|assistant):\*\*", re.MULTILINE)
 
 
 def _turn_role(line: str, current: str) -> str:
