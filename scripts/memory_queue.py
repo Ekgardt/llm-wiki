@@ -11596,9 +11596,27 @@ class _QueueV3CandidateReader:
             return self._load_ordinary_purge_plan(cutoff, export)
         return self._new_ordinary_purge_plan(cutoff, export)
 
+    def _demote_corrupt_finished_tasks(self, cutoff: str) -> None:
+        """Move corrupt finished rows out of the purge selection, and commit it.
+
+        One corrupt row used to refuse the whole plan, and nothing else can move
+        a finished row. Demoted to `dead / payload_hash_mismatch` it leaves the
+        selection and becomes something `quarantine-corrupt` accepts.
+        """
+        now = _utc_now()
+        with closing(self._connect()) as database, begin_immediate(database):
+            rows = database.execute(
+                """SELECT * FROM tasks
+                   WHERE state IN ('succeeded','cancelled') AND updated_at<?""",
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                self._require_valid_task_payload(database, row, now=now, parse=True)
+
     def _new_ordinary_purge_plan(
         self, cutoff: str, export: Path
     ) -> _OrdinaryPurgePlan:
+        self._demote_corrupt_finished_tasks(cutoff)
         with closing(self._connect()) as database:
             database.execute("BEGIN")
             rows = database.execute(
