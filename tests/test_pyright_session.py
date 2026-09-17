@@ -6770,7 +6770,7 @@ def test_session_close_reserves_before_waiting_for_active_operation(
     assert session._closed is True
 
 
-def test_failed_real_session_close_keeps_reservation_until_close_all_retry(
+def test_failed_real_session_close_keeps_reservation_until_a_retry(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,

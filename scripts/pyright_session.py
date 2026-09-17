@@ -2020,6 +2020,7 @@ class LanguageServerSession:
         self._startup_atexit_registered = False
         self._closing = False
         self._closed = False
+        self._close_stranded = False
         self._capacity_locked = False
 
     @property
@@ -4978,14 +4979,34 @@ class LanguageServerSession:
             raise ValueError("workspace revision must describe this checkout")
 
     def close(self, *, deadline: float) -> None:
+        """Close what this session owns; a failure leaves it stranded, not lost.
+
+        A close that raises after `_closing` was set leaves a session nobody is
+        closing. It is marked, so the manager's next caller retries the close
+        under its own deadline instead of polling a flag that never clears.
+        """
         deadline = _validated_deadline(deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not self._close_lock.acquire(timeout=remaining):
             raise TimeoutError("Pyright close serialization deadline expired")
         try:
-            self._close_owned(deadline)
+            self._close_attempt_recorded(deadline)
         finally:
             self._close_lock.release()
+
+    def _close_attempt_recorded(self, deadline: float) -> None:
+        """Close under the close lock, remembering one that did not finish.
+
+        `_close_stranded` is written only by the thread holding `_close_lock`,
+        so the flag is never set while another thread is still closing: it
+        means "the last close attempt ended badly and nobody took it up".
+        """
+        self._close_stranded = False
+        try:
+            self._close_owned(deadline)
+        except BaseException:
+            self._close_stranded = True
+            raise
 
     def _close_finished_locked(
         self,
@@ -5403,17 +5424,36 @@ class LanguageServerSessionManager:
         return None
 
     @staticmethod
-    def _wait_for_session_close(session: LanguageServerSession, deadline: float) -> None:
-        while True:
-            closed, closing, _starting, _active, _last_used = (
-                LanguageServerSessionManager._session_state(session, deadline)
-            )
-            if closed or not closing:
-                return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Pyright session close wait deadline expired")
-            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+    def _finish_session_close(session: LanguageServerSession, deadline: float) -> None:
+        """Close a session found closing, under this caller's deadline.
+
+        `close` is serialized: while another caller is closing, this waits for
+        it and then finds nothing left to do. When the earlier close failed and
+        nobody is closing, this is the retry -- polling the flag, as this did
+        before 2026-09-17, waited for a close that was never coming.
+        """
+        session.close(deadline=deadline)
+
+    def _stranded_entry_locked(
+        self,
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]],
+        deadline: float,
+    ) -> tuple[tuple[str, PyrightIdentity], LanguageServerSession] | None:
+        """A session whose close failed: it holds a slot and serves nobody."""
+        for key, session in live:
+            if self._close_is_stranded(session, deadline):
+                return key, session
+        return None
+
+    @staticmethod
+    def _close_is_stranded(session: LanguageServerSession, deadline: float) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            return not session._closed and session._close_stranded
+        finally:
+            session._lock.release()
 
     def _admit_manager_locked(self) -> None:
         if self._closed:
@@ -5496,7 +5536,9 @@ class LanguageServerSessionManager:
         deadline: float,
     ) -> _SessionLookup:
         """At capacity: evict the least recently used idle session, or refuse."""
-        reserved = self._reserve_lru_idle_locked(live, deadline)
+        reserved = self._stranded_entry_locked(
+            live, deadline
+        ) or self._reserve_lru_idle_locked(live, deadline)
         if reserved is None:
             return _SessionLookup(
                 session=self._capacity_denied_session(repository, identity, profile)
@@ -5590,9 +5632,9 @@ class LanguageServerSessionManager:
         profile: LanguageServerProfile,
         deadline: float,
     ) -> LanguageServerSession | None:
-        """Wait out a closing session, or evict a reserved one; None to look again."""
+        """Finish a closing session, or evict a reserved one; None to look again."""
         if lookup.wait_for is not None:
-            self._wait_for_session_close(lookup.wait_for, deadline)
+            self._finish_session_close(lookup.wait_for, deadline)
             return None
         assert lookup.reserved is not None
         return self._evict_and_adopt(
