@@ -719,7 +719,7 @@ def test_process_runner_uses_posix_session_and_killpg(monkeypatch):
         pid = 42
         returncode = None
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             calls.append(("communicate", timeout))
             if len([item for item in calls if item[0] == "communicate"]) == 1:
                 raise subprocess.TimeoutExpired(["cmd"], timeout)
@@ -758,7 +758,7 @@ def test_process_runner_uses_windows_group_and_tree_termination(monkeypatch):
         returncode = None
         attempts = 0
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             self.attempts += 1
             if self.attempts == 1:
                 raise subprocess.TimeoutExpired(["cmd"], timeout)
@@ -798,7 +798,7 @@ def test_windows_failed_taskkill_kills_direct_process_and_reports_cleanup_failur
         stdout = Pipe()
         stderr = Pipe()
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             calls.append(("communicate", timeout))
             if len([item for item in calls if isinstance(item, tuple)]) <= 1:
                 raise subprocess.TimeoutExpired(["uv"], timeout)
@@ -828,7 +828,7 @@ def test_windows_taskkill_nonzero_return_is_bounded_failure(monkeypatch):
     class Terminator:
         returncode = 1
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             calls.append(("communicate", timeout))
             return "", ""
 
@@ -862,7 +862,7 @@ def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monk
         stdout = Pipe("stdout")
         stderr = Pipe("stderr")
 
-        def communicate(self, timeout=None):
+        def communicate(self, input=None, timeout=None):
             calls.append(("communicate", timeout))
             raise subprocess.TimeoutExpired(["uv"], timeout)
 

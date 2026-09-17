@@ -79,6 +79,7 @@ from evidence_resolver import (  # noqa: E402
 from llm_client import (  # noqa: E402
     call_candidate,
     call_ceiling,
+    chain_stops_after,
     forced_provider,
     probe_candidate,
     provider_candidates,
@@ -988,11 +989,26 @@ def resolve_compile_plan(
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
     attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
+    resolved = _first_resolved_plan(attempt)
+    if resolved is None:
+        raise RuntimeError(_no_plan_message(attempt.lineage))
+    return resolved
+
+
+def _first_resolved_plan(attempt: _CompileAttempt) -> ResolvedCompilePlan | None:
+    """The first provider that answers with a plan; a timeout ends the chain.
+
+    A deadline is the budget of the whole compile call, so the next provider
+    would spend a second one the step was never given. `chain_stops_after` is the
+    one rule all three provider chains of the product ask.
+    """
     for candidate in provider_candidates(forced_provider(), max_tokens=4000):
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved
-    raise RuntimeError(_no_plan_message(attempt.lineage))
+        if attempt.out_of_time:
+            return None
+    return None
 
 
 def _no_plan_message(lineage: Sequence[str]) -> str:
@@ -1037,6 +1053,7 @@ class _CompileAttempt:
         self.batch = batch
         self.token_adapters = token_adapters
         self.lineage: tuple[str, ...] = ()
+        self.out_of_time = False
         self.source_descriptors = tuple(
             SourceDescriptor(item.logical_path, len(item.content), item.sha256)
             for item in inputs.sources
@@ -1083,6 +1100,7 @@ class _CompileAttempt:
         should say what it disagreed with.
         """
         self.lineage += (_failure_lineage(stage, descriptor, failure),)
+        self.out_of_time = self.out_of_time or chain_stops_after(failure)
         _report_stage_detail(stage, failure, detail)
         return None
 

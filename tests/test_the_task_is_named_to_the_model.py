@@ -57,3 +57,27 @@ def test_an_older_cli_reads_the_frame_from_the_prompt(monkeypatch) -> None:
     sent = llm_client._claude_stdin("", "is it so?")
 
     assert sent.startswith(f"<system>{llm_client.TASK_FRAME}</system>")
+
+
+@pytest.mark.parametrize("system_prompt", ["BE A JUDGE", ""])
+def test_codex_carries_the_same_frame(system_prompt) -> None:
+    """Codex reads instruction files of its own before the prompt."""
+    sent = llm_client._codex_prompt(system_prompt, "is it so?")
+
+    assert sent.startswith(f"SYSTEM: {llm_client._framed_system_text(system_prompt)}")
+    assert sent.endswith("USER: <task>\nis it so?\n</task>")
+
+
+def test_opencode_carries_the_same_frame(monkeypatch) -> None:
+    """An OpenCode session prepends whatever its configuration and plugins hold."""
+    sent: dict = {}
+    monkeypatch.setattr(
+        llm_client, "_opencode_post", lambda url, body: sent.update(body) or {}
+    )
+    monkeypatch.setattr(llm_client, "_opencode_text", lambda data: "ok")
+    monkeypatch.setattr(llm_client, "_parse_opencode_usage", lambda data: None)
+
+    llm_client._opencode_answer("http://127.0.0.1:1", "ses", "is it so?", "BE A JUDGE")
+
+    assert sent["parts"] == [{"type": "text", "text": "<task>\nis it so?\n</task>"}]
+    assert sent["system"] == f"BE A JUDGE\n\n{llm_client.TASK_FRAME}"

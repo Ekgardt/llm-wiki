@@ -27,6 +27,7 @@ from claims import (
 from llm_client import (
     ProviderDescriptor,
     call_candidate,
+    chain_stops_after,
     probe_candidate,
     provider_candidates,
 )
@@ -519,6 +520,18 @@ def _critique_order(
     ] + [first_descriptor]
 
 
+def _chain_ended(lineage: Sequence[Mapping[str, object]]) -> bool:
+    """Whether the last refusal ends the chain instead of falling through.
+
+    An evaluator that ran out of time has spent the deadline this evaluation was
+    given; the next one would spend another. One rule for all three provider
+    chains of the product, named in `llm_client.chain_stops_after`.
+    """
+    if not lineage:
+        return False
+    return chain_stops_after(lineage[-1].get("failure"))
+
+
 def _stage_prompt(
     claim: NormalizedClaim, existing: IndexedClaim, prior_label: str | None
 ) -> str:
@@ -967,6 +980,8 @@ class ContradictionPipeline:
             evaluation = self._try_descriptor(descriptor, stage, prompt, system, lineage)
             if evaluation is not None:
                 return evaluation, descriptor, lineage
+            if _chain_ended(lineage):
+                return None, None, lineage
         return None, None, lineage
 
     def _try_descriptor(

@@ -41,8 +41,10 @@ class _Recorder:
 
 @pytest.fixture
 def recorder(monkeypatch: pytest.MonkeyPatch) -> _Recorder:
+    """Both seams: the CLI backends run through `_run_cli`, the flag probe through run."""
     calls = _Recorder()
     monkeypatch.setattr(llm_client.subprocess, "run", calls)
+    monkeypatch.setattr(llm_client, "_run_cli", calls)
     return calls
 
 
