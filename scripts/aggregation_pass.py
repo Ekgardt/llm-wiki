@@ -180,7 +180,7 @@ def entity_note(groups: Sequence[Sequence[str]]) -> str:
 def fan_out_queries(
     question: str, inputs: Sequence[str], ask: Callable[[str], str | None]
 ) -> list[str]:
-    """Up to five concrete sub-queries about the kind of thing being counted."""
+    """Up to `MAX_FANOUT` concrete sub-queries about the kind of thing being counted."""
     return parsed_queries(ask(_fanout_prompt(question, inputs)), question)[:MAX_FANOUT]
 
 

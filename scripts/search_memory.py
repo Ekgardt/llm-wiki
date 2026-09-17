@@ -390,12 +390,8 @@ def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
     """The exact stored row for one chunk.
 
     The builder writes these and the validator rebuilds them from the
-    authoritative sources to compare, so this shape is stated once.
-    """
-    """The exact stored row for one chunk.
-
-    The builder writes these and the validator rebuilds them from the
-    authoritative sources to compare; two copies of this shape would drift.
+    authoritative sources to compare, so this shape is stated once: two copies
+    of it would drift.
     """
     title = (
         chunk.heading_ancestry[-1]

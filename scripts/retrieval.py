@@ -193,15 +193,6 @@ def _optional_stage_fits(kind: str | None, deadline: float) -> bool:
     return observed <= window
 
 
-def _require_optional_stage_time(
-    deadline: float, cancelled: Callable[[], bool] | None
-) -> None:
-    if deadline - time.monotonic() <= 0:
-        raise OptionalStageTimeout("optional stage deadline reached")
-    if cancelled is not None and cancelled():
-        raise OptionalStageTimeout("optional stage deadline reached")
-
-
 def _optional_stage_admitted(
     kind: str | None, deadline: float, cancelled: Callable[[], bool] | None
 ) -> bool:

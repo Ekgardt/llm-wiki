@@ -8,8 +8,10 @@ is read: a fact a model wrote is never a citation, so the key points at the
 user's turn, and the turn is what the reader gets.
 
 Keys are extracted at compile, in the nightly window, never at capture; they
-live in a disposable store under `cache/fact-keys/` beside the generation and
-touch no generation artifact; a turn is keyed once, by the hash of its bytes.
+live in a disposable store under `cache/fact-keys/` beside the generation; a
+turn is keyed once, by the hash of its bytes. Since 2026-09-17 the next
+generation build also copies them into the `keys` column of its search table
+(`docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`).
 See `docs/research/2026-09-09-fact-keys-beside-the-turn.md`.
 
     uv run python scripts/fact_keys.py            # key the turns that have none yet
