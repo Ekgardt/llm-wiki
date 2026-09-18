@@ -20,6 +20,7 @@ from interruption import (
 from interruption import (
     interruption_in_chain as _interruption_in_chain,
 )
+from lsp_profiles import server_notification_union
 
 if os.name == "nt":
     import ctypes
@@ -65,15 +66,13 @@ SERVER_REQUESTS = frozenset(
         "workspace/configuration",
     }
 )
-SERVER_NOTIFICATIONS = frozenset(
-    {
-        "$/progress",
-        "pyright/beginProgress",
-        "pyright/endProgress",
-        "pyright/reportProgress",
-        "textDocument/publishDiagnostics",
-    }
-)
+# Every notification any managed profile is allowed to send. Derived, not
+# listed: a profile added to `lsp_profiles.REGISTRY` teaches the transport its
+# notifications with it, instead of having them silently dropped here. Being on
+# this list is not enough to reach anything -- `_dispatch_known_notification`
+# still requires the session to have registered a handler for the method, and a
+# session registers only its own profile's.
+SERVER_NOTIFICATIONS = server_notification_union()
 
 _FLAT_SEMANTIC_RESULT_METHODS = frozenset(
     {

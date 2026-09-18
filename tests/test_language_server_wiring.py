@@ -341,22 +341,13 @@ def test_the_transport_carries_every_notification_the_neutral_layer_needs() -> N
     assert PYRIGHT_PROFILE.server_notifications <= SERVER_NOTIFICATIONS
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "measured 2026-08-29: `lsp_protocol.SERVER_NOTIFICATIONS` is a module-level "
-        "allowlist and drops `$/typescriptVersion`, so the profile's post-initialize "
-        "identity assertion is registered but never reached. Widening it means "
-        "editing `scripts/lsp_protocol.py`, which the complexity gate refuses "
-        "wholesale over roughly thirty pre-existing findings in the transport hot "
-        "path. The pinned engine is still checked, one step earlier, by digest "
-        "against the install receipt before the process starts."
-    ),
-)
 def test_the_transport_carries_every_profiles_own_notifications() -> None:
+    # Closed 2026-09-17 (finding K-B16): the transport's allowlist is this
+    # union, so `$/typescriptVersion` reaches the profile's post-initialize
+    # identity assertion instead of being dropped with one warning.
     from lsp_protocol import SERVER_NOTIFICATIONS
 
-    assert lsp_profiles.server_notification_union() <= SERVER_NOTIFICATIONS
+    assert lsp_profiles.server_notification_union() == SERVER_NOTIFICATIONS
 
 
 # --- The freshness contract knows more than one language (CODE-08 blocker 2) ---

@@ -3137,19 +3137,13 @@ class LanguageServerSession:
     def _add_identity_handler(self, handlers: dict[str, object]) -> None:
         """Register the post-initialize identity assertion, where a profile has one.
 
-        Honest limitation, measured 2026-08-28: `lsp_protocol.SERVER_NOTIFICATIONS`
-        is a module-level allowlist and does not carry `$/typescriptVersion`, so
-        this handler is registered but not yet reached -- the transport drops the
-        method with one "unknown notification" warning and nothing else. Widening
-        that allowlist means editing `lsp_protocol.py`, which the complexity gate
-        refuses wholesale over roughly thirty pre-existing findings in the
-        transport hot path; that is a separate piece of work.
-
-        The guarantee is not lost in the meantime, it is taken earlier:
-        `lsp_identity` digests the pinned engine at `tsserver.path` against the
-        install receipt *before* the process starts, so the file the server is
-        pointed at is known to be ours. What is missing is the server's own
-        confirmation that it used it rather than something else.
+        Two checks, not one. `lsp_identity` digests the pinned engine at
+        `tsserver.path` against the install receipt *before* the process
+        starts, so the file the server is pointed at is known to be ours. This
+        is the server's own word, afterwards, that it used that file rather
+        than one it found for itself. Since 2026-09-17 the transport's
+        allowlist is derived from the profile registry, so the notification
+        reaches here instead of being dropped with one warning.
         """
         identity = self._profile.identity_notification
         if identity is None:
@@ -3162,6 +3156,21 @@ class LanguageServerSession:
             return
         version, confirmed = identity.confirmed(params)
         self._retain_progress((identity.method, str(version), str(confirmed)))
+        self._record_identity_confirmation(confirmed)
+
+    def _record_identity_confirmation(self, confirmed: bool) -> None:
+        """A server that did not name the engine we pinned answers as degraded.
+
+        Readiness is left alone: the session still answers, and the caller is
+        told the answers come from an engine we did not verify.
+        """
+        if confirmed:
+            return
+        code = self._profile.degradation_code("server_identity_unconfirmed")
+        with self._lock:
+            self._degradation_codes = tuple(
+                sorted({*self._degradation_codes, code})
+            )
 
     def _prepare_owner(
         self, attempt: _StartupAttempt, *, startup_deadline: float
