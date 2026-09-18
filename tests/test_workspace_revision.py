@@ -32,25 +32,69 @@ from workspace_revision import (
 from tests.code_kernel_helpers import copy_python_fixture
 
 
+def _indexed_git_config_variables() -> list[str]:
+    """The `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` names this process carries."""
+    prefixes = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+    return [name for name in os.environ if name.startswith(prefixes)]
+
+
+def _neutralize_git_environment(monkeypatch) -> None:
+    """Remove every variable that could steer git's configuration.
+
+    `_private_git_environment_overridden` declines the private path outright
+    when one of these is set, so a host that exports one moves every
+    optimization assertion here onto the exact fallback. The names come from the
+    product, so one added there is covered here without being copied.
+    """
+    selectors = workspace_revision._PRIVATE_GIT_SELECTOR_ENVIRONMENT
+    for name in (*selectors, *_indexed_git_config_variables()):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _absent_system_git_files(monkeypatch, home: Path) -> None:
+    """Point the system config and attributes at files that do not exist.
+
+    A hosted runner's `/etc/gitconfig` is not empty. Installing the `git-lfs`
+    package runs `git lfs install --skip-repo --system`, which writes a
+    `[filter "lfs"]` clean/smudge section there, and a clean/smudge filter is
+    the most direct way a configuration can change what git reads of a working
+    tree. The product is right to decline its fast path on such a machine, so
+    without this these tests assert the host rather than the product - which is
+    what they were doing on every Linux runner. The fence's strictness is pinned
+    by `tests/test_a_system_config_that_only_says_where_git_may_work.py`
+    instead of by whatever `/etc` happens to hold. Research:
+    `docs/research/2026-09-18-a-test-of-an-optimisation-must-own-the-environment-it-asserts.md`.
+    """
+    system = home / "system-git"
+    system.mkdir()
+    monkeypatch.setattr(
+        workspace_revision, "_SYSTEM_GIT_CONFIG_PATHS", (system / "gitconfig",)
+    )
+    monkeypatch.setattr(
+        workspace_revision, "_SYSTEM_GIT_ATTRIBUTE_PATHS", (system / "gitattributes",)
+    )
+
+
 @pytest.fixture(autouse=True)
 def _isolated_global_git_configuration(tmp_path_factory, monkeypatch) -> None:
-    """Keep the developer's global Git configuration out of these contracts.
+    """Keep the machine's own Git configuration out of these contracts.
 
     `workspace_revision` deliberately declines its private-index fast path when
-    a global Git configuration could change ignore, attribute or index
-    semantics, and it only tolerates a `[user]` name/email section. Any ordinary
-    `~/.gitconfig` — a credential helper, an alias, `init.defaultBranch` — is
-    therefore enough to move every verifier here onto the exact fallback, so the
-    optimization assertions passed only on a machine whose global configuration
-    happened to be empty.
+    a Git configuration could change ignore, attribute or index semantics, and
+    it only tolerates sections that cannot. Any ordinary `~/.gitconfig` — a
+    credential helper, an alias, `init.defaultBranch` — is therefore enough to
+    move every verifier here onto the exact fallback, so the optimization
+    assertions passed only on a machine whose configuration happened to be
+    empty. The system configuration, the system attributes file and the `GIT_*`
+    selector environment are the same class of host input, and are pinned too.
     """
     home = tmp_path_factory.mktemp("git-home")
     (home / ".config").mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
-    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
-        monkeypatch.delenv(name, raising=False)
+    _neutralize_git_environment(monkeypatch)
+    _absent_system_git_files(monkeypatch, home)
 
 
 def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
@@ -996,8 +1040,46 @@ def test_private_index_declines_repository_global_and_system_attributes(
     assert (result, exact_calls, private_calls) == (True, 1, 0)
 
 
+def test_the_fixture_takes_this_machines_git_configuration_out_of_the_way() -> None:
+    """The pinning the optimization assertions rest on, checked rather than assumed.
+
+    Every `private_calls == 1` in this file is a claim about the product, and it
+    only holds while the host cannot reach the fence. A runner's `/etc/gitconfig`
+    carries a git-lfs clean/smudge filter, so an unpinned system path turned all
+    of those assertions into assertions about `/etc`.
+    """
+    installation = workspace_revision._private_git_installation()
+    assert installation is not None
+
+    pinned = (*installation.system_config_paths, *installation.system_attribute_paths)
+
+    assert (
+        [path.exists() for path in pinned],
+        [name in os.environ for name in workspace_revision._PRIVATE_GIT_SELECTOR_ENVIRONMENT],
+        _indexed_git_config_variables(),
+    ) == ([False] * len(pinned), [False] * 9, [])
+
+
+# The `[filter "lfs"]` section `git lfs install --skip-repo --system` writes, which
+# the git-lfs Debian package's postinst runs and every hosted Linux runner therefore
+# carries in /etc/gitconfig. A clean/smudge filter changes what git reads of a working
+# tree, so the fast path must stay off wherever it is installed.
+LFS_SYSTEM_CONFIG = (
+    '[filter "lfs"]\n'
+    "\tclean = git-lfs clean -- %f\n"
+    "\tsmudge = git-lfs smudge -- %f\n"
+    "\tprocess = git-lfs filter-process\n"
+    "\trequired = true\n"
+)
+_DECLINED_CONFIGS = {
+    "global": "[core]\n\tautocrlf = false\n",
+    "system": "[core]\n\tautocrlf = false\n",
+    "system-git-lfs": LFS_SYSTEM_CONFIG,
+}
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
-@pytest.mark.parametrize("source", ["global", "system"])
+@pytest.mark.parametrize("source", sorted(_DECLINED_CONFIGS))
 def test_private_index_declines_global_and_system_config_files(
     repository: Path,
     tmp_path: Path,
@@ -1017,7 +1099,7 @@ def test_private_index_declines_global_and_system_config_files(
             (config,),
             raising=False,
         )
-    config.write_text("[core]\n\tautocrlf = false\n", encoding="ascii")
+    config.write_text(_DECLINED_CONFIGS[source], encoding="ascii")
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
 
@@ -1025,9 +1107,7 @@ def test_private_index_declines_global_and_system_config_files(
         scope, expected, monkeypatch
     )
 
-    assert result is True
-    assert exact_calls == 1
-    assert private_calls == 0
+    assert (result, exact_calls, private_calls) == (True, 1, 0)
 
 
 def _commit_inert_attribute_file(repository: Path, name: str) -> None:

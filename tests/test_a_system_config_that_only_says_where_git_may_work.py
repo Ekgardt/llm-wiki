@@ -27,6 +27,18 @@ import workspace_revision  # noqa: E402
 # What `actions/runner-images` appends to /etc/gitconfig, byte for byte.
 RUNNER_SYSTEM_CONFIG = b"[safe]\n        directory = *\n"
 
+# What `git lfs install --skip-repo --system` writes there - which the git-lfs
+# Debian package's postinst runs, and which the same runner image installs. A
+# clean/smudge filter changes what git reads of a working tree, so the fence must
+# refuse it and the fast path must stay off on such a machine.
+LFS_SYSTEM_CONFIG = (
+    b'[filter "lfs"]\n'
+    b"\tclean = git-lfs clean -- %f\n"
+    b"\tsmudge = git-lfs smudge -- %f\n"
+    b"\tprocess = git-lfs filter-process\n"
+    b"\trequired = true\n"
+)
+
 
 @pytest.mark.parametrize(
     ("content", "inert"),
@@ -38,6 +50,9 @@ RUNNER_SYSTEM_CONFIG = b"[safe]\n        directory = *\n"
         (b"[safe]\n\tdirectory = *\n\tsomethingElse = yes\n", False),
         (b"[core]\n\tautocrlf = false\n", False),
         (b"[safe]\n\tdirectory = *\n[core]\n\tautocrlf = false\n", False),
+        # A hosted Linux runner's real file: the filter first, the section after.
+        (LFS_SYSTEM_CONFIG, False),
+        (LFS_SYSTEM_CONFIG + RUNNER_SYSTEM_CONFIG, False),
     ],
 )
 def test_only_a_section_that_cannot_change_what_git_reads_is_ignored(
