@@ -65,10 +65,6 @@ def _all_resolved(result) -> bool:
     return all(item["resolution"] == "resolved" for item in result.assertions)
 
 
-def _assertions_of(result, edge_type: str) -> list:
-    return [item for item in result.assertions if item["edge_type"] == edge_type]
-
-
 def _first_assertion(result, edge_type: str) -> dict:
     return next(item for item in result.assertions if item["edge_type"] == edge_type)
 
@@ -241,7 +237,7 @@ def test_cross_file_resolution_keeps_ambiguous_and_missing_targets_as_observatio
 
     result = extract_code(sources, repository_id="repo")
 
-    assert _assertions_of(result, "CALLS") == []
+    assert _assertions_of_type(result, "CALLS") == []
     assert {
         ("CALLS", "helper", "ambiguous_target"),
         ("IMPORTS", "absent", "missing_dependency"),
