@@ -198,6 +198,18 @@ the normalized navigation facade, deterministic rendering, precise
 `get_architecture` modes, doctor diagnostics, and qualification gates. A query is
 routed to one profile by file suffix; a suffix no profile claims falls back to
 Pyright, which opens the file, answers nothing, and degrades to structural evidence.
+A session whose close failed is closed again by the next caller for its key, under
+that caller's deadline, and is evicted before a healthy idle one. A start that ran
+out of time or met the operating system is retried at most three times, after 5 s,
+30 s and 120 s; identity, protocol and capability failures stay terminal. Open
+documents are a bounded cache, not a ledger: the least recently used is closed with
+`textDocument/didClose` to make room, and `synchronize` re-reads a retained document
+only when its file identity changed. A server unused for 300 seconds is closed by the
+next request for another checkout, at most one per call and never the session being
+asked for — there is still no daemon and no timer. The transport's server-notification
+allowlist is the profile registry's union, so a profile added there is carried by the
+transport; a server whose post-initialize identity does not name the engine we pinned
+answers as degraded.
 A Windows Job Object owns the assigned server tree. On POSIX, the process group
 covers the assigned managed server's descendants only while they remain in-group;
 hostile `setsid()` escape is unsupported, so this path remains limited to trusted
