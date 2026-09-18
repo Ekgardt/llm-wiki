@@ -131,7 +131,18 @@ def _other_project_slugs() -> set[str]:
 
 
 def _named_slugs(text: str, slugs: set[str]) -> set[str]:
-    return {slug for slug in slugs if re.search(rf"\b{re.escape(slug)}\b", text)}
+    """The slugs this text names as a token — not as two words inside a longer phrase.
+
+    `\\b` counts a hyphen as a boundary, so a project called `refusal-names` matched the
+    prose in `...-a-refusal-names-its-component-...`. A leak names a project in a path, in
+    quotes or after a space. See
+    `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
+    """
+    return {
+        slug
+        for slug in slugs
+        if re.search(rf"(?<![\w-]){re.escape(slug)}(?![\w-])", text)
+    }
 
 
 def _is_private(match: str) -> bool:
@@ -253,3 +264,16 @@ def test_the_sweep_reaches_past_the_knowledge_directory() -> None:
 def test_the_projects_own_address_is_not_a_leak() -> None:
     """Co-authorship lines are public identity, not the owner's address."""
     assert _private_strings("Co-Authored-By: Claude <noreply@anthropic.com>") == set()
+
+
+def test_a_slug_is_named_as_a_token_and_not_as_two_words_of_a_phrase() -> None:
+    """A two-word project slug must not match prose written in slug form.
+
+    See `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
+    """
+    slugs = {"refusal-names"}
+    leaks = ("knowledge/projects/refusal-names/state.md", 'the "refusal-names" project', "refusal-names.md")
+    phrase = "docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md"
+
+    assert [_named_slugs(text, slugs) for text in leaks] == [slugs] * len(leaks)
+    assert _named_slugs(phrase, slugs) == set()
