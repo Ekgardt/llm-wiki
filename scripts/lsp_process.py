@@ -44,7 +44,6 @@ from lsp_protocol import (
     _ProtocolStartupCleanupError,
 )
 from lsp_security import redact_lsp_text
-from operational_ownership import OwnerLease, OwnershipRegistry
 from process_liveness import process_state
 
 ProcessTree = _lsp_process_tree.ProcessTree
@@ -93,7 +92,6 @@ _STDERR_TAIL_BYTES = 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
-_IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
 _RECOVERY_RETRY_SECONDS = 0.05
 # Where the recovery beat stops doubling. A cleanup that is stuck is stuck;
@@ -1356,8 +1354,6 @@ class _LifecycleCoordinator:
     heartbeat_stop: threading.Event = field(default_factory=threading.Event, repr=False)
     heartbeat_wake: threading.Event = field(default_factory=threading.Event, repr=False)
     heartbeat_thread: threading.Thread | None = None
-    ownership_registry: OwnershipRegistry | None = field(default=None, repr=False)
-    ownership_lease: OwnerLease | None = field(default=None, repr=False)
     seen_failures: set[tuple[str | None, bool]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
@@ -1503,25 +1499,6 @@ class LspProcess:
         return _start_lsp_process(cls, command, cwd=cwd, owner_root=owner_root)
 
     @classmethod
-    def _start_with_v3_candidate(
-        cls,
-        command: Sequence[str],
-        *,
-        cwd: Path,
-        owner_root: Path,
-        state_root: Path,
-    ) -> LspProcess:
-        return _start_lsp_process_impl(
-            cls,
-            command,
-            cwd=cwd,
-            owner_root=owner_root,
-            configured_deadline=None,
-            generation_configuration=_unconfigured_generation(),
-            ownership_state_root=Path(state_root),
-        )
-
-    @classmethod
     def start_configured(
         cls,
         command: Sequence[str],
@@ -1611,9 +1588,6 @@ class LspProcess:
 
     def close(self, deadline: float) -> None:
         _shutdown_lsp_process(self, deadline)
-
-    def idle_expired(self, now: float) -> bool:
-        return _idle_expired_lsp_process(self, now)
 
     def stderr_bytes(self) -> bytes:
         with self._stderr_projection_lock:
@@ -2098,7 +2072,6 @@ def _write_generation_lease(
     owner_nonce: str,
     deadline: float,
     retry_stop: threading.Event,
-    ownership: OwnerLease | None = None,
 ) -> None:
     process = generation.process
     server_pid = process.pid if process is not None else generation.server_pid
@@ -2117,8 +2090,6 @@ def _write_generation_lease(
             "server_pid": server_pid,
             "state": "live",
         }
-    if ownership is not None:
-        record.update(_canonical_lsp_fields(ownership))
     owner.write_lease(
         record,
         deadline=deadline,
@@ -2439,18 +2410,9 @@ def _validated_cwd(cwd: Path) -> Path:
 
 
 def _claim_startup_ownership(
-    coordinator: _LifecycleCoordinator,
-    owner_root: Path,
-    ownership_state_root: Path | None,
-    owner_nonce: str,
+    coordinator: _LifecycleCoordinator, owner_root: Path
 ) -> _OwnerDirectory:
-    """Take the registry lease, if there is a registry, and open the owner."""
-    if ownership_state_root is not None:
-        registry = OwnershipRegistry(ownership_state_root)
-        coordinator.ownership_registry = registry
-        coordinator.ownership_lease = registry.acquire(
-            "lsp", scope=f"lsp:{owner_nonce}"
-        )
+    """Open the owner directory this startup will own."""
     owner = _OwnerDirectory.open(owner_root)
     coordinator.owner_directory = owner
     return owner
@@ -2458,13 +2420,12 @@ def _claim_startup_ownership(
 
 def _startup_owner_record(
     arguments: Sequence[str],
-    coordinator: _LifecycleCoordinator,
     *,
     generation_nonce: str,
     owner_nonce: str,
     started_at: str,
 ) -> dict[str, object]:
-    record: dict[str, object] = {
+    return {
         "command_basename": Path(arguments[0]).name,
         "generation_nonce": generation_nonce,
         "owner_nonce": owner_nonce,
@@ -2472,9 +2433,6 @@ def _startup_owner_record(
         "started_at": started_at,
         "state": ProcessState.PROCESS_RUNNING.value,
     }
-    if coordinator.ownership_lease is not None:
-        record.update(_canonical_lsp_fields(coordinator.ownership_lease))
-    return record
 
 
 def _require_generation_owners(
@@ -2652,7 +2610,6 @@ def _start_lsp_process_impl(
     owner_root: Path,
     configured_deadline: float | None,
     generation_configuration: _GenerationConfiguration,
-    ownership_state_root: Path | None = None,
     environment_overrides: Mapping[str, str] | None = None,
 ) -> LspProcess:
     cwd = _validated_cwd(cwd)
@@ -2673,9 +2630,7 @@ def _start_lsp_process_impl(
     driver_acquired = False
 
     try:
-        owner = _claim_startup_ownership(
-            coordinator, owner_root, ownership_state_root, owner_nonce
-        )
+        owner = _claim_startup_ownership(coordinator, owner_root)
         startup_deadline = _resolved_startup_deadline(configured_deadline)
         _acquire_driver(coordinator, startup_deadline)
         driver_acquired = True
@@ -2693,7 +2648,6 @@ def _start_lsp_process_impl(
             generation_nonce=generation_nonce,
             owner_record=_startup_owner_record(
                 arguments,
-                coordinator,
                 generation_nonce=generation_nonce,
                 owner_nonce=owner_nonce,
                 started_at=started_at,
@@ -2952,19 +2906,6 @@ def _lease_write_targets(
         _release_lifecycle(coordinator)
 
 
-def _heartbeat_ownership_lease(
-    coordinator: _LifecycleCoordinator,
-) -> OwnerLease | None:
-    """Refresh the registry lease, when there is a registry holding one."""
-    ownership = coordinator.ownership_lease
-    registry = coordinator.ownership_registry
-    if ownership is None or registry is None:
-        return ownership
-    ownership = registry.heartbeat(ownership)
-    coordinator.ownership_lease = ownership
-    return ownership
-
-
 def _publish_current_lease(
     instance: LspProcess,
     coordinator: _LifecycleCoordinator,
@@ -2972,23 +2913,12 @@ def _publish_current_lease(
     generation: _Generation,
     deadline: float,
 ) -> None:
-    ownership = _heartbeat_ownership_lease(coordinator)
-    if ownership is None:
-        _write_generation_lease(
-            owner,
-            generation,
-            instance.owner_nonce,
-            deadline,
-            coordinator.heartbeat_stop,
-        )
-        return
     _write_generation_lease(
         owner,
         generation,
         instance.owner_nonce,
         deadline,
         coordinator.heartbeat_stop,
-        ownership,
     )
 
 
@@ -4969,17 +4899,6 @@ def _cancel_all_lsp_process(instance: LspProcess, reason: str) -> None:
     protocol.cancel_all(reason)
 
 
-def _idle_expired_lsp_process(instance: LspProcess, now: float) -> bool:
-    now = _validated_deadline(now)
-    coordinator = instance._coordinator
-    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-    _acquire_lifecycle(coordinator, deadline)
-    try:
-        return now - instance.last_used_monotonic >= _IDLE_SECONDS
-    finally:
-        _release_lifecycle(coordinator)
-
-
 def _exit_stream_owners(
     instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
 ) -> tuple[threading.Thread | None, threading.Thread | None]:
@@ -5739,28 +5658,6 @@ def _forget_closed_owner_locked(coordinator: _LifecycleCoordinator) -> None:
         coordinator.owner_directory = None
 
 
-def _release_ownership_lease_locked(run: _CleanupRun) -> None:
-    """Hand the registry lease back once the owner directory is gone."""
-    coordinator = run.coordinator
-    if not run.terminal or coordinator.owner_directory is not None:
-        return
-    if not _registry_lease_held(coordinator):
-        return
-    try:
-        coordinator.ownership_registry.release(coordinator.ownership_lease)
-        coordinator.ownership_lease = None
-    except BaseException as error:
-        run.failed("lease_removal", error)
-
-
-def _registry_lease_held(coordinator: _LifecycleCoordinator) -> bool:
-    """A registry lease this coordinator can still hand back."""
-    return (
-        coordinator.ownership_lease is not None
-        and coordinator.ownership_registry is not None
-    )
-
-
 def _forget_lease_generation_locked(coordinator: _LifecycleCoordinator) -> None:
     if coordinator.owner_directory is None:
         coordinator.lease_generation = None
@@ -5844,7 +5741,6 @@ def _close_cleanup_locked(run: _CleanupRun, *, outcome_ready: bool) -> None:
     coordinator = run.coordinator
     _forget_released_generations_locked(coordinator)
     _forget_closed_owner_locked(coordinator)
-    _release_ownership_lease_locked(run)
     _forget_lease_generation_locked(coordinator)
     _forget_active_generation_locked(coordinator, terminal=run.terminal)
     _settle_ownership_pending_locked(run, outcome_ready=outcome_ready)
@@ -6328,8 +6224,6 @@ def _owner_directory_open(coordinator: _LifecycleCoordinator) -> bool:
 
 
 def _coordinator_has_ownership_locked(coordinator: _LifecycleCoordinator) -> bool:
-    if coordinator.ownership_lease is not None:
-        return True
     if _any_generation_held(coordinator) or _any_worker_alive(coordinator):
         return True
     return _owner_directory_open(coordinator)
@@ -6968,17 +6862,6 @@ def _write_owner_record(
     record: Mapping[str, object],
 ) -> None:
     owner_directory.write_record("owner.json", record)
-
-
-def _canonical_lsp_fields(ownership: OwnerLease) -> dict[str, object]:
-    return {
-        "canonical_role": ownership.role,
-        "canonical_scope": ownership.scope,
-        "actor_id": ownership.actor_id,
-        "owner_token": ownership.token,
-        "fencing_epoch": ownership.epoch,
-        "process_start_identity": ownership.process.start_identity,
-    }
 
 
 def _new_stderr_wake() -> _StderrWake | None:
