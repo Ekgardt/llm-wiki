@@ -14261,7 +14261,15 @@ def _processor_result_frame(
 
 
 def _send_processor_frame(sender: Any, frame: bytes) -> None:
-    """Hand the frame over, but only once the parent says it is listening."""
+    """Hand the frame over, but only once the parent says it is listening.
+
+    `frame` is the finished result: the caller evaluates it before this runs, so
+    `R` means "the task is done and I have an answer", not "I am up". The parent
+    reads the child's descendants on this signal, and that ordering is the
+    reason the set it gets is the tree the task left running rather than an
+    empty one. See
+    `docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md`.
+    """
     sender.send_bytes(b"R")
     if not sender.poll(5) or sender.recv_bytes(1) != b"A":
         return
@@ -14730,7 +14738,14 @@ def _may_keep_waiting(run: _ChildRun) -> bool:
 
 
 def _child_ready_handshake(run: _ChildRun) -> None:
-    """The child announces it is up, and only then do we track its tree."""
+    """The child says it has an answer, and only then do we track its tree.
+
+    `R` is sent after the processor has returned, not when the child starts, so
+    the tree recorded here is the one the finished task left behind — a provider
+    the processor shelled out to and did not wait for. Moving this earlier would
+    record an empty set and leave `_cleanup_confirmed` and `_await_cleanup`
+    verifying nothing.
+    """
     _await_child_message(run)
     try:
         ready = run.receiver.recv_bytes(1)
