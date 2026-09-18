@@ -2215,11 +2215,16 @@ def _allowed_private_config_pair(
     pair = _config_key_value(line)
     if pair is None:
         return None
+    return _pair_this_section_may_carry(section, pair)
+
+
+def _pair_this_section_may_carry(
+    section: str, pair: tuple[str, str]
+) -> tuple[str, str] | None:
+    """`pair` when `section` is allowed to carry its key, else None."""
     if section in _INERT_PRIVATE_CONFIG_SECTIONS:
         return _inert_section_pair(section, pair)
-    if pair[0] not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
-        return None
-    return pair
+    return pair if pair[0] in _ALLOWED_PRIVATE_CONFIG_KEYS[section] else None
 
 
 def _inert_section_pair(section: str, pair: tuple[str, str]) -> tuple[str, str] | None:
@@ -2297,14 +2302,35 @@ def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
     return _REQUIRED_PRIVATE_CONFIG_KEYS <= seen
 
 
-def _ignored_config_setting_allowed(line: str, in_user_section: bool) -> bool:
+# The only sections an external git config may open, and the keys each may set.
+# `[user]` names the author of a commit. `[safe]` decides only whether git agrees
+# to work in a repository at all, never what it reads of the working tree, its
+# ignore rules, its attributes or its index — and every GitHub-hosted Linux
+# runner ships an `/etc/gitconfig` holding `[safe]` / `directory = *`, so
+# refusing that section turned the private read off for the whole machine.
+# Research: docs/research/2026-09-18-a-system-config-that-only-says-where-git-may-work.md
+_INERT_EXTERNAL_CONFIG_SECTIONS = MappingProxyType(
+    {
+        "user": frozenset({"email", "name"}),
+        "safe": frozenset({"directory", "barerepository"}),
+    }
+)
+
+
+def _external_config_section(line: str) -> str | None:
+    """The section this line opens, when it opens one an external config may open."""
+    match = re.fullmatch(r"\[(user|safe)\]", line, flags=re.IGNORECASE)
+    return None if match is None else match.group(1).lower()
+
+
+def _ignored_config_setting_allowed(line: str, section: str | None) -> bool:
     """Whether this line of an external config is one the read can ignore."""
-    if line.startswith("[") or not in_user_section:
+    if line.startswith("[") or section is None:
         return False
     pair = _config_key_value(line)
     if pair is None:
         return False
-    return pair[0] in {"email", "name"}
+    return pair[0] in _INERT_EXTERNAL_CONFIG_SECTIONS[section]
 
 
 def _blank_or_comment(line: str) -> bool:
@@ -2314,26 +2340,24 @@ def _blank_or_comment(line: str) -> bool:
 
 def _ignored_config_lines_allowed(text: str) -> bool:
     """Whether every line of an external config is one the read can ignore."""
-    in_user_section = False
+    section: str | None = None
     for raw_line in text.splitlines():
-        in_user_section, verdict = _ignored_config_line_step(
-            raw_line.strip(), in_user_section
-        )
+        section, verdict = _ignored_config_line_step(raw_line.strip(), section)
         if verdict is False:
             return False
     return True
 
 
 def _ignored_config_line_step(
-    line: str, in_user_section: bool
-) -> tuple[bool, bool | None]:
-    """Whether we are in `[user]` after this line, and False only on refusal."""
+    line: str, section: str | None
+) -> tuple[str | None, bool | None]:
+    """The section open after this line, and False only when the line is refused."""
     if _blank_or_comment(line):
-        return in_user_section, None
-    if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
-        return True, None
-    allowed = _ignored_config_setting_allowed(line, in_user_section)
-    return in_user_section, allowed or False
+        return section, None
+    opened = _external_config_section(line)
+    if opened is not None:
+        return opened, None
+    return section, _ignored_config_setting_allowed(line, section) or False
 
 
 def _safe_ignored_git_config(content: bytes) -> bool:
