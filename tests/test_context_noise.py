@@ -85,14 +85,12 @@ def test_useful_signal_preserved(injected_context: str):
     (guardrails, metacognitive, health, or — when budget allows — the
     knowledge index).
     """
-    assert "# Project memory context" in injected_context
-    substantive = (
-        "## Guard rails" in injected_context
-        or "## Your knowledge state" in injected_context
-        or "## Health" in injected_context
-        or "Session Memory Index" in injected_context
+    blocks = ("## Guard rails", "## Your knowledge state", "## Health", "Session Memory Index")
+    survived = [block for block in blocks if block in injected_context]
+
+    assert ("# Project memory context" in injected_context, bool(survived)) == (True, True), (
+        "no substantive SessionStart block survived packing"
     )
-    assert substantive, "no substantive SessionStart block survived packing"
 
 
 def test_context_size_reasonable(injected_context: str):
@@ -132,13 +130,17 @@ def test_nightly_catchup_claim_is_atomic_and_once_per_date(tmp_path, monkeypatch
             )
         )
 
-    assert claims.count(True) == 1
     state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
-    assert state["nightly_catchup_claim"]["date"] == "2026-07-12"
-    assert state["nightly_catchup_claim"]["status"] == "claimed"
-    assert state["nightly_catchup_claim"]["expires_at"]
+    claim = state["nightly_catchup_claim"]
     memory_state.update_state(lambda value: value.update(last_nightly_date="2026-07-13"))
-    assert session_start_context._claim_nightly_catchup("2026-07-13") is False
+
+    assert (
+        claims.count(True),
+        claim["date"],
+        claim["status"],
+        bool(claim["expires_at"]),
+        session_start_context._claim_nightly_catchup("2026-07-13"),
+    ) == (1, "2026-07-12", "claimed", True, False)
 
 
 def test_expired_nightly_claim_can_be_retried(tmp_path, monkeypatch):
@@ -321,19 +323,30 @@ def test_direct_session_start_routes_semantic_items_through_compiler(monkeypatch
     ])
 
     by_id = {item.item_id: item for item in captured["items"]}
-    assert result == "compiled-session"
-    assert captured["budget"] is session_start_context.DEFAULT_CONTEXT_BUDGET
-    assert captured["packing"] == {}
-    assert by_id["session:title"].priority_class == "evidence"
-    assert by_id["session:title"].mandatory is False
-    assert by_id["session:guardrails"].priority_class == "safety"
-    assert by_id["session:guardrails"].mandatory is True
-    assert by_id["session:health"].priority_class == "health"
-    assert by_id["session:health"].mandatory is True
-    assert by_id["session:advisory"].priority_class == "handoff"
-    assert by_id["session:advisory"].mandatory is False
-    assert by_id["session:index"].priority_class == "evidence"
-    assert by_id["session:daily"].priority_class == "history"
+    packed = (
+        result,
+        captured["budget"] is session_start_context.DEFAULT_CONTEXT_BUDGET,
+        captured["packing"],
+    )
+    classes = {
+        name: (by_id[f"session:{name}"].priority_class, by_id[f"session:{name}"].mandatory)
+        for name in ("title", "guardrails", "health", "advisory")
+    }
+    evidence_and_history = (
+        by_id["session:index"].priority_class,
+        by_id["session:daily"].priority_class,
+    )
+
+    assert (packed, classes, evidence_and_history) == (
+        ("compiled-session", True, {}),
+        {
+            "title": ("evidence", False),
+            "guardrails": ("safety", True),
+            "health": ("health", True),
+            "advisory": ("handoff", False),
+        },
+        ("evidence", "history"),
+    )
 
 
 def test_direct_session_start_drops_optional_sections_whole_under_pressure(monkeypatch):
@@ -421,14 +434,21 @@ def test_recovered_handoff_routes_through_compiler_as_mandatory(monkeypatch):
     result = integration_adapter._append_context(global_items, "recovered handoff")
 
     by_id = {item.item_id: item for item in captured["items"]}
-    assert result == "compiled-recovery"
-    assert captured["packing"] == {
-        "emergency_byte_cap": captured["budget"].available_input_tokens,
-    }
-    assert by_id["session-start:project-handoff"].priority_class == "handoff"
-    assert by_id["session-start:project-handoff"].mandatory is True
-    assert by_id["session:advisory"].mandatory is False
-    assert by_id["session:daily"].priority_class == "history"
+    handoff = by_id["session-start:project-handoff"]
+
+    assert (
+        result,
+        captured["packing"],
+        (handoff.priority_class, handoff.mandatory),
+        by_id["session:advisory"].mandatory,
+        by_id["session:daily"].priority_class,
+    ) == (
+        "compiled-recovery",
+        {"emergency_byte_cap": captured["budget"].available_input_tokens},
+        ("handoff", True),
+        False,
+        "history",
+    )
 
 
 def test_integration_uses_unpacked_project_handoff_items(monkeypatch):
@@ -517,9 +537,11 @@ def test_integration_keeps_complete_recovered_handoff_under_pressure(monkeypatch
         [optional_history], handoff_items
     )
 
-    assert rendered == expected
-    assert "optional global history" not in rendered
-    assert all(item.text in rendered for item in handoff_items)
+    kept = (
+        rendered == expected,
+        "optional global history" in rendered,
+        all(item.text in rendered for item in handoff_items),
+    )
 
     monkeypatch.setattr(
         context_budget,
@@ -527,9 +549,13 @@ def test_integration_keeps_complete_recovered_handoff_under_pressure(monkeypatch
         ContextBudget(None, len(expected.encode("utf-8")) - 1, 0, 0),
     )
     failure = integration_adapter._append_context([], handoff_items)
-    assert "mandatory_budget_exceeded" in failure
-    assert "Ship whole" not in failure
-    assert "History whole" not in failure
+    refused = (
+        "mandatory_budget_exceeded" in failure,
+        "Ship whole" in failure,
+        "History whole" in failure,
+    )
+
+    assert (kept, refused) == ((True, False, True), (True, False, False))
 
 
 def test_integration_context_drops_optional_sections_whole_under_pressure(monkeypatch):
@@ -557,9 +583,7 @@ def test_integration_context_drops_optional_sections_whole_under_pressure(monkey
 
     result = integration_adapter._append_context(items, "recovered-whole")
 
-    assert result == expected
-    assert "advisory" not in result
-    assert "history" not in result
+    assert (result, "advisory" in result, "history" in result) == (expected, False, False)
 
 
 def test_session_start_impossible_mandatory_budget_is_visible_not_sliced(monkeypatch):
@@ -637,13 +661,19 @@ def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
 
     result = session_start_project_state._clip("project state", 2400)
 
-    assert result == "compiled-project-state"
-    assert captured["packing"] == {"emergency_byte_cap": 2400}
-    assert len(captured["items"]) == 1
     item = captured["items"][0]
-    assert item.text == "project state"
-    assert item.priority_class == "handoff"
-    assert item.mandatory is True
+
+    assert (
+        result,
+        captured["packing"],
+        len(captured["items"]),
+        (item.text, item.priority_class, item.mandatory),
+    ) == (
+        "compiled-project-state",
+        {"emergency_byte_cap": 2400},
+        1,
+        ("project state", "handoff", True),
+    )
 
 
 def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
@@ -820,9 +850,11 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     block = session_start_context.health_block()
     elapsed = time.perf_counter() - started
 
-    assert elapsed < 0.5
-    assert block.startswith("## Health")
-    assert "secret" not in block
+    assert (elapsed < 0.5, block.startswith("## Health"), "secret" in block) == (
+        True,
+        True,
+        False,
+    )
 
 
 def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
