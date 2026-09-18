@@ -112,8 +112,6 @@ DELEGATES = frozenset(
     {
         "session_start_context.py",
         "session_start_project_state.py",
-        "precompact_capture.py",
-        "session_end_capture.py",
         "session_end_project_tag.py",
         "user_prompt_capture.py",
         "post_tool_capture.py",
@@ -121,6 +119,11 @@ DELEGATES = frozenset(
         "feedback_capture.py",
     }
 )
+# The two thin wrappers that used to spawn the detached flush. They were deleted on
+# 2026-09-17 — the adapter captures these events itself — and this map outlives them
+# as a compatibility guard: an older `settings.json` that still passes one of these
+# flags is ignored here instead of failing on a delegate that no longer exists. See
+# `docs/research/2026-09-17-the-two-hook-wrappers-nothing-calls-are-retired.md`.
 CAPTURE_DELEGATES = {
     "pre_compact": "precompact_capture.py",
     "session_end": "session_end_capture.py",

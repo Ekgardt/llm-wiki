@@ -4,7 +4,7 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 
 ## Raw layer
 - `knowledge/daily/YYYY-MM-DD.md` stores captured session-end and (optionally) pre-compact summaries.
-- Baseline path is the `SessionEnd` hook: just work and close Claude — `scripts/session_end_capture.py` spawns `flush_memory.py` and a daily-log entry lands automatically. No `/compact` required.
+- Baseline path is the `SessionEnd` hook: just work and close Claude — `scripts/integration_adapter.py` publishes a durable capture intent and the capture worker turns it into a daily-log entry. No `/compact` required.
 - The `PreCompact` hook is a safety net for long sessions that auto-compact; `/compact` is an **optional manual tool**, not part of the regular capture regimen.
 
 ## Compiled layer

@@ -1,8 +1,8 @@
 """Regression test: session_end_project_tag skip semantics.
 
 SessionEnd hook must:
-  - SKIP when cwd is inside the vault (vault's own project-level
-    session_end_capture.py handles it with richer content).
+  - SKIP when cwd is inside the vault (the vault's own capture handles it
+    with richer content).
   - SKIP when cwd is $HOME (HOME is not a project; the .claude/
     marker matches ~/.claude/ not a project .claude/).
   - WRITE a tagged entry for normal non-vault cwd.

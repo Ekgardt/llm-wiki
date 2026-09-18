@@ -5,11 +5,10 @@ Fires at session end from any cwd. Appends a minimal marker entry to
 metadata. This lets cross-project sessions leave breadcrumbs in the
 shared daily log.
 
-Companion to the project-level `session_end_capture.py` hook, which spawns
-`flush_memory.py` (heavy, LLM-driven, transcript-based) when cwd = vault.
-To avoid duplicate work and noisy logs, this user-level hook **skips**
-when the current directory is inside the vault — the project-level hook
-already handles that case with richer content.
+Companion to the adapter's own session-end capture, which publishes the durable
+capture intent the worker classifies. To avoid duplicate work and noisy logs, this
+user-level hook **skips** when the current directory is inside the vault — the
+vault's own capture already handles that case with richer content.
 
 Contract (hard requirements, mirrors session_start_project_state.py):
     * Must exit 0 on ANY error. Breaking a session-end is worse than a
