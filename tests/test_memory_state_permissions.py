@@ -130,14 +130,15 @@ def test_atomic_write_uses_unique_recoverable_durable_staging(tmp_path, monkeypa
     with pytest.raises(MetadataDurabilityUnavailable):
         memory_state.atomic_write(target, "new")
 
-    assert target.read_text(encoding="utf-8") == "old"
-    assert len(observed) == 1
+    assert (target.read_text(encoding="utf-8"), len(observed)) == ("old", 1)
     staged, destination, options = observed[0]
-    assert destination == target
-    assert staged.parent == target.parent
-    assert staged.name.startswith(".state.json.")
-    assert staged.read_bytes() == b"new"
-    assert options["replace"] is True
+    assert (
+        destination,
+        staged.parent,
+        staged.name.startswith(".state.json."),
+        staged.read_bytes(),
+        options["replace"],
+    ) == (target, target.parent, True, b"new", True)
 
 
 def test_atomic_write_replaces_longer_existing_file(tmp_path):
@@ -171,6 +172,11 @@ def test_save_state_routes_through_atomic_write(tmp_path, monkeypatch):
     assert calls == [(state_file, '{\n  "value": 1\n}', "utf-8")]
 
 
+def _entry_names(directory) -> list[str]:
+    """Every name directly inside `directory`, in order."""
+    return sorted(path.name for path in directory.iterdir())
+
+
 def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
     """Audit OPS-07: a fresh owner's lock moved aside by mistake is put back."""
     import memory_state
@@ -178,28 +184,44 @@ def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
     lock = tmp_path / "state.json.lock"
     lock.write_bytes(b"4242")
 
-    assert memory_state.retire_stale_lock(lock, b"4242") is True
-    assert not lock.exists()
+    retired = memory_state.retire_stale_lock(lock, b"4242")
     # The steal guard's sidecar stays; nothing else is left (2026-09-14).
-    assert [path.name for path in tmp_path.iterdir()] == ["state.json.lock.steal"]
+    after_retirement = (retired, lock.exists(), _entry_names(tmp_path))
 
     lock.write_bytes(b"9999")
-    assert memory_state.retire_stale_lock(lock, b"4242") is False
-    assert lock.read_bytes() == b"9999"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["state.json.lock", "state.json.lock.steal"]
+    refused = memory_state.retire_stale_lock(lock, b"4242")
+    after_refusal = (refused, lock.read_bytes(), _entry_names(tmp_path))
 
+    assert after_retirement == (True, False, ["state.json.lock.steal"])
+    assert after_refusal == (False, b"9999", ["state.json.lock", "state.json.lock.steal"])
     assert memory_state.retire_stale_lock(tmp_path / "absent.lock", b"1") is False
 
 
 def test_a_dead_state_lock_is_retired_and_a_live_one_waited_out(tmp_path, monkeypatch):
+    """A lock with no identity line: the PID probe, then the 30 s rule.
+
+    The probe is substituted where the operating system is actually asked,
+    `process_liveness.process_state` — the seam
+    `test_the_three_legacy_locks_ask_the_same_probe` uses. It used to be
+    substituted at `memory_state._is_pid_alive`, which `_owner_alive` stopped
+    calling when a lock learned to name its process, so this test asked the real
+    machine whether PID 777 was running and passed only where it was not. It is
+    not, here; on a Windows runner it was, and the lock stayed.
+
+    The live half is asserted too, which the name promised and the body did not.
+    """
     import memory_state
+    import process_liveness
 
     lock = tmp_path / "state.json.lock"
     monkeypatch.setattr(memory_state, "LOCK_FILE", lock)
     monkeypatch.setattr(memory_state, "_lock_age", lambda: memory_state._STALE_LOCK_SECONDS + 1)
     lock.write_bytes(b"777")
-    monkeypatch.setattr(memory_state, "_is_pid_alive", lambda pid: False)
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "alive")
+    memory_state._await_lock_turn(deadline=time.time() + 0.2, poll=0.01)
+    waited_out = lock.exists()
 
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
     memory_state._await_lock_turn(deadline=time.time() + 5, poll=0.01)
 
-    assert not lock.exists()
+    assert (waited_out, lock.exists()) == (True, False)
