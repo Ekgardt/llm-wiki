@@ -41,7 +41,7 @@ Measured, same prompt, same flags, one minute apart:
 
 | working directory of `claude -p` | seconds | answer |
 |---|---|---|
-| `/home/user/llm-wiki` (this repository) | **175.42** | 980 characters about a pytest permission prompt |
+| `<vault>` (this repository) | **175.42** | 980 characters about a pytest permission prompt |
 | a neutral temporary directory | **12.59** | `pong` |
 
 The worker inherited the orchestrator's working directory, which is this

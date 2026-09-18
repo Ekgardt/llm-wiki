@@ -5214,7 +5214,7 @@ _HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):(?P<rest>.
 # A kind whose name says the writer lost a race. The event is carried by the
 # next session end, so it is retried work and not lost work, and counting it as
 # a failure made this check permanently red on a machine that runs several
-# agents. Measured on this vault 2026-09-07: `no-hands` logged four of these in
+# agents. Measured on this vault 2026-09-07: `another-project` logged four of these in
 # four minutes while its committed sequence advanced from 836 to 838.
 CONTENTION_KIND_MARKER = "contention"
 CONTENTION_MESSAGES = (
@@ -5318,7 +5318,7 @@ def _quiet_hook_message(failures: int, contended: int) -> str:
 
 
 # A project's checkpoints are ordered, so one sequence that cannot finish holds
-# every later one. Measured on this vault 2026-08-30: `fix-pip` sequence 320
+# every later one. Measured on this vault 2026-08-30: one project's sequence 320
 # stood `reserved` behind a `discarded` transaction from 08-28 and refused every
 # checkpoint for that project for two days, while 744 of them queued in
 # `run/state.json`. Nothing reported it. An hour is long enough that no live

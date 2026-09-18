@@ -18,7 +18,7 @@ numbers.
    sources, 546 of them code, and 35 630 nodes; the ones activated 09-11 and
    09-12 hold 309 and 322 sources, **zero** code, and about 14 400 nodes.
 3. `logs/maintenance/20260912T030233-repositories-1816302.out.log` — the
-   nightly's repository step, verbatim: for `/home/user/llm-wiki`,
+   nightly's repository step, verbatim: for `<vault>`,
    `"status": "refused"`, `"reason": "repository_is_the_vault"`, message *"this
    is the vault itself; its generation is built and activated by the nightly
    pass"*.
@@ -71,7 +71,7 @@ citation is the gold's proof, and a proof that points at the wrong line is not
 a proof.
 
 **Three. The collector refuses this repository by its own bound.** Indexing
-`/home/user/llm-wiki-tasks` with default roots is refused with *duplicate corpus
+`<vault>` with default roots is refused with *duplicate corpus
 source path: `knowledge/notes/2026-04-13 Three Conventions One Root.md`*, and
 there is exactly one file of that name on disk. A repository that is also a
 vault reaches `knowledge/` twice and the collector counts the collision as the
@@ -109,7 +109,7 @@ choose.
 
 The comparison numbers do not exist yet. To produce them tonight without
 touching the contract, the run is pointed at the worktree checkout
-`/home/user/llm-wiki-tasks`, which the repository step does index (it is not the
+`<vault>`, which the repository step does index (it is not the
 vault), with explicit code roots to step around defect three. That measures the
 same code through the same product path. It is a workaround and it is named as
 one: the vault itself still answers nothing about its own code.
@@ -118,7 +118,7 @@ one: the vault itself still answers nothing about its own code.
 
 `timing::macos_full::py3.10-s2` failed on `7a457f2`. The shard holds
 `tests/test_code_parity_stand.py`, where the test I added asserted
-`default_cbm_project("/home/user/llm-wiki") == "home-user-llm-wiki"` — a literal
+`default_cbm_project("<vault>") == "<derived-project-key>"` — a literal
 that holds only on this Linux box. `/home` is an autofs mount on macOS and a
 drive-anchored path on Windows, so `Path(...).resolve()` returns something else
 there and the assertion is false; the Windows shard would have failed the same

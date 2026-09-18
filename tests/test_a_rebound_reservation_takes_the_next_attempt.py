@@ -6,7 +6,7 @@ were then. Replay it after either has moved and `prepare` refuses: same id,
 different request. The row can never settle, and every event behind it queues
 forever.
 
-Measured on this vault on 2026-09-07: `no-hands` sequence 839 refused this way,
+Measured on this vault on 2026-09-07: `another-project` sequence 839 refused this way,
 1 127 events queued behind it over five hours, `run/state.json` grew to 2.8 MB
 — eleven times the bound doctor may read — and two of its checks went blind
 while the state lock began timing out under the size.
@@ -24,9 +24,9 @@ from markdown_transaction import TransactionFailure  # noqa: E402
 
 
 class _Reservation:
-    project = "no-hands"
+    project = "another-project"
     sequence = 839
-    operation_id = "project:no-hands:839:attempt:1:epoch:11708:abc"
+    operation_id = "project:another-project:839:attempt:1:epoch:11708:abc"
 
 
 class _Store:
@@ -73,7 +73,7 @@ def test_a_rebound_reservation_is_replayed_under_the_next_attempt(monkeypatch):
     store = _Store(ValueError(project_journal.REBOUND_REQUEST), fresh=fresh)
 
     assert _replay(store) == "receipt from attempt 2"
-    assert store.retried == ("no-hands", 839)
+    assert store.retried == ("another-project", 839)
     assert store.reserved_with[1] is fresh
 
 
@@ -97,7 +97,7 @@ def test_a_failed_precondition_still_quarantines():
     store = _Store(TransactionFailure("no", "precondition_failed", "quarantined"))
 
     assert _replay(store) is None
-    assert store.quarantined == [("no-hands", 839, "quarantined")]
+    assert store.quarantined == [("another-project", 839, "quarantined")]
 
 
 def test_another_transaction_failure_still_raises():
@@ -108,6 +108,6 @@ def test_another_transaction_failure_still_raises():
 
 
 def test_a_pending_prior_still_waits():
-    store = _Store(project_journal.ProjectPendingPriorError("no-hands", 839, 838))
+    store = _Store(project_journal.ProjectPendingPriorError("another-project", 839, 838))
 
     assert _replay(store) is None

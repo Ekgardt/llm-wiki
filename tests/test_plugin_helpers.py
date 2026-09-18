@@ -1757,8 +1757,8 @@ def _claude_post_tool_payload(stdout: str) -> dict:
     """The shape Claude Code's PostToolUse hook actually sends."""
     return {
         "session_id": "abcdefgh-1111",
-        "transcript_path": "/home/user/.claude/projects/x/abcdefgh-1111.jsonl",
-        "cwd": "/home/user/llm-wiki",
+        "transcript_path": "/repo/home/.claude/projects/x/abcdefgh-1111.jsonl",
+        "cwd": "/repo/llm-wiki",
         "permission_mode": "acceptEdits",
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",

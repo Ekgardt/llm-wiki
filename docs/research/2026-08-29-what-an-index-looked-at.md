@@ -15,7 +15,7 @@ project vocabulary and must not travel to other repositories, and that
 
 Dated research for the three gaps commit `27301e1` named and did not take.
 Measurements in this note were taken on this machine on 2026-08-29 against
-`/home/user/llm-wiki` and `/home/user/agenticos/checkout-claude/main`.
+`<vault>` and `<other-repo>`.
 
 ---
 
@@ -52,7 +52,7 @@ about a repository is most likely to be about:
 | repository | tracked root files | after hidden are pruned |
 |---|---|---|
 | `llm-wiki` | 17 | 12 — `AGENTS.md`, `CHANGELOG.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `LICENSE`, `README.md`, `README.ru.md`, `README.zh-CN.md`, `install.ps1`, `install.sh`, `pyproject.toml`, `uv.lock` |
-| `agenticos` | 11 | 7 — `README.md`, `bootstrap.sh`, `crontab.txt`, `env.template`, `onboarding.md`, `pyproject.toml`, `uv.lock` |
+| `other-project` | 11 | 7 — `README.md`, `bootstrap.sh`, `crontab.txt`, `env.template`, `onboarding.md`, `pyproject.toml`, `uv.lock` |
 
 The audit entry says "seven names here and as many there". The seven for the
 neighbour is right; here it is twelve. Corrected by measurement, not argued.
@@ -125,7 +125,7 @@ available:
 
 | repository | untracked files collected under tracked roots | of those, outside `__pycache__` |
 |---|---|---|
-| `agenticos` | 17 | **0** |
+| `other-project` | 17 | **0** |
 | `llm-wiki` | 3 | **3** — `benchmark/code-parity-2026-08-29-anchored-run1.json`, `…-run2.json`, `benchmark/flush-classification-live.json` |
 
 So on the foreign repository a Git listing would change nothing at all: every

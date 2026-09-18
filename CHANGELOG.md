@@ -639,7 +639,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `docs/research/2026-09-10-a-cached-reader-needs-one-thread-at-a-time-not-a-serialized-build.md`.
 - **The compile commits again; a project journal is no longer a claim page.**
   No compile had committed since 2026-09-07: the claim index read
-  `knowledge/projects/*/journal.md` and refused the 4.2 MB `no-hands`
+  `knowledge/projects/*/journal.md` and refused the 4.2 MB `another-project`
   journal at a 4 MiB cap the journal itself did not have, so every draft
   was recorded as a validation error. The claim tree, the claim index and
   lint now share one file set, `context.md` and `state.md`: the journal is

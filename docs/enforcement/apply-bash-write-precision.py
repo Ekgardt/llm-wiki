@@ -25,7 +25,7 @@ any failure.
 
     sudo python3 "$LLM_WIKI_ROOT/docs/enforcement/apply-bash-write-precision.py"
 
-    ($LLM_WIKI_ROOT on this machine: /home/user/llm-wiki)
+    ($LLM_WIKI_ROOT on this machine: <vault>)
 """
 
 from __future__ import annotations

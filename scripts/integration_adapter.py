@@ -1722,7 +1722,7 @@ def drain_pending_backlog(budget_seconds: float = BACKLOG_DRAIN_SECONDS) -> dict
 def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> int:
     """One project's backlog, isolated: its failure is not the pass's failure.
 
-    Measured 2026-08-30: a single unrecoverable reservation in `fix-pip` raised
+    Measured 2026-08-30: a single unrecoverable reservation in one project raised
     out of the drain and stopped every other project behind it, and the orphan
     sweep after it never ran at all. A recovery pass that one bad row can halt
     is not a recovery pass.

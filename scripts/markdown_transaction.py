@@ -5055,7 +5055,7 @@ class MarkdownCoordinator:
         one, and refused: `operation_id is already bound to a different
         request`, permanently.
 
-        Measured on this vault 2026-08-30: `fix-pip` sequence 320 sat
+        Measured on this vault 2026-08-30: one project's sequence 320 sat
         `reserved` with a NULL transaction while a `discarded` transaction held
         its operation id. That single row had been refusing every checkpoint for
         that project since 08-28 — 366 log lines — and it also stopped the
@@ -7591,7 +7591,7 @@ class MarkdownCoordinator:
         everybody, including the generation publication.
 
         Measured on the live vault 2026-08-28: one row for `gate_name`
-        `global`, canonical owner `project:fix-pip`, lease expired at
+        `global`, canonical owner `project:<one project>`, lease expired at
         20:50:21Z, pid 2095087 gone — and every generation pass since answered
         `sqlite3.IntegrityError: UNIQUE constraint failed:
         writer_owners.gate_name`, twice in a row on an otherwise idle machine.

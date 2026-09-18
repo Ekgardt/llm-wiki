@@ -47,6 +47,6 @@ def test_the_backfill_skips_sessions_of_memory_calls_and_keeps_conversations(tmp
     started_in_provider = json.dumps({"type": "session_meta", "payload": {"cwd": "/tmp/llm-wiki-provider-ab_1"}})
     _saved(tmp_path, "-tmp-llm-wiki-provider---2h7vub/one.jsonl", TURN)
     _saved(tmp_path, "2026/09/14/rollout-two.jsonl", started_in_provider + "\n" + TURN)
-    kept = _saved(tmp_path, "-home-user-project/three.jsonl", json.dumps({"cwd": "/home/user/project"}) + "\n" + TURN)
+    kept = _saved(tmp_path, "-repo-project/three.jsonl", json.dumps({"cwd": "/repo/project"}) + "\n" + TURN)
 
     assert backfill_sessions._transcripts((tmp_path,)) == [kept]

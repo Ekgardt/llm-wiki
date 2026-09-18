@@ -176,9 +176,9 @@ def test_an_agent_worktree_belongs_to_the_checkout_that_owns_it() -> None:
 
     from session_start_project_state import owning_checkout
 
-    worktree = Path("/home/user/llm-wiki/.claude/worktrees/agent-a0a60df15")
+    worktree = Path("/repo/llm-wiki/.claude/worktrees/agent-a0a60df15")
 
-    assert owning_checkout(worktree) == Path("/home/user/llm-wiki")
+    assert owning_checkout(worktree) == Path("/repo/llm-wiki")
 
 
 def test_a_worktree_the_owner_made_elsewhere_stays_its_own_project() -> None:
@@ -187,6 +187,6 @@ def test_a_worktree_the_owner_made_elsewhere_stays_its_own_project() -> None:
 
     from session_start_project_state import owning_checkout
 
-    elsewhere = Path("/home/user/worktrees/feature-branch")
+    elsewhere = Path("/repo/worktrees/feature-branch")
 
     assert owning_checkout(elsewhere) == elsewhere

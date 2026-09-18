@@ -69,7 +69,7 @@ each subdirectory under it a project.
 
 Measured 2026-08-29 on the two real repositories on this machine.
 
-`/home/user/agenticos/checkout-claude/main` tracks twelve top-level
+`<other-repo>` tracks twelve top-level
 directories (946 tracked files):
 
 | root | tracked files |
@@ -89,7 +89,7 @@ directories (946 tracked files):
 
 Its `pyproject.toml` says:
 
-- `[tool.hatch.build.targets.wheel] packages = ["src/agenticos"]` — **one** of
+- `[tool.hatch.build.targets.wheel] packages = ["src/<other-repo-package>"]` — **one** of
   the twelve.
 - `[tool.hatch.build.targets.sdist] include = ["/src", "/tests", "/docs",
   "/scripts", ...]` — **four** of the twelve. `seed`, `vepkit`, `deploy`,
@@ -99,7 +99,7 @@ A manifest reader would therefore index between 8% and 33% of that repository
 and report success. That is precisely the `NEW-67` failure, arrived at
 silently.
 
-This vault is the harder case. `/home/user/llm-wiki/pyproject.toml` declares no
+This vault is the harder case. `<vault>/pyproject.toml` declares no
 build backend and no `packages`, `py-modules` or `where` at all, so a packaging
 reader learns *nothing* about our own layout. Reading tool sections instead
 does not rescue it: `[tool.pyright] include = ["scripts", "tests",
@@ -124,7 +124,7 @@ including the maintenance scripts packaging is designed to leave out.
 **(a) Git-tracked top-level directories.** Already implemented as
 `repository_index.tracked_top_level_directories()`. Cost: requires Git, which
 `admit_repository` already requires. Excludes build output, virtualenvs and
-caches for free by honouring `.gitignore` — measured on agenticos, 946 tracked
+caches for free by honouring `.gitignore` — measured on other-project, 946 tracked
 files against a 2.2 GB checkout. Includes directories that are not code in any
 narrow sense (`fixtures`, `config`, `seed`), which is a cost only if the
 budget is tight; the collector already bounds files, bytes, entries and depth,
@@ -150,7 +150,7 @@ repository's layout.
 A tracked top-level directory can be one the corpus walk refuses to descend
 into. `_Discovery._directory_excluded` prunes any name starting with `.`, plus
 `SKIP_DIRECTORIES` and (outside historical mode) `ARCHIVE_DIRECTORIES`. Every
-real repository tracks `.github`; agenticos tracks two files there.
+real repository tracks `.github`; other-project tracks two files there.
 
 Naming such a root as a code root is worse than skipping it. The walk does not
 apply the prune rule to the root it is handed — only to children — so
@@ -176,14 +176,14 @@ walk would collect nothing from it.
 
 - **Root-level tracked files are never indexed.** `README.md`,
   `pyproject.toml`, `bootstrap.sh`, `crontab.txt`, `env.template`,
-  `onboarding.md`, `uv.lock` — seven non-hidden root files in agenticos, and
+  `onboarding.md`, `uv.lock` — seven non-hidden root files in other-project, and
   the same seven names here. `tracked_top_level_directories()` only returns
   directories, and nothing else offers them. A code root *may* be a file
   (`_add_code_root` handles a regular path), so the fix is available; it is a
   different gap from the name allowlist and is not taken here.
 - **`SKIP_DIRECTORIES` is still this vault's vocabulary.** `gaps` and
   `raw-sources` are knowledge-tree names, `_template` is ours, and they prune
-  *inside* every code root of every repository. Measured: agenticos has no
+  *inside* every code root of every repository. Measured: other-project has no
   directory of any of those names under any root, so nothing is lost today.
   Fixing it means making the prune set depend on the walk kind, which changes
   what the vault's own generation contains, so it is not taken in the same
@@ -203,7 +203,7 @@ walk would collect nothing from it.
 - [Package Discovery and Namespace Packages — setuptools](https://setuptools.pypa.io/en/latest/userguide/package_discovery.html) — auto-discovery covers src-layout and flat-layout when `packages`/`py-modules` are unspecified; flat-layout refuses multiple top-level packages to avoid publishing maintenance scripts.
 - [Ignore files — Cursor docs](https://cursor.com/help/customization/ignore-files) — indexing respects `.gitignore`; `.cursorignore` adds exclusions.
 - [How to setup OpenGrok](https://github.com/oracle/opengrok/wiki/How-to-setup-OpenGrok) — operator-named `SRC_ROOT`, one project per subdirectory.
-- Local measurement, 2026-08-29: `git ls-files` per top-level directory in `/home/user/agenticos/checkout-claude/main`; `pyproject.toml` of that repository and of this one.
+- Local measurement, 2026-08-29: `git ls-files` per top-level directory in `<other-repo>`; `pyproject.toml` of that repository and of this one.
 
 ## Related
 
@@ -219,7 +219,7 @@ Indexed through `mcp_server._execute_tool_call("get_architecture", {"mode":
 "index", ...})` against an isolated `LLM_WIKI_STATE_ROOT`; the live vault's
 catalog was not touched.
 
-`/home/user/agenticos/checkout-claude/main`, eleven code roots discovered
+`<other-repo>`, eleven code roots discovered
 (`config, deploy, docs, fixtures, ops, scripts, seed, skills, src, tests,
 vepkit`), `.github` reported in `excluded_roots`:
 
@@ -238,7 +238,7 @@ collector hashes it and leaves it out of the corpus, which is the existing
 
 Navigation against `src/`, a directory that could not be indexed at all before
 this change: `mode=callers, symbol=_claim_key` returned three callers, all in
-`src/agenticos/assurance.py` at lines 731, 772 and 787, which is exactly what
+`src/<other-repo-package>/assurance.py` at lines 731, 772 and 787, which is exactly what
 `grep -rn "_claim_key(" --include=*.py` returns.
 
 The refusals still fire by name, through the tool path, on that same real

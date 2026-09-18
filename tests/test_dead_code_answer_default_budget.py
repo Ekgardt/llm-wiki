@@ -45,7 +45,7 @@ def _candidate(index: int, reason: str) -> dict:
         "name": f"_helper_number_{index:04d}",
         "symbol_id": f"code:node:{index:032x}",
         "owner": f"scripts.{module}",
-        "file": f"/home/user/llm-wiki/scripts/{module}.py",
+        "file": f"/repo/llm-wiki/scripts/{module}.py",
         "line": 3253 + index,
         # Genuinely constant on every live row, and hoisted out by
         # `answer_budget` for exactly that reason -- kept here so the fixture
@@ -64,7 +64,7 @@ def _live_shaped_answer() -> dict:
         for index in range(_DEFENSIBLE)
     ]
     return {
-        "directory": "/home/user/llm-wiki",
+        "directory": "/repo/llm-wiki",
         "candidates": code_graph._ordered_dead_candidates(rows),
         "source_generation": "generation-18cfd903a7a4e112-3ce112cb",
         "graph_complete": False,

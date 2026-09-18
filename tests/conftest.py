@@ -84,7 +84,7 @@ def _isolate_test_state_root():
 #
 # The watch is deliberately uneven, because the live runtime writes here too:
 #   * `knowledge/projects` is compared by name only — a real session working in
-#     `agenticos` or `fix-pip` appends to its own journal while the suite runs,
+#     `project-beta` or `project-alpha` appends to its own journal while the suite runs,
 #     and that is the owner's work, not a leak. A leaking test creates a project
 #     of its own, which shows up as a new name.
 #   * `knowledge/notes` is compared file by file — only a nightly compile writes

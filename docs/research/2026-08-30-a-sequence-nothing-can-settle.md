@@ -11,7 +11,7 @@ stopped writing entirely.
 ```
 llm-wiki 1428  quarantined   68 evidence ids   transaction 4ab2ceba… quarantined
 llm-wiki 1429  reserved      28 evidence ids   no transaction at all
-fix-pip   320  reserved       ?                transaction 20477c3f… discarded
+other-worktree   320  reserved       ?                transaction 20477c3f… discarded
 ```
 
 `llm-wiki` 1429 carries exactly the 28 events at the head of the pending queue,

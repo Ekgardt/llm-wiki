@@ -68,7 +68,7 @@ The decision of
 `docs/research/2026-09-12-the-vault-is-a-repository-too.md` made this
 measurement possible the same evening: the vault now holds a code generation of
 its own, so the stand can ask it about its own code. Three runs,
-`--directory /home/user/llm-wiki`:
+`--directory <vault>`:
 
 | side | correct (of 16) | tokens | p95 per task | confident-wrong |
 |---|---|---|---|---|

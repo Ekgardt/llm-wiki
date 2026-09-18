@@ -21,7 +21,7 @@ change. Everything dated 2026-08-28 was measured here today.
 
 ## 1. What the product already carries, and what silently assumes the vault
 
-Traced through the graph (`home-user-llm-wiki`, index generation
+Traced through the graph (`<derived-project-key>`, index generation
 2026-08-28T20:30:16Z, `check_index_coverage` reports no recorded gap for all
 five files below) and confirmed by reading the source.
 
@@ -98,30 +98,30 @@ merged graph. This work does not attempt (b) — see §5.
 contract says an operator must be able to drop, so its registry is the most
 relevant evidence available — and it is a cautionary tale. `list_projects`
 returns **23 projects, 1.2 GB in `~/.cache/codebase-memory-mcp`**, of which
-**20 are the same repository**: `agenticos-ga11a`, `agenticos-ga19a`,
-`agenticos-xc02`, `agenticos-de06`, … each one an agent worktree under
+**20 are the same repository**: `other-project-ga11a`, `other-project-ga19a`,
+`other-project-xc02`, `other-project-de06`, … each one an agent worktree under
 `.claude/worktrees/`, each carrying its own ~14,000-node, ~48-50 MB index of
 substantially identical code. The registry keys on the path, so:
 
 - one repository becomes twenty projects;
 - when the derived name collides, the key degrades to the whole path
-  (`home-user-agenticos-checkout-claude-main-.claude-worktrees-agent-a741bf753f9768152`);
+  (`<derived-project-key>.claude-worktrees-agent-a741bf753f9768152`);
 - a *subdirectory* can be registered as a peer project — `llm-wiki-scripts`,
-  root `/home/user/llm-wiki/scripts`, sits in the same list as `home-user-llm-wiki`
+  root `<vault>/scripts`, sits in the same list as `<derived-project-key>`
   and re-indexes 7,408 nodes of the 28,000 already in its parent.
 
 Measured against the same three directories, `resolve_repository_scope` gets
 this right without being asked:
 
 ```
-/home/user/agenticos/checkout-claude/main                      repository:47d7e17166d3b6f48…
-/home/user/agenticos/checkout-claude/main/.claude/worktrees/…  repository:47d7e17166d3b6f48…
-/home/user/agenticos/checkout-claude/fix-pip                   repository:47d7e17166d3b6f48…
-/home/user/llm-wiki                                            repository:d8c142988412f9d85…
+<other-repo>                      repository:47d7e17166d3b6f48…
+<other-repo>/.claude/worktrees/…  repository:47d7e17166d3b6f48…
+<other-repo-worktree>                   repository:47d7e17166d3b6f48…
+<vault>                                            repository:d8c142988412f9d85…
 ```
 
-Same repository id for all three agenticos checkouts (they share
-`git_common_dir = /home/user/agenticos/checkout-claude/main/.git`), distinct
+Same repository id for all three other-project checkouts (they share
+`git_common_dir = <other-repo>/.git`), distinct
 `checkout_id` for each. **The identity half of CODE-03 is already built and is
 better than the tool it has to replace.** What is missing is only that the
 catalog can hold a generation for one repository at a time.
@@ -271,7 +271,7 @@ path in every answer. Both are worse than a named refusal.
 - [SCIP — a better code indexing format than LSIF](https://sourcegraph.com/blog/announcing-scip) and [scip-code.org](https://scip-code.org/) — per-repository index, per-commit upload, incremental re-index.
 - [Sourcegraph: writing an indexer](https://sourcegraph.com/docs/code-search/code-navigation/writing_an_indexer) — CI-produced index uploaded per commit.
 - [gitrepository-layout](https://git-scm.com/docs/gitrepository-layout) and [git-worktree](https://git-scm.com/docs/git-worktree) — per-worktree vs common directory; `commondir`; a linked worktree's `.git` is a file.
-- Local measurement, 2026-08-28: `mcp__codebase-memory-mcp__list_projects` (23 projects, 20 of them worktrees of one repository), `du -sh ~/.cache/codebase-memory-mcp` (1.2 GB), `resolve_repository_scope` on four directories, `collect_corpus` on `/home/user/agenticos/checkout-claude/main`.
+- Local measurement, 2026-08-28: `mcp__codebase-memory-mcp__list_projects` (23 projects, 20 of them worktrees of one repository), `du -sh ~/.cache/codebase-memory-mcp` (1.2 GB), `resolve_repository_scope` on four directories, `collect_corpus` on `<other-repo>`.
 
 ## Related
 

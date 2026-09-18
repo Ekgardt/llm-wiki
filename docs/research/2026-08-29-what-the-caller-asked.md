@@ -4,7 +4,7 @@
 codebase-memory-mcp's, what is actually inside them, and what changed.
 
 Measured against `benchmark/code-parity-v1.json` on this repository
-(`/home/user/llm-wiki`, 29 459 nodes / 156 526 edges in the active generation).
+(`<vault>`, 29 459 nodes / 156 526 edges in the active generation).
 Token counts are `len(text) // 4`, the same approximation
 `benchmark/run_code_parity.py` uses throughout — an approximation, not a
 tokenizer, and used only to compare shapes against each other.
@@ -46,7 +46,7 @@ Inside the remaining third, more repetition:
 * `entry_points`: `kind` and `name` were the constant `"main"` on all 97 rows —
   776 tokens (29.7% of that field) spent saying one word twice, 97 times.
 * Every `file` on all 497 rows carried the absolute prefix
-  `/home/user/llm-wiki/`, ~2 485 tokens, while `directory` and `source_root`
+  `<vault>/`, ~2 485 tokens, while `directory` and `source_root`
   name that root at the top of the same answer.
 
 ### 2.2 `mode=community` — 13 454 tokens, and it could not answer

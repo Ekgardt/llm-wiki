@@ -13,7 +13,7 @@ refused:
 compile_memory: FAILED — transaction not committed: ValueError: claim index page exceeds 4194304 bytes
 ```
 
-The page is `knowledge/projects/no-hands/journal.md`, 4 241 615 bytes, 981
+The page is `knowledge/projects/another-project/journal.md`, 4 241 615 bytes, 981
 checkpoint events. The draft stage derives claims through the claim index
 (`_with_derived_claims`), the index rebuild reads every project page under
 `knowledge/projects` — `context.md`, `journal.md`, `state.md` — and refuses

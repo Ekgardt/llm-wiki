@@ -59,7 +59,7 @@ touch: `scripts/compile_cache.py`, `scripts/build_tiers.py`,
 
 ## Sources
 
-1. Law 5, `/home/user/.claude/CLAUDE.md`.
+1. Law 5, `<home>/.claude/CLAUDE.md`.
 2. M. Fowler, *Refactoring: Improving the Design of Existing Code*, 2nd ed.
    (2018) — the refactoring catalogue named above.
 3. radon documentation, "Cyclomatic Complexity" — which constructs add one.

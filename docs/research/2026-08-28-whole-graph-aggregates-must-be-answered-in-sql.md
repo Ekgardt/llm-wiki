@@ -145,7 +145,7 @@ Three conclusions follow, and each one settles a design choice.
 
 ## What the fix measured
 
-Direct drive on this repository, `LLM_WIKI_STATE_ROOT=/home/user/llm-wiki`,
+Direct drive on this repository, `LLM_WIKI_STATE_ROOT=<vault>`,
 generation `generation-18cfd903a7a4e112-3ce112cb`:
 
 | tool | before | after |
@@ -159,7 +159,7 @@ aggregates themselves are 1–3 s. Both symbols the parity stand asks about,
 `_flush_started` and `_search_backends`, are in the dead-code answer, and
 `mcp_server` is named in the architecture answer.
 
-Parity stand, `--sides llm_wiki llm_wiki_best --directory /home/user/llm-wiki`.
+Parity stand, `--sides llm_wiki llm_wiki_best --directory <vault>`.
 The before column is the same stand run from a detached worktree at HEAD
 against the same live generation, so only the code differs:
 

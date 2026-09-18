@@ -83,7 +83,7 @@ def test_a_path_that_is_not_a_git_repository_is_refused_by_name(vault, tmp_path)
 def test_a_directory_inside_a_repository_is_refused_and_names_the_root(
     vault, tmp_path
 ):
-    """cbm registers `/home/user/llm-wiki/scripts` as a peer of the repository
+    """cbm registers `/repo/llm-wiki/scripts` as a peer of the repository
     that contains it. A subdirectory is not a repository."""
     import repository_index
 

@@ -294,7 +294,7 @@ def _checkpoint_step() -> _Step:
     blocks every sequence behind it for that project.
 
     Measured on this vault on 2026-09-07: `llm-wiki` 2214 lost a precondition
-    during the benchmark runs and 2215 sat reserved behind it, `no-hands` 830
+    during the benchmark runs and 2215 sat reserved behind it, `another-project` 830
     likewise. Six hundred hook failures accumulated over a day, one per
     session end, and clearing it took a person running a repair script by
     hand — which is the thing this pass exists to stop needing.

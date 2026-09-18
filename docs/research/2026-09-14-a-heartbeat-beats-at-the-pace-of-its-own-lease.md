@@ -16,7 +16,7 @@ failing". This is the research before the fix.
   `repository_index.run_fenced`. The caller passed no `cancelled` of its own, so
   the stop came from the fence guard: `_MaintenanceHeartbeat.cancelled()` is
   "deadline reached or fence lost", and the deadline was fourteen minutes away.
-- A manual `repository_index.py refresh /home/user/llm-wiki --budget-seconds 3000`
+- A manual `repository_index.py refresh <vault> --budget-seconds 3000`
   earlier the same day was cancelled at 46-47 seconds. Same shape.
 
 ## The mechanism, read in the code

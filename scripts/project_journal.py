@@ -1428,7 +1428,7 @@ def _appended_journal(current_journal: bytes, event: object, records: list) -> b
 _ROTATION_ID = "journal-rotation"
 # A journal also rolls by size, as every append-only log does (Kafka rolls a
 # segment at `segment.bytes` or `segment.ms`, whichever comes first). Rolling
-# by count alone let the no-hands journal reach 4.2 MB at 981 events, past
+# by count alone let the another-project journal reach 4.2 MB at 981 events, past
 # the claim tree's 4 MB page cap, and the nightly compile failed for two
 # nights. Two megabytes keeps a live journal at half that cap.
 # See `docs/research/2026-09-09-a-journal-rolls-by-size-too.md`.
@@ -2461,7 +2461,7 @@ class ProjectStore:
         `prepare` refuses: same id, different request. The row can never settle
         and every event behind it queues forever.
 
-        Measured on this vault on 2026-09-07: `no-hands` sequence 839 refused
+        Measured on this vault on 2026-09-07: `another-project` sequence 839 refused
         this way, 1 127 events queued behind it over five hours, `run/state.json`
         grew to 2.8 MB — eleven times the bound doctor is allowed to read — and
         two of its checks went blind while the state lock started timing out

@@ -16,7 +16,7 @@ docs/research/2026-08-21-applying-a-policy-change-safely.md
     sudo "$LLM_WIKI_ROOT/.venv/bin/python" \
         "$LLM_WIKI_ROOT/docs/enforcement/apply-rules-1-2-cover-bash.py"
 
-    ($LLM_WIKI_ROOT on this machine: /home/user/llm-wiki)
+    ($LLM_WIKI_ROOT on this machine: <vault>)
 """
 
 from __future__ import annotations

@@ -106,6 +106,6 @@ the journal are untouched by all three.
 - [RAG vs long context: what the 2026 data shows — Wire](https://usewire.io/blog/long-context-vs-rag-what-the-data-shows/)
 - [In Defense of RAG in the Era of Long-Context Language Models (arXiv 2409.01666)](https://arxiv.org/pdf/2409.01666)
 - [Is Agentic RAG worth it? An experimental comparison (arXiv 2601.07711)](https://arxiv.org/pdf/2601.07711)
-- Our measurement: `/home/user/.claude/jobs/80be9db9/tmp/depth-40/r1.jsonl`
+- Our measurement: `<home>/.claude/jobs/80be9db9/tmp/depth-40/r1.jsonl`
 - Our gate: `scripts/query_memory.py::_require_citation_touches_claim`,
   `_require_figures_agree`, `verify_grounded_answer`

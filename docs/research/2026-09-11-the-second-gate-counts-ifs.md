@@ -26,7 +26,7 @@ memory_queue; the 25 in impact_analysis are that file's legacy functions.
 
 ## Sources
 
-1. Law 5 as written in `/home/user/.claude/CLAUDE.md`.
+1. Law 5 as written in `<home>/.claude/CLAUDE.md`.
 2. The managed gate's own rules (`MAX_IFS_PER_LEVEL = 2`, `MAX_NESTING = 2`,
    `MAX_COMPLEXITY = 5`, the guard-shaped if/else check).
 

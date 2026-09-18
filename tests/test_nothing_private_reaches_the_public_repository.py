@@ -41,68 +41,130 @@ PRIVATE_PATTERNS = (
     re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.IGNORECASE),
 )
 
-# Addresses that are the project's own public identity rather than the owner's.
-PUBLIC_ADDRESSES = frozenset({"noreply@anthropic.com"})
+# Addresses that are a public identity rather than the owner's: the co-authorship
+# line, and the address of the hosting service in a clone command.
+PUBLIC_ADDRESSES = frozenset({"noreply@anthropic.com", "git@github.com"})
+
+# Domains RFC 2606 reserves for documentation and testing, which is what a fixture
+# address in this repository is: "`.example` is recommended for use in documentation
+# or as examples", "`.invalid` is intended for use in online construction of domain
+# names that are sure to be invalid", "`.test` is recommended for use in testing",
+# and IANA "has the following second level domain names reserved which can be used
+# as examples. example.com example.net example.org".
+RESERVED_DOMAINS = (".example", ".invalid", ".test", ".localhost", "example.com", "example.net", "example.org")
+
+
+# Text the whole repository is made of. A leak is a leak in a document, a comment
+# or a fixture; the audit that first looked outside `knowledge/` found the name of
+# another project in a document and real machine paths in seven test files, while
+# this guard was green. See
+# `docs/research/2026-09-18-nothing-personal-reaches-the-public-repository.md`.
+TEXT_SUFFIXES = frozenset(
+    {".md", ".py", ".json", ".yaml", ".yml", ".toml", ".sh", ".ps1", ".js", ".txt", ".cfg"}
+)
+
+# The two files whose purpose is to hold the pattern: this guard's own examples,
+# and the fixture that proves the DLP rule catches a home path. Both are synthetic.
+PATTERN_FIXTURES = frozenset(
+    {"tests/test_nothing_private_reaches_the_public_repository.py", "tests/test_structure.py"}
+)
+
+
+def _tracked(prefix: str | None = None) -> list[Path]:
+    arguments = ["git", "ls-files"] + ([prefix] if prefix else [])
+    listing = subprocess.run(
+        arguments, cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout
+    return [ROOT / line for line in listing.splitlines() if line]
 
 
 def _tracked_knowledge() -> list[Path]:
-    listing = subprocess.run(
-        ["git", "ls-files", "knowledge/"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return [ROOT / line for line in listing.splitlines() if line.endswith(".md")]
+    return [path for path in _tracked("knowledge/") if path.suffix == ".md"]
 
 
-def _is_other_project(entry: Path) -> bool:
+def _tracked_text() -> list[Path]:
+    """Every tracked text file except the two that hold the pattern on purpose."""
+    named = (path for path in _tracked() if path.suffix in TEXT_SUFFIXES)
+    return [path for path in named if str(path.relative_to(ROOT)) not in PATTERN_FIXTURES]
+
+
+def _text_of(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _offenders(finder) -> dict[str, set[str]]:
+    """Each tracked text file that carries something private, and what it carries."""
+    found = ((path, finder(_text_of(path))) for path in _tracked_text())
+    return {str(path.relative_to(ROOT)): hit for path, hit in found if hit}
+
+
+# A run of this product creates project directories of its own: a benchmark corpus,
+# a dated run label, a generated project key. Those are this repository's own
+# vocabulary, not somebody else's project, and they are told apart by what the
+# repository itself holds — never by a list of private names.
+GENERATED_SLUG = re.compile(r"^[0-9a-f]{16,}$|\d{4}-\d{2}-\d{2}")
+
+
+def _repository_vocabulary() -> set[str]:
+    """Words this repository already uses in its own tracked paths."""
+    words: set[str] = set()
+    for path in _tracked():
+        words.update(re.split(r"[/._-]", str(path.relative_to(ROOT)).casefold()))
+    return words
+
+
+def _is_other_project(entry: Path, vocabulary: set[str]) -> bool:
     """A directory that names one of the owner's other projects, not this one."""
-    if not entry.is_dir():
+    if not entry.is_dir() or entry.name in OWN_SLUGS or len(entry.name) <= 4:
         return False
-    return entry.name not in OWN_SLUGS and len(entry.name) > 4
+    if GENERATED_SLUG.search(entry.name):
+        return False
+    return entry.name.casefold() not in vocabulary
 
 
 def _other_project_slugs() -> set[str]:
     projects = ROOT / "knowledge" / "projects"
     if not projects.is_dir():
         return set()
-    return {entry.name for entry in projects.iterdir() if _is_other_project(entry)}
+    vocabulary = _repository_vocabulary()
+    return {entry.name for entry in projects.iterdir() if _is_other_project(entry, vocabulary)}
 
 
 def _named_slugs(text: str, slugs: set[str]) -> set[str]:
     return {slug for slug in slugs if re.search(rf"\b{re.escape(slug)}\b", text)}
 
 
+def _is_private(match: str) -> bool:
+    """A home path always; an address unless it is public or a reserved example domain."""
+    if match in PUBLIC_ADDRESSES:
+        return False
+    return not match.casefold().endswith(RESERVED_DOMAINS)
+
+
 def _private_strings(text: str) -> set[str]:
     found: set[str] = set()
     for pattern in PRIVATE_PATTERNS:
-        found.update(
-            match for match in pattern.findall(text) if match not in PUBLIC_ADDRESSES
-        )
+        found.update(match for match in pattern.findall(text) if _is_private(match))
     return found
 
 
-def test_no_tracked_page_names_another_project() -> None:
-    """The leak that happened: a neighbouring project named in a public page."""
+def test_no_tracked_file_names_another_project() -> None:
+    """The leak that happened: a neighbouring project named in a file anyone can clone.
+
+    Documents, comments and fixtures, not only published pages: the names were in a
+    developer document, five research notes, four source comments and three tests.
+    """
     slugs = _other_project_slugs()
-    offenders: dict[str, set[str]] = {}
-    for path in _tracked_knowledge():
-        named = _named_slugs(path.read_text(encoding="utf-8"), slugs)
-        if named:
-            offenders[str(path.relative_to(ROOT))] = named
 
-    assert not offenders, f"published pages name other projects: {offenders}"
+    offenders = _offenders(lambda text: _named_slugs(text, slugs))
+
+    assert not offenders, f"tracked files name other projects: {offenders}"
 
 
-def test_no_tracked_page_carries_a_home_path_or_an_address() -> None:
-    offenders: dict[str, set[str]] = {}
-    for path in _tracked_knowledge():
-        found = _private_strings(path.read_text(encoding="utf-8"))
-        if found:
-            offenders[str(path.relative_to(ROOT))] = found
+def test_no_tracked_file_carries_a_home_path_or_an_address() -> None:
+    offenders = _offenders(_private_strings)
 
-    assert not offenders, f"published pages carry private strings: {offenders}"
+    assert not offenders, f"tracked files carry private strings: {offenders}"
 
 
 def test_the_check_reads_git_rather_than_the_ignore_file() -> None:
@@ -142,6 +204,23 @@ def test_a_planted_slug_would_be_caught() -> None:
     assert found == {"someone-elses-project"}
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("a-private-thing", True),          # somebody's project
+        ("full-2026-09-14", False),         # a dated run label of this product
+        ("cb387b9645434586a379f252ac", False),  # a generated project key
+        ("benchmark", False),               # a directory of this repository
+        ("refusalbench", False),            # a corpus this repository already names
+    ],
+)
+def test_the_product_own_runs_are_not_other_projects(tmp_path, name, expected) -> None:
+    """A run of this product creates project directories too; only the rest can leak."""
+    (tmp_path / name).mkdir()
+
+    assert _is_other_project(tmp_path / name, _repository_vocabulary()) is expected
+
+
 def test_a_slug_inside_a_longer_word_is_not_a_match() -> None:
     """Word boundaries, or every page mentioning `api` names a project."""
     assert _named_slugs("the rapid queue", {"api"}) == set()
@@ -149,6 +228,26 @@ def test_a_slug_inside_a_longer_word_is_not_a_match() -> None:
 
 def test_a_planted_home_path_would_be_caught() -> None:
     assert _private_strings("see /home/someone/vault/run") == {"/home/someone/"}
+
+
+def test_a_reserved_example_address_is_not_a_leak() -> None:
+    """RFC 2606 domains are what a fixture address in this repository is."""
+    fixtures = "t@example.invalid parity@example.test someone@example.com git@github.com"
+
+    assert _private_strings(fixtures) == set()
+
+
+def test_a_real_looking_address_is_still_caught() -> None:
+    assert _private_strings("write to someone@somewhere.org") == {"someone@somewhere.org"}
+
+
+def test_the_sweep_reaches_past_the_knowledge_directory() -> None:
+    """The names were in documents, comments and fixtures, not in published pages."""
+    swept = {str(path.relative_to(ROOT)) for path in _tracked_text()}
+    zones = {path.split("/")[0] for path in swept}
+
+    assert {"docs", "scripts", "tests", "benchmark"} <= zones
+    assert "tests/test_structure.py" not in swept
 
 
 def test_the_projects_own_address_is_not_a_leak() -> None:
