@@ -198,6 +198,17 @@ function Register-ScheduledTask {
 """
 
 
+def _specified_limit_hours() -> list[float]:
+    """The hour limits the script's own task table names, nightly then weekly.
+
+    Read from the product rather than repeated here. A pass whose bound moves
+    has to move both the table and the `New-TimeSpan` that registers it, and
+    this test is what proves those two still agree.
+    """
+    text = SCRIPT.read_text(encoding="utf-8")
+    return [float(hours) for hours in re.findall(r"LimitHours\s*=\s*(\d+)", text)]
+
+
 def test_a_registration_carries_the_marker_and_the_limits(tmp_path) -> None:
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run-scheduled-task.ps1").write_text("", encoding="utf-8")
@@ -212,5 +223,6 @@ def test_a_registration_carries_the_marker_and_the_limits(tmp_path) -> None:
 
     result = _run(command)
 
+    expected = [[hours, True] for hours in _specified_limit_hours()]
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout.splitlines()[-1]) == [[3, True], [5, True]]
+    assert json.loads(result.stdout.splitlines()[-1]) == expected
