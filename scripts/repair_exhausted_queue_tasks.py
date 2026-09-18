@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -66,6 +67,21 @@ def _report(rows: list[sqlite3.Row]) -> None:
         )
 
 
+def _opened(queue):
+    """One `with` for both queues, each closing the handle it opened.
+
+    The pre-adoption queue hands back a context manager that closes its own
+    connection; the adopted reader hands back a bare connection, whose context
+    manager settles the transaction and leaves the handle open — on Windows that
+    keeps `queue-v3.sqlite3` in use. See
+    `docs/research/2026-09-18-a-connection-is-closed-by-whoever-opened-it.md`.
+    """
+    opened = queue._connect()  # noqa: SLF001
+    if isinstance(opened, sqlite3.Connection):
+        return closing(opened)
+    return opened
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -76,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     queue = active_or_legacy_memory_queue(Path(ROOT), Path(STATE_ROOT))
-    with queue._connect() as database:  # noqa: SLF001
+    with _opened(queue) as database:
         database.row_factory = sqlite3.Row
         rows = stranded_tasks(database, args.max_attempts)
         _report(rows)

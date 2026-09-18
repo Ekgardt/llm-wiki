@@ -12993,7 +12993,9 @@ def _acquire_queue_owner(
     pid = os.getpid()
     expires_at = acquired_at + timedelta(seconds=ttl_seconds)
     values = (token, pid, _timestamp(acquired_at), _timestamp(expires_at))
-    with _open_queue_ownership_db(state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(state_root)
+    ) as connection, begin_immediate(connection):
         epoch = _take_queue_ownership(connection, role, busy_code, values)
     return QueueOwnerLease(
         Path(state_root).resolve(), role, token, pid, epoch, expires_at, ttl_seconds
@@ -13061,7 +13063,9 @@ def _heartbeat_queue_owner(
     if entry is not None:
         return _heartbeat_adopted_queue_owner(lease, entry)
     heartbeat_at = _as_utc(now or _utc_now())
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(
             connection, lease, heartbeat_at, heartbeat=True
         )
@@ -13072,7 +13076,9 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
     entry = _pop_adopted_owner(lease.token)
     if entry is not None:
         return _release_adopted_queue_owner(entry)
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         changed = connection.execute(
             """UPDATE queue_ownership
                SET token=NULL, pid=NULL, heartbeat_at=NULL, expires_at=NULL
@@ -13470,7 +13476,9 @@ def _commit_migration_marker(
     lease: QueueOwnerLease, marker: Path, run_dir: Path
 ) -> QueueOwnerLease:
     now = _utc_now()
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(connection, lease, now, heartbeat=True)
         try:
             _write_durable_file(marker, canonical_json_bytes({"version": 2}))
