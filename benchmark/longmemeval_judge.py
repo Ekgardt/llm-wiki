@@ -46,7 +46,10 @@ JUDGE_SYSTEM_PROMPT = (
 # value to match. Token-overlap metrics are reported as inapplicable there for
 # the same reason.
 # See `docs/research/2026-09-01-a-category-graded-by-the-wrong-question.md`.
-RUBRIC_CATEGORY = "single-session-preference"
+# Which categories those are lives in `longmemeval_score.RUBRIC_CATEGORIES`,
+# because the deterministic metrics have to hold out exactly the rows this
+# prompt treats differently, and two copies of that list would drift.
+gold_is_rubric = longmemeval_score.gold_is_rubric
 
 RUBRIC_SYSTEM_PROMPT = (
     "You grade personalised answers against a rubric. The gold text describes "
@@ -61,7 +64,7 @@ RUBRIC_SYSTEM_PROMPT = (
 
 def system_prompt_for(row: dict) -> str:
     """The fact prompt, except where the category is graded against a rubric."""
-    if str(row.get("category")) == RUBRIC_CATEGORY:
+    if gold_is_rubric(row):
         return RUBRIC_SYSTEM_PROMPT
     return JUDGE_SYSTEM_PROMPT
 
@@ -86,7 +89,7 @@ def _fact_prompt(row: dict) -> str:
 
 
 def judge_prompt(row: dict) -> str:
-    if str(row.get("category")) == RUBRIC_CATEGORY:
+    if gold_is_rubric(row):
         return _rubric_prompt(row)
     return _fact_prompt(row)
 
@@ -197,18 +200,38 @@ def _judged_ids(path: Path) -> set[str]:
     return {str(row.get("question_id")) for row in _loaded_rows(path)}
 
 
-def _row_verdict(row: dict) -> float:
-    """The judge's word where it spoke; the deterministic score elsewhere."""
+def _row_verdict(row: dict) -> float | None:
+    """The judge's word where it spoke; the deterministic score where that means something.
+
+    On a rubric row the deterministic score is not a weaker answer, it is no
+    answer: `contains_answer` cannot match a gold that describes a good reply.
+    Substituting it turned the judge's silence into thirty wrong answers —
+    `single-session-preference` was published as 0.1 for the 2026-09-17 run
+    while the judge graded three rows and called all three right. Silence is
+    reported as silence. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
     verdict = row.get("judge_correct")
-    if verdict is None:
-        verdict = bool(longmemeval_score.score_question(row).get("correct"))
-    return float(verdict)
+    if verdict is not None:
+        return float(verdict)
+    if longmemeval_score.gold_is_rubric(row):
+        return None
+    return float(bool(longmemeval_score.score_question(row).get("correct")))
 
 
-def _accuracy_row(values: list[float]) -> dict:
+def _accuracy_row(values: list[float | None]) -> dict:
+    """One category's judged accuracy, with what stayed ungraded beside it."""
+    graded = [value for value in values if value is not None]
+    return {
+        "n": len(graded),
+        "ungraded": len(values) - len(graded),
+        "judge_accuracy": _mean(graded),
+    }
+
+
+def _mean(values: list[float]) -> float | None:
     if not values:
-        return {"n": 0, "judge_accuracy": None}
-    return {"n": len(values), "judge_accuracy": round(sum(values) / len(values), 4)}
+        return None
+    return round(sum(values) / len(values), 4)
 
 
 def _gradable(rows: list[dict]) -> list[dict]:
@@ -220,9 +243,11 @@ def _judge_accuracy(rows: list[dict]) -> dict:
 
     Rows the provider never answered are dropped, not graded: there is no
     hypothesis to compare, so counting them would report the throughput of
-    this machine's single provider as the memory system's recall.
+    this machine's single provider as the memory system's recall. Rows nothing
+    could grade — no judge verdict and a gold no text metric can read — are
+    carried as `ungraded`, not folded into the mean as wrong.
     """
-    verdicts: dict[str, list[float]] = {}
+    verdicts: dict[str, list[float | None]] = {}
     for row in _gradable(rows):
         verdicts.setdefault(str(row.get("category")), []).append(_row_verdict(row))
     report = {name: _accuracy_row(values) for name, values in sorted(verdicts.items())}
@@ -235,8 +260,21 @@ def _judge_accuracy(rows: list[dict]) -> dict:
 # estimated prompt tokens and wall seconds. See `docs/TASKS-to-100-2026-09-08.md`, task 14.
 def _correct_flags(rows: list[dict], protocol: str) -> list[bool]:
     if protocol == "ours":
-        return [bool(_row_verdict(row)) for row in _gradable(rows)]
-    return [bool(row.get("official_label")) for row in rows if isinstance(row.get("official_label"), bool)]
+        return _our_flags(rows)
+    return _official_flags(rows)
+
+
+def _our_verdicts(rows: list[dict]) -> list[float | None]:
+    return [_row_verdict(row) for row in _gradable(rows)]
+
+
+def _our_flags(rows: list[dict]) -> list[bool]:
+    return [bool(value) for value in _our_verdicts(rows) if value is not None]
+
+
+def _official_flags(rows: list[dict]) -> list[bool]:
+    labels = [row.get("official_label") for row in rows]
+    return [bool(label) for label in labels if isinstance(label, bool)]
 
 
 def _mean_of(rows: list[dict], key: str) -> float | None:

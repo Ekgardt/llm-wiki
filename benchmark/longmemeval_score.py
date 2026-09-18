@@ -27,6 +27,30 @@ PROVIDER_ERROR_KINDS = frozenset(
     {"provider_no_response", "provider_invalid_json", "provider_deadline"}
 )
 
+# One LongMemEval type is graded against a rubric instead of against a fact, and
+# every text metric in this file is undefined there. The authors' own template
+# says so: "I will give you a question, a rubric for desired personalized
+# response, and a response from a model ... The model does not need to reflect
+# all the points in the rubric" (`benchmark/longmemeval_official.py::PREFERENCE`,
+# copied character for character from their `src/evaluation/evaluate_qa.py`).
+#
+# A gold of that shape was written by the dataset's authors, not said by anyone
+# in the sessions — "The user would prefer responses that suggest resources
+# specifically tailored to Adobe Premiere Pro". No answer contains it and no
+# prompt can either, so `contains`, `em`, `f1` and the prompt-evidence signal
+# all read 0 there whatever the system does. Measured on the recorded run of
+# 2026-09-17: 0 of 30 by containment, and the judge called right every one of
+# the three rows it managed to grade.
+#
+# An undefined metric reports nothing. It never reports a miss.
+# See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+RUBRIC_CATEGORIES = frozenset({"single-session-preference"})
+
+
+def gold_is_rubric(row: dict) -> bool:
+    """Whether this row's gold describes a good answer instead of being one."""
+    return str(row.get("category") or row.get("question_type")) in RUBRIC_CATEGORIES
+
 
 def normalize(text: object) -> str:
     tokens = _NON_ALNUM.sub(" ", str(text).casefold()).split()
@@ -121,6 +145,8 @@ def score_question(result: dict) -> dict:
     """Attach deterministic metrics to one per-question result record."""
     if result.get("is_abstention"):
         return _scored_abstention(result)
+    if gold_is_rubric(result):
+        return _scored_rubric(result)
     gold = result.get("gold", "")
     hypothesis = result.get("hypothesis", "")
     return {
@@ -129,6 +155,22 @@ def score_question(result: dict) -> dict:
         "contains": contains_answer(gold, hypothesis),
         "f1": round(token_f1(gold, hypothesis), 4),
         "correct": contains_answer(gold, hypothesis),
+        "abstained": declined_to_answer(result),
+    }
+
+
+def _scored_rubric(result: dict) -> dict:
+    """No text metric speaks here, so this row claims none of them.
+
+    `abstained` is still recorded: whether the system refused is a fact about
+    the run, not a comparison against the gold text.
+    """
+    return {
+        **result,
+        "em": None,
+        "contains": None,
+        "f1": None,
+        "correct": None,
         "abstained": declined_to_answer(result),
     }
 
@@ -185,11 +227,24 @@ def _flags(rows: list[dict], key: str) -> list[float]:
     return [float(bool(row.get(key))) for row in rows]
 
 
+def _text_scored(scored: list[dict]) -> list[dict]:
+    """The rows a text metric can speak about; a rubric gold is not one of them."""
+    return [row for row in scored if row.get("correct") is not None]
+
+
 def _quality_metrics(scored: list[dict]) -> dict:
+    """Accuracy over the rows the metric applies to, with that count beside it.
+
+    `text_scored` is the denominator and `text_not_applicable` is what was held
+    out, so the figure can never be read as if it covered every question.
+    """
+    graded = _text_scored(scored)
     return {
-        "accuracy": _mean(_flags(scored, "correct")),
-        "em": _mean(_flags(scored, "em")),
-        "f1": _mean(_metric_values(scored, "f1")),
+        "text_scored": len(graded),
+        "text_not_applicable": len(scored) - len(graded),
+        "accuracy": _mean(_flags(graded, "correct")),
+        "em": _mean(_flags(graded, "em")),
+        "f1": _mean(_metric_values(graded, "f1")),
     }
 
 
