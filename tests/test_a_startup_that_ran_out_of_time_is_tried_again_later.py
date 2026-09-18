@@ -153,11 +153,20 @@ def _manager_with_sessions(
 
 
 def _start_and_age(sessions: list[PyrightSession]) -> None:
-    """Give each session a live server and the oldest possible last-used time."""
+    """Give each session a live server and an old, but not expired, last-used time.
+
+    One clock answers both of the manager's questions: a session past
+    `_IDLE_SECONDS` is closed by the next request, and a session inside the
+    limit is only ordered for eviction. These have to stay inside the limit to
+    reach the eviction order at all, so they are aged by half of it — still far
+    older than the session that owns no server, which is what this is about.
+    """
     for session in sessions:
         session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         with session._lock:
-            session._last_used_monotonic = 0.0
+            session._last_used_monotonic = (
+                time.monotonic() - pyright_session_module._IDLE_SECONDS / 2
+            )
 
 
 def test_a_session_that_owns_no_server_gives_up_its_slot_first(

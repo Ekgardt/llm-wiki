@@ -75,6 +75,11 @@ STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
 
 _OWNER_CLEANUP_SECONDS = 2.0
+# How long a session may go unused before the next request closes the server it
+# owns. The manager keeps one clock: this bound and capacity eviction both read
+# the session's own last-used instant, so "idle" means one thing here. See
+# `docs/research/2026-09-18-lsp-one-clock-for-one-idea-of-idle.md`.
+_IDLE_SECONDS = 300.0
 # How much of a caller's time one idle reap may spend. There is no daemon, so
 # the reap rides on a request; it must not become the request's cost.
 _IDLE_REAP_SECONDS = 2.0
@@ -5769,26 +5774,36 @@ class LanguageServerSessionManager:
         finally:
             session._lock.release()
 
-    @staticmethod
-    def _idle_expired_process(
-        session: LanguageServerSession, now: float, deadline: float
+    def _idle_expired_session(
+        self,
+        key: tuple[str, PyrightIdentity],
+        session: LanguageServerSession,
+        now: float,
+        deadline: float,
     ) -> bool:
-        """Whether the server this session owns has gone unused past the limit."""
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
-            raise TimeoutError("Pyright session state lock deadline expired")
-        try:
-            process = session._process
-        finally:
-            session._lock.release()
-        if process is None:
+        """Whether the server this session owns has gone unused past the limit.
+
+        The clock is the session's own last-used instant, the one capacity
+        eviction already orders by: one idea of "idle" in one place. A session
+        that owns no server is rank 0 and costs a caller nothing, so there is
+        nothing in it to reap.
+        """
+        entry = self._idle_entry(key, session, deadline)
+        if entry is None:
             return False
-        return process.idle_expired(now)
+        rank, last_used = entry[0], entry[1]
+        if rank == 0:
+            return False
+        return now - last_used >= _IDLE_SECONDS
 
     def _reserve_if_idle_expired(
-        self, session: LanguageServerSession, now: float, deadline: float
+        self,
+        key: tuple[str, PyrightIdentity],
+        session: LanguageServerSession,
+        now: float,
+        deadline: float,
     ) -> bool:
-        if not self._idle_expired_process(session, now, deadline):
+        if not self._idle_expired_session(key, session, now, deadline):
             return False
         return session._reserve_idle_close(deadline)
 
@@ -5802,7 +5817,7 @@ class LanguageServerSessionManager:
         for entry_key, session in live:
             if entry_key == key:
                 continue
-            if self._reserve_if_idle_expired(session, now, deadline):
+            if self._reserve_if_idle_expired(entry_key, session, now, deadline):
                 return entry_key, session
         return None
 
