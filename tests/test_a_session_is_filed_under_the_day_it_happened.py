@@ -79,11 +79,17 @@ def _vault_with_records(tmp_path: Path, day: str, count: int) -> Path:
     return tmp_path
 
 
+def _closed_with(day: str, digest: str) -> dict:
+    """A day closed over exactly the records that digest was taken from."""
+    return {"consolidated_session_days": {day: {"items": 1, "record_set": digest}}}
+
+
 def test_a_day_that_gained_a_late_record_is_consolidated_once_more(tmp_path):
     day = "2026-09-16"
-    vault = _vault_with_records(tmp_path, day, 2)
-    covered = {"consolidated_session_days": {day: {"items": 1, "records": 2}}}
-    late = {"consolidated_session_days": {day: {"items": 1, "records": 1}}}
+    vault = _vault_with_records(tmp_path, day, 1)
+    late = _closed_with(day, episode_consolidation.record_set_digest(vault, day))
+    _vault_with_records(tmp_path, day, 2)
+    covered = _closed_with(day, episode_consolidation.record_set_digest(vault, day))
 
     outcomes = (
         episode_consolidation.pending_days(vault, covered, today="2026-09-17"),
