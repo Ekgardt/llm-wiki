@@ -17,8 +17,17 @@ def test_a_refused_compile_records_its_refusal_not_the_holders_status(monkeypatc
     import compile_memory
 
     marks: list[str] = []
-    monkeypatch.setattr(compile_memory, "parse_args", lambda: type("A", (), {"trigger": "auto", "discard_unusable_receipts": False})())
-    monkeypatch.setattr(compile_memory, "_acquire_compile_lock", lambda: (None, "lock held by another compile"))
+    arguments = type(
+        "A",
+        (),
+        {"trigger": "auto", "discard_unusable_receipts": False, "lock_token": None},
+    )
+    monkeypatch.setattr(compile_memory, "parse_args", arguments)
+    monkeypatch.setattr(
+        compile_memory,
+        "_acquire_compile_lock",
+        lambda _token=None: (None, "lock held by another compile"),
+    )
     monkeypatch.setattr(compile_memory, "_mark_started", lambda trigger: marks.append("started"))
     monkeypatch.setattr(compile_memory, "_mark_finished", lambda *a, **k: marks.append("finished"))
     monkeypatch.setattr(compile_memory, "_mark_refused", lambda trigger, reason: marks.append("refused"))
