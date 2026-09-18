@@ -35,6 +35,22 @@ The installer verifies the pinned SHA-256 and npm integrity before publishing.
 No query, MCP call, doctor check, or profile discovery path downloads or updates a
 server. The qualified runtime uses Node 22; CI pins Node 22.23.1.
 
+What an install needs:
+
+- **Platforms.** Artifacts are pinned for linux x86_64 and arm64, macOS x86_64 and
+  arm64, and Windows x86_64. Any other platform is refused by name before a byte is
+  downloaded, instead of silently taking the linux/x86_64 pin.
+- **Offline.** Pyright and typescript install fully from local artifacts
+  (`--artifact`, `--runtime-artifact`); rust-analyzer too, with its four
+  `--component-artifact` toolchain parts. gopls is built from source at install time
+  and still reaches the Go module proxy, so it is **not** an offline install.
+- **Disk.** gopls peaks near 863 MB during its build and leaves about 324 MB after
+  pruning its caches; the rust-analyzer toolchain is bounded at 3 GiB decompressed.
+- **Receipts.** The Pyright install receipt is `pyright-install/v2` and digests the
+  bundles the launch shim loads, not only the 229-byte shim itself. An install
+  published before that schema is reported as predating it and degrades to structural
+  navigation until `scripts/install_pyright.py` is run again.
+
 ## Process ownership boundaries
 
 - **Windows Job Object** owns the assigned server tree.
