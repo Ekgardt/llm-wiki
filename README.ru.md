@@ -319,7 +319,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence; недельный прогон запускает этот архиватор сам, а команда выше — его ручная форма. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 

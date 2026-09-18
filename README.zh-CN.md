@@ -309,7 +309,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
+队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析；每周任务会自动运行该归档器，上面的命令只是它的手动形式。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ---
 

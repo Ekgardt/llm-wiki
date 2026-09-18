@@ -315,7 +315,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
+Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution; the weekly pass runs that archiver, so the command above is the manual form of scheduled work. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
 
 ---
 

@@ -591,6 +591,8 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
+The weekly pass runs this archiver itself (step `daily_archive`), so the hot window
+holds without anyone typing the command; running it by hand does the same work.
 The archive moves, never deletes, eligible daily logs older than the 90-day hot
 window. A source remains flat if its compile receipt, terminal operations, queue
 preflight, exact evidence, or pins do not validate. Published BagIt bags are immutable
