@@ -1572,25 +1572,51 @@ def _already_ordered(task_id: str, visited: set[str], visiting: set[str]) -> boo
 
 
 def _parents_before_children(rows_by_id: dict[str, sqlite3.Row]) -> list:
-    """Redrive parents must be inserted before the tasks that name them."""
+    """Redrive parents must be inserted before the tasks that name them.
+
+    The walk carries its own stack: a redrive chain is as long as whatever the
+    pre-adoption queue accumulated, and Python's recursion limit is not a bound
+    this migration chose. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
     ordered_rows: list[sqlite3.Row] = []
     visited: set[str] = set()
     visiting: set[str] = set()
-
-    def visit_task(task_id: str) -> None:
-        if _already_ordered(task_id, visited, visiting):
-            return
-        visiting.add(task_id)
-        parent = rows_by_id[task_id]["redrive_of"]
-        if parent is not None:
-            visit_task(str(parent))
-        visiting.remove(task_id)
-        visited.add(task_id)
-        ordered_rows.append(rows_by_id[task_id])
-
     for task_id in sorted(rows_by_id):
-        visit_task(task_id)
+        _place_with_parents(task_id, rows_by_id, ordered_rows, visited, visiting)
     return ordered_rows
+
+
+def _place_with_parents(
+    task_id: str,
+    rows_by_id: dict[str, sqlite3.Row],
+    ordered_rows: list,
+    visited: set[str],
+    visiting: set[str],
+) -> None:
+    """Place this task after every parent it names, deepest parent first."""
+    chain = _redrive_chain(task_id, rows_by_id, visited, visiting)
+    for placed in reversed(chain):
+        visiting.discard(placed)
+        visited.add(placed)
+        ordered_rows.append(rows_by_id[placed])
+
+
+def _redrive_chain(
+    task_id: str,
+    rows_by_id: dict[str, sqlite3.Row],
+    visited: set[str],
+    visiting: set[str],
+) -> list[str]:
+    """This task and every unplaced parent above it, child first."""
+    chain: list[str] = []
+    current: str | None = task_id
+    while current is not None and not _already_ordered(current, visited, visiting):
+        visiting.add(current)
+        chain.append(current)
+        parent = rows_by_id[current]["redrive_of"]
+        current = None if parent is None else str(parent)
+    return chain
 
 
 def _ordered_queue_v2_tasks(source: sqlite3.Connection) -> tuple[list, dict[str, int]]:
@@ -2824,7 +2850,16 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return _as_utc(datetime.fromisoformat(value)) if value is not None else None
 
 
-def _is_secret_key(key: str) -> bool:
+def _is_secret_key(key: object) -> bool:
+    """Whether this payload key names a secret; a non-string key names none.
+
+    JSON turns the other basic key types into "1", "true" and "null", so none of
+    them can spell a secret, and refusing to walk such a payload would have been
+    an `AttributeError` out of `enqueue`. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(key, str):
+        return False
     normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
     return normalized in _SECRET_KEYS or normalized.endswith(
         ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
@@ -5170,9 +5205,22 @@ def _require_leased_row(
     return row
 
 
+# What the v3 `source_failures.error_code` CHECK stores: bytes, not characters.
+MAX_SOURCE_FAILURE_CODE_BYTES = 64
+
+
+def _within_stored_code_bytes(error_code: str) -> bool:
+    return 1 <= len(error_code.encode("utf-8")) <= MAX_SOURCE_FAILURE_CODE_BYTES
+
+
 def _valid_source_failure_fields(error_code: object, producer: object) -> bool:
-    """Whether a source failure's own fields are inside contract."""
-    if not isinstance(error_code, str) or not 1 <= len(error_code) <= 200:
+    """Whether a source failure's own fields are inside contract.
+
+    The bound is the one the schema enforces — 1 to 64 bytes of UTF-8 — and not
+    200 characters, which let a code through validation and broke the insert. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(error_code, str) or not _within_stored_code_bytes(error_code):
         return False
     if any(char in error_code for char in "\r\n"):
         return False
