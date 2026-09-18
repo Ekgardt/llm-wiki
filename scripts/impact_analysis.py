@@ -865,11 +865,19 @@ def _active_graph(root: Path, deadline: float):
         catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
         if not catalog_path.is_file():
             return None
+        from code_graph import _opened_code_or_active
+
         scope = resolve_repository_scope(root, deadline=deadline)
-        return EvidenceGraph.open_active_for_repository(
+        # A diff maps to code, so this asks for the checkout's code generation
+        # and falls through to the pointer only when it has none -- the same
+        # two steps every other code reader takes. See
+        # `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+        return _opened_code_or_active(
+            EvidenceGraph,
             GenerationCatalog(state_root, catalog_path=catalog_path),
             scope,
-            deadline=deadline,
+            deadline,
+            None,
         )
     except TimeoutError:
         raise
