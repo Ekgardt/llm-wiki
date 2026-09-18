@@ -3197,6 +3197,25 @@ def _promotion_plan(
     )
 
 
+def _remove_temporary_publication(temporary: Path) -> None:
+    """Whatever happened, no half-written page is left beside the real one.
+
+    A publish that succeeded has already moved the file, so this is a no-op
+    there, and a failure to remove never replaces the error on its way up. See
+    `docs/research/2026-09-18-nothing-half-written-is-left-behind.md`.
+    """
+    with contextlib.suppress(OSError):
+        temporary.unlink(missing_ok=True)
+
+
+_STAGED_PRUNE_MARK = ".pruning-"
+
+
+def _staged_prune_owner(name: str) -> str:
+    """`.<id>.pruning-<uuid>` names the transaction whose images it holds."""
+    return name[1 : name.rindex(_STAGED_PRUNE_MARK)]
+
+
 def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
     # The floor is the undo window itself, not a literal. It was 30 because the
     # contract promised point-undo of any committed write for a month; the owner
@@ -7404,11 +7423,33 @@ class MarkdownCoordinator:
         cutoff = _prune_cutoff(retention_days, now)
         pruned = 0
         with self.writer_gate():
+            self._recover_interrupted_prunes()
             for row in self._prunable_rows():
                 self._require_operation_active(deadline, cancelled)
                 if _parse_timestamp(row["updated_at"]) < cutoff:
                     pruned += self._prune_one(row, deadline, cancelled)
         return pruned
+
+    def _recover_interrupted_prunes(self) -> None:
+        """Put back the images of every prune that died between rename and mark.
+
+        The writer gate is held, so no live prune can be mid-rename: a staged
+        directory here is the debris of a process that is gone, and nothing else
+        ever looks at it again. See
+        `docs/research/2026-09-18-nothing-half-written-is-left-behind.md`.
+        """
+        if not self.transaction_root.is_dir():
+            return
+        for staged in sorted(self.transaction_root.glob(".*.pruning-*")):
+            self._restore_staged_prune(staged)
+
+    def _restore_staged_prune(self, staged: Path) -> None:
+        """The images go back where the row still says they are; a live one wins."""
+        artifact_root = self.transaction_root / _staged_prune_owner(staged.name)
+        if artifact_root.exists():
+            self._remove_artifacts(staged)
+            return
+        staged.replace(artifact_root)
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
         with self._connect() as database:
@@ -7431,7 +7472,7 @@ class MarkdownCoordinator:
         if not artifact_root.exists():
             return 0
         staged_root = self.transaction_root / (
-            f".{row['id']}.pruning-{uuid.uuid4().hex}"
+            f".{row['id']}{_STAGED_PRUNE_MARK}{uuid.uuid4().hex}"
         )
         artifact_root.replace(staged_root)
         try:
@@ -9103,18 +9144,25 @@ class MarkdownCoordinator:
         self, row: sqlite3.Row, target: Path, content: bytes
     ) -> None:
         temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            outcome = self._published_windows_outcome(row, target, temporary, content)
+        finally:
+            _remove_temporary_publication(temporary)
+        if outcome == "duplicate":
+            fsync_directory(target.parent)
+
+    def _published_windows_outcome(
+        self, row: sqlite3.Row, target: Path, temporary: Path, content: bytes
+    ) -> str:
         self._write_new_file(temporary, content, owner_only=False)
         self._before_target_mutation(target)
-        outcome = durable_publish_file(
+        return durable_publish_file(
             temporary,
             target,
             replace=row["kind"] == "replace",
             expected_sha256=row["after_hash"],
             max_bytes=MAX_KNOWLEDGE_TARGET_BYTES,
         )
-        if outcome == "duplicate":
-            temporary.unlink()
-            fsync_directory(target.parent)
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""
