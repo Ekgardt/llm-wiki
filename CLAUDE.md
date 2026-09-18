@@ -233,8 +233,16 @@ deletion contract, which
 protects live LSP owners and retained LSP failure evidence. While ownership is live,
 `run/lsp/<owner-nonce>/lease.json` is a bounded mutable live lease, refreshed every
 10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only
-`owner.json` and `failure.json`. Controlled cleanup removes the lease after joining
-its heartbeat; abrupt death leaves it to expire. Second-fatal recovery completes
+`owner.json` and `failure.json`. `failure.json` carries an optional `stderr_tail`:
+the last kilobyte the failed server wrote, redacted line by line through
+`lsp_security.redact_lsp_text` and bounded by its JSON encoding. `owner.json` names
+the owner and the generation it started with; after a recovery restart the live
+generation is named by the lease and the failed one by the failure record, and doctor
+no longer requires the three to agree on a generation nonce or a pid. Controlled
+cleanup removes the lease after joining its heartbeat; abrupt death leaves it to
+expire, and starting a server sweeps sibling owner roots in `run/lsp/` whose records
+name only processes proven dead and which hold no `failure.json`; roots holding
+failure evidence are left for the operator. Second-fatal recovery completes
 without caller intervention. Incomplete startups enter a bounded module registry;
 Pyright sessions adopt returned cleanup owners into session-held normal-exit and
 caller-deadline retry, while unadopted owners stay registered. Windows lease refresh
