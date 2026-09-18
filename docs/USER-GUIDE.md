@@ -395,6 +395,14 @@ uv run python scripts/doctor.py                            # local health; --rep
 uv run --locked --no-sync python scripts/sync_memory.py --check --json  # read-only check
 ```
 
+Per-project brief — the decisions, patterns and open threads of one project,
+written to `knowledge/projects/<slug>/context.md`:
+
+```bash
+uv run python scripts/build_context.py --slug my-project           # print it
+uv run python scripts/build_context.py --slug my-project --write   # write the page
+```
+
 ### Bounded synchronization
 
 ```bash
