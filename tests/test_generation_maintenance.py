@@ -147,7 +147,7 @@ def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_p
     now = datetime.now(timezone.utc)
 
     healthy = doctor._generation_check(
-        root, state, now, deadline=time.monotonic() + 5, max_sources=10
+        root, state, now, deadline=time.monotonic() + LONG_TIMEOUT, max_sources=10
     )
 
     assert healthy["status"] == "degraded"
@@ -176,7 +176,7 @@ def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_p
         "---\ntype: concept\n---\n# New\n", encoding="utf-8"
     )
     stale = doctor._generation_check(
-        root, state, now, deadline=time.monotonic() + 5, max_sources=10
+        root, state, now, deadline=time.monotonic() + LONG_TIMEOUT, max_sources=10
     )
 
     assert stale["status"] == "degraded"
@@ -196,7 +196,7 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -225,7 +225,7 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -265,7 +265,7 @@ def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_p
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -285,7 +285,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -303,7 +303,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -323,7 +323,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 
@@ -378,7 +378,7 @@ def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(t
     doctor._repair_generation_catalog(
         root,
         state,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=lambda: False,
         repaired=repaired,
     )
@@ -405,7 +405,7 @@ def test_generation_repair_does_not_create_an_empty_catalog(tmp_path):
     doctor._repair_generation_catalog(
         root,
         state,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=lambda: False,
         repaired=[],
     )
@@ -554,7 +554,7 @@ def test_fts_failure_preserves_prior_and_removes_candidate(tmp_path, monkeypatch
         doctor._build_or_refresh_generation(
             root,
             state,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + LONG_TIMEOUT,
             cancelled=lambda: False,
             max_sources=10,
             force_rebuild=False,
@@ -625,7 +625,7 @@ def test_source_drift_before_publication_preserves_prior_and_removes_candidate(
     doctor._build_or_refresh_generation(
         root,
         state,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=lambda: False,
         max_sources=10,
         force_rebuild=False,
@@ -665,7 +665,7 @@ def test_cancellation_after_registration_leaves_only_an_unregistered_orphan(
         doctor._build_or_refresh_generation(
             root,
             state,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + LONG_TIMEOUT,
             cancelled=lambda: cancelled,
             max_sources=10,
             force_rebuild=False,
@@ -827,7 +827,7 @@ def test_incomplete_v2_orphan_is_not_registered_or_activated(tmp_path):
     doctor._repair_generation_catalog(
         root,
         state,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         cancelled=lambda: False,
         repaired=repaired,
     )
@@ -2131,7 +2131,7 @@ def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
         root,
         state,
         datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
 

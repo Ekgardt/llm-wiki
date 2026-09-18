@@ -13,10 +13,17 @@ from here; `test_slow_machine.py` keeps that count at zero. A bound the test
 expects to elapse (`assert not event.wait(1)`, `pytest.raises(TimeoutError)`)
 or a `wait` whose result the test discards, branches on or compares with
 `False` is the test's own pause and stays a small literal, because that test
-pays it on every run; deadline arguments to the code under test are the
-test's own numbers, and the fake LSP server is a fixture process, not a test. See
-`docs/research/2026-09-10-a-timeout-is-a-hang-bound-not-a-stopwatch.md` and
-`docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`.
+pays it on every run. A `deadline=` handed to the code under test is whichever
+of those two it is: one the test expects to lapse is its own number and stays
+small, one the test expects to be *kept* is a hang bound wearing another
+keyword and comes from here — a five-second deadline on a generation build
+caught the wrong `TimeoutError` on Windows in run 35363057747, which is why
+the distinction is written down rather than assumed. The AST guard cannot tell
+the two apart, so it does not try. The fake LSP server is a fixture process,
+not a test. See
+`docs/research/2026-09-10-a-timeout-is-a-hang-bound-not-a-stopwatch.md`,
+`docs/research/2026-09-10-every-hang-bound-in-the-tests-comes-from-one-place.md`
+and `docs/research/2026-09-18-a-deadline-a-test-expects-to-be-kept-is-a-hang-bound.md`.
 """
 
 from __future__ import annotations
