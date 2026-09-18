@@ -57,12 +57,14 @@ tests/test_pyright_session.py
    The pinning test keeps all its assertions; "until `close_all`" stays true when nobody
    asks in between.
 2. **A startup that failed on the clock or the operating system is retried, three times at
-   most.** `TimeoutError`/`OSError` make the session retryable after 5 s, 30 s, 120 s. The
-   manager replaces the spent session with a fresh one (so degradation codes start clean and
-   the capacity check applies again) and carries the count. Identity, protocol and
-   capability failures stay terminal, as today. A spent session owns no process; it is
-   always idle, and eviction now takes it before a healthy idle one, so it cannot hold a
-   slot against a caller.
+   most.** A failure whose degradation code ends in `_startup_timeout`, or an `OSError` that
+   is not a `PermissionError`, clears `_startup_attempted` and names an instant before which
+   no retry may start: 5 s, then 30 s, then 120 s. The session keeps the count, so no manager
+   state is added. Claiming a retry clears the degradation codes, so a start that succeeds
+   does not answer with the last one's failure. Identity, protocol and capability failures
+   stay terminal, as today. A spent session owns no process, and eviction now takes a session
+   that owns no server before a healthy idle one, so a checkout that keeps being asked for and
+   keeps failing cannot hold a slot against its neighbours.
 3. **The Node probe is asked once per Node.** A successful probe is kept for the Node
    executable it was run on, keyed by path, device, inode, size and mtime, for at most
    300 s (a version-manager shim can change what it runs without changing itself). A failed
@@ -70,11 +72,12 @@ tests/test_pyright_session.py
    unqualify a checkout that has a healthy session. Configuration and server digests are
    still read on every `get()`: they are the session key, and a changed `pyrightconfig.json`
    must produce a new session.
-4. **Idle servers are closed by the next request.** A session unused for 300 s (the number
-   `lsp_process._IDLE_SECONDS` already names) is closed by the next `get()` for another key,
-   at most one per call, bounded by `min(caller deadline, 2 s)`; its failure does not fail
-   the caller and leaves a stranded session for rule 1. No thread, no timer. The session's
-   own `last_used_monotonic` is the clock, so `LspProcess.idle_expired` is not needed.
+4. **Idle servers are closed by the next request.** A server unused for 300 s is closed by
+   the next `get()` for another key, at most one per call, bounded by
+   `min(caller deadline, 2 s)`; its failure does not fail the caller and leaves a stranded
+   session for rule 1. No thread, no timer. The clock is `LspProcess.idle_expired`, which
+   already existed with the 300 s limit and no caller -- the manager now makes that one call,
+   rather than a second idea of what "idle" means.
 
 ## What this costs
 
