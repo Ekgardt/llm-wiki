@@ -66,8 +66,12 @@ Files: `scripts/code_extractor.py`, `scripts/code_hints.py`,
    than approximate, because definitions are collected before edges within one
    `extract()` and the trees stay alive for the whole of it.
 2. `route` is translated to the verbs it declares: the string constants of the
-   `methods=` keyword, upper-cased, or `("GET",)` when it names none, per the
-   Flask documentation above. One decorator may therefore mint more than one
+   `methods=` keyword, upper-cased, or `("GET",)` per the Flask documentation
+   above when the decorator names no `methods=` at all, names it with something
+   that is not a literal list, tuple or set, or fills it with values that are
+   not string constants. In that last case the extractor cannot read what the
+   source says, and falls back to the framework's own default rather than
+   inventing a verb. One decorator may therefore mint more than one
    route node — one per verb — which is what the source says. `HEAD` and
    `OPTIONS` are not minted: they are the framework's addition, not the
    repository's declaration, and nothing asks for them. Verb decorators
