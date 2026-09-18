@@ -46,13 +46,18 @@ def test_a_rerun_skips_the_batch_that_already_finished(tmp_path, monkeypatch):
     state = _state_after_failure(vault, monkeypatch)
     prompts: list[str] = []
     recorded: dict = {}
-    monkeypatch.setattr(consolidation, "_record_consolidation", lambda d, c, r: recorded.update(day=d))
+    monkeypatch.setattr(
+        consolidation,
+        "_record_consolidation",
+        lambda d, c, r, digest: recorded.update(day=d, digest=digest),
+    )
 
     outcome = consolidation.consolidate_day(
         vault, DAY, call=lambda prompt: prompts.append(prompt) or "[]", state=state
     )
 
-    assert (len(prompts), outcome["status"], recorded) == (1, "empty", {"day": DAY})
+    expected = {"day": DAY, "digest": consolidation.record_set_digest(vault, DAY)}
+    assert (len(prompts), outcome["status"], recorded) == (1, "empty", expected)
 
 
 def test_a_provider_that_returns_nothing_leaves_the_day_pending(tmp_path, monkeypatch):
