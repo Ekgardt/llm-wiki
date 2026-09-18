@@ -669,6 +669,9 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
     if trace is None:
         return {}
     return {
+        # What the rendering dropped from its tail after the compiler was done:
+        # `packer_dropped` is the compiler's own shed, this one is the last.
+        "rendering_shed": getattr(context, "shed_for_budget", 0),
         "compile_l0": trace.l0_count,
         "compile_l1": trace.l1_count,
         "compile_l2": trace.l2_count,

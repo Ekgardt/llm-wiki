@@ -138,8 +138,8 @@ def record_access(slug: str, source: str = "search", query: str | None = None,
         )
         if event is not None:
             best_effort_record_event(event)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        _note_flush_failure(slug, exc)
 
 
 # Pages the last flush could not export, named: [{"slug", "error"}]. The

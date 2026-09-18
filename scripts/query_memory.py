@@ -50,6 +50,16 @@ QA_DEADLINE_SECONDS = 120.0
 # coverage from the fan-out loop instead.
 QA_MAX_CANDIDATES = 12
 QA_MAX_OUTPUT_TOKENS = 1200
+# The window and everything subtracted from it are UTF-8 bytes, under the
+# estimate `context_budget` documents and this path relies on: one token per
+# byte, which over-counts for every script and so can only reserve too much.
+# `ContextBudget` names its fields in tokens; `_qa_budget` is the one place that
+# says what this path actually puts in them. Cyrillic and CJK evidence therefore
+# get a smaller share than Latin — safe, and the reason the names disagreed with
+# the values until 2026-09-18. See
+# `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+QA_OUTPUT_RESERVE_BYTES = QA_MAX_OUTPUT_TOKENS
+QA_SAFETY_MARGIN_BYTES = 512
 # The default window, in bytes: the system prompt (about 4.6 KB) and the twelve
 # candidates' pieces of up to 4 KB each, with room for the entries that come in
 # whole. 8 192 held one piece beside the prompt. See
@@ -108,6 +118,11 @@ class GroundedContext:
     # sorted for stability; this is what says which page was the last one
     # retrieval still reached. See `aggregation_pass.reaches_the_edge`.
     ranked_paths: tuple[str, ...] = ()
+    # How many pieces of evidence the final rendering dropped from its tail to
+    # fit the window. The compiler records what *it* dropped; this is the shed
+    # after it, and until 2026-09-18 nothing recorded it at all. See
+    # `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+    shed_for_budget: int = 0
 
     @classmethod
     def empty(cls, *, profile: str) -> GroundedContext:
@@ -487,6 +502,15 @@ def _render_cached_full_index(index_text: str) -> str:
     )
 
 
+def _qa_budget() -> object:
+    """The answer path's window, in bytes, under the one-byte-per-token estimate."""
+    from context_budget import ContextBudget
+
+    return ContextBudget(
+        None, QA_DEFAULT_INPUT_BYTES, QA_OUTPUT_RESERVE_BYTES, QA_SAFETY_MARGIN_BYTES
+    )
+
+
 def build_grounded_context(
     snapshot: object,
     candidates: Iterable[object],
@@ -497,19 +521,24 @@ def build_grounded_context(
     whole: int | None = None,
     question: str | None = None,
     partner: bool = True,
+    deadline: float | None = None,
 ) -> GroundedContext:
     """Group retrieved children by parent and expose only captured source spans.
 
     `whole` is how many top entries come in whole for this call; a second pass
     asks for more than the first. With `question`, a long reply is pruned to
     the sentences that bear on it. See `evidence_pruning`.
-    """
-    from context_budget import ContextBudget
 
+    `deadline` is the answer's own `time.monotonic` instant. The shedding loop
+    below recompiles after every dropped span, so without it a question whose
+    best pages are long spent an unbounded stretch of the caller's budget in a
+    loop nothing could stop. See
+    `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+    """
     normalized_profile = profile.upper()
     if normalized_profile not in QA_PROFILES:
         raise GroundedQAError("unsupported grounded QA profile")
-    active_budget = budget or ContextBudget(None, QA_DEFAULT_INPUT_BYTES, QA_MAX_OUTPUT_TOKENS, 512)
+    active_budget = budget or _qa_budget()
     index_text, chosen = _profile_selection(
         snapshot, candidates, vault=vault, profile=normalized_profile
     )
@@ -519,10 +548,12 @@ def build_grounded_context(
         selected,
         _evidence_budget(active_budget, MANIFEST_OVERHEAD_BYTES * len(selected)),
         frozenset(chunk.id for chunk in chosen),
+        deadline,
     )
     evidence, stale = _authoritative_evidence(
         compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question)
     )
+    offered = len(evidence)
     prompt_context = _packed_context(evidence, index_text, active_budget)
     packed_tokens = len(prompt_context.encode("utf-8"))
     if packed_tokens > active_budget.available_input_tokens:
@@ -536,6 +567,7 @@ def build_grounded_context(
         getattr(compiled, "trace", None),
         stale,
         ranked_paths=_ranked_paths(selected, parent_paths),
+        shed_for_budget=offered - len(evidence),
     )
 
 
@@ -585,7 +617,11 @@ def _ranked_paths(selected: tuple, kept: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _fitted_selection(
-    snapshot: object, selected: tuple, budget: object, retrieved: frozenset = frozenset()
+    snapshot: object,
+    selected: tuple,
+    budget: object,
+    retrieved: frozenset = frozenset(),
+    deadline: float | None = None,
 ) -> tuple[tuple[str, ...], tuple, object]:
     """The most relevant spans that fit, dropping the weakest first.
 
@@ -598,15 +634,30 @@ def _fitted_selection(
     """
     from context_budget import BudgetExceededError
 
+    pages = _chunks_by_page(snapshot)
     if not selected:
-        return _compiled_for(snapshot, (), budget)
+        return _compiled_for(snapshot, (), budget, pages, deadline)
     kept = list(selected)
     while kept:
         try:
-            return _compiled_for(snapshot, tuple(kept), budget)
+            return _compiled_for(snapshot, tuple(kept), budget, pages, deadline)
         except BudgetExceededError:
             _shed_one(kept, retrieved)
     raise GroundedQAError("no retrieved span fits the grounded answer budget")
+
+
+def _chunks_by_page(snapshot: object) -> dict[str, list]:
+    """The snapshot's chunks grouped by page, each with its place in the snapshot.
+
+    Built once for the whole shedding loop, which narrows the snapshot again
+    after every dropped span and used to walk every chunk of the corpus each
+    time. The position travels with the chunk so the narrowed snapshot keeps
+    the order the corpus has.
+    """
+    pages: dict[str, list] = {}
+    for position, chunk in enumerate(snapshot.chunks):
+        pages.setdefault(chunk.parent_page, []).append((position, chunk))
+    return pages
 
 
 def _repeats(kept: list) -> list[int]:
@@ -670,14 +721,27 @@ def _shed_one(kept: list, retrieved: frozenset = frozenset()) -> None:
 
 
 def _compiled_for(
-    snapshot: object, selected: tuple, budget: object
+    snapshot: object,
+    selected: tuple,
+    budget: object,
+    pages: dict[str, list] | None = None,
+    deadline: float | None = None,
 ) -> tuple[tuple[str, ...], tuple, object]:
+    _check_optional_deadline(deadline)
     parent_paths = _parent_paths(selected)
-    narrow, sources = _narrowed_snapshot(snapshot, parent_paths)
-    return parent_paths, sources, _compiled_context(narrow, sources, selected, budget)
+    narrow, sources = _narrowed_snapshot(snapshot, parent_paths, pages)
+    return parent_paths, sources, _compiled_context(narrow, sources, selected, budget, deadline)
 
 
-def _compiled_context(narrow: object, sources: tuple, selected: tuple, budget: object) -> object:
+def _check_optional_deadline(deadline: float | None) -> None:
+    if deadline is None:
+        return
+    _check_deadline(deadline)
+
+
+def _compiled_context(
+    narrow: object, sources: tuple, selected: tuple, budget: object, deadline: float | None = None
+) -> object:
     from context_compiler import compile_context
 
     # A selected chunk is delivered as itself. The compiler used to widen a
@@ -692,20 +756,31 @@ def _compiled_context(narrow: object, sources: tuple, selected: tuple, budget: o
         budget=budget,
         small_parent_chars=0,
         large_parent_subtree_chars=0,
+        deadline=deadline,
     )
 
 
-def _narrowed_snapshot(snapshot: object, parent_paths: tuple[str, ...]) -> tuple[object, tuple]:
+def _chunks_of(snapshot: object, parent_paths: tuple[str, ...], pages: dict[str, list] | None):
+    """The chunks of these pages in the snapshot's own order, through the index."""
+    index = pages if pages is not None else _chunks_by_page(snapshot)
+    found = [entry for page in parent_paths for entry in index.get(page, ())]
+    found.sort()
+    return [chunk for _position, chunk in found]
+
+
+def _narrowed_snapshot(
+    snapshot: object, parent_paths: tuple[str, ...], pages: dict[str, list] | None = None
+) -> tuple[object, tuple]:
     """The snapshot cut down to the parent pages, and those pages' sources."""
     from corpus_snapshot import CorpusSnapshot
 
     sources = tuple(
         source for source in snapshot.sources if source.record.relative_path in parent_paths
     )
-    chunks = tuple(chunk for chunk in snapshot.chunks if chunk.parent_page in parent_paths)
+    chunks = _chunks_of(snapshot, parent_paths, pages)
     narrow = CorpusSnapshot(
         sources,
-        chunks,
+        tuple(chunks),
         snapshot.corpus_sha256,
         snapshot.policy,
         snapshot.collector_version,
@@ -1559,6 +1634,7 @@ class _AnswerPass:
             whole=whole,
             question=_question_for_pruning(self.question, prune),
             partner=partner,
+            deadline=self.deadline,
         )
         prompt = question_block + context.prompt_context
         _require_prompt_fits(system_prompt + prompt, self.budget)
@@ -1590,8 +1666,6 @@ def grounded_qa(
     a stand: it returns the text of claims the gates dropped, labelled, so an
     answer policy can be measured; the product never asks for it.
     """
-    from context_budget import ContextBudget
-
     _require_bounded_question(question)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
@@ -1605,7 +1679,7 @@ def grounded_qa(
         Path(vault),
         snapshot or _answer_corpus(Path(vault), selected_deadline),
         selected_profile,
-        budget or ContextBudget(None, QA_DEFAULT_INPUT_BYTES, QA_MAX_OUTPUT_TOKENS, 512),
+        budget or _qa_budget(),
         generator,
         selected_deadline,
     )

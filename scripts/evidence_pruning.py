@@ -55,9 +55,20 @@ def sentence_spans(content: bytes, start: int, end: int) -> list[tuple[int, int]
     return spans
 
 
+def _holds_a_turn(piece: bytes) -> bool:
+    """Whether a turn marker opens any line of this piece.
+
+    Asking whether the piece *starts* with one exempted the first chunk of every
+    entry, because an entry starts with its heading — so the first turn of a
+    file, often the user's longest message, was delivered whole however long it
+    was. See `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+    """
+    return any(line.lstrip().startswith(TURN_PREFIXES) for line in piece.splitlines())
+
+
 def prunes(content: bytes, start: int, end: int) -> bool:
     """Only a turn of a conversation, and only one long enough to be worth pruning."""
-    if not content[start:end].lstrip().startswith(TURN_PREFIXES):
+    if not _holds_a_turn(content[start:end]):
         return False
     if end - start <= PRUNE_ABOVE_BYTES:
         return False
@@ -106,6 +117,13 @@ def _ranked(scores: np.ndarray) -> list[int]:
     return [int(index) for index in np.argsort(-scores, kind="stable")]
 
 
+# The first sentence carries the speaker marker and is kept before anything is
+# scored, so a first sentence of KEEP_BYTES or more used to spend the whole
+# budget and deliver nothing the question itself chose. At least this many
+# sentences are kept whatever they cost.
+MIN_SENTENCES = 2
+
+
 def _within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> set[int]:
     """The first sentence and then the best ones, until KEEP_BYTES are spent."""
     chosen: set[int] = set()
@@ -115,6 +133,12 @@ def _within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> se
             continue
         chosen.add(index)
         spent += spans[index][1] - spans[index][0]
-        if spent >= KEEP_BYTES:
+        if _budget_spent(spent, len(chosen)):
             break
     return chosen
+
+
+def _budget_spent(spent: int, kept: int) -> bool:
+    if kept < MIN_SENTENCES:
+        return False
+    return spent >= KEEP_BYTES

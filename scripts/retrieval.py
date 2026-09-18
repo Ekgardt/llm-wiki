@@ -1281,8 +1281,24 @@ def _standing_disposition(query: str | None) -> dict[str, float]:
         from retrieval_disposition import disposition
 
         return disposition(query)
-    except Exception:  # noqa: BLE001 - a missing history must not fail a search
+    except Exception as exc:  # noqa: BLE001 - named, never silent; the search still answers
+        _name_dropped("retrieval_disposition", exc)
         return {}
+
+
+def _name_dropped(kind: str, error: BaseException) -> None:
+    """A best-effort step that failed is recorded, not forgotten.
+
+    The bounded failure trail `mcp_server` already writes a dropped telemetry
+    event to, and doctor reads. Silence made "this ran and found nothing" look
+    exactly like "this raised on every call", which is how the key lookup of
+    2026-09-16 stayed broken for a day. See
+    `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure(kind, describe_error(error), error=error)
 
 
 def _co_activation_table() -> dict[str, dict[str, float]]:
@@ -1290,7 +1306,8 @@ def _co_activation_table() -> dict[str, dict[str, float]]:
         from co_activation import load
 
         return load()
-    except Exception:  # noqa: BLE001 - a missing table must not fail a search
+    except Exception as exc:  # noqa: BLE001 - named, never silent; the search still answers
+        _name_dropped("co_activation", exc)
         return {}
 
 
@@ -2809,8 +2826,8 @@ def _record_impressions(
         _emit_impressions(
             rows, query=query, corpus_generation=corpus_generation, source_tool=source_tool
         )
-    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
-        pass
+    except Exception as exc:  # noqa: BLE001 - named, never silent; telemetry is not load-bearing
+        _name_dropped("retrieval_impression", exc)
 
 
 def _impression_event(
