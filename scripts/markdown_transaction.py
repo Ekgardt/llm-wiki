@@ -6223,8 +6223,41 @@ class MarkdownCoordinator:
         content_guard: object,
     ) -> None:
         """Every project target moves inside the database transaction that
-        commits its checkpoint, so a failure rewinds both together."""
+        commits its checkpoint, so a failure rewinds both together.
+
+        The restore is outside the lock because the commit itself can fail: the
+        caller's deadline lands in `before_commit`, which runs as the lock exits.
+        See `docs/research/2026-09-18-the-restore-covers-the-commit-too.md`.
+        """
         changed: list[sqlite3.Row] = []
+        try:
+            self._commit_project_under_lock(
+                record, plan, rows, operation_states, content_guard, changed
+            )
+        except BaseException:
+            with self._uncancellable():
+                self._restore_inflight_operations(record.id, changed)
+            raise
+
+    @contextlib.contextmanager
+    def _uncancellable(self) -> Iterator[None]:
+        """Compensation runs to the end; the deadline that stopped the write
+        must not also stop the undo and leave the vault half-written."""
+        previous = self._enter_recovery_scope(float("inf"), None)
+        try:
+            yield
+        finally:
+            self._leave_recovery_scope(previous)
+
+    def _commit_project_under_lock(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+        content_guard: object,
+        changed: list[sqlite3.Row],
+    ) -> None:
         with self._connect() as database, begin_immediate(
             database, before_commit=self._require_current_operation_active
         ):
@@ -6242,9 +6275,6 @@ class MarkdownCoordinator:
                 self._commit_project_checkpoint(
                     database, record, rows, operation_states
                 )
-            except BaseException:
-                self._restore_inflight_operations(record.id, changed)
-                raise
             finally:
                 self._local.mutation_database = None
 
@@ -7221,10 +7251,11 @@ class MarkdownCoordinator:
         return _required_state_hash(state["sha256"])
 
     def _rollback_for_quarantine(self, transaction_id: str, error_code: str) -> None:
+        """The undo runs to the end: the deadline that stopped the write must
+        not also stop the rollback and leave the vault half-written."""
         try:
-            for row in self._operation_rows(transaction_id):
-                if row["applied"]:
-                    self._rollback_one_operation(transaction_id, row)
+            with self._uncancellable():
+                self._rollback_applied_operations(transaction_id)
         except _TargetBoundaryChanged:
             self._set_transaction_state(
                 transaction_id, "quarantined", error_code="parent_identity_changed"
@@ -7233,6 +7264,11 @@ class MarkdownCoordinator:
         self._set_transaction_state(
             transaction_id, "quarantined", error_code=error_code
         )
+
+    def _rollback_applied_operations(self, transaction_id: str) -> None:
+        for row in self._operation_rows(transaction_id):
+            if row["applied"]:
+                self._rollback_one_operation(transaction_id, row)
 
     def _rollback_one_operation(self, transaction_id: str, row: sqlite3.Row) -> None:
         """An operation that cannot be rolled back is left as it stands."""
