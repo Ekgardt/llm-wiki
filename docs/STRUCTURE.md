@@ -391,10 +391,12 @@ implemented.
 
 This section records the implemented Python/Pyright slice. The runtime path helpers are implemented,
 while the authoritative corpus checkpoint remains
-`corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
-2026-07-21 Plan A remain implemented, including explicit Graph v3 selection contracts
-and bounded sealed-workspace utilities, but its one-shot consent/SCIP/publication
-Tasks 6-16 are superseded.
+`corpus-generation/v2` with `evidence-graph/v2`. The whole 2026-07-21 Plan A is
+superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by the
+replacement plan below, and on 2026-09-18 its foundation — the Graph v3 selection
+contracts, the sealed-workspace utilities and the `code_capture` manifest section that
+nothing in production ever filled — was removed from the code
+(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
 
 The replacement plan implements path derivation, position and URI conversion,
 bounded protocol transport, process startup evidence, platform-qualified lifecycle
