@@ -224,7 +224,6 @@ _MANIFEST_KEYS = {
     "artifacts",
     "vector_state",
     "repository_scope",
-    "code_capture",
     # A generation that holds code names its roots; a memory generation has no
     # such key, which is how one checkout can carry both and a reader can tell
     # them apart (decision 2026-09-12, the vault is a repository too).
@@ -233,7 +232,6 @@ _MANIFEST_KEYS = {
 _REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {
     "parent_generation_id",
     "repository_scope",
-    "code_capture",
     "code_roots",
 }
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
@@ -1490,8 +1488,8 @@ def _graph_fields(value: dict[str, object]) -> tuple[str | None, str | None]:
     graph_extractor = _optional_version(
         "graph_extractor_version", value["graph_extractor_version"]
     )
-    if graph_schema not in {None, "evidence-graph/v2", "evidence-graph/v3"}:
-        raise ValueError("graph schema must be null, evidence-graph/v2, or evidence-graph/v3")
+    if graph_schema not in {None, "evidence-graph/v2"}:
+        raise ValueError("graph schema must be null or evidence-graph/v2")
     if (graph_schema is None) != (graph_extractor is None):
         raise ValueError("graph schema and extractor versions must be both set or null")
     return graph_schema, graph_extractor
@@ -1505,14 +1503,6 @@ def _normalized_scope_section(value: dict[str, object], _parent: str | None) -> 
     return RepositoryScope.from_dict(value["repository_scope"]).as_dict()
 
 
-def _normalized_capture_section(value: dict[str, object], _parent: str | None) -> object:
-    from code_workspace import validate_code_capture
-
-    return validate_code_capture(value["code_capture"])
-
-
-# Insertion order is the manifest's own section order and is load-bearing only
-# for readability; canonical JSON sorts keys before anything is hashed.
 def _normalized_code_roots_section(value: dict[str, object], _parent: str | None) -> object:
     roots = value["code_roots"]
     if not isinstance(roots, list) or not all(isinstance(name, str) for name in roots):
@@ -1525,7 +1515,6 @@ def _normalized_code_roots_section(value: dict[str, object], _parent: str | None
 _OPTIONAL_MANIFEST_SECTIONS = {
     "parent_generation_id": _normalized_parent_section,
     "repository_scope": _normalized_scope_section,
-    "code_capture": _normalized_capture_section,
     "code_roots": _normalized_code_roots_section,
 }
 
@@ -1704,25 +1693,9 @@ def _require_complete_vectors(
     )
 
 
-def _require_graph_v3_contract(
-    normalized: dict[str, object], graph_schema: str | None
-) -> None:
-    if graph_schema != "evidence-graph/v3":
-        return
-    _require_v3_manifest(normalized)
-
-
-def _require_v3_manifest(normalized: dict[str, object]) -> None:
-    if normalized["schema_version"] == "corpus-generation/v1":
-        raise ValueError("evidence-graph/v3 requires corpus-generation/v2")
-    if "code_capture" not in normalized:
-        raise ValueError("evidence-graph/v3 requires code_capture")
-
-
 def _require_schema_contract(
     normalized: dict[str, object], graph_schema: str | None, seen: set[str]
 ) -> None:
-    _require_graph_v3_contract(normalized, graph_schema)
     if normalized["schema_version"] != "corpus-generation/v2":
         return
     _require_v2_contract(normalized, graph_schema, seen)
@@ -1738,7 +1711,7 @@ def _require_v2_contract(
     normalized: dict[str, object], graph_schema: str | None, seen: set[str]
 ) -> None:
     _require_v2_artifacts(seen)
-    if graph_schema not in {"evidence-graph/v2", "evidence-graph/v3"}:
+    if graph_schema != "evidence-graph/v2":
         raise ValueError("corpus-generation/v2 requires the Evidence Graph schema")
     if "repository_scope" not in normalized:
         raise ValueError("corpus-generation/v2 requires a validated repository scope")
@@ -1777,7 +1750,7 @@ def _validate_artifact_databases(
             cancelled=cancelled,
         )
         return
-    if graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:
+    if graph_schema == "evidence-graph/v2":
         validate_generation_artifact(
             generation_path,
             normalized,
@@ -1786,58 +1759,6 @@ def _validate_artifact_databases(
             monotonic=monotonic,
             cancelled=cancelled,
         )
-
-
-def _source_membership(source_manifest: dict, source_sizes: dict) -> list[tuple]:
-    return [
-        (
-            source["logical_id"],
-            source["relative_path"],
-            source["sha256"],
-            source_sizes.get(source["logical_id"]),
-        )
-        for source in source_manifest["sources"]
-    ]
-
-
-def _captured_membership(normalized: dict[str, object]) -> list[tuple]:
-    return [
-        (item["source_id"], item["relative_path"], item["sha256"], item["stat"]["size"])
-        for item in normalized["code_capture"]["files"]
-    ]
-
-
-def _stored_source_sizes(database_path: Path) -> dict[str, int]:
-    with closing(
-        sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0)
-    ) as database:
-        return {
-            row[0]: row[1]
-            for row in database.execute(
-                "SELECT source_id, size FROM source ORDER BY source_id"
-            ).fetchall()
-        }
-
-
-def _validate_code_capture_membership(
-    generation_path: Path, normalized: dict[str, object], state_root: Path
-) -> None:
-    import corpus_snapshot
-    import evidence_graph
-
-    raw = read_runtime_bytes(
-        generation_path / "source-manifest.json",
-        state_root,
-        max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
-    )
-    try:
-        source_manifest = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("source manifest must contain valid UTF-8 JSON") from exc
-    source_manifest = corpus_snapshot.validate_canonical_source_manifest(source_manifest)
-    sizes = _stored_source_sizes(generation_path / "evidence.sqlite3")
-    if _captured_membership(normalized) != _source_membership(source_manifest, sizes):
-        raise ValueError("code_capture files must match canonical source membership")
 
 
 def _normalized_manifest(
@@ -1978,8 +1899,6 @@ def _validate_databases_once(
             monotonic=monotonic,
             cancelled=cancelled,
         )
-        if "code_capture" in normalized:
-            _validate_code_capture_membership(generation_path, normalized, state_root)
     except ValueError as exc:
         _remember_verdict(key, str(exc))
         raise

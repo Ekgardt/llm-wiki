@@ -183,9 +183,12 @@ search, and its index was keyed to a different embedder than the product's — s
 `knowledge/notes/retire-lancedb-decision.md`.
 
 **Implemented code-navigation slice:** The current authoritative corpus checkpoint
-remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
-2026-07-21 Plan A remain implemented, but its one-shot consent/SCIP/publication Tasks
-6-16 are superseded. The replacement plan implements the production-quality,
+remains `corpus-generation/v2` with `evidence-graph/v2`. The whole 2026-07-21 Plan A is
+superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by the
+replacement plan, and on 2026-09-18 the foundation that nothing in production ever ran --
+the sealed code workspace, the `code_capture` manifest section, the verified-analysis
+records and the `evidence-graph/v3` schema they filled -- was removed from the code
+(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`). The replacement plan implements the production-quality,
 Python 3.10-compatible read-only LSP path through pinned Pyright 1.1.411: paths,
 positions, bounded protocol, startup evidence, leased platform-qualified lifecycle
 ownership, repository containment, safe log redaction, explicit profile installation,

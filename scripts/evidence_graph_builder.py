@@ -38,7 +38,6 @@ from types import MappingProxyType
 import corpus_snapshot
 import evidence_graph
 import generation_catalog
-from code_intelligence import VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
 from repository_scope import RepositoryScope, same_repository_record
 
@@ -228,7 +227,6 @@ def _require_build_types(
     graph_schema: object,
     repository_scope: object,
     snapshot: object,
-    code_capture: object,
 ) -> None:
     _require_type(
         catalog,
@@ -248,21 +246,6 @@ def _require_build_types(
         corpus_snapshot.CorpusSnapshot,
         "snapshot must be a CorpusSnapshot or None",
     )
-    _require_optional_type(
-        code_capture,
-        corpus_snapshot.CodeCaptureContract,
-        "code_capture must be a CodeCaptureContract or None",
-    )
-
-
-def _require_capture_agreement(snapshot: object, code_capture: object) -> None:
-    if code_capture is None:
-        return
-    from code_workspace import code_capture_as_dict, validate_code_capture
-
-    validate_code_capture(code_capture_as_dict(code_capture))
-    if snapshot is not None and snapshot.code_capture != code_capture:
-        raise ValueError("code_capture must be the exact supplied CorpusSnapshot contract")
 
 
 def _require_publication_root(
@@ -274,74 +257,21 @@ def _require_publication_root(
         raise ValueError("complete generation activation requires publication_root")
 
 
-def _require_v3_inputs(
-    graph_schema: object,
-    snapshot: object,
-    repository_scope: object,
-    code_capture: object,
-) -> None:
-    if graph_schema is not evidence_graph.GraphSchema.V3:
-        return
-    if snapshot is None or repository_scope is None or code_capture is None:
-        raise ValueError(
-            "evidence-graph/v3 requires a CorpusSnapshot, repository scope, and code_capture"
-        )
-
-
-def _require_complete_generation_inputs(
-    graph_schema: object,
-    snapshot: object,
-    repository_scope: object,
-    code_capture: object,
-    activate: bool,
-    publication_root: object,
-) -> None:
-    _require_publication_root(snapshot, activate, publication_root)
-    _require_v3_inputs(graph_schema, snapshot, repository_scope, code_capture)
-
-
 def _validated_build_inputs(
     *,
     catalog: object,
     graph_schema: object,
     repository_scope: RepositoryScope | None,
     snapshot: object,
-    code_capture: object,
     activate: bool,
     publication_root: object,
 ) -> RepositoryScope | None:
     """Check every argument once, and hand back the scope the build will use."""
-    _require_build_types(catalog, graph_schema, repository_scope, snapshot, code_capture)
-    _require_capture_agreement(snapshot, code_capture)
-    _require_complete_generation_inputs(
-        graph_schema, snapshot, repository_scope, code_capture, activate, publication_root
-    )
+    _require_build_types(catalog, graph_schema, repository_scope, snapshot)
+    _require_publication_root(snapshot, activate, publication_root)
     if repository_scope is None:
         return None
     return RepositoryScope.from_dict(repository_scope.as_dict())
-
-
-def _require_capture_membership(
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
-    sources_list: list[Mapping[str, object]],
-) -> None:
-    if code_capture is None:
-        return
-    capture_membership = sorted(
-        (item.source_id, item.relative_path, item.sha256, item.stat.size)
-        for item in code_capture.files
-    )
-    source_membership = sorted(
-        (
-            str(source["source_id"]),
-            str(source["relative_path"]),
-            str(source["sha256"]),
-            int(source["size"]),
-        )
-        for source in sources_list
-    )
-    if capture_membership != source_membership:
-        raise ValueError("code_capture files must match builder source membership")
 
 
 def _snapshot_source_rows(snapshot: corpus_snapshot.CorpusSnapshot) -> list[dict]:
@@ -426,60 +356,6 @@ def _generation_source_manifest(
     return source_manifest, source_manifest_bytes, source_manifest_sha256
 
 
-def _require_analysis_batch(
-    batch: object,
-    count: int,
-    source_manifest_sha256: str,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    _require_analysis_identity(batch, count)
-    if batch.source_manifest_sha256 != source_manifest_sha256:
-        raise ValueError("verified analysis source manifest must match generation manifest")
-    _require_analysis_scope(batch, graph_schema, repository_scope)
-
-
-def _require_analysis_identity(batch: object, count: int) -> None:
-    if count >= evidence_graph.MAX_VALIDATION_ROWS:
-        raise ValueError("verified analysis row ceiling exceeded")
-    if type(batch) is not VerifiedAnalysisBatch:
-        raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
-
-
-def _require_analysis_scope(
-    batch: VerifiedAnalysisBatch,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    if graph_schema is not evidence_graph.GraphSchema.V3:
-        return
-    observed = (batch.analysis.run.repository_id, batch.analysis.run.checkout_id)
-    if observed != (repository_scope.repository_id, repository_scope.checkout_id):
-        raise ValueError("verified analysis repository or checkout does not match publication")
-
-
-def _validated_analysis_batches(
-    verified_analyses: Iterable[VerifiedAnalysisBatch],
-    *,
-    source_manifest_sha256: str,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-    code_capture: object,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[VerifiedAnalysisBatch]:
-    validated: list[VerifiedAnalysisBatch] = []
-    for batch in verified_analyses:
-        _check_stop(deadline, cancelled)
-        _require_analysis_batch(
-            batch, len(validated), source_manifest_sha256, graph_schema, repository_scope
-        )
-        validated.append(batch)
-    if validated and code_capture is None:
-        raise ValueError("verified analyses require code_capture")
-    return validated
-
-
 def _materialized_graph_records(
     *,
     nodes: Iterable[Mapping[str, object]],
@@ -560,12 +436,9 @@ def _build_manifest(
     tokenizer_config_sha256: str = DEFAULT_TOKENIZER_CONFIG_SHA256,
     search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
     code_roots: tuple[str, ...] = (),
     vectors: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
-    if graph_schema is evidence_graph.GraphSchema.V3 and code_capture is None:
-        raise ValueError("evidence-graph/v3 manifests require code_capture")
     manifest = {
         "generation_id": generation_id,
         "schema_version": schema_version,
@@ -591,7 +464,7 @@ def _build_manifest(
     }
     manifest.update(
         _optional_manifest_fields(
-            parent_generation_id, repository_scope, code_capture, code_roots
+            parent_generation_id, repository_scope, code_roots
         )
     )
     manifest.update(_vector_manifest_fields(vectors))
@@ -682,7 +555,6 @@ def _code_roots_field(code_roots: tuple[str, ...]) -> dict[str, object]:
 def _optional_manifest_fields(
     parent_generation_id: str | None,
     repository_scope: RepositoryScope | None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
     code_roots: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The fields a manifest carries only when the build actually has them."""
@@ -691,19 +563,8 @@ def _optional_manifest_fields(
         fields["parent_generation_id"] = parent_generation_id
     if repository_scope:
         fields["repository_scope"] = repository_scope.as_dict()
-    fields.update(_code_capture_field(code_capture))
     fields.update(_code_roots_field(code_roots))
     return fields
-
-
-def _code_capture_field(
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
-) -> dict[str, object]:
-    if code_capture is None:
-        return {}
-    from code_workspace import code_capture_as_dict
-
-    return {"code_capture": code_capture_as_dict(code_capture)}
 
 
 def _invalid_deadline(deadline: float | None) -> bool:
@@ -883,7 +744,6 @@ def build_full_generation(
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
     graph_schema: evidence_graph.GraphSchema = evidence_graph.GraphSchema.V2,
-    verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
     generation_id: str,
     parent_generation_id: str | None = None,
     policy: Mapping[str, object] | None = None,
@@ -900,7 +760,6 @@ def build_full_generation(
     snapshot: corpus_snapshot.CorpusSnapshot | None = None,
     publication_root: Path | None = None,
     coordinator: object | None = None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
 ) -> BuildResult:
     """Atomically build one full Evidence Graph generation.
 
@@ -921,7 +780,6 @@ def build_full_generation(
         graph_schema=graph_schema,
         repository_scope=repository_scope,
         snapshot=snapshot,
-        code_capture=code_capture,
         activate=activate,
         publication_root=publication_root,
     )
@@ -938,7 +796,6 @@ def build_full_generation(
     source_bytes_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
-    _require_capture_membership(code_capture, sources_list)
     _require_snapshot_agreement(
         snapshot,
         sources_list,
@@ -958,15 +815,6 @@ def build_full_generation(
         )
     )
     _check_stop(deadline, cancelled)
-    verified_analysis_list = _validated_analysis_batches(
-        verified_analyses,
-        source_manifest_sha256=source_manifest_sha256,
-        graph_schema=graph_schema,
-        repository_scope=repository_scope,
-        code_capture=code_capture,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
     records = _materialized_graph_records(
         nodes=nodes,
         occurrences=occurrences,
@@ -994,10 +842,6 @@ def build_full_generation(
             sources_list=sources_list,
             source_bytes_snapshot=source_bytes_snapshot,
             records=records,
-            verified_analysis_list=verified_analysis_list,
-            generation_id=generation_id,
-            expected_active=expected_active,
-            repository_scope=repository_scope,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1036,7 +880,6 @@ def build_full_generation(
             repository_scope=repository_scope,
             graph_schema=graph_schema,
             snapshot=snapshot,
-            code_capture=code_capture,
             code_roots=_policy_code_roots(policy),
             deadline=deadline,
             cancelled=cancelled,
@@ -1098,12 +941,6 @@ def _kill_if(kill_point: str | None, name: str) -> None:
         raise KillPointError(kill_point)
 
 
-def _v3_only(value: object, graph_schema: evidence_graph.GraphSchema) -> object:
-    if graph_schema is evidence_graph.GraphSchema.V3:
-        return value
-    return None
-
-
 def _write_generation_database(
     database_path: Path,
     *,
@@ -1111,10 +948,6 @@ def _write_generation_database(
     sources_list: list[Mapping[str, object]],
     source_bytes_snapshot: Mapping[str, bytes],
     records: Mapping[str, list[Mapping[str, object]]],
-    verified_analysis_list: list[VerifiedAnalysisBatch],
-    generation_id: str,
-    expected_active: str | None,
-    repository_scope: RepositoryScope | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> None:
@@ -1129,10 +962,6 @@ def _write_generation_database(
         evidence=records["evidence"],
         observations=records["observations"],
         dependencies=records["dependencies"],
-        verified_analyses=verified_analysis_list,
-        publication_generation_id=_v3_only(generation_id, graph_schema),
-        publication_expected_active=_v3_only(expected_active, graph_schema),
-        repository_scope=_v3_only(repository_scope, graph_schema),
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -1271,7 +1100,6 @@ def _write_generation_manifests(
     repository_scope: RepositoryScope | None,
     graph_schema: evidence_graph.GraphSchema,
     snapshot: corpus_snapshot.CorpusSnapshot | None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
     code_roots: tuple[str, ...],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
@@ -1315,7 +1143,6 @@ def _write_generation_manifests(
         tokenizer_config_sha256=tokenizer_config_sha256,
         search_artifact=search_artifact,
         incremental_manifest_bytes=incremental_manifest_bytes,
-        code_capture=code_capture,
         code_roots=code_roots,
         vectors=vectors,
     )

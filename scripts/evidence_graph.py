@@ -17,7 +17,6 @@ from enum import Enum, unique
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from code_intelligence import AnalysisIdentity, PositionEncoding, VerifiedAnalysisBatch
 from graph_storable import (  # noqa: F401 - the writer's rules, shared with its readers
     MAX_IDENTITY_KEY_CHARS,
     storable_identity_key,
@@ -32,8 +31,15 @@ GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 
 @unique
 class GraphSchema(str, Enum):
+    """The one published generation schema.
+
+    `evidence-graph/v3` -- the analyzer-run, claim and slice tables of the
+    superseded 2026-07-21 Plan A -- was removed on 2026-09-18: nothing in
+    production ever built one, and no artifact on disk carries it. See
+    `docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`.
+    """
+
     V2 = "evidence-graph/v2"
-    V3 = "evidence-graph/v3"
 # Absurdity ceilings, not read bounds (audit M8, docs/research/2026-09-11-a-ceiling-says-which-kind-of-ceiling-it-is.md).
 # A source reaches this module already read, and the reader that bounded it
 # is the corpus snapshot (`corpus_snapshot.MAX_CORPUS_FILE_BYTES`, one page);
@@ -314,318 +320,6 @@ CREATE INDEX dependency_invalidation ON dependency(dependency_node_id, kind, dep
 CREATE INDEX dependency_reverse ON dependency(dependent_node_id, kind, dependency_node_id, dependency_id);
 """
 
-_V3_EXTENSION_SCHEMA = """
-CREATE TABLE analyzer_run (
-  run_id TEXT PRIMARY KEY,
-  analysis_mode TEXT NOT NULL CHECK (analysis_mode IN ('precise','native-syntax')),
-  repository_id TEXT NOT NULL,
-  checkout_id TEXT NOT NULL,
-  source_generation_id TEXT NOT NULL,
-  source_manifest_sha256 TEXT NOT NULL,
-  manifest_sha256 TEXT NOT NULL,
-  lockfile_sha256 TEXT NOT NULL,
-  sdk_sha256 TEXT NOT NULL,
-  target_sha256 TEXT NOT NULL,
-  configuration_sha256 TEXT NOT NULL,
-  feature_sha256 TEXT NOT NULL,
-  invocation_sha256 TEXT NOT NULL,
-  environment_sha256 TEXT NOT NULL,
-  dependency_state_sha256 TEXT NOT NULL,
-  analysis_sha256 TEXT NOT NULL,
-  position_encoding TEXT NOT NULL CHECK (position_encoding IN ('utf-8','utf-16','utf-32')),
-  analyzer_family TEXT NOT NULL,
-  analyzer_version TEXT NOT NULL,
-  protocol TEXT NOT NULL CHECK (protocol IN ('scip','lsp','native')),
-  protocol_version TEXT NOT NULL,
-  executable_sha256 TEXT NOT NULL,
-  declared_capability_count INTEGER NOT NULL CHECK (declared_capability_count > 0),
-  declared_capabilities_sha256 TEXT NOT NULL,
-  expected_scope_count INTEGER NOT NULL CHECK (expected_scope_count > 0),
-  expected_scope_set_sha256 TEXT NOT NULL,
-  receipt_sha256 TEXT,
-  receipt_output_sha256 TEXT,
-  consent_grant_id TEXT,
-  consent_revision INTEGER,
-  lease_id TEXT,
-  publication_generation_id TEXT NOT NULL,
-  publication_expected_active TEXT,
-  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
-  qualified INTEGER NOT NULL CHECK (qualified IN (0,1)),
-  outcome TEXT NOT NULL CHECK (outcome IN
-    ('complete','partial','failed','cancelled','rejected','superseded')),
-  started_at TEXT NOT NULL,
-  ended_at TEXT NOT NULL,
-  UNIQUE (run_id, source_manifest_sha256),
-  CHECK (
-    (analysis_mode='precise' AND evidence_level IN ('compiler','semantic')
-      AND receipt_sha256 IS NOT NULL AND receipt_output_sha256 IS NOT NULL
-      AND consent_grant_id IS NOT NULL AND consent_revision IS NOT NULL
-      AND consent_revision >= 1 AND lease_id IS NOT NULL)
-    OR
-    (analysis_mode='native-syntax' AND evidence_level IN ('syntax','lexical')
-      AND receipt_sha256 IS NULL AND receipt_output_sha256 IS NULL
-      AND consent_grant_id IS NULL AND consent_revision IS NULL AND lease_id IS NULL)
-  )
-) WITHOUT ROWID;
-
-CREATE TABLE run_capability (
-  run_id TEXT NOT NULL REFERENCES analyzer_run(run_id),
-  capability TEXT NOT NULL CHECK (capability IN
-    ('definitions','declarations','references','calls','imports','types',
-     'type_definitions','inheritance','implementations','diagnostics')),
-  PRIMARY KEY (run_id, capability)
-) WITHOUT ROWID;
-
-CREATE TABLE analysis_scope (
-  scope_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  source_manifest_sha256 TEXT NOT NULL,
-  build_target TEXT NOT NULL,
-  build_configuration TEXT NOT NULL,
-  expected_source_count INTEGER NOT NULL CHECK (expected_source_count >= 0),
-  expected_source_set_sha256 TEXT NOT NULL,
-  generated_sources TEXT NOT NULL CHECK (generated_sources IN
-    ('available','unavailable','not-required')),
-  dependency_resolution TEXT NOT NULL CHECK (dependency_resolution IN
-    ('complete','partial','unavailable')),
-  analyzer_support TEXT NOT NULL CHECK (analyzer_support IN
-    ('complete','partial','unsupported','unqualified')),
-  FOREIGN KEY (run_id, source_manifest_sha256)
-    REFERENCES analyzer_run(run_id, source_manifest_sha256),
-  UNIQUE (run_id, build_target, build_configuration),
-  UNIQUE (scope_id, run_id)
-) WITHOUT ROWID;
-
-CREATE TABLE expected_source (
-  scope_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  source_id TEXT NOT NULL REFERENCES source(source_id),
-  source_sha256 TEXT NOT NULL,
-  disposition TEXT NOT NULL CHECK (disposition IN ('included','excluded','generated')),
-  PRIMARY KEY (scope_id, source_id),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id)
-) WITHOUT ROWID;
-
-CREATE TABLE coverage (
-  scope_id TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  capability TEXT NOT NULL CHECK (capability IN
-    ('definitions','declarations','references','calls','imports','types',
-     'type_definitions','inheritance','implementations','diagnostics')),
-  status TEXT NOT NULL CHECK (status IN
-    ('complete','partial','failed','cancelled','rejected','unsupported','excluded')),
-  closed_world_eligible INTEGER NOT NULL CHECK (closed_world_eligible IN (0,1)),
-  reason TEXT,
-  PRIMARY KEY (scope_id, source_id, capability),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
-  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
-  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
-  CHECK ((status IN ('complete','excluded') AND reason IS NULL)
-      OR (status NOT IN ('complete','excluded') AND reason IS NOT NULL)),
-  CHECK (closed_world_eligible = 0 OR status IN ('complete','excluded'))
-) WITHOUT ROWID;
-
-CREATE TABLE symbol_claim (
-  claim_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  scope_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  capability TEXT NOT NULL CHECK (capability IN ('definitions','declarations')),
-  identity_scheme TEXT NOT NULL,
-  identity_value TEXT NOT NULL,
-  display_name TEXT NOT NULL,
-  symbol_kind TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('definition','declaration')),
-  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
-  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
-  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
-  ambiguity INTEGER NOT NULL CHECK (ambiguity IN (0,1)),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
-  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
-  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
-  CHECK ((capability='definitions' AND role='definition')
-      OR (capability='declarations' AND role='declaration'))
-) WITHOUT ROWID;
-
-CREATE TABLE relationship_claim (
-  claim_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  scope_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  source_identity_scheme TEXT NOT NULL,
-  source_identity_value TEXT NOT NULL,
-  relation TEXT NOT NULL CHECK (relation IN
-    ('REFERENCES_SYMBOL','CALLS','IMPORTS','HAS_TYPE',
-     'TYPE_DEFINITION','INHERITS','IMPLEMENTS')),
-  capability TEXT NOT NULL CHECK (capability IN
-    ('references','calls','imports','types','type_definitions','inheritance','implementations')),
-  target_identity_scheme TEXT,
-  target_identity_value TEXT,
-  target_text TEXT,
-  resolution TEXT NOT NULL CHECK (resolution IN ('resolved','unresolved','ambiguous')),
-  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
-  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
-  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
-  ambiguity INTEGER NOT NULL CHECK (ambiguity IN (0,1)),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
-  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
-  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
-  CHECK ((resolution='resolved' AND target_identity_scheme IS NOT NULL
-          AND target_identity_value IS NOT NULL AND target_text IS NULL)
-      OR (resolution!='resolved' AND target_identity_scheme IS NULL
-          AND target_identity_value IS NULL AND target_text IS NOT NULL)),
-  CHECK ((resolution='ambiguous' AND ambiguity=1)
-      OR (resolution!='ambiguous' AND ambiguity=0)),
-  CHECK ((relation='REFERENCES_SYMBOL' AND capability='references')
-      OR (relation='CALLS' AND capability='calls')
-      OR (relation='IMPORTS' AND capability='imports')
-      OR (relation='HAS_TYPE' AND capability='types')
-      OR (relation='TYPE_DEFINITION' AND capability='type_definitions')
-      OR (relation='INHERITS' AND capability='inheritance')
-      OR (relation='IMPLEMENTS' AND capability='implementations'))
-) WITHOUT ROWID;
-
-CREATE TABLE diagnostic (
-  diagnostic_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  scope_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  capability TEXT NOT NULL CHECK (capability='diagnostics'),
-  severity TEXT NOT NULL CHECK (severity IN ('error','warning','information','hint')),
-  code TEXT,
-  message TEXT NOT NULL,
-  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
-  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
-  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax')),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
-  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
-  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
-  UNIQUE (diagnostic_id, scope_id)
-) WITHOUT ROWID;
-
-CREATE TABLE diagnostic_related (
-  diagnostic_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  scope_id TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  message TEXT,
-  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
-  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
-  PRIMARY KEY (diagnostic_id, ordinal),
-  FOREIGN KEY (diagnostic_id, scope_id) REFERENCES diagnostic(diagnostic_id, scope_id),
-  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id)
-) WITHOUT ROWID;
-
-CREATE TABLE slice_activation (
-  slice_id TEXT PRIMARY KEY,
-  slice_key TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  scope_id TEXT NOT NULL,
-  capability TEXT NOT NULL CHECK (capability IN
-    ('definitions','declarations','references','calls','imports','types',
-     'type_definitions','inheritance','implementations','diagnostics')),
-  selected INTEGER NOT NULL CHECK (selected IN (0,1)),
-  selection_reason TEXT NOT NULL CHECK (selection_reason IN
-    ('new-complete','new-partial-terminal','retained-parent','complete-empty')),
-  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
-  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
-  UNIQUE (slice_id, run_id, scope_id, capability)
-) WITHOUT ROWID;
-
-CREATE TABLE validity (
-  validity_id TEXT PRIMARY KEY,
-  symbol_claim_id TEXT REFERENCES symbol_claim(claim_id),
-  relationship_claim_id TEXT REFERENCES relationship_claim(claim_id),
-  diagnostic_id TEXT REFERENCES diagnostic(diagnostic_id),
-  status TEXT NOT NULL CHECK (status IN ('current','soft-stale','hard-stale')),
-  stale_reason TEXT,
-  CHECK ((symbol_claim_id IS NOT NULL) + (relationship_claim_id IS NOT NULL)
-       + (diagnostic_id IS NOT NULL) = 1),
-  CHECK ((status='current' AND stale_reason IS NULL)
-      OR (status!='current' AND stale_reason IS NOT NULL))
-) WITHOUT ROWID;
-
-CREATE INDEX analyzer_run_scope
-ON analyzer_run(repository_id, checkout_id, analysis_sha256, run_id);
-CREATE INDEX analyzer_run_publication
-ON analyzer_run(publication_generation_id, outcome, run_id);
-CREATE INDEX run_capability_reverse
-ON run_capability(capability, run_id);
-CREATE INDEX analysis_scope_run
-ON analysis_scope(run_id, build_target, build_configuration, scope_id);
-CREATE INDEX expected_source_reverse
-ON expected_source(source_id, source_sha256, scope_id);
-CREATE INDEX coverage_capability
-ON coverage(scope_id, capability, status, source_id);
-CREATE INDEX symbol_identity
-ON symbol_claim(identity_scheme, identity_value, capability, claim_id);
-CREATE INDEX symbol_source_span
-ON symbol_claim(source_id, byte_start, byte_end, claim_id);
-CREATE INDEX relationship_source
-ON relationship_claim(source_identity_scheme, source_identity_value, capability, claim_id);
-CREATE INDEX relationship_target
-ON relationship_claim(target_identity_scheme, target_identity_value, capability, claim_id);
-CREATE INDEX relationship_source_span
-ON relationship_claim(source_id, byte_start, byte_end, claim_id);
-CREATE INDEX diagnostic_source_span
-ON diagnostic(source_id, byte_start, byte_end, severity, diagnostic_id);
-CREATE INDEX diagnostic_related_source_span
-ON diagnostic_related(source_id, byte_start, byte_end, diagnostic_id, ordinal);
-CREATE UNIQUE INDEX one_selected_slice
-ON slice_activation(slice_key) WHERE selected=1;
-CREATE INDEX slice_run
-ON slice_activation(run_id, scope_id, capability, selected, slice_id);
-CREATE UNIQUE INDEX validity_symbol_once
-ON validity(symbol_claim_id) WHERE symbol_claim_id IS NOT NULL;
-CREATE UNIQUE INDEX validity_relationship_once
-ON validity(relationship_claim_id) WHERE relationship_claim_id IS NOT NULL;
-CREATE UNIQUE INDEX validity_diagnostic_once
-ON validity(diagnostic_id) WHERE diagnostic_id IS NOT NULL;
-CREATE INDEX validity_status
-ON validity(status, validity_id);
-"""
-
-_V3_TABLES = frozenset(
-    {
-        "analyzer_run",
-        "run_capability",
-        "analysis_scope",
-        "expected_source",
-        "coverage",
-        "symbol_claim",
-        "relationship_claim",
-        "diagnostic",
-        "diagnostic_related",
-        "slice_activation",
-        "validity",
-    }
-)
-_V3_INDEXES = frozenset(
-    {
-        "analyzer_run_scope",
-        "analyzer_run_publication",
-        "run_capability_reverse",
-        "analysis_scope_run",
-        "expected_source_reverse",
-        "coverage_capability",
-        "symbol_identity",
-        "symbol_source_span",
-        "relationship_source",
-        "relationship_target",
-        "relationship_source_span",
-        "diagnostic_source_span",
-        "diagnostic_related_source_span",
-        "one_selected_slice",
-        "slice_run",
-        "validity_symbol_once",
-        "validity_relationship_once",
-        "validity_diagnostic_once",
-        "validity_status",
-    }
-)
-
-
 def _schema_signature(database: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
     return tuple(
         tuple(row)
@@ -636,386 +330,16 @@ def _schema_signature(database: sqlite3.Connection) -> tuple[tuple[object, ...],
     )
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=1)
 def _expected_schema_signature(schema: GraphSchema) -> tuple[tuple[object, ...], ...]:
+    del schema
     database = sqlite3.connect(":memory:")
     try:
-        database.executescript(
-            _SCHEMA + (_V3_EXTENSION_SCHEMA if schema is GraphSchema.V3 else "")
-        )
+        database.executescript(_SCHEMA)
         return _schema_signature(database)
     finally:
         database.close()
 
-
-def _set_sha256(rows: Sequence[Mapping[str, object]]) -> str:
-    return hashlib.sha256(canonical_json_bytes(list(rows))).hexdigest()
-
-
-def _slice_key(run_id: str, scope_id: str, capability: str) -> str:
-    return "slice:" + hashlib.sha256(
-        canonical_json_bytes(
-            {"run_id": run_id, "scope_id": scope_id, "capability": capability}
-        )
-    ).hexdigest()
-
-
-_V3_TABLE_NAMES = (
-    "analyzer_run",
-    "run_capability",
-    "analysis_scope",
-    "expected_source",
-    "coverage",
-    "symbol_claim",
-    "relationship_claim",
-    "diagnostic",
-    "diagnostic_related",
-    "slice_activation",
-    "validity",
-)
-
-
-def _require_batch_type(batch: object) -> None:
-    if type(batch) is not VerifiedAnalysisBatch:
-        raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
-
-
-def _require_batch_scope(run, repository_scope: RepositoryScope) -> None:
-    if (run.repository_id, run.checkout_id) != (
-        repository_scope.repository_id,
-        repository_scope.checkout_id,
-    ):
-        raise ValueError("analyzer run repository or checkout does not match publication scope")
-
-
-def _batch_additions(run, analysis) -> dict[str, int]:
-    related_count = sum(len(item.related) for item in analysis.diagnostics)
-    expected_source_count = sum(len(scope.expected_sources) for scope in analysis.scopes)
-    return {
-        "analyzer_run": 1,
-        "run_capability": len(run.declared_capabilities),
-        "analysis_scope": len(analysis.scopes),
-        "expected_source": expected_source_count,
-        "coverage": len(analysis.coverage),
-        "symbol_claim": len(analysis.symbols),
-        "relationship_claim": len(analysis.relationships),
-        "diagnostic": len(analysis.diagnostics),
-        "diagnostic_related": related_count,
-        "slice_activation": len(analysis.scopes) * len(run.declared_capabilities),
-        "validity": len(analysis.validity),
-    }
-
-
-def _reserve_batch_rows(
-    rows: dict[str, list], additions: dict[str, int], total_rows: int
-) -> int:
-    """Refuse a batch that would take any table past its ceiling.
-
-    The aggregate ceiling this used to check in addition -- every table's
-    ceiling multiplied by the number of tables -- can never be reached while
-    each table is refused at its own, so it was a line that could not run. The
-    bound it claimed still holds; it is the sum of the per-table ones.
-    See `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
-    """
-    for table, count in additions.items():
-        if count > MAX_VALIDATION_ROWS - len(rows[table]):
-            raise ValueError(f"{table} row ceiling exceeded")
-    return total_rows + sum(additions.values())
-
-
-def _capability_scope_rows(run, analysis) -> tuple[list[dict], list[dict]]:
-    capability_rows = [
-        {"capability": capability.value}
-        for capability in run.declared_capabilities
-    ]
-    scope_rows = [
-        {
-            "scope_id": scope.scope_id,
-            "source_manifest_sha256": scope.source_manifest_sha256,
-            "target": scope.build_target,
-            "configuration": scope.build_configuration,
-        }
-        for scope in analysis.scopes
-    ]
-    if any(
-        scope.source_manifest_sha256 != run.source_manifest_sha256
-        for scope in analysis.scopes
-    ):
-        raise ValueError("analysis scope manifest must match its analyzer run")
-    return capability_rows, scope_rows
-
-
-def _append_run_row(
-    rows: dict[str, list],
-    run,
-    capability_rows: list[dict],
-    scope_rows: list[dict],
-    publication_generation_id: str,
-    publication_expected_active: str | None,
-) -> None:
-    identity = run.identity
-    rows["analyzer_run"].append(
-        (
-            run.run_id,
-            run.analysis_mode,
-            run.repository_id,
-            run.checkout_id,
-            run.source_generation_id,
-            run.source_manifest_sha256,
-            identity.manifest_sha256,
-            identity.lockfile_sha256,
-            identity.sdk_sha256,
-            identity.target_sha256,
-            identity.configuration_sha256,
-            identity.feature_sha256,
-            identity.invocation_sha256,
-            identity.environment_sha256,
-            identity.dependency_state_sha256,
-            identity.analysis_sha256,
-            identity.position_encoding.value,
-            run.analyzer_family,
-            run.analyzer_version,
-            run.protocol,
-            run.protocol_version,
-            run.executable_sha256,
-            len(capability_rows),
-            _set_sha256(capability_rows),
-            len(scope_rows),
-            _set_sha256(scope_rows),
-            run.receipt_sha256,
-            run.receipt_output_sha256,
-            run.consent_grant_id,
-            run.consent_revision,
-            run.lease_id,
-            publication_generation_id,
-            publication_expected_active,
-            run.evidence_level.value,
-            int(run.qualified),
-            run.outcome.value,
-            run.started_at,
-            run.ended_at,
-        )
-    )
-
-
-def _append_slice_rows(rows: dict[str, list], run, scope) -> None:
-    outcome = "new-complete" if run.outcome.value == "complete" else "new-partial-terminal"
-    for capability in run.declared_capabilities:
-        slice_key = _slice_key(run.run_id, scope.scope_id, capability.value)
-        rows["slice_activation"].append(
-            (
-                slice_key,
-                slice_key,
-                run.run_id,
-                scope.scope_id,
-                capability.value,
-                1,
-                outcome,
-            )
-        )
-
-
-def _append_scope_rows(rows: dict[str, list], run, analysis) -> None:
-    for scope in analysis.scopes:
-        source_rows = [
-            {
-                "source_id": source.source_id,
-                "sha256": source.source_sha256,
-                "disposition": source.disposition,
-            }
-            for source in scope.expected_sources
-        ]
-        rows["analysis_scope"].append(
-            (
-                scope.scope_id,
-                scope.run_id,
-                scope.source_manifest_sha256,
-                scope.build_target,
-                scope.build_configuration,
-                len(source_rows),
-                _set_sha256(source_rows),
-                scope.generated_sources,
-                scope.dependency_resolution,
-                scope.analyzer_support,
-            )
-        )
-        rows["expected_source"].extend(
-            (
-                scope.scope_id,
-                scope.run_id,
-                source.source_id,
-                source.source_sha256,
-                source.disposition,
-            )
-            for source in scope.expected_sources
-        )
-        _append_slice_rows(rows, run, scope)
-
-
-def _coverage_row(coverage, scope_run: dict) -> tuple:
-    return (
-        coverage.scope_id,
-        scope_run[coverage.scope_id],
-        coverage.source_id,
-        coverage.capability.value,
-        coverage.status.value,
-        int(coverage.closed_world_eligible),
-        coverage.reason,
-    )
-
-
-def _symbol_row(claim) -> tuple:
-    return (
-        claim.claim_id,
-        claim.run_id,
-        claim.scope_id,
-        claim.source_id,
-        claim.capability.value,
-        claim.identity.scheme,
-        claim.identity.value,
-        claim.display_name,
-        claim.symbol_kind,
-        claim.role.value,
-        claim.range.byte_start,
-        claim.range.byte_end,
-        claim.evidence_level.value,
-        int(claim.ambiguity),
-    )
-
-
-def _relationship_row(claim) -> tuple:
-    return (
-        claim.claim_id,
-        claim.run_id,
-        claim.scope_id,
-        claim.source_id,
-        claim.source_identity.scheme,
-        claim.source_identity.value,
-        claim.relation.value,
-        claim.capability.value,
-        None if claim.target_identity is None else claim.target_identity.scheme,
-        None if claim.target_identity is None else claim.target_identity.value,
-        claim.target_text,
-        claim.resolution.value,
-        claim.range.byte_start,
-        claim.range.byte_end,
-        claim.evidence_level.value,
-        int(claim.ambiguity),
-    )
-
-
-def _append_analysis_rows(rows: dict[str, list], analysis) -> None:
-    scope_run = {scope.scope_id: scope.run_id for scope in analysis.scopes}
-    rows["coverage"].extend(
-        _coverage_row(coverage, scope_run) for coverage in analysis.coverage
-    )
-    rows["symbol_claim"].extend(_symbol_row(claim) for claim in analysis.symbols)
-    rows["relationship_claim"].extend(
-        _relationship_row(claim) for claim in analysis.relationships
-    )
-
-
-def _diagnostic_row(diagnostic) -> tuple:
-    return (
-        diagnostic.diagnostic_id,
-        diagnostic.run_id,
-        diagnostic.scope_id,
-        diagnostic.source_id,
-        diagnostic.capability.value,
-        diagnostic.severity.value,
-        diagnostic.code,
-        diagnostic.message,
-        diagnostic.range.byte_start,
-        diagnostic.range.byte_end,
-        diagnostic.evidence_level.value,
-    )
-
-
-def _append_diagnostic_rows(rows: dict[str, list], analysis) -> None:
-    for diagnostic in analysis.diagnostics:
-        rows["diagnostic"].append(_diagnostic_row(diagnostic))
-        rows["diagnostic_related"].extend(
-            (
-                diagnostic.diagnostic_id,
-                ordinal,
-                diagnostic.scope_id,
-                related.source_id,
-                related.message,
-                related.range.byte_start,
-                related.range.byte_end,
-            )
-            for ordinal, related in enumerate(diagnostic.related)
-        )
-
-
-def _append_validity_rows(rows: dict[str, list], analysis) -> None:
-    for validity in analysis.validity:
-        subject = [None, None, None]
-        subject[{"symbol": 0, "relationship": 1, "diagnostic": 2}[validity.subject_kind.value]] = (
-            validity.subject_id
-        )
-        rows["validity"].append(
-            (
-                validity.validity_id,
-                *subject,
-                validity.status.value,
-                validity.stale_reason,
-            )
-        )
-
-
-def _v3_batch_rows(
-    rows: dict[str, list],
-    batch,
-    total_rows: int,
-    publication_generation_id: str,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope,
-) -> int:
-    _require_batch_type(batch)
-    analysis = batch.analysis
-    run = analysis.run
-    _require_batch_scope(run, repository_scope)
-    total_rows = _reserve_batch_rows(rows, _batch_additions(run, analysis), total_rows)
-    capability_rows, scope_rows = _capability_scope_rows(run, analysis)
-    _append_run_row(
-        rows,
-        run,
-        capability_rows,
-        scope_rows,
-        publication_generation_id,
-        publication_expected_active,
-    )
-    rows["run_capability"].extend(
-        (run.run_id, capability.value)
-        for capability in run.declared_capabilities
-    )
-    _append_scope_rows(rows, run, analysis)
-    _append_analysis_rows(rows, analysis)
-    _append_diagnostic_rows(rows, analysis)
-    _append_validity_rows(rows, analysis)
-    return total_rows
-
-
-def _v3_rows(
-    verified_analyses: Sequence[VerifiedAnalysisBatch],
-    *,
-    publication_generation_id: str,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope,
-) -> dict[str, list[tuple[object, ...]]]:
-    rows: dict[str, list[tuple[object, ...]]] = {table: [] for table in _V3_TABLE_NAMES}
-    total_rows = 0
-    for batch in verified_analyses:
-        total_rows = _v3_batch_rows(
-            rows,
-            batch,
-            total_rows,
-            publication_generation_id,
-            publication_expected_active,
-            repository_scope,
-        )
-    return rows
 
 def _closed(record: Mapping[str, object], expected: frozenset[str], label: str) -> None:
     if not isinstance(record, Mapping):
@@ -1192,80 +516,6 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
-
-
-def _collected_verified(
-    verified_analyses: Iterable[VerifiedAnalysisBatch],
-) -> tuple[VerifiedAnalysisBatch, ...]:
-    verified_values: list[VerifiedAnalysisBatch] = []
-    for batch in verified_analyses:
-        if len(verified_values) >= MAX_VALIDATION_ROWS:
-            raise ValueError("verified analysis row ceiling exceeded")
-        verified_values.append(batch)
-    return tuple(verified_values)
-
-
-def _v3_extension_rows(
-    verified: tuple[VerifiedAnalysisBatch, ...],
-    publication_generation_id: str | None,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope | None,
-) -> dict[str, list]:
-    generation_id = _text(
-        publication_generation_id, "publication_generation_id", maximum=128
-    )
-    expected_active = _text(
-        publication_expected_active,
-        "publication_expected_active",
-        maximum=128,
-        optional=True,
-    )
-    if not isinstance(repository_scope, RepositoryScope):
-        raise TypeError("repository_scope must be a RepositoryScope for evidence-graph/v3")
-    scope = RepositoryScope.from_dict(repository_scope.as_dict())
-    assert generation_id is not None
-    return _v3_rows(
-        verified,
-        publication_generation_id=generation_id,
-        publication_expected_active=expected_active,
-        repository_scope=scope,
-    )
-
-
-def _require_no_publication_context(
-    publication_generation_id: str | None,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    if any(
-        value is not None
-        for value in (
-            publication_generation_id,
-            publication_expected_active,
-            repository_scope,
-        )
-    ):
-        raise ValueError("publication context is only valid for evidence-graph/v3")
-
-
-def _extension_rows_for(
-    schema: GraphSchema,
-    verified: tuple[VerifiedAnalysisBatch, ...],
-    publication_generation_id: str | None,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope | None,
-) -> dict[str, list]:
-    if schema is GraphSchema.V3:
-        return _v3_extension_rows(
-            verified,
-            publication_generation_id,
-            publication_expected_active,
-            repository_scope,
-        )
-    _require_no_publication_context(
-        publication_generation_id, publication_expected_active, repository_scope
-    )
-    return {}
 
 
 def _require_regular_parent(path: Path) -> None:
@@ -1683,27 +933,13 @@ def _normalized_generation_rows(
     return normalized
 
 
-def _write_v3_tables(database: sqlite3.Connection, extension_rows: dict[str, list]) -> None:
-    for table in _V3_TABLE_NAMES:
-        table_rows = extension_rows[table]
-        if table_rows:
-            slots = ", ".join("?" for _ in table_rows[0])
-            database.executemany(
-                f"INSERT INTO {table} VALUES ({slots})", table_rows
-            )
-
-
 def _write_generation_tables(
     database: sqlite3.Connection,
     schema: GraphSchema,
     normalized: dict[str, list[tuple]],
-    extension_rows: dict[str, list],
 ) -> None:
-    database.executescript(
-        "BEGIN IMMEDIATE;\n"
-        + _SCHEMA
-        + (_V3_EXTENSION_SCHEMA if schema is GraphSchema.V3 else "")
-    )
+    del schema
+    database.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA)
     database.executemany(
         "INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized["sources"]
     )
@@ -1723,9 +959,7 @@ def _write_generation_tables(
     database.executemany(
         "INSERT INTO dependency VALUES (?, ?, ?, ?, ?)", normalized["dependencies"]
     )
-    if schema is GraphSchema.V3:
-        _write_v3_tables(database, extension_rows)
-    database.execute(f"PRAGMA user_version={2 if schema is GraphSchema.V2 else 3}")
+    database.execute("PRAGMA user_version=2")
     violations = database.execute("PRAGMA foreign_key_check").fetchone()
     if violations is not None:
         raise ValueError("Evidence Graph records violate referential integrity")
@@ -1749,7 +983,6 @@ def _built_generation_database(
     temporary: Path,
     schema: GraphSchema,
     normalized: dict[str, list[tuple]],
-    extension_rows: dict[str, list],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     monotonic: Callable[[], float],
@@ -1761,7 +994,7 @@ def _built_generation_database(
             _build_progress_handler(deadline, cancelled, monotonic),
             PROGRESS_OPCODES,
         )
-        _write_generation_tables(database, schema, normalized, extension_rows)
+        _write_generation_tables(database, schema, normalized)
         database.commit()
         _check_build_stop(deadline, cancelled, monotonic)
     except sqlite3.OperationalError as exc:
@@ -1779,9 +1012,6 @@ def _published_database(
     temporary: Path,
     path: Path,
     schema: GraphSchema,
-    publication_generation_id: str | None,
-    publication_expected_active: str | None,
-    repository_scope: RepositoryScope | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1798,11 +1028,6 @@ def _published_database(
     validate_generation_database(
         temporary,
         schema=schema,
-        publication_generation_id=publication_generation_id,
-        publication_expected_active=(
-            publication_expected_active if schema is GraphSchema.V3 else _UNSET
-        ),
-        repository_scope=repository_scope,
         deadline=deadline,
         cancelled=cancelled,
         monotonic=monotonic,
@@ -1835,10 +1060,6 @@ def create_generation_database(
     evidence: Iterable[Mapping[str, object]],
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
-    verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
-    publication_generation_id: str | None = None,
-    publication_expected_active: str | None = None,
-    repository_scope: RepositoryScope | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1846,16 +1067,6 @@ def create_generation_database(
     """Create one immutable database using only the explicitly selected schema."""
     if not isinstance(schema, GraphSchema):
         raise TypeError("schema must be a GraphSchema")
-    verified = _collected_verified(verified_analyses)
-    if schema is GraphSchema.V2 and verified:
-        raise ValueError("verified analyses require explicit evidence-graph/v3")
-    extension_rows = _extension_rows_for(
-        schema,
-        verified,
-        publication_generation_id,
-        publication_expected_active,
-        repository_scope,
-    )
     path, temporary = _prepared_database_path(database_path)
     try:
         normalized = _normalized_generation_rows(
@@ -1872,19 +1083,9 @@ def create_generation_database(
             monotonic,
         )
         _built_generation_database(
-            temporary, schema, normalized, extension_rows, deadline, cancelled, monotonic
+            temporary, schema, normalized, deadline, cancelled, monotonic
         )
-        _published_database(
-            temporary,
-            path,
-            schema,
-            publication_generation_id,
-            publication_expected_active,
-            repository_scope,
-            deadline,
-            cancelled,
-            monotonic,
-        )
+        _published_database(temporary, path, schema, deadline, cancelled, monotonic)
         return schema
     except BaseException:
         _discarded_temporary(temporary)
@@ -2210,281 +1411,6 @@ def _validate_stored_records(
     _check_build_stop(deadline, cancelled, monotonic)
 
 
-def _persisted_run_header(database: sqlite3.Connection, run_id: str):
-    run = database.execute(
-        "SELECT source_manifest_sha256,expected_scope_count,expected_scope_set_sha256,"
-        "declared_capability_count,declared_capabilities_sha256 "
-        "FROM analyzer_run WHERE run_id=?",
-        (run_id,),
-    ).fetchone()
-    if run is None:
-        raise ValueError("analyzer run is missing")
-    return run
-
-
-def _scope_set_matches(scopes: list, scope_rows: list, run) -> bool:
-    return (
-        all(row[1] == run[0] for row in scopes)
-        and len(scope_rows) == run[1]
-        and _set_sha256(scope_rows) == run[2]
-    )
-
-
-def _require_scope_set(database: sqlite3.Connection, run_id: str, run) -> list:
-    scopes = database.execute(
-        "SELECT scope_id,source_manifest_sha256,build_target,build_configuration "
-        "FROM analysis_scope WHERE run_id=? ORDER BY scope_id",
-        (run_id,),
-    ).fetchall()
-    scope_rows = [
-        {
-            "scope_id": row[0],
-            "source_manifest_sha256": row[1],
-            "target": row[2],
-            "configuration": row[3],
-        }
-        for row in scopes
-    ]
-    if not _scope_set_matches(scopes, scope_rows, run):
-        raise ValueError("persisted expected scope set is incomplete")
-    return scopes
-
-
-def _require_capability_set(database: sqlite3.Connection, run_id: str, run) -> list[str]:
-    capabilities = [
-        {"capability": row[0]}
-        for row in database.execute(
-            "SELECT capability FROM run_capability WHERE run_id=? ORDER BY capability",
-            (run_id,),
-        ).fetchall()
-    ]
-    if len(capabilities) != run[3] or _set_sha256(capabilities) != run[4]:
-        raise ValueError("persisted declared capability set is incomplete")
-    return [row["capability"] for row in capabilities]
-
-
-def _require_captured_source_hash(
-    database: sqlite3.Connection, source_id: str, source_sha256: str
-) -> None:
-    stored = database.execute(
-        "SELECT sha256 FROM source WHERE source_id=?", (source_id,)
-    ).fetchone()
-    if stored is None or stored[0] != source_sha256:
-        raise ValueError("persisted expected source hash does not match captured source")
-
-
-def _require_scope_sources(database: sqlite3.Connection, scope_id: str) -> list:
-    expected_count, expected_sha256 = database.execute(
-        "SELECT expected_source_count,expected_source_set_sha256 "
-        "FROM analysis_scope WHERE scope_id=?",
-        (scope_id,),
-    ).fetchone()
-    sources = database.execute(
-        "SELECT source_id,source_sha256,disposition FROM expected_source "
-        "WHERE scope_id=? ORDER BY source_id",
-        (scope_id,),
-    ).fetchall()
-    source_rows = [
-        {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
-        for row in sources
-    ]
-    if len(source_rows) != expected_count or _set_sha256(source_rows) != expected_sha256:
-        raise ValueError("persisted expected source set is incomplete")
-    for source_id, source_sha256, _disposition in sources:
-        _require_captured_source_hash(database, source_id, source_sha256)
-    return sources
-
-
-def _expected_coverage_keys(sources: list, capability_values: list[str]) -> set:
-    return {
-        (source_id, capability)
-        for source_id, _sha256, _disposition in sources
-        for capability in capability_values
-    }
-
-
-def _require_scope_coverage(
-    database: sqlite3.Connection,
-    scope_id: str,
-    sources: list,
-    capability_values: list[str],
-) -> None:
-    expected_coverage = _expected_coverage_keys(sources, capability_values)
-    actual_coverage = {
-        (row[0], row[1])
-        for row in database.execute(
-            "SELECT source_id,capability FROM coverage WHERE scope_id=?",
-            (scope_id,),
-        ).fetchall()
-    }
-    coverage_count = database.execute(
-        "SELECT count(*) FROM coverage WHERE scope_id=?", (scope_id,)
-    ).fetchone()[0]
-    if actual_coverage != expected_coverage or coverage_count != len(expected_coverage):
-        raise ValueError("coverage does not span expected sources and capabilities")
-
-
-def validate_persisted_scope(database: sqlite3.Connection, run_id: str) -> None:
-    run = _persisted_run_header(database, run_id)
-    scopes = _require_scope_set(database, run_id, run)
-    capability_values = _require_capability_set(database, run_id, run)
-    for scope_id, _manifest, _target, _configuration in scopes:
-        sources = _require_scope_sources(database, scope_id)
-        _require_scope_coverage(database, scope_id, sources, capability_values)
-
-
-def _require_optional_run_digests(row: sqlite3.Row) -> None:
-    for column in ("receipt_sha256", "receipt_output_sha256"):
-        if row[column] is not None:
-            _digest(row[column], column)
-
-
-def _require_run_identity(row: sqlite3.Row) -> None:
-    component_names = AnalysisIdentity._component_names()
-    identity = AnalysisIdentity(
-        **{name: _digest(row[name], name) for name in component_names},
-        position_encoding=PositionEncoding(row["position_encoding"]),
-        analysis_sha256=_digest(row["analysis_sha256"], "analysis_sha256"),
-    )
-    if identity.recompute_analysis_sha256() != identity.analysis_sha256:
-        raise ValueError("persisted analysis_sha256 does not match its components")
-    for column in (
-        "executable_sha256",
-        "declared_capabilities_sha256",
-        "expected_scope_set_sha256",
-    ):
-        _digest(row[column], column)
-    _require_optional_run_digests(row)
-
-
-def _require_run_scope_binding(
-    row: sqlite3.Row,
-    publication_expected_active: object,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    if publication_expected_active is not _UNSET and (
-        row["publication_expected_active"] != publication_expected_active
-    ):
-        raise ValueError("analyzer run expected active generation does not match publication")
-    if repository_scope is not None and (
-        row["repository_id"],
-        row["checkout_id"],
-    ) != (repository_scope.repository_id, repository_scope.checkout_id):
-        raise ValueError("analyzer run repository or checkout does not match publication scope")
-
-
-def _require_run_publication(
-    row: sqlite3.Row,
-    publication_generation_id: str | None,
-    publication_expected_active: object,
-    repository_scope: RepositoryScope | None,
-    source_manifest_sha256: str | None,
-) -> None:
-    if source_manifest_sha256 is not None and row["source_manifest_sha256"] != source_manifest_sha256:
-        raise ValueError("analyzer run source manifest does not match generation manifest")
-    if publication_generation_id is not None and (
-        row["publication_generation_id"] != publication_generation_id
-    ):
-        raise ValueError("analyzer run publication generation does not match generation manifest")
-    _require_run_scope_binding(row, publication_expected_active, repository_scope)
-
-
-def _require_claim_ranges(database: sqlite3.Connection) -> None:
-    for table in ("symbol_claim", "relationship_claim", "diagnostic"):
-        invalid_range = database.execute(
-            f"SELECT 1 FROM {table} c JOIN source s USING(source_id) "
-            "WHERE c.byte_start < 0 OR c.byte_end <= c.byte_start "
-            "OR c.byte_end > s.size LIMIT 1"
-        ).fetchone()
-        if invalid_range is not None:
-            raise ValueError(f"persisted {table} range is outside its captured source")
-    invalid_related_range = database.execute(
-        "SELECT 1 FROM diagnostic_related r JOIN source s USING(source_id) "
-        "WHERE r.byte_start < 0 OR r.byte_end <= r.byte_start "
-        "OR r.byte_end > s.size LIMIT 1"
-    ).fetchone()
-    if invalid_related_range is not None:
-        raise ValueError("persisted diagnostic_related range is outside its captured source")
-
-
-def _slice_key_sets(stored_slices: list) -> tuple[set, set]:
-    stored_keys = {(row[0], row[1], row[2], row[3]) for row in stored_slices}
-    selected_keys = {
-        (row[0], row[1], row[2], row[3]) for row in stored_slices if row[4] == 1
-    }
-    return stored_keys, selected_keys
-
-
-def _require_slice_cover(database: sqlite3.Connection) -> None:
-    required_slices = {
-        (_slice_key(row[0], row[1], row[2]), row[0], row[1], row[2])
-        for row in database.execute(
-            "SELECT s.run_id,s.scope_id,c.capability FROM analysis_scope s "
-            "JOIN run_capability c ON c.run_id=s.run_id"
-        )
-    }
-    stored_slices = list(
-        database.execute(
-            "SELECT slice_key,run_id,scope_id,capability,selected FROM slice_activation"
-        )
-    )
-    stored_keys, selected_keys = _slice_key_sets(stored_slices)
-    if stored_keys != required_slices or selected_keys != required_slices:
-        raise ValueError("selected slices do not exactly cover deterministic slice keys")
-
-
-def _require_validity_binding(
-    database: sqlite3.Connection, column: str, expected: set
-) -> None:
-    actual = [
-        row[0]
-        for row in database.execute(
-            f"SELECT {column} FROM validity WHERE {column} IS NOT NULL"
-        )
-    ]
-    if len(actual) != len(set(actual)) or set(actual) != expected:
-        raise ValueError("validity must bind every claim subject exactly once")
-
-
-def _require_validity_bindings(database: sqlite3.Connection) -> None:
-    subjects = {
-        "symbol_claim_id": {row[0] for row in database.execute("SELECT claim_id FROM symbol_claim")},
-        "relationship_claim_id": {
-            row[0] for row in database.execute("SELECT claim_id FROM relationship_claim")
-        },
-        "diagnostic_id": {
-            row[0] for row in database.execute("SELECT diagnostic_id FROM diagnostic")
-        },
-    }
-    for column, expected in subjects.items():
-        _require_validity_binding(database, column, expected)
-
-
-def _validate_v3_sets(
-    database: sqlite3.Connection,
-    *,
-    publication_generation_id: str | None = None,
-    publication_expected_active: object = _UNSET,
-    repository_scope: RepositoryScope | None = None,
-    source_manifest_sha256: str | None = None,
-) -> None:
-    run_rows = database.execute("SELECT * FROM analyzer_run ORDER BY run_id").fetchall()
-    for row in run_rows:
-        _require_run_identity(row)
-        _require_run_publication(
-            row,
-            publication_generation_id,
-            publication_expected_active,
-            repository_scope,
-            source_manifest_sha256,
-        )
-    for row in run_rows:
-        validate_persisted_scope(database, row["run_id"])
-    _require_claim_ranges(database)
-    _require_slice_cover(database)
-    _require_validity_bindings(database)
-
-
 def _names_of_type(schema_rows: list, kind: str) -> set[str]:
     return {row["name"] for row in schema_rows if row["type"] == kind}
 
@@ -2494,8 +1420,7 @@ def _other_object_types(schema_rows: list) -> set[str]:
 
 
 def _expected_schema_objects(schema: GraphSchema) -> tuple[set[str], set[str]]:
-    if schema is GraphSchema.V3:
-        return set(_TABLE_COLUMNS) | _V3_TABLES, set(_EXPLICIT_INDEXES) | set(_V3_INDEXES)
+    del schema
     return set(_TABLE_COLUMNS), set(_EXPLICIT_INDEXES)
 
 
@@ -2612,10 +1537,6 @@ def _validate_connection(
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
-    publication_generation_id: str | None = None,
-    publication_expected_active: object = _UNSET,
-    repository_scope: RepositoryScope | None = None,
-    source_manifest_sha256: str | None = None,
 ) -> None:
     """Validate the closed Evidence Graph file format and all stored integrity invariants."""
     _validation_deadline(database, deadline, monotonic, cancelled)
@@ -2677,14 +1598,6 @@ LIMIT 1
             monotonic=monotonic,
             cancelled=cancelled,
         )
-        if schema is GraphSchema.V3:
-            _validate_v3_sets(
-                database,
-                publication_generation_id=publication_generation_id,
-                publication_expected_active=publication_expected_active,
-                repository_scope=repository_scope,
-                source_manifest_sha256=source_manifest_sha256,
-            )
     except sqlite3.Error as exc:
         _raise_validation_error(
             exc,
@@ -2743,10 +1656,6 @@ def validate_generation_database(
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
-    publication_generation_id: str | None = None,
-    publication_expected_active: object = _UNSET,
-    repository_scope: RepositoryScope | None = None,
-    source_manifest_sha256: str | None = None,
 ) -> None:
     """Reopen and validate one exact, closed Evidence Graph database contract."""
     if not isinstance(schema, GraphSchema):
@@ -2763,10 +1672,6 @@ def validate_generation_database(
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
-            publication_generation_id=publication_generation_id,
-            publication_expected_active=publication_expected_active,
-            repository_scope=repository_scope,
-            source_manifest_sha256=source_manifest_sha256,
         )
     finally:
         database.close()
@@ -2919,22 +1824,6 @@ def _known_format_key(key: str | None, receipt: Path) -> bool:
     return False
 
 
-def _v3_validation_context(
-    manifest: Mapping[str, object], schema: GraphSchema
-) -> dict[str, object]:
-    if schema is not GraphSchema.V3:
-        return {
-            "publication_generation_id": None,
-            "repository_scope": None,
-            "source_manifest_sha256": None,
-        }
-    return {
-        "publication_generation_id": manifest.get("generation_id"),
-        "repository_scope": RepositoryScope.from_dict(manifest.get("repository_scope")),
-        "source_manifest_sha256": manifest.get("source_manifest_sha256"),
-    }
-
-
 def _validate_connection_once(
     database: sqlite3.Connection,
     manifest: Mapping[str, object],
@@ -2956,7 +1845,6 @@ def _validate_connection_once(
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,
-        **_v3_validation_context(manifest, schema),
     )
     if key is not None:
         _FORMAT_VALIDATED.add(key)

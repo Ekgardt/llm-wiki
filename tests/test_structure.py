@@ -260,7 +260,11 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
         assert "read-only LSP" in normalized
         assert "Serena runtime dependency" in normalized
         assert "persistent daemon" in normalized
-        assert "Tasks 6-16 are superseded" in normalized
+        # The whole 2026-07-21 Plan A is superseded since 2026-09-18, its
+        # foundation included:
+        # docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md
+        assert "2026-07-21 Plan A is superseded" in normalized
+        assert "Tasks 6-16 were superseded" in normalized
     for stale in (
         "normalized navigation is not implemented",
         "normalized navigation facade, and MCP routing remain unimplemented",
