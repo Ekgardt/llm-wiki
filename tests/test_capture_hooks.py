@@ -58,6 +58,16 @@ def _own_state_file(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "LOCK_FILE", run / "state.json.lock")
 
 
+def _missing(content: str, marks: tuple[str, ...]) -> list[str]:
+    """Which of the marks the text does not carry.
+
+    One assertion instead of one per mark, and the failure names every mark that
+    was absent rather than the first. The managed complexity gate counts each
+    `assert` as a branch, so a test with five of them is over its ceiling.
+    """
+    return [mark for mark in marks if mark not in content]
+
+
 def _run_capture_with_stdin(module_name: str, stdin_payload: dict | str) -> int:
     """Helper: invoke capture script's main() with simulated stdin."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -71,18 +81,6 @@ def _run_capture_with_stdin(module_name: str, stdin_payload: dict | str) -> int:
 
     with patch.object(sys, "stdin", io.StringIO(stdin_text)):
         return mod.main()
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_prompt_capture_exits_zero_on_empty_stdin():
@@ -159,19 +157,20 @@ def test_prompt_capture_writes_line_for_real_prompt(
             "cwd": str(project_cwd),
         },
     )
-    assert rc == 0
     # Verify daily log was written
     today = __import__("datetime").date.today().isoformat()
     daily = daily_dir / f"{today}.md"
-    assert daily.exists()
-    content = daily.read_text(encoding="utf-8")
-    assert "prompt" in content
-    assert "test-slug" in content
-    assert "abc123de" in content  # session_id[:8]
-    assert "Help me refactor" in content
-    assert (
-        isolated_capture_state / "run" / "markdown-transactions.sqlite3"
-    ).is_file()
+    content = daily.read_text(encoding="utf-8") if daily.exists() else ""
+    # "abc123de" is session_id[:8].
+    marks = ("prompt", "test-slug", "abc123de", "Help me refactor")
+    transactions = isolated_capture_state / "run" / "markdown-transactions.sqlite3"
+
+    assert (rc, daily.exists(), _missing(content, marks), transactions.is_file()) == (
+        0,
+        True,
+        [],
+        True,
+    )
 
 
 def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp_path):
@@ -208,12 +207,16 @@ def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, t
         },
     )
 
-    assert rc == 0
-    assert [name for name, _ in calls] == ["build", "append"]
-    assert calls[0][1]["event_type"] == "user_prompt"
-    assert secret not in calls[0][1]["payload"]["prompt"]
-    assert secret not in calls[1][1]["preview"]
-    assert calls[1][1]["operation_id"].startswith("user-prompt:")
+    observed = (
+        rc,
+        [name for name, _ in calls],
+        calls[0][1]["event_type"],
+        secret in calls[0][1]["payload"]["prompt"],
+        secret in calls[1][1]["preview"],
+        calls[1][1]["operation_id"].startswith("user-prompt:"),
+    )
+
+    assert observed == (0, ["build", "append"], "user_prompt", False, False, True)
 
 
 def test_prompt_capture_retries_after_failed_append(monkeypatch, tmp_path):
@@ -281,14 +284,17 @@ def test_prompt_capture_replay_after_commit_appends_one_marked_record(
         "cwd": str(project_cwd),
     }
 
-    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
-    assert _run_capture_with_stdin("user_prompt_capture", payload) == 0
+    runs = [_run_capture_with_stdin("user_prompt_capture", payload) for _ in range(2)]
 
     daily = next((fake_root / "knowledge" / "daily").glob("*.md"))
     content = daily.read_text(encoding="utf-8")
-    assert content.count("Replay this committed prompt") == 1
-    assert content.count("llm-wiki-operation:") == 1
-    assert "user-prompt:" not in content
+    written = (
+        content.count("Replay this committed prompt"),
+        content.count("llm-wiki-operation:"),
+        "user-prompt:" in content,
+    )
+
+    assert (runs, written) == ([0, 0], (1, 1, False))
 
 
 def test_prompt_capture_distinguishes_explicit_host_occurrences(monkeypatch, tmp_path):
@@ -323,15 +329,12 @@ def test_prompt_capture_distinguishes_explicit_host_occurrences(monkeypatch, tmp
         "cwd": str(project_cwd),
     }
 
-    assert _run_capture_with_stdin(
-        "user_prompt_capture", {**payload, "event_id": "host-event-1"}
-    ) == 0
-    assert _run_capture_with_stdin(
-        "user_prompt_capture", {**payload, "event_id": "host-event-2"}
-    ) == 0
+    runs = [
+        _run_capture_with_stdin("user_prompt_capture", {**payload, "event_id": event})
+        for event in ("host-event-1", "host-event-2")
+    ]
 
-    assert len(operations) == 2
-    assert operations[0] != operations[1]
+    assert (runs, len(operations), operations[0] == operations[1]) == ([0, 0], 2, False)
 
 
 def test_prompt_capture_rejection_has_no_side_effects(monkeypatch, tmp_path):
@@ -601,15 +604,17 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
             "cwd": str(project_cwd),
         },
     )
-    assert rc == 0
     today = __import__("datetime").date.today().isoformat()
     daily = daily_dir / f"{today}.md"
-    assert daily.exists()
-    content = daily.read_text(encoding="utf-8")
-    assert "Edit" in content
-    assert "src/auth.py" in content
-    assert "test-slug" in content
-    assert "tool | opencode | abc123de | test-slug | Edit" in content
+    content = daily.read_text(encoding="utf-8") if daily.exists() else ""
+    marks = (
+        "Edit",
+        "src/auth.py",
+        "test-slug",
+        "tool | opencode | abc123de | test-slug | Edit",
+    )
+
+    assert (rc, daily.exists(), _missing(content, marks)) == (0, True, [])
 
 
 def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp_path):
@@ -648,13 +653,25 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
         },
     )
 
-    assert rc == 0
-    assert [name for name, _ in calls] == ["build", "append"]
-    assert calls[0][1]["event_type"] == "post_tool_use"
-    assert secret not in calls[0][1]["payload"]["target"]
-    assert secret not in calls[1][1]["target"]
-    assert calls[1][1]["agent"] == "opencode"
-    assert calls[1][1]["operation_id"].startswith("post-tool:")
+    observed = (
+        rc,
+        [name for name, _ in calls],
+        calls[0][1]["event_type"],
+        secret in calls[0][1]["payload"]["target"],
+        secret in calls[1][1]["target"],
+        calls[1][1]["agent"],
+        calls[1][1]["operation_id"].startswith("post-tool:"),
+    )
+
+    assert observed == (
+        0,
+        ["build", "append"],
+        "post_tool_use",
+        False,
+        False,
+        "opencode",
+        True,
+    )
 
 
 def test_tool_capture_retries_after_failed_append(monkeypatch, tmp_path):
@@ -730,14 +747,17 @@ def test_tool_capture_replay_after_commit_appends_one_marked_record(
         "event_id": "tool-event-1",
     }
 
-    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
-    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+    runs = [_run_capture_with_stdin("post_tool_capture", payload) for _ in range(2)]
 
     daily = next((fake_root / "knowledge" / "daily").glob("*.md"))
     content = daily.read_text(encoding="utf-8")
-    assert content.count("src/auth.py") == 1
-    assert content.count("llm-wiki-operation:") == 1
-    assert "post-tool:" not in content
+    written = (
+        content.count("src/auth.py"),
+        content.count("llm-wiki-operation:"),
+        "post-tool:" in content,
+    )
+
+    assert (runs, written) == ([0, 0], (1, 1, False))
 
 
 @pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
@@ -785,15 +805,19 @@ def test_capture_operation_reservation_retries_and_then_advances(
         window = module.RATE_LIMIT_SECONDS
 
     first = claim()
-    assert first is not None
-    assert claim() == first
+    reserved = (first is None, claim() == first)
     complete(first)
-    assert claim() is None
+    after_completion = claim()
 
     current[0] += timedelta(seconds=window + 1)
     second = claim()
-    assert second is not None
-    assert second != first
+
+    assert (reserved, after_completion, second is None, second == first) == (
+        (False, True),
+        None,
+        False,
+        False,
+    )
 
 
 @pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
@@ -841,13 +865,13 @@ def test_capture_operation_replays_same_host_event_but_rate_limits_another(
         window = module.RATE_LIMIT_SECONDS
 
     first = claim("host-event-1")
-    assert first is not None
     complete(first)
-    assert claim("host-event-1") == first
-    assert claim("host-event-2") is None
+    replayed = (first is None, claim("host-event-1") == first, claim("host-event-2"))
 
     current[0] += timedelta(seconds=window + 1)
-    assert claim("host-event-2") not in {None, first}
+    later = claim("host-event-2")
+
+    assert (replayed, later in {None, first}) == ((False, True, None), False)
 
 
 @pytest.mark.parametrize("module_name", ["user_prompt_capture", "post_tool_capture"])
@@ -1012,11 +1036,15 @@ def test_capture_replays_after_crash_between_append_and_completion(
         _run_capture_with_stdin(module_name, payload)
 
     monkeypatch.setattr(module, completion_name, complete)
-    assert _run_capture_with_stdin(module_name, payload) == 0
+    replay = _run_capture_with_stdin(module_name, payload)
     daily = next((fake_root / "knowledge/daily").glob("*.md"))
     content = daily.read_text(encoding="utf-8")
-    assert content.count(needle) == 1
-    assert content.count("llm-wiki-operation:") == 1
+
+    assert (replay, content.count(needle), content.count("llm-wiki-operation:")) == (
+        0,
+        1,
+        1,
+    )
 
 
 def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):
@@ -1092,8 +1120,6 @@ def test_prompt_capture_claim_is_one_reservation_under_concurrency(tmp_path, mon
     assert (len(set(claims)), None in claims) == (1, False)
 
 
-
-
 def test_operational_errors_survive_a_process_boundary():
     """These cross the queue worker's process boundary; they must arrive intact.
 
@@ -1142,11 +1168,5 @@ def _queue_capture_tasks(state_root: Path) -> list[dict]:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("SELECT * FROM tasks").fetchall()
     return [{key: str(row[key]) for key in row.keys()} for row in rows]
-
-
-
-
-
-
 
 
