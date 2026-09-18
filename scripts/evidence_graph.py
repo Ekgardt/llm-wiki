@@ -71,7 +71,6 @@ PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
 IO_CHUNK_BYTES = 64 * 1024
-_UNSET = object()
 
 _SHA256 = frozenset("0123456789abcdef")
 _NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
