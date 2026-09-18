@@ -7729,9 +7729,10 @@ class MarkdownCoordinator:
         stop: threading.Event,
         lost: threading.Event,
     ) -> threading.Thread:
+        # The gate is already taken; its expiry is counted from here.
         heartbeat = threading.Thread(
             target=self._heartbeat_canonical_writer_gate,
-            args=(registry, lease, stop, lost),
+            args=(registry, lease, stop, lost, time.monotonic()),
             name="markdown-writer-heartbeat",
             daemon=True,
         )
@@ -7810,6 +7811,7 @@ class MarkdownCoordinator:
         owner: OwnerLease,
         stop: threading.Event,
         lost: threading.Event,
+        held_since: float,
     ) -> None:
         """Renew the gate and its projection; a busy database is not a lost gate.
 
@@ -7822,6 +7824,7 @@ class MarkdownCoordinator:
             interval=owner.heartbeat_seconds,
             lease_seconds=owner.ttl_seconds,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=held_since,
             stop=stop,
         )
         if ended is not None:

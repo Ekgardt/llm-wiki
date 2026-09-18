@@ -14085,6 +14085,8 @@ class _SourceFenceHeartbeat:
         self._fence = fence
         self._heartbeat_seconds = heartbeat_seconds
         self._lease_seconds = lease_seconds
+        # The fence row is already written; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.error: Exception | None = None
@@ -14133,6 +14135,7 @@ class _SourceFenceHeartbeat:
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
             attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )
@@ -14162,6 +14165,8 @@ class _LeaseHeartbeat:
         self._lease = lease
         self._heartbeat_seconds = heartbeat_seconds
         self._lease_seconds = lease_seconds
+        # The lease is already claimed; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self.error: Exception | None = None
         self._thread = threading.Thread(
@@ -14189,6 +14194,7 @@ class _LeaseHeartbeat:
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
             attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )

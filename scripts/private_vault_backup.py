@@ -559,6 +559,7 @@ def _maintain_heartbeat(
     lease: OwnerLease,
     stop: threading.Event,
     failures: list[BaseException],
+    held_since: float,
 ) -> None:
     # A busy database is retried until the lease expires; a lost fence is final.
     # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
@@ -570,6 +571,7 @@ def _maintain_heartbeat(
         interval=lease.heartbeat_seconds,
         lease_seconds=lease.ttl_seconds,
         attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+        held_since=held_since,
         stop=stop,
     )
     if ended is not None:
@@ -602,9 +604,11 @@ def _stop_heartbeat(
 def _heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]:
     stop = threading.Event()
     failures: list[BaseException] = []
+    # The owner is already held; its expiry is counted from here.
+    held_since = time.monotonic()
     thread = threading.Thread(
         target=_maintain_heartbeat,
-        args=(registry, lease, stop, failures),
+        args=(registry, lease, stop, failures, held_since),
         name="backup-owner-heartbeat",
         daemon=True,
     )

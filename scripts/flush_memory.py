@@ -785,6 +785,9 @@ class _CaptureKeepAlive:
         self._task_fence = task_fence
         self._intent_fence = intent_fence
         self._owner = owner
+        # Every claim above is already held, so the expiry is counted from here
+        # and not from the moment the thread below first gets to run.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
 
@@ -809,6 +812,7 @@ class _CaptureKeepAlive:
             interval=CAPTURE_KEEPALIVE_SECONDS,
             lease_seconds=INTENT_FENCE_SECONDS,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
         )
 

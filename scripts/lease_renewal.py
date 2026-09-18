@@ -36,11 +36,17 @@ def _attempt(renew: Callable[[], object]) -> BaseException | None:
 class _Deadline:
     """When the lease runs out, measured from the start of its last good renewal."""
 
-    def __init__(self, lease_seconds: float, attempt_seconds: float, monotonic: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        lease_seconds: float,
+        attempt_seconds: float,
+        monotonic: Callable[[], float],
+        held_since: float,
+    ) -> None:
         self._lease_seconds = lease_seconds
         self._attempt_seconds = attempt_seconds
         self._monotonic = monotonic
-        self._expires = monotonic() + lease_seconds
+        self._expires = held_since + lease_seconds
 
     def renewed_at(self, started: float) -> None:
         self._expires = started + self._lease_seconds
@@ -64,6 +70,7 @@ def renew_until_stopped(
     interval: float,
     lease_seconds: float,
     attempt_seconds: float,
+    held_since: float,
     stop: threading.Event,
     transient: Callable[[BaseException], bool] = busy_database,
     wait: Callable[[float], bool] | None = None,
@@ -72,11 +79,16 @@ def renew_until_stopped(
     """Renew every `interval` until `stop`; the error that ended the lease, or None.
 
     `attempt_seconds` is the longest one renewal may block — its database's busy wait.
+    `held_since` is the caller's `monotonic()` reading from the moment the lease was
+    acquired: the expiry is counted from the write, not from this thread's start, and
+    the argument has no default so a new holder cannot leave it out and get the long,
+    unsafe answer. See
+    `docs/research/2026-09-18-a-lease-expires-from-when-it-was-taken.md`.
     `wait(seconds)` returns True when the renewer should stop; it defaults to
     `stop.wait`, and a queue passes its own injected seam.
     """
     waiter = stop.wait if wait is None else wait
-    deadline = _Deadline(lease_seconds, attempt_seconds, monotonic)
+    deadline = _Deadline(lease_seconds, attempt_seconds, monotonic, held_since)
     pause: float | None = interval
     while not waiter(pause):
         started = monotonic()

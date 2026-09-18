@@ -11,6 +11,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -1360,6 +1361,8 @@ def heartbeat_owner(
         registry = OwnershipRegistry(Path(lease.state_root))
     stop = threading.Event()
     failure: list[BaseException] = []
+    # The lease is already written; its expiry is counted from here.
+    held_since = time.monotonic()
 
     def heartbeat() -> None:
         # A busy database is retried until the lease expires; a lost fence is
@@ -1371,6 +1374,7 @@ def heartbeat_owner(
             interval=lease.heartbeat_seconds,
             lease_seconds=lease.ttl_seconds,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=held_since,
             stop=stop,
             wait=lambda seconds: _wait_for_owner_heartbeat(stop, seconds),
         )

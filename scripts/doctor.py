@@ -7031,6 +7031,8 @@ class _MaintenanceHeartbeat:
         self.lease = lease
         self.deadline = deadline
         self.interval = _heartbeat_interval(lease)
+        # The owner row is already written; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._thread: threading.Thread | None = None
@@ -7064,6 +7066,7 @@ class _MaintenanceHeartbeat:
             interval=self.interval,
             lease_seconds=_lease_seconds(self.lease),
             attempt_seconds=reliable_memory.DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             transient=_transient_beat_failure,
         )
