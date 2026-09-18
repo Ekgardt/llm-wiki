@@ -1701,6 +1701,34 @@ _REQUIRED_FCNTL_NAMES = (
     "F_SEAL_SHRINK",
     "F_SEAL_WRITE",
 )
+# Linux gives the file seals the same numbers on every architecture
+# (`include/uapi/linux/fcntl.h`: `F_LINUX_SPECIFIC_BASE` is 1024, `F_ADD_SEALS`
+# is +9 and `F_GET_SEALS` +10; the seal bits are 0x0001 to 0x0008). CPython
+# publishes them only when it was built against headers that declared them, and
+# the interpreter `uv run` uses does not -- which turned this whole path off and
+# skipped about 45 tests in silence. The seals are applied and then read back,
+# so a wrong number cannot publish an unsealed index. See
+# `docs/research/2026-09-18-a-cloned-checkout-keeps-the-private-read.md`.
+_LINUX_SEAL_CONSTANTS = MappingProxyType(
+    {
+        "F_ADD_SEALS": 1033,
+        "F_GET_SEALS": 1034,
+        "F_SEAL_SEAL": 0x0001,
+        "F_SEAL_SHRINK": 0x0002,
+        "F_SEAL_GROW": 0x0004,
+        "F_SEAL_WRITE": 0x0008,
+    }
+)
+
+
+def _seal_constant(name: str) -> int | None:
+    """One file-seal number, from `fcntl` when it has it, else from the ABI."""
+    value = getattr(_fcntl, name, None) if _fcntl is not None else None
+    if isinstance(value, int):
+        return value
+    if not sys.platform.startswith("linux"):
+        return None
+    return _LINUX_SEAL_CONSTANTS.get(name)
 
 
 def _has_all_attributes(module: object, names: Iterable[str]) -> bool:
@@ -1714,7 +1742,7 @@ def _private_index_runtime_available() -> bool:
         return False
     if _fcntl is None:
         return False
-    return _has_all_attributes(_fcntl, _REQUIRED_FCNTL_NAMES)
+    return all(_seal_constant(name) is not None for name in _REQUIRED_FCNTL_NAMES)
 
 
 def _private_index_platform_supported() -> bool:
@@ -2112,6 +2140,20 @@ _ALLOWED_PRIVATE_CONFIG_KEYS = MappingProxyType(
     }
 )
 
+# What `git clone` writes besides `[core]`, and what editors add beside it.
+# These sections say where a branch pushes and pulls; none of their settings
+# changes what git reads of the working tree, so any key is tolerated except the
+# two that can make a read fetch objects. Refusing the sections outright turned
+# the private read off for every cloned repository -- after it had already
+# hashed the index. See
+# `docs/research/2026-09-18-a-cloned-checkout-keeps-the-private-read.md`.
+_INERT_PRIVATE_CONFIG_SECTIONS = MappingProxyType(
+    {
+        "remote": frozenset({"promisor", "partialclonefilter"}),
+        "branch": frozenset(),
+    }
+)
+
 # The keys a private repository config must set for the private read to stand.
 _REQUIRED_PRIVATE_CONFIG_KEYS = frozenset(
     {"core.bare", "core.filemode", "core.repositoryformatversion"}
@@ -2173,7 +2215,16 @@ def _allowed_private_config_pair(
     pair = _config_key_value(line)
     if pair is None:
         return None
+    if section in _INERT_PRIVATE_CONFIG_SECTIONS:
+        return _inert_section_pair(section, pair)
     if pair[0] not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
+        return None
+    return pair
+
+
+def _inert_section_pair(section: str, pair: tuple[str, str]) -> tuple[str, str] | None:
+    """A setting in a section that cannot change what git reads, or a refusal."""
+    if pair[0] in _INERT_PRIVATE_CONFIG_SECTIONS[section]:
         return None
     return pair
 
@@ -2194,9 +2245,20 @@ def _private_config_setting_allowed(
 
 
 def _config_section_header(line: str) -> str | None:
-    """The section this line opens, if it opens one the private read allows."""
-    match = re.fullmatch(r"\[(core|extensions|user)\]", line, flags=re.IGNORECASE)
-    return None if match is None else match.group(1).lower()
+    """The section this line opens, if it opens one the private read allows.
+
+    A subsection (`[remote "origin"]`) opens the same section as its bare form:
+    what may be set there is decided by the key table, not by the name of the
+    remote or branch.
+    """
+    match = re.fullmatch(
+        r"\[(core|extensions|user)\]|\[(remote|branch) \"[^\"\\\\]*\"\]",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return (match.group(1) or match.group(2)).lower()
 
 
 def _private_config_lines_allowed(text: str, hash_name: str, seen: set[str]) -> bool:
@@ -3205,20 +3267,38 @@ def _private_index_fence_ns(hashes: Mapping[str, _VerificationHash]) -> int:
     return max(time.time_ns(), newest + 1_000_000_000)
 
 
+def _seal_numbers() -> dict[str, int] | None:
+    """Every seal number this machine can give, or None when one is missing."""
+    if _fcntl is None:
+        return None
+    numbers = {name: _seal_constant(name) for name in _REQUIRED_FCNTL_NAMES}
+    if any(value is None for value in numbers.values()):
+        return None
+    return numbers
+
+
+def _applied_seals(descriptor: int, numbers: dict[str, int], required: int) -> int | None:
+    """The seals the kernel reports after the request, or None when it refused."""
+    try:
+        _fcntl.fcntl(descriptor, numbers["F_ADD_SEALS"], required)
+        return _fcntl.fcntl(descriptor, numbers["F_GET_SEALS"])
+    except OSError:
+        return None
+
+
 def _seal_private_index(descriptor: int) -> bool:
     """Whether the descriptor could be sealed against every further change."""
-    if _fcntl is None:
+    numbers = _seal_numbers()
+    if numbers is None:
         return False
     required = (
-        _fcntl.F_SEAL_WRITE
-        | _fcntl.F_SEAL_GROW
-        | _fcntl.F_SEAL_SHRINK
-        | _fcntl.F_SEAL_SEAL
+        numbers["F_SEAL_WRITE"]
+        | numbers["F_SEAL_GROW"]
+        | numbers["F_SEAL_SHRINK"]
+        | numbers["F_SEAL_SEAL"]
     )
-    try:
-        _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, required)
-        applied = _fcntl.fcntl(descriptor, _fcntl.F_GET_SEALS)
-    except OSError:
+    applied = _applied_seals(descriptor, numbers, required)
+    if applied is None:
         return False
     return applied & required == required
 
