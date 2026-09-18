@@ -134,8 +134,10 @@ def _backup_path(destination: Path) -> Path:
 
 
 def _create_verified_backup(destination: Path, original: bytes) -> Path:
+    """Binary: a copy of somebody's config keeps that config's own newlines."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     backup = _backup_path(destination)
-    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(backup, flags, 0o600)
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(original)
         handle.flush()

@@ -6261,8 +6261,10 @@ def _lock_metadata(pid: int, token: str, now: datetime) -> bytes:
 
 
 def _create_owned_lock(path: Path, token: str, now: datetime) -> bool:
+    """Binary: the metadata written is the metadata a reader parses back."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(path, flags, 0o600)
     except FileExistsError:
         return False
     try:

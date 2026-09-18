@@ -1784,9 +1784,13 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
-    """Create the lock exclusively and write the claim, or report it is taken."""
+    """Create the lock exclusively and write the claim, or report it is taken.
+
+    Binary: a Windows text-mode descriptor rewrites the claim's newlines.
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(str(lock_file), flags, 0o600)
     except FileExistsError:
         return False
     except PermissionError as error:

@@ -13525,8 +13525,10 @@ def _post_marker_legacy_conflict(state_root: Path) -> None:
 
 
 def _write_durable_file(path: Path, data: bytes) -> None:
+    """Binary: the bytes linked into place are the bytes a conflict compares."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)

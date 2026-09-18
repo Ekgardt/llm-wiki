@@ -522,8 +522,10 @@ class _InstallLock:
 
 
 def _claimed_lock(path: Path, nonce: str) -> bool:
+    """Binary: the lock record written is the record `_lock_record` reads back."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(path, flags, 0o600)
     except FileExistsError:
         return False
     with os.fdopen(descriptor, "wb") as handle:

@@ -166,10 +166,14 @@ def _link_lock(staged: Path, payload: bytes) -> bool:
     return True
 
 
+# Untranslated: the four lines written are the four lines read back.
+_LOCK_WRITE_FLAGS = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+
+
 def _exclusive_write_lock(payload: bytes) -> bool:
     """The fallback where hard links are unsupported: create, then write."""
     try:
-        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(str(LOCK_FILE), _LOCK_WRITE_FLAGS)
     except OSError:
         return False
     try:

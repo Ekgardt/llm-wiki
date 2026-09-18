@@ -791,9 +791,15 @@ def run_nightly(
 
 
 def _write_marker(marker: Path) -> bool:
-    """Create the marker exclusively and stamp it with this process."""
+    """Create the marker exclusively and stamp it with this process.
+
+    The descriptor is binary so that Windows writes the payload's newlines as
+    they are. Research:
+    docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        descriptor = os.open(str(marker), flags)
     except FileExistsError:
         return False
     try:

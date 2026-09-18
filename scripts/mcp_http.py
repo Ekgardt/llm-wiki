@@ -162,7 +162,11 @@ def _write_new_token(path: Path) -> str:
 
 
 _NEW_PRIVATE_FILE_FLAGS = (
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_BINARY", 0)
 )
 
 
@@ -172,10 +176,13 @@ def _write_private_file(path: Path, text: str) -> None:
     Audit 3, B6: the token used to be written with `O_TRUNC`, through any link
     that sat at its path. Research:
     `docs/research/2026-09-17-a-new-token-never-lands-in-someone-elses-file.md`.
+    The descriptor and the stream above it are both untranslated, so the secret
+    reaches disk as the characters it is on every platform. Research:
+    `docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md`.
     """
     descriptor = os.open(path, _NEW_PRIVATE_FILE_FLAGS, TOKEN_FILE_MODE)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
     except OSError:
         path.unlink(missing_ok=True)

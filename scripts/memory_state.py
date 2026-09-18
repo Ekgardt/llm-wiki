@@ -199,6 +199,10 @@ def _sharing_violation(exc: PermissionError) -> bool:
     return sys.platform == "win32" and exc.errno == 13
 
 
+# Untranslated: what the payload says is what the lock file holds.
+_LOCK_OPEN_FLAGS = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
+
+
 def _lock_already_held() -> bool:
     return sys.platform == "win32" and LOCK_FILE.exists()
 
@@ -211,9 +215,15 @@ def _contention(exc: PermissionError, observed_contention: bool) -> bool:
 
 
 def _claim_lock(payload: bytes) -> int | None:
-    """The lock descriptor when it was ours to take, None while contended."""
+    """The lock descriptor when it was ours to take, None while contended.
+
+    The descriptor is binary: a Windows text-mode descriptor would write the
+    payload's newlines as CRLF, `_release_state_lock` would never recognise its
+    own lock again, and the file would outlive every writer. Research:
+    docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md
+    """
     try:
-        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        fd = os.open(str(LOCK_FILE), _LOCK_OPEN_FLAGS)
     except FileExistsError:
         return None
     os.write(fd, payload)

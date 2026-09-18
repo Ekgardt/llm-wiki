@@ -1934,6 +1934,8 @@ def _validate_resource_sizes(resources: Sequence[ManagedResource]) -> None:
 
 
 def _write_preimage(install_root: Path, value: bytes) -> str:
+    """Binary: a preimage addressed by its own digest is stored byte for byte."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     digest = _sha256(value)
     relative = f"preimages/{digest}.bin"
     target = install_root / relative
@@ -1941,7 +1943,7 @@ def _write_preimage(install_root: Path, value: bytes) -> str:
         if target.read_bytes() != value:
             raise InstallControlError("install_preimage_conflict")
         return relative
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(target, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(value)

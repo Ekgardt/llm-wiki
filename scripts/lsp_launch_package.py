@@ -124,7 +124,9 @@ def _remove_made(made: list[Path]) -> None:
 
 
 def _write_sealed_file(path: Path, payload: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, SEALED_FILE_MODE)
+    """Binary: a sealed file holds the payload's bytes, not Windows' idea of them."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, SEALED_FILE_MODE)
     try:
         os.write(descriptor, payload)
     finally:
