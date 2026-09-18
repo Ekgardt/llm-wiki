@@ -43,9 +43,14 @@ def _reasons(path: Path) -> list[str]:
     return [json.loads(line)["reason"] for line in path.read_text("utf-8").splitlines()]
 
 
-def _appending_writer(reason: str) -> threading.Thread:
+def _appending_writer(reason: str, finished: threading.Event) -> threading.Thread:
     record = {"kind": "burst", "reason": reason, "at": "now", "outcome": "lost"}
-    worker = threading.Thread(target=capture_diagnostics._append_failure_line, args=(record,))
+
+    def _append() -> None:
+        capture_diagnostics._append_failure_line(record)
+        finished.set()
+
+    worker = threading.Thread(target=_append)
     worker.start()
     return worker
 
@@ -54,17 +59,18 @@ def test_a_line_appended_during_a_trim_is_not_erased_by_it(trail, monkeypatch):
     """The trim reads every line and writes the file back; an append must not fall in between.
 
     The writer starts after the trim has read the trail and before it replaces it —
-    the window the whole-file rewrite used to lose a line in. `join(0.05)` is the
-    test's own pause: it expects the writer to still be waiting for the lock.
+    the window the whole-file rewrite used to lose a line in. The 0.05 s is the test's
+    own pause, and it expects it to elapse: the writer is waiting for the trail's lock.
     """
     _oversize(trail)
     trimmed_tail = capture_diagnostics._trimmed_tail
     writers: list[threading.Thread] = []
+    finished = threading.Event()
 
     def _append_after_reading(lines: list[str], max_bytes: int) -> list[str]:
         kept = trimmed_tail(lines, max_bytes)
-        writers.append(_appending_writer("appended during the trim"))
-        writers[-1].join(0.05)
+        writers.append(_appending_writer("appended during the trim", finished))
+        assert not finished.wait(0.05)
         return kept
 
     monkeypatch.setattr(capture_diagnostics, "_trimmed_tail", _append_after_reading)
