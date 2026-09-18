@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 
 import pytest
+from lsp_process import LspProcess
 
-from scripts.lsp_process import LspProcess
 from tests.slow_machine import SHORT_TIMEOUT
 
 pytestmark = pytest.mark.skipif(

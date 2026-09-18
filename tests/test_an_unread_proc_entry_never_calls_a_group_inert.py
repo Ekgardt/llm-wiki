@@ -10,10 +10,11 @@ import sys
 import time
 from pathlib import Path
 
+import lsp_process
+import lsp_process_tree
 import pytest
+from lsp_process import GenerationLaunch, LspProcess
 
-from scripts import lsp_process, lsp_process_tree
-from scripts.lsp_process import GenerationLaunch, LspProcess
 from tests.slow_machine import SHORT_TIMEOUT
 
 OWNER_NONCE = "e" * 32

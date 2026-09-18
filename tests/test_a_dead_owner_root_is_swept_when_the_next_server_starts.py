@@ -17,8 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from lsp_process import LspProcess
 
-from scripts.lsp_process import LspProcess
 from tests.slow_machine import SHORT_TIMEOUT
 
 OWNER_NONCE = "f" * 32

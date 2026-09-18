@@ -14,9 +14,9 @@ import time
 from pathlib import Path
 
 import pytest
+from lsp_process import LspProcess
+from lsp_security import redact_lsp_text
 
-from scripts.lsp_process import LspProcess
-from scripts.lsp_security import redact_lsp_text
 from tests.slow_machine import SHORT_TIMEOUT
 
 OWNER_NONCE = "d" * 32
