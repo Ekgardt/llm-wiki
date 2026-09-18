@@ -35,7 +35,6 @@ class _CapturedSource(Protocol):
     content: bytes
 
 EXTRACTOR_VERSION = "code-extractor/v14"
-SCIP_DEFINITION_ROLE = 0x1
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
@@ -94,10 +93,6 @@ def _require_stop_arguments(deadline: object, cancelled: object) -> None:
 
 def _finite_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _non_negative_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _byte_span(content: bytes, start: int, end: int) -> tuple[int, int, int, int]:
@@ -160,29 +155,6 @@ def _optional_parser(language: str):
 
 
 @dataclass(frozen=True, slots=True)
-class ScipSymbol:
-    """A compiler-backed symbol covering one source declaration."""
-
-    source_id: str
-    byte_start: int
-    byte_end: int
-    symbol: str
-    roles: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class CoChange:
-    """A precomputed, bounded repository co-change relationship."""
-
-    source_path: str
-    target_path: str
-    weight: float
-    evidence_source_id: str | None = None
-    byte_start: int = 0
-    byte_end: int = 0
-
-
-@dataclass(frozen=True, slots=True)
 class ExtractionLimits:
     max_sources: int = 10_000
     max_source_bytes: int = 16 * 1024 * 1024
@@ -193,8 +165,6 @@ class ExtractionLimits:
     max_evidence: int = 500_000
     max_observations: int = 250_000
     max_candidate_dependencies: int = 500_000
-    max_scip_symbols: int = 500_000
-    max_co_changes: int = 100_000
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:
@@ -330,26 +300,6 @@ def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int,
     return start, end, _written_line(content, start), _written_line(content, end)
 
 
-def _python_name_span(
-    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
-    offsets: tuple[int, ...],
-    content: bytes,
-) -> tuple[int, int]:
-    line_start = offsets[node.lineno - 1]
-    declaration_end = content.find(b"\n", line_start)
-    if declaration_end < 0:
-        declaration_end = len(content)
-    match = re.search(
-        rb"\b(?:class|def|async\s+def)\s+" + re.escape(node.name.encode()) + rb"\b",
-        content[line_start:declaration_end],
-    )
-    if match is None:
-        return -1, -1
-    name_offset = match.group(0).rfind(node.name.encode())
-    start = line_start + match.start() + name_offset
-    return start, start + len(node.name.encode())
-
-
 def _is_constant_name(name: str) -> bool:
     """The convention that separates a constant from a variable: UPPER_CASE."""
     return name[:1].isalpha() and name == name.upper()
@@ -383,11 +333,6 @@ def _nested_statements(node: ast.AST) -> list[ast.AST]:
     for field in _PYTHON_NESTED_FIELDS:
         collected.extend(getattr(node, field, None) or ())
     return collected
-
-
-def _python_target_span(target: ast.Name, offsets: tuple[int, ...]) -> tuple[int, int]:
-    start = offsets[target.lineno - 1] + target.col_offset
-    return start, start + len(target.id.encode())
 
 
 def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -448,14 +393,6 @@ class _SyntaxFile:
     language: str
     module_name: str
     module_id: str
-
-
-def _defines_span(symbol: ScipSymbol, source: _CapturedSource, name_span: tuple[int, int]) -> bool:
-    return (
-        symbol.source_id == source.record.logical_id
-        and bool(symbol.roles & SCIP_DEFINITION_ROLE)
-        and (symbol.byte_start, symbol.byte_end) == tuple(name_span)
-    )
 
 
 def _add_module_aliases(module_aliases: dict[str, set[str]], module_name: str) -> None:
@@ -843,13 +780,6 @@ def _syntax_name_node(node: object) -> object | None:
     return next((child for child in node.named_children if child.type in {"identifier", "constant"}), None)
 
 
-def _syntax_name_span(node: object) -> tuple[int, int]:
-    named = node.child_by_field_name("name")
-    if named is None:
-        return (-1, -1)
-    return (named.start_byte, named.end_byte)
-
-
 def _paren_step(character: str) -> int:
     return {"(": 1, ")": -1}.get(character, 0)
 
@@ -952,14 +882,12 @@ class _Collector:
         self,
         sources: tuple[_CapturedSource, ...],
         repository_id: str,
-        scip_symbols: tuple[ScipSymbol, ...],
         limits: ExtractionLimits,
         deadline: float | None,
         cancelled: Callable[[], bool] | None,
     ) -> None:
         self.sources = sources
         self.repository_id = repository_id
-        self.scip_symbols = scip_symbols
         self.limits = limits
         _require_stop_arguments(deadline, cancelled)
         self.deadline = deadline
@@ -1166,20 +1094,18 @@ class _Collector:
     def symbol_identity(
         self,
         source: _CapturedSource,
-        span: tuple[int, int, int, int],
-        name_span: tuple[int, int],
         language: str,
         owner: str,
         name: str,
         signature: str,
     ) -> tuple[str, str]:
-        candidates = sorted(
-            symbol.symbol
-            for symbol in self.scip_symbols
-            if _defines_span(symbol, source, name_span)
-        )
-        if candidates:
-            return "scip/v1", candidates[0]
+        """The line-independent identity of one declaration.
+
+        There used to be a second scheme here, `scip/v1`, chosen when a
+        caller-supplied `ScipSymbol` covered the declaration's name span
+        exactly. No caller ever supplied one (audit 3, C2), so the branch and
+        the name spans that fed it are gone.
+        """
         key = "\x1f".join((
             self.repository_id, language, source.record.relative_path,
             owner, name, signature,
@@ -1341,9 +1267,8 @@ class _Collector:
     ) -> None:
         source = ctx.source
         span = ctx.span(statement)
-        name_span = _python_target_span(target, ctx.offsets)
         scheme, key = self.symbol_identity(
-            source, span, name_span, "python", owner.name, target.id, target.id,
+            source, "python", owner.name, target.id, target.id,
         )
         node_id = self.add_node(
             "constant", scheme, key,
@@ -1355,9 +1280,8 @@ class _Collector:
     def _python_class(self, ctx: _PythonFile, node: ast.ClassDef, owner: _PythonOwner) -> None:
         source = ctx.source
         span = ctx.span(node)
-        name_span = _python_name_span(node, ctx.offsets, source.content)
         scheme, key = self.symbol_identity(
-            source, span, name_span, "python", owner.name, node.name, node.name,
+            source, "python", owner.name, node.name, node.name,
         )
         node_id = self.add_node(
             "class", scheme, key,
@@ -1380,10 +1304,9 @@ class _Collector:
     ) -> None:
         source = ctx.source
         span = ctx.span(node)
-        name_span = _python_name_span(node, ctx.offsets, source.content)
         signature = _signature(node)
         scheme, key = self.symbol_identity(
-            source, span, name_span, "python", owner.name, node.name, signature,
+            source, "python", owner.name, node.name, signature,
         )
         kind = "method" if owner.in_class else "function"
         node_id = self.add_node(
@@ -1878,7 +1801,7 @@ class _Collector:
         source = ctx.source
         span = self._syntax_span(node)
         scheme, key = self.symbol_identity(
-            source, span, _syntax_name_span(node), ctx.language, ctx.module_name, name, name
+            source, ctx.language, ctx.module_name, name, name
         )
         node_id = self.add_node(
             "class", scheme, key,
@@ -1909,7 +1832,7 @@ class _Collector:
         span = self._syntax_span(node)
         signature = self._syntax_signature(node, name, source.content)
         scheme, key = self.symbol_identity(
-            source, span, _syntax_name_span(node), ctx.language, owner_name, name, signature
+            source, ctx.language, owner_name, name, signature
         )
         node_id = self.add_node(
             kind, scheme, key,
@@ -2314,13 +2237,17 @@ def extract_code(
     sources: Iterable[_CapturedSource],
     *,
     repository_id: str,
-    scip_symbols: Iterable[ScipSymbol] = (),
-    co_changes: Iterable[CoChange] = (),
     limits: ExtractionLimits | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> CodeExtraction:
-    """Extract immutable source snapshots without filesystem or store access."""
+    """Extract immutable source snapshots without filesystem or store access.
+
+    Two optional inputs were removed on 2026-09-17 because nothing ever supplied
+    either: `scip_symbols=` (a second identity scheme, audit 3 C2) and
+    `co_changes=` (the `CO_CHANGED_WITH` edge, audit 3 C3). Research:
+    `docs/research/2026-09-17-graph-three-islands-nothing-sails-to.md`.
+    """
     _require_repository_id(repository_id)
     bounds = limits or ExtractionLimits()
     _check_stop(deadline, cancelled)
@@ -2329,35 +2256,8 @@ def extract_code(
     selected = tuple(sorted(captured, key=lambda item: item.record.relative_path))
     _require_unique_sources(selected)
     _require_source_bytes(selected, bounds, deadline, cancelled)
-    symbols = _bounded_values(
-        scip_symbols,
-        bounds.max_scip_symbols,
-        "SCIP symbol",
-        deadline,
-        cancelled,
-    )
-    _require_valid_symbols(symbols, selected, deadline, cancelled)
-    collector = _Collector(
-        selected,
-        repository_id,
-        tuple(sorted(symbols, key=lambda item: item.symbol)),
-        bounds,
-        deadline,
-        cancelled,
-    )
-    result = collector.extract()
-    changes = _bounded_values(
-        co_changes,
-        bounds.max_co_changes,
-        "co-change",
-        deadline,
-        cancelled,
-    )
-    _require_valid_co_changes(changes)
-    if not changes:
-        return result
-    _add_co_changes(collector, changes, selected, deadline, cancelled)
-    return collector.result()
+    collector = _Collector(selected, repository_id, bounds, deadline, cancelled)
+    return collector.extract()
 
 
 _REQUIRED_RECORD_FIELDS = ("logical_id", "relative_path", "sha256", "size", "language")
@@ -2435,100 +2335,3 @@ def _require_recorded_content(source: _CapturedSource) -> None:
         raise ValueError("captured source size does not match content")
     if source.record.sha256 != hashlib.sha256(source.content).hexdigest():
         raise ValueError("captured source hash does not match content")
-
-
-def _require_valid_symbols(
-    symbols: tuple[object, ...],
-    selected: tuple[_CapturedSource, ...],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> None:
-    sources_by_id = {source.record.logical_id: source for source in selected}
-    for symbol in symbols:
-        _check_stop(deadline, cancelled)
-        if not _valid_symbol(symbol, sources_by_id):
-            raise ValueError("SCIP symbols must identify a valid captured source span")
-
-
-def _valid_symbol(symbol: object, sources_by_id: Mapping[str, _CapturedSource]) -> bool:
-    source = sources_by_id.get(getattr(symbol, "source_id", None))
-    if not isinstance(symbol, ScipSymbol) or source is None:
-        return False
-    return _valid_symbol_span(symbol, len(source.content)) and _valid_symbol_name(symbol)
-
-
-def _valid_symbol_span(symbol: ScipSymbol, content_length: int) -> bool:
-    if not _non_negative_int(symbol.byte_start) or not isinstance(symbol.byte_end, int):
-        return False
-    return symbol.byte_start < symbol.byte_end <= content_length
-
-
-def _valid_symbol_name(symbol: ScipSymbol) -> bool:
-    if not symbol.symbol or len(symbol.symbol) > 4096:
-        return False
-    return _non_negative_int(symbol.roles) and symbol.roles <= 0x7F
-
-
-def _require_valid_co_changes(changes: tuple[object, ...]) -> None:
-    if not all(_valid_co_change(change) for change in changes):
-        raise ValueError("co-change records must use bounded finite values")
-
-
-def _valid_co_change(change: object) -> bool:
-    if not isinstance(change, CoChange) or not math.isfinite(change.weight):
-        return False
-    if not 0.0 <= change.weight <= 1.0:
-        return False
-    return _bounded_co_change_paths(change)
-
-
-def _bounded_co_change_paths(change: CoChange) -> bool:
-    if not change.source_path or not change.target_path:
-        return False
-    return len(change.source_path) <= 4096 and len(change.target_path) <= 4096
-
-
-def _add_co_changes(
-    collector: _Collector,
-    changes: tuple[CoChange, ...],
-    selected: tuple[_CapturedSource, ...],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> None:
-    for change in sorted(changes, key=lambda item: (item.source_path, item.target_path)):
-        _check_stop(deadline, cancelled)
-        _add_co_change(collector, change, selected)
-
-
-def _add_co_change(
-    collector: _Collector, change: CoChange, selected: tuple[_CapturedSource, ...]
-) -> None:
-    evidence_source = _evidence_source(selected, change.evidence_source_id)
-    source_node = collector.files.get(change.source_path)
-    target_node = collector.files.get(change.target_path)
-    if not _all_present(evidence_source, source_node, target_node):
-        return
-    if not _co_change_anchored(change, evidence_source):
-        return
-    collector.add_assertion(
-        source_node, "CO_CHANGED_WITH", target_node, evidence_source,
-        _byte_span(evidence_source.content, change.byte_start, change.byte_end),
-        confidence="medium",
-    )
-
-
-def _evidence_source(
-    selected: tuple[_CapturedSource, ...], logical_id: str | None
-) -> _CapturedSource | None:
-    return next((source for source in selected if source.record.logical_id == logical_id), None)
-
-
-def _all_present(*values: object) -> bool:
-    return all(value is not None for value in values)
-
-
-def _co_change_anchored(change: CoChange, evidence_source: _CapturedSource) -> bool:
-    return (
-        0 <= change.byte_start < change.byte_end <= len(evidence_source.content)
-        and 0.0 <= change.weight <= 1.0
-    )

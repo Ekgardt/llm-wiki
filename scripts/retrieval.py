@@ -375,7 +375,9 @@ GRAPH_EDGE_DECAY: dict[str, float] = {
     "CHECKPOINT_EVIDENCED_BY_EVENT": 0.65,
     "CHECKPOINT_HAS_BLOCKER": 0.75,
     "CHECKPOINT_RECORDED_DECISION": 0.75,
-    "CO_CHANGED_WITH": 0.45,
+    # `CO_CHANGED_WITH` was weighted here with no producer anywhere in the
+    # product; its island was removed on 2026-09-17 (audit 3, C3). See
+    # `docs/research/2026-09-17-graph-three-islands-nothing-sails-to.md`.
     "CONTAINS": 0.70,
     "DEFINES": 0.80,
     "EVIDENCED_BY": 0.70,
