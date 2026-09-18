@@ -408,10 +408,13 @@ GRAPH_PROFILE_EDGE_TYPES: dict[str, tuple[str, ...]] = {
         "IMPORTS",
         "INHERITS",
     ),
+    # `CO_CHANGED_WITH` stood here too until its island was removed on
+    # 2026-09-17 (audit 3, C3). Every name in these tuples has to be a key of
+    # `GRAPH_EDGE_DECAY`, or the profile asks for a weight that is not there;
+    # `tests/test_graph_retrieval.py` holds that line.
     "IMPACT": (
         "CALLS",
         "CHECKPOINT_CHANGED_FILE",
-        "CO_CHANGED_WITH",
         "IMPORTS",
         "READS",
         "REFERENCES_SYMBOL",
@@ -1955,6 +1958,11 @@ def _run_graph_backend(
     directions = GRAPH_PROFILE_DIRECTIONS.get(requested, ("out",))
     edge_types = _profile_edge_types(requested, graph_edge_families)
     seeds = _graph_seeds(lexical_hits, dense_hits)
+    # Built before the call, not inside it: a profile naming an edge type this
+    # product no longer weighs is our own defect, and reading it as "the graph
+    # backend failed" hid one for a day. See
+    # `docs/research/2026-09-18-a-profile-asks-only-for-edges-this-product-weighs.md`.
+    edge_decay = {edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types}
     try:
         raw_hits = graph_backend(
             **filters,
@@ -1962,7 +1970,7 @@ def _run_graph_backend(
             max_hops=GRAPH_MAX_HOPS,
             directions=directions,
             edge_types=edge_types,
-            edge_decay={edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types},
+            edge_decay=edge_decay,
             per_seed_limit=per_seed_limit,
             global_limit=global_limit,
             deadline_monotonic=deadline_monotonic,
