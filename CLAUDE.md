@@ -295,7 +295,11 @@ writes to it. See `docs/research/2026-09-14-the-vault-log-is-private.md`.
    only in chat.
 4. Every important update should touch:
    - the most relevant wiki page(s)
-   - `knowledge/index.md`
+   - `knowledge/index.md` — regenerated, never hand-edited: run
+     `scripts/rebuild_memory_index.py` (the compile does it inside its
+     transaction). It is tracked and publication-filtered, so it names only
+     published pages; on a vault that publishes none, the private navigation is
+     `scripts/search_memory.py` plus the log below.
    - `knowledge/log.local.md` (the private vault log)
 5. Preserve provenance. When writing claims, include a `Source:` / Evidence
    line pointing to the relevant file(s).
@@ -333,7 +337,8 @@ you need it: `grep` it, or ask the memory for the decision you are after. Rule
 When asked to compile or ingest new material:
 1. Inspect `knowledge/inbox/` and/or the target source file.
 2. Decide whether to create or update pages under `knowledge/notes/`.
-3. Update `knowledge/index.md`.
+3. Regenerate `knowledge/index.md` with `scripts/rebuild_memory_index.py`; do
+   not edit it by hand.
 4. Append a concise entry to `knowledge/log.local.md`.
 5. Summarize what changed.
 
