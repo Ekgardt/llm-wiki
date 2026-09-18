@@ -45,5 +45,23 @@ person looks:
 A capability that recovers the owner's bytes is not deleted to shorten a list; a tool a
 person cannot find is documented, not removed.
 
+## The files nothing names (F2–F4 of the same list)
+
+- **68 benchmark result files** (12 named nowhere, 56 cited only by family prefix in dated
+  documents, 7.1 MB in all) and **about 25 dated documents** — audits, comparisons, options,
+  superpowers plans and specs — that no test pins and no other document names.
+- They are kept. Each is the evidence behind a number a research note or the changelog
+  quotes; a result file that nothing names by its exact file name is still the proof of the
+  measurement it recorded, and a dated audit is the record of what was true that day.
+  Deleting the owner's measurement and audit record to save 7 MB in a repository whose
+  history is already 81 MB is a bad trade, and it is also the owner's own material rather
+  than product code.
+- One module is left undecided on purpose: `scripts/freshness_watch.py` (587 lines, 368 lines
+  of tests) implements the "optional bounded watching" that `CLAUDE.md` names in the approved
+  superset contract, and nothing calls it. It is neither dead by the brief's rule (a contract
+  promises it) nor mine to wire: its only sensible callers are a session hook or the query
+  path, both owned by other areas, and choosing one is a decision about when the vault spends
+  CPU while its owner is working. It is named for the owner, not deleted.
+
 Files: `.github/workflows/tests.yml`, `CONTRIBUTING.md`, `docs/USER-GUIDE.md`,
 `docs/research/2026-09-18-the-tools-nothing-ran.md`.
