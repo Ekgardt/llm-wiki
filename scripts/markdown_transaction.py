@@ -3971,7 +3971,27 @@ def _classify_comparable_append(
     """A record whose images still exist: the same request, or a different one."""
     if not _append_request_matches(coordinator, record, relative, block):
         raise OperationBoundElsewhereError("operation_id is already bound to a different request")
-    return record if record.state == "committed" else "advance"
+    if record.state != "committed":
+        return "advance"
+    return _committed_append_or_rewrite(coordinator, record, relative)
+
+
+def _committed_append_or_rewrite(
+    coordinator: MarkdownCoordinator, record: TransactionRecord, relative: str
+) -> _AppendAttemptResult:
+    """The earlier append still stands, unless its target is no longer there.
+
+    A committed record used to be answered with `committed` whatever had become
+    of the file, so append, delete, append said "written" over a file that did
+    not exist. A target that is gone took the block with it, so the next
+    candidate id writes again. Bytes that merely changed are not checked: a
+    daily log grows under every other writer, and that is not this block's
+    disappearance. See
+    `docs/research/2026-09-18-a-committed-append-still-needs-its-file.md`.
+    """
+    if coordinator._current_hash(relative) != ABSENT:
+        return record
+    return "advance"
 
 
 def _append_transaction_failure(error: TransactionFailure) -> Literal["advance"]:
