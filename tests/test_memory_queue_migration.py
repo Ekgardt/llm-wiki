@@ -170,19 +170,25 @@ def test_queue_v2_hash_mismatch_is_preserved_dead_and_never_claimable(
                ORDER BY priority DESC, available_at, created_at, id LIMIT 1"""
         ).fetchone()
 
-    assert summary["payload_hash_mismatches"] == 1
-    assert task == (expected, "0" * 64, "dead", "payload_hash_mismatch")
-    assert history == [
-        (
-            1,
-            "2026-08-05T12:00:00+00:00",
-            "2026-08-05T12:00:01+00:00",
-            "failed",
-            "provider_failed",
-        )
-    ]
-    assert claimable is None
-    assert candidate_queue.claim("worker") is None
+    assert (
+        summary["payload_hash_mismatches"],
+        task,
+        history,
+        (claimable, candidate_queue.claim("worker")),
+    ) == (
+        1,
+        (expected, "0" * 64, "dead", "payload_hash_mismatch"),
+        [
+            (
+                1,
+                "2026-08-05T12:00:00+00:00",
+                "2026-08-05T12:00:01+00:00",
+                "failed",
+                "provider_failed",
+            )
+        ],
+        (None, None),
+    )
 
 
 @pytest.mark.parametrize(
@@ -254,22 +260,32 @@ def test_migration_imports_json_and_dead_processing_before_marker(
 
     receipt = memory_queue.migrate_legacy_queue(tmp_path)
 
-    assert receipt.imported == 2
-    assert receipt.quarantined == 0
-    assert observed_marker == [False, False]
-    assert (tmp_path / "run" / "queue-migrated-v2").is_file()
-    assert not ready.exists() and not processing.exists()
     queue = MemoryQueue(tmp_path)
     first = queue.get("legacy-1")
     second = queue.get("legacy-2")
-    assert (first.attempts, first.created_at, first.last_attempt_at) == (
-        3,
-        datetime(2026, 7, 1, 12, tzinfo=timezone.utc),
-        datetime(2026, 7, 2, 13, tzinfo=timezone.utc),
+
+    # The marker is written only after every record is in, and the sources go.
+    assert (
+        (receipt.imported, receipt.quarantined),
+        observed_marker,
+        (
+            (tmp_path / "run" / "queue-migrated-v2").is_file(),
+            ready.exists(),
+            processing.exists(),
+        ),
+        (first.attempts, first.created_at, first.last_attempt_at),
+        (second.attempts, second.last_attempt_at, first.payload["password"]),
+    ) == (
+        (2, 0),
+        [False, False],
+        (True, False, False),
+        (
+            3,
+            datetime(2026, 7, 1, 12, tzinfo=timezone.utc),
+            datetime(2026, 7, 2, 13, tzinfo=timezone.utc),
+        ),
+        (2, datetime(2026, 7, 3, 14, tzinfo=timezone.utc), "[REDACTED]"),
     )
-    assert second.attempts == 2
-    assert second.last_attempt_at == datetime(2026, 7, 3, 14, tzinfo=timezone.utc)
-    assert first.payload["password"] == "[REDACTED]"
 
 
 def test_live_processing_owner_aborts_without_marker(
@@ -327,9 +343,11 @@ def test_concurrent_migration_has_one_exclusive_owner(
     release.set()
     owner.join(LONG_TIMEOUT)
 
-    assert sum(isinstance(item, memory_queue.MigrationReceipt) for item in outcomes) == 1
     busy = [item for item in outcomes if isinstance(item, MigrationBusy)]
-    assert len(busy) == 1 and busy[0].code == "migration_busy"
+    assert (
+        sum(isinstance(item, memory_queue.MigrationReceipt) for item in outcomes),
+        [item.code for item in busy],
+    ) == (1, ["migration_busy"])
 
 
 def test_sqlite_owner_takeover_is_epoch_fenced_and_release_is_token_fenced(
@@ -348,13 +366,18 @@ def test_sqlite_owner_takeover_is_epoch_fenced_and_release_is_token_fenced(
         ttl_seconds=10,
     )
 
-    assert second.epoch == first.epoch + 1
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         memory_queue._heartbeat_queue_owner(first, now=now + timedelta(seconds=2))
-    assert raised.value.code == "migration_fence_lost"
-    assert memory_queue._release_queue_owner(first) is False
-    assert memory_queue._release_queue_owner(second) is True
-    assert not list((tmp_path / "run").glob("queue-*.lock"))
+
+    assert (
+        second.epoch - first.epoch,
+        raised.value.code,
+        (
+            memory_queue._release_queue_owner(first),
+            memory_queue._release_queue_owner(second),
+        ),
+        list((tmp_path / "run").glob("queue-*.lock")),
+    ) == (1, "migration_fence_lost", (False, True), [])
 
 
 def test_expired_owner_cannot_be_stolen_while_pid_is_alive(
@@ -491,13 +514,17 @@ except mq.MigrationBusy as exc:
     # first one spent.
     _await_file(entered, LONG_TIMEOUT)
     _await_first_exit(processes, LONG_TIMEOUT)
-    assert _finished(processes) == 1
+    finished_before_release = _finished(processes)
     release.write_text("go", encoding="ascii")
     outputs = [_contender_output(process) for process in processes]
 
-    assert sorted(item["state"] for item in outputs) == ["busy", "migrated"]
-    assert not list((tmp_path / "run").glob("queue-*.lock"))
-    assert stale.epoch >= 1
+    # One was refused before the other was let go, so only one migration ran.
+    assert (
+        finished_before_release,
+        sorted(item["state"] for item in outputs),
+        list((tmp_path / "run").glob("queue-*.lock")),
+        stale.epoch >= 1,
+    ) == (1, ["busy", "migrated"], [], True)
 
 
 def _finished(processes: list[subprocess.Popen]) -> int:
@@ -537,13 +564,16 @@ def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(
     thread = threading.Thread(target=migrate)
     thread.start()
     assert renamed.wait(LONG_TIMEOUT)
-    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
-        memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
-    assert raised.value.code == "legacy_migration_quiesced"
-    assert not (tmp_path / "run" / "queue").exists()
+    # Nothing can recreate the legacy directory while the migration holds it:
+    # the pre-adoption JSON writer was removed with the rest of that path.
+    absent_during_migration = not (tmp_path / "run" / "queue").exists()
     release.set()
     thread.join(LONG_TIMEOUT)
-    assert isinstance(outcome[0], memory_queue.MigrationReceipt)
+
+    assert (absent_during_migration, isinstance(outcome[0], memory_queue.MigrationReceipt)) == (
+        True,
+        True,
+    )
 
 
 def test_recreated_legacy_queue_after_marker_is_quarantined_as_conflict(
@@ -554,13 +584,18 @@ def test_recreated_legacy_queue_after_marker_is_quarantined_as_conflict(
     queue_dir = tmp_path / "run" / "queue"
     queue_dir.mkdir()
     (queue_dir / "late.json").write_bytes(raw)
-    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
-        memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
 
-    assert raised.value.code == "legacy_backend_conflict"
+    # A directory that reappears after the marker is a conflict, and the next
+    # migration pass is what notices it.
+    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
+        memory_queue.migrate_legacy_queue(tmp_path)
+
     quarantine = tmp_path / "run" / "queue-quarantine"
-    assert next(quarantine.glob("*.raw")).read_bytes() == raw
-    assert not queue_dir.exists()
+    assert (
+        raised.value.code,
+        next(quarantine.glob("*.raw")).read_bytes(),
+        queue_dir.exists(),
+    ) == ("legacy_backend_conflict", raw, False)
 
 
 def test_malformed_legacy_record_is_redacted_quarantined_and_not_printed(
@@ -574,21 +609,30 @@ def test_malformed_legacy_record_is_redacted_quarantined_and_not_printed(
 
     receipt = memory_queue.migrate_legacy_queue(tmp_path)
 
-    assert receipt.imported == 0 and receipt.quarantined == 1
-    assert receipt.codes == ("legacy_invalid",)
-    assert not source.exists()
     quarantine_dir = tmp_path / "run" / "queue-quarantine"
     quarantine = next(quarantine_dir.glob("*.json"))
     raw_copy = next(quarantine_dir.glob("*.raw"))
     text = quarantine.read_text(encoding="utf-8")
-    assert "top-secret" not in text
-    assert set(json.loads(text)) == {"code", "raw_name", "source_name", "source_sha256"}
-    assert raw_copy.read_bytes() == raw
-    assert memory_queue._is_owner_only(quarantine_dir)
-    assert memory_queue._is_owner_only(quarantine)
-    assert memory_queue._is_owner_only(raw_copy)
-    assert "top-secret" not in capsys.readouterr().out
-    assert MemoryQueue(tmp_path).retains_run_directory() is True
+    owner_only = tuple(
+        memory_queue._is_owner_only(path)
+        for path in (quarantine_dir, quarantine, raw_copy)
+    )
+
+    # The record is kept byte for byte, and its secret reaches neither the
+    # quarantine note nor the console.
+    assert (
+        (receipt.imported, receipt.quarantined, receipt.codes),
+        source.exists(),
+        (set(json.loads(text)), "top-secret" in text),
+        (raw_copy.read_bytes(), owner_only),
+        ("top-secret" in capsys.readouterr().out, MemoryQueue(tmp_path).retains_run_directory()),
+    ) == (
+        (0, 1, ("legacy_invalid",)),
+        False,
+        ({"code", "raw_name", "source_name", "source_sha256"}, False),
+        (raw, (True, True, True)),
+        (False, True),
+    )
 
 
 def test_legacy_source_is_bounded_and_never_follows_symlinks(
@@ -665,18 +709,19 @@ def test_conflicting_interrupted_import_aborts_without_marker(tmp_path: Path) ->
     assert not (tmp_path / "run" / "queue-migrated-v2").exists()
 
 
-def test_marker_prevents_any_legacy_backend_write(
+def test_after_the_marker_every_enqueue_goes_to_sqlite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Past migration there is no JSON path left to write to, only the database."""
     memory_queue.migrate_legacy_queue(tmp_path)
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
+
     task_id = memory_queue.enqueue("query", {"prompt": "sqlite"})
 
-    assert MemoryQueue(tmp_path).get(task_id).state == "ready"
-    assert not list((tmp_path / "run" / "queue").glob("*"))
-    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
-        memory_queue._legacy_write_allowed(tmp_path)
-    assert raised.value.code == "legacy_backend_disabled"
+    assert (
+        MemoryQueue(tmp_path).get(task_id).state,
+        list((tmp_path / "run" / "queue").glob("*")),
+    ) == ("ready", [])
 
 
 @pytest.mark.parametrize(
@@ -723,29 +768,6 @@ def test_marker_must_be_regular_owner_only_and_bounded(
     assert raised.value.code == "migration_marker_invalid"
 
 
-def test_legacy_enqueue_retracts_file_if_marker_wins_publication_race(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real_write = memory_queue._write_durable_file
-    published: list[Path] = []
-
-    def marker_wins(path: Path, data: bytes) -> None:
-        if path.parent.name == "queue" and path.suffix == ".json":
-            marker = tmp_path / "run" / "queue-migrated-v2"
-            real_write(marker, canonical_json_bytes({"version": 2}))
-            published.append(path)
-        real_write(path, data)
-
-    monkeypatch.setattr(memory_queue, "_write_durable_file", marker_wins)
-
-    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
-        memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
-
-    assert raised.value.code == "legacy_marker_race"
-    assert len(published) == 1
-    assert not published[0].exists()
-
-
 def test_redrive_links_new_task_without_changing_dead_history(tmp_path: Path) -> None:
     queue = MemoryQueue(tmp_path)
     original = queue.enqueue("query", 1, {"prompt": "again"})
@@ -755,11 +777,13 @@ def test_redrive_links_new_task_without_changing_dead_history(tmp_path: Path) ->
     before = queue.get(original)
 
     replacement = queue.redrive(original)
+    fresh = queue.get(replacement)
 
-    assert replacement != original
-    assert queue.get(replacement).redrive_of == original
-    assert queue.get(replacement).state == "ready"
-    assert queue.get(original) == before
+    assert (
+        replacement == original,
+        (fresh.redrive_of, fresh.state),
+        queue.get(original) == before,
+    ) == (False, (original, "ready"), True)
 
 
 def test_redrive_insert_and_link_commit_in_one_transaction(tmp_path: Path) -> None:
@@ -783,12 +807,15 @@ def test_redrive_insert_and_link_commit_in_one_transaction(tmp_path: Path) -> No
 
     replacement = queue.redrive(original)
 
-    assert queue.get(replacement).redrive_of == original
-    assert _statements_starting("BEGIN IMMEDIATE", statements) == ["BEGIN IMMEDIATE"]
     inserts = _statements_starting("INSERT INTO tasks", statements)
-    assert len(inserts) == 1
-    assert original in inserts[0]
-    assert _statements_starting("UPDATE tasks SET redrive_of", statements) == []
+
+    # One transaction, one insert that already names its parent, no later update.
+    assert (
+        queue.get(replacement).redrive_of,
+        _statements_starting("BEGIN IMMEDIATE", statements),
+        (len(inserts), original in inserts[0]),
+        _statements_starting("UPDATE tasks SET redrive_of", statements),
+    ) == (original, ["BEGIN IMMEDIATE"], (1, True), [])
 
 
 def _statements_starting(prefix: str, statements: list[str]) -> list[str]:
@@ -816,14 +843,23 @@ def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
         terminal_before=now - timedelta(days=30), export_path=export
     )
 
-    assert receipt.purged == 1 and receipt.task_ids == (task_id,)
     manifest_bytes = (export / "manifest.json").read_bytes()
     manifest = json.loads(manifest_bytes)
-    assert manifest["records_sha256"] == sha256_bytes((export / "records.json").read_bytes())
-    assert manifest_bytes == canonical_json_bytes(manifest)
-    assert (export / "results" / f"{task_id}.result").read_bytes() == b"answer"
     with pytest.raises(KeyError):
         queue.get(task_id)
+
+    # The export carries the result and a canonical manifest over its records.
+    assert (
+        (receipt.purged, receipt.task_ids),
+        manifest["records_sha256"],
+        manifest_bytes == canonical_json_bytes(manifest),
+        (export / "results" / f"{task_id}.result").read_bytes(),
+    ) == (
+        (1, (task_id,)),
+        sha256_bytes((export / "records.json").read_bytes()),
+        True,
+        b"answer",
+    )
 
 
 def test_purge_expired_deadline_creates_no_export_and_deletes_nothing(
@@ -902,15 +938,19 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
             cancelled=cancelled,
         )
 
-    assert queue.get(task_id).state == "succeeded"
-    assert not export.exists()
+    rolled_back = (queue.get(task_id).state, export.exists())
 
     monkeypatch.setattr(memory_queue, "begin_immediate", real_begin_immediate)
     receipt = queue.purge(
         terminal_before=now - timedelta(days=30), export_path=export
     )
-    assert receipt.task_ids == (task_id,)
-    assert export.is_dir()
+
+    # Nothing was lost by the expiry, and the next attempt completes.
+    assert (rolled_back, receipt.task_ids, export.is_dir()) == (
+        ("succeeded", False),
+        (task_id,),
+        True,
+    )
 
 
 def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
@@ -943,15 +983,19 @@ def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
     with pytest.raises(OSError):
         queue.purge(terminal_before=now - timedelta(days=30), export_path=export)
 
-    assert not export.exists()
-    assert not list(export.parent.glob(".purge.staging-*"))
+    after_failure = (export.exists(), list(export.parent.glob(".purge.staging-*")))
+
     monkeypatch.setattr(memory_queue, "_write_durable_file", real_write)
     receipt = queue.purge(
         terminal_before=now - timedelta(days=30), export_path=export
     )
-    assert receipt.task_ids == (task_id,)
-    assert export.is_dir()
-    assert not list(export.parent.glob(".purge.staging-*"))
+
+    # The failed attempt left no staging directory, and the retry completes.
+    assert (
+        after_failure,
+        (receipt.task_ids, export.is_dir()),
+        list(export.parent.glob(".purge.staging-*")),
+    ) == ((False, []), ((task_id,), True), [])
 
 
 def test_purge_rejects_unsafe_existing_export_parent(
@@ -996,10 +1040,11 @@ def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path)
         export_path=export_parent / "export",
     )
 
-    assert receipt.purged == 0
-    assert queue.get(succeeded).state == "succeeded"
-    assert queue.get(dead).state == "dead"
-    assert queue.retains_run_directory() is True
+    assert (
+        receipt.purged,
+        (queue.get(succeeded).state, queue.get(dead).state),
+        queue.retains_run_directory(),
+    ) == (0, ("succeeded", "dead"), True)
 
 
 def _dead_task(queue: MemoryQueue, now: datetime, prompt: str) -> str:
@@ -1059,13 +1104,13 @@ def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) 
 
     receipt = queue.restore(export_path=export)
 
-    assert receipt.restored == 1
     exported_id, restored_id = receipt.task_ids[0]
-    assert exported_id == task_id
     restored = queue.get(restored_id)
-    assert restored.state == "ready"
-    assert restored.kind == "query"
-    assert restored.payload == {"prompt": "restore me"}
+
+    assert (
+        (receipt.restored, exported_id),
+        (restored.state, restored.kind, restored.payload),
+    ) == ((1, task_id), ("ready", "query", {"prompt": "restore me"}))
 
 
 def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:

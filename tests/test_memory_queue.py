@@ -86,6 +86,201 @@ def _v3_queue(tmp_path: Path):
     return MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
 
 
+def _counts(summary) -> tuple[int, int, int, int]:
+    """One worker run's outcome as (succeeded, failed, dead, skipped)."""
+    return (summary.succeeded, summary.failed, summary.dead, summary.skipped)
+
+
+def _worked(module, processor, *, max_tasks: int = 1):
+    """One bounded worker pass, running the handler in this process."""
+    return module.run_worker(
+        processor,
+        max_tasks=max_tasks,
+        idle_seconds=0,
+        processor_runner=module._run_processor_inline,
+    )
+
+
+def _task_row(queue: MemoryQueue, task_id: str, columns: str) -> tuple:
+    """Named columns of one task row, read past the API."""
+    with sqlite3.connect(queue.db_path) as connection:
+        return connection.execute(
+            f"SELECT {columns} FROM tasks WHERE id=?", (task_id,)  # noqa: S608
+        ).fetchone()
+
+
+def _modes(*paths: Path) -> tuple[int, ...]:
+    return tuple(stat.S_IMODE(path.stat().st_mode) for path in paths)
+
+
+def _rows_at(path: Path, queries: tuple[str, ...]) -> tuple:
+    """One row per query, read through one connection to one database."""
+    with sqlite3.connect(path) as database:
+        return tuple(database.execute(query).fetchone() for query in queries)
+
+
+def _schema_objects(path: Path) -> list[tuple]:
+    with sqlite3.connect(path) as database:
+        return database.execute(
+            "SELECT type,name,sql FROM sqlite_schema ORDER BY type,name"
+        ).fetchall()
+
+
+def _touched_triggers(statements: list[str]) -> bool:
+    return any(
+        statement.lstrip().upper().startswith(("DROP TRIGGER", "CREATE TRIGGER"))
+        for statement in statements
+    )
+
+
+def _worked_twice_policy(module):
+    """One bounded pass under the two-attempt retry policy the legacy queue takes."""
+    return module.run_worker(
+        module._manual_processor,
+        max_tasks=1,
+        idle_seconds=0,
+        max_attempts=2,
+        retry_base_seconds=1,
+        retry_cap_seconds=1,
+        processor_runner=module._run_processor_inline,
+    )
+
+
+def _fail_one_attempt(
+    queue: MemoryQueue,
+    clock: FakeClock,
+    attempt: int,
+    *,
+    retry_after: int = 3601,
+    task_id: str | None = None,
+) -> None:
+    """Claim and fail once, then wait out the backoff unless this was the last."""
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.fail(lease, QueueFailure("temporary", retry_after=retry_after))
+    if attempt >= 8:
+        return
+    _wait_for_retry(queue, clock, lease.id if task_id is None else task_id)
+
+
+def _wait_for_retry(queue: MemoryQueue, clock: FakeClock, task_id: str) -> None:
+    retry_at = queue.get(task_id).available_at
+    clock.advance(max(0.0, (retry_at - clock()).total_seconds()))
+
+
+def _claim_then_expire(queue: MemoryQueue, clock: FakeClock) -> int | None:
+    """Take a one-second lease and let it expire; answers which attempt it was."""
+    lease = queue.claim("worker", lease_seconds=1)
+    clock.advance(2)
+    return None if lease is None else lease.attempt
+
+
+def _assert_posix_modes(queue: MemoryQueue, journal: Path) -> None:
+    """Owner-only runtime, database and journal, where modes mean anything."""
+    if os.name != "posix":
+        return
+    assert (
+        _modes(queue.run_dir, queue.db_path),
+        stat.S_IMODE(journal.stat().st_mode) & 0o077,
+    ) == ((0o700, 0o600), 0)
+
+
+def _prepare_leased_transition(
+    queue, tmp_path: Path, lease, operation_id: str, transition: str
+) -> None:
+    """Whatever the transition under test needs to exist before it runs."""
+    if transition == "acknowledge":
+        queue.publish_result(lease, operation_id=operation_id, result=b"answer")
+        return
+    if transition != "result-adoption":
+        return
+    result_name = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    result_path = tmp_path / "run" / "queue-results" / f"{result_name}.result"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_bytes(b"answer")
+    memory_queue._harden_owner_only(result_path.parent, 0o700)
+    memory_queue._harden_owner_only(result_path, 0o600)
+
+
+def _all_refused_as_stale(queue: MemoryQueue, stale, task_id: str) -> None:
+    """Every operation a lost lease could attempt is refused by its fence."""
+    for action in (
+        lambda: queue.heartbeat(stale),
+        lambda: queue.publish_result(stale, operation_id=task_id, result=b"old"),
+        lambda: queue.acknowledge(stale),
+    ):
+        with pytest.raises(LeaseFenceError):
+            action()
+
+
+def _read_if_present(path: Path) -> bytes | None:
+    """What a result file holds, or None where it is gone."""
+    if not path.is_file():
+        return None
+    return path.read_bytes()
+
+
+def _hide_result_from_exists(monkeypatch, result_path: Path, branch: str) -> None:
+    """In the link-race branch the file appears absent to the pre-check."""
+    if branch != "link_race":
+        return
+    real_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: False if path == result_path else real_exists(path),
+    )
+
+
+def _corrupt_stored_result(result_path: Path, corruption: str) -> None:
+    if corruption == "missing":
+        result_path.unlink()
+        return
+    result_path.write_bytes(b"tampered")
+
+
+def _forget_result_reference(queue: MemoryQueue, task_id: str) -> None:
+    """Leave the published file behind with no row pointing at it."""
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            """UPDATE tasks SET result_reference=NULL, result_operation_id=NULL,
+                   result_sha256=NULL WHERE id=?""",
+            (task_id,),
+        )
+
+
+def _chmod_or_unshare(monkeypatch, memory_queue, result_path: Path) -> None:
+    """Make the file readable by others, or say so where modes do not apply."""
+    if os.name == "posix":
+        result_path.chmod(0o644)
+        return
+    monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
+
+
+def _mutate_published_result(
+    monkeypatch, memory_queue, result_path: Path, mutation: str
+) -> None:
+    """One way a published result stops being the bytes that were published."""
+    if mutation == "delete":
+        result_path.unlink()
+        return
+    if mutation == "chmod":
+        _chmod_or_unshare(monkeypatch, memory_queue, result_path)
+        return
+    result_path.write_bytes(b"corrupt")
+
+
+def _task_facts(task) -> tuple:
+    """A task's state, error code, and the outcome and code of its last attempt."""
+    last = task.attempt_history[-1] if task.attempt_history else None
+    return (
+        task.state,
+        task.error_code,
+        None if last is None else last.outcome,
+        None if last is None else last.error_code,
+    )
+
+
 def test_validate_payload_blob_accepts_canonical_object_and_bounded_raw_inspection() -> None:
     raw = b'{"items":[1,true,null],"name":"ok"}'
     digest = "364a34cd522634b4ee44cf2d71407e8baf6bc379ad77c3095403f901299820f7"
@@ -170,19 +365,24 @@ def test_enqueue_stores_closed_canonical_redacted_payload(queue: MemoryQueue) ->
     )
 
     task = queue.get(task_id)
-    assert task.kind == "query"
-    assert task.handler_version == 2
-    assert task.state == "ready"
-    assert task.priority == 0
-    assert task.payload == {"a": ["ok"], "z": "Authorization: Bearer [REDACTED]"}
-    assert task.input_hash == sha256_bytes(canonical_json_bytes(task.payload))
     with sqlite3.connect(queue.db_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
         stored = connection.execute(
             "SELECT payload_json FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()[0]
-    assert "payload" not in columns
-    assert json.loads(stored) == task.payload
+
+    redacted = {"a": ["ok"], "z": "Authorization: Bearer [REDACTED]"}
+    assert (
+        (task.kind, task.handler_version, task.state, task.priority),
+        task.payload,
+        task.input_hash,
+        ("payload" in columns, json.loads(stored)),
+    ) == (
+        ("query", 2, "ready", 0),
+        redacted,
+        sha256_bytes(canonical_json_bytes(redacted)),
+        (False, redacted),
+    )
 
 
 @pytest.mark.parametrize("state", ["ready", "leased", "blocked", "dead"])
@@ -520,15 +720,7 @@ def test_v3_leased_transitions_demote_payload_mismatch(
     lease = queue.claim("worker")
     assert lease is not None
     operation_id = f"operation-{transition}"
-    if transition == "acknowledge":
-        queue.publish_result(lease, operation_id=operation_id, result=b"answer")
-    if transition == "result-adoption":
-        result_name = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
-        result_path = tmp_path / "run" / "queue-results" / f"{result_name}.result"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_bytes(b"answer")
-        memory_queue._harden_owner_only(result_path.parent, 0o700)
-        memory_queue._harden_owner_only(result_path, 0o600)
+    _prepare_leased_transition(queue, tmp_path, lease, operation_id, transition)
     with sqlite3.connect(queue.db_path) as database:
         database.execute(
             "UPDATE tasks SET payload_blob=? WHERE id=?",
@@ -733,24 +925,31 @@ def test_v3_ordinary_purge_uses_transactional_authorization_without_schema_mutat
         export_path=export,
     )
 
-    assert receipt == memory_queue.PurgeReceipt(1, (task_id,))
     records = json.loads((export / "records.json").read_bytes())
-    assert records[0]["schema_version"] == "queue-task/v3"
-    assert records[0]["task_id"] == task_id
     validate_schema(records[0], SCRIPTS_DIR / "schemas" / "queue-task-v3.json")
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
-        assert database.execute("SELECT COUNT(*) FROM attempt_history").fetchone() == (0,)
-        assert database.execute(
-            "SELECT COUNT(*) FROM task_purge_authorizations"
-        ).fetchone() == (0,)
-        schema_after = database.execute(
-            "SELECT type,name,sql FROM sqlite_schema ORDER BY type,name"
-        ).fetchall()
-    assert schema_after == schema_before
-    assert not any(
-        statement.lstrip().upper().startswith(("DROP TRIGGER", "CREATE TRIGGER"))
-        for statement in statements
+    counts = _rows_at(
+        queue.db_path,
+        (
+            "SELECT COUNT(*) FROM tasks",
+            "SELECT COUNT(*) FROM attempt_history",
+            "SELECT COUNT(*) FROM task_purge_authorizations",
+        ),
+    )
+    schema_after = _schema_objects(queue.db_path)
+
+    # Nothing of the row survives, and the purge changed no schema object.
+    assert (
+        receipt,
+        (records[0]["schema_version"], records[0]["task_id"]),
+        counts,
+        schema_after == schema_before,
+        _touched_triggers(statements),
+    ) == (
+        memory_queue.PurgeReceipt(1, (task_id,)),
+        ("queue-task/v3", task_id),
+        ((0,), (0,), (0,)),
+        True,
+        False,
     )
 
 
@@ -818,25 +1017,21 @@ def test_heartbeat_result_and_acknowledge_are_fenced(
     old = queue.claim("old", lease_seconds=120)
     assert old is not None
     renewed = queue.heartbeat(old, lease_seconds=180)
-    assert renewed.expires_at == clock() + timedelta(seconds=180)
+    renewed_until = clock() + timedelta(seconds=180)
     clock.advance(181)
     current = queue.claim("new", lease_seconds=120)
-    assert current is not None
+    assert (renewed.expires_at, current is None) == (renewed_until, False)
 
-    for action in (
-        lambda: queue.heartbeat(old),
-        lambda: queue.publish_result(old, operation_id=task_id, result=b"old"),
-        lambda: queue.acknowledge(old),
-    ):
-        with pytest.raises(LeaseFenceError):
-            action()
+    _all_refused_as_stale(queue, old, task_id)
 
     reference = queue.publish_result(current, operation_id=task_id, result=b"new")
     terminal = queue.acknowledge(current)
-    assert terminal.state == "succeeded"
-    assert terminal.error_code is None
-    assert queue.get(task_id).state == "succeeded"
-    assert (queue.state_root / reference).read_bytes() == b"new"
+
+    assert (
+        (terminal.state, terminal.error_code),
+        queue.get(task_id).state,
+        (queue.state_root / reference).read_bytes(),
+    ) == (("succeeded", None), "succeeded", b"new")
 
 
 def test_result_publication_is_stable_owner_only_and_no_clobber(
@@ -846,13 +1041,17 @@ def test_result_publication_is_stable_owner_only_and_no_clobber(
     lease = queue.claim("worker")
     assert lease is not None
     reference = queue.publish_result(lease, operation_id="stable-op", result=b"answer")
-    assert queue.publish_result(lease, operation_id="stable-op", result=b"answer") == reference
+    again = queue.publish_result(lease, operation_id="stable-op", result=b"answer")
     with pytest.raises(ResultConflictError):
         queue.publish_result(lease, operation_id="stable-op", result=b"different")
     result_path = queue.state_root / reference
-    assert queue.get(lease.id).result_sha256 == sha256_bytes(b"answer")
+
+    assert (again, queue.get(lease.id).result_sha256) == (
+        reference,
+        sha256_bytes(b"answer"),
+    )
     if sys.platform != "win32":
-        assert stat.S_IMODE(result_path.stat().st_mode) == 0o600
+        assert _modes(result_path) == (0o600,)
 
 
 @pytest.mark.parametrize("branch", ["precheck", "link_race"])
@@ -864,21 +1063,16 @@ def test_publish_existing_same_digest_is_bounded_idempotent_without_read_bytes(
     assert lease is not None
     reference = queue.publish_result(lease, operation_id=task_id, result=b"same")
     result_path = queue.state_root / reference
-    real_exists = Path.exists
-    if branch == "link_race":
-        monkeypatch.setattr(
-            Path,
-            "exists",
-            lambda path: False if path == result_path else real_exists(path),
-        )
+    _hide_result_from_exists(monkeypatch, result_path, branch)
     monkeypatch.setattr(
         Path,
         "read_bytes",
         lambda path: pytest.fail("publish_result must use bounded validator"),
     )
 
-    assert queue.publish_result(lease, operation_id=task_id, result=b"same") == reference
-    assert queue.get(task_id).state == "leased"
+    again = queue.publish_result(lease, operation_id=task_id, result=b"same")
+
+    assert (again, queue.get(task_id).state) == (reference, "leased")
 
 
 def test_publish_existing_mismatch_is_bounded_conflict_without_overwrite(
@@ -956,10 +1150,11 @@ def test_publish_existing_invalid_metadata_dead_letters_without_overwrite(
     with pytest.raises(ResultConflictError, match="result_corrupt"):
         queue.publish_result(lease, operation_id=task_id, result=incoming)
     task = queue.get(task_id)
-    assert task.state == "dead"
-    assert task.error_code == "result_corrupt"
-    with result_path.open("rb") as handle:
-        assert handle.read() == b"original"
+
+    assert ((task.state, task.error_code), _read_if_present(result_path)) == (
+        ("dead", "result_corrupt"),
+        b"original",
+    )
 
 
 def test_expired_lease_with_published_result_reconciles_without_redelivery(
@@ -971,25 +1166,30 @@ def test_expired_lease_with_published_result_reconciles_without_redelivery(
     reference = queue.publish_result(
         lease, operation_id=task_id, result=b"first-and-only-result"
     )
-    assert queue.get(task_id).state == "leased"  # Crash before acknowledge.
+    leased_before_crash = queue.get(task_id).state  # Crash before acknowledge.
     clock.advance(6)
 
-    assert queue.claim("replacement") is None
+    claimed_again = queue.claim("replacement")
     task = queue.get(task_id)
-    assert task.state == "succeeded"
-    assert task.result_reference == reference
-    assert task.result_sha256 == sha256_bytes(b"first-and-only-result")
-    assert len(task.attempt_history) == 1
-    assert task.attempt_history[0].outcome == "succeeded"
+
+    assert (
+        (leased_before_crash, claimed_again),
+        (task.state, task.result_reference, task.result_sha256),
+        [item.outcome for item in task.attempt_history],
+    ) == (
+        ("leased", None),
+        ("succeeded", reference, sha256_bytes(b"first-and-only-result")),
+        ["succeeded"],
+    )
 
 
-def test_drain_does_not_rerun_handler_after_publish_before_ack_crash(
+def test_a_handler_is_not_rerun_after_a_publish_before_ack_crash(
     tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(12))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     task_id = queue.enqueue("query", 1, {"prompt": "changes-every-time"})
     lease = queue.claim("crashed", lease_seconds=5)
     assert lease is not None
@@ -997,13 +1197,16 @@ def test_drain_does_not_rerun_handler_after_publish_before_ack_crash(
     clock.advance(6)
     calls: list[str] = []
 
-    counts = memory_queue.drain_with(
+    summary = _worked(
+        memory_queue,
         lambda task: calls.append(task["id"]) or DeferredResult(b"different"),
-        max_tasks=1,
     )
-    assert counts == {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
-    assert calls == []
-    assert queue.get(task_id).state == "succeeded"
+
+    assert (_counts(summary), calls, queue.get(task_id).state) == (
+        (0, 0, 0, 0),
+        [],
+        "succeeded",
+    )
 
 
 @pytest.mark.parametrize("corruption", ["missing", "mismatch"])
@@ -1015,51 +1218,50 @@ def test_expired_published_result_corruption_goes_dead_without_overwrite(
     assert lease is not None
     reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
     result_path = queue.state_root / reference
-    if corruption == "missing":
-        result_path.unlink()
-    else:
-        result_path.write_bytes(b"tampered")
+    _corrupt_stored_result(result_path, corruption)
     clock.advance(6)
 
-    assert queue.claim("replacement") is None
+    claimed_again = queue.claim("replacement")
     task = queue.get(task_id)
-    assert task.state == "dead"
-    assert task.error_code == "result_corrupt"
-    assert task.attempt_history[-1].error_code == "result_corrupt"
-    if corruption == "mismatch":
-        assert result_path.read_bytes() == b"tampered"
+
+    # A mismatched file keeps its own bytes; a missing one stays missing.
+    assert (
+        claimed_again,
+        (task.state, task.error_code, task.attempt_history[-1].error_code),
+        _read_if_present(result_path),
+    ) == (
+        None,
+        ("dead", "result_corrupt", "result_corrupt"),
+        None if corruption == "missing" else b"tampered",
+    )
 
 
-def test_drain_adopts_orphaned_valid_result_before_handler(
+def test_an_orphaned_valid_result_is_adopted_before_the_handler(
     tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(13))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("crashed", lease_seconds=5)
     assert lease is not None
     reference = queue.publish_result(lease, operation_id=task_id, result=b"orphaned")
-    with sqlite3.connect(queue.db_path) as connection:
-        connection.execute(
-            """UPDATE tasks SET result_reference=NULL, result_operation_id=NULL,
-                   result_sha256=NULL WHERE id=?""",
-            (task_id,),
-        )
+    _forget_result_reference(queue, task_id)
     clock.advance(6)
     calls: list[str] = []
 
-    counts = memory_queue.drain_with(
+    summary = _worked(
+        memory_queue,
         lambda task: calls.append(task["id"]) or DeferredResult(b"new-output"),
-        max_tasks=1,
     )
-    assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
-    assert calls == []
     task = queue.get(task_id)
-    assert task.state == "succeeded"
-    assert task.result_reference == reference
-    assert task.result_sha256 == sha256_bytes(b"orphaned")
+
+    assert (
+        _counts(summary),
+        calls,
+        (task.state, task.result_reference, task.result_sha256),
+    ) == ((1, 0, 0, 0), [], ("succeeded", reference, sha256_bytes(b"orphaned")))
 
 
 @pytest.mark.parametrize("mutation", ["delete", "chmod", "corrupt"])
@@ -1074,25 +1276,16 @@ def test_acknowledge_rejects_result_mutated_after_publish(
     lease = queue.claim("worker")
     assert lease is not None
     reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
-    result_path = queue.state_root / reference
-    if mutation == "delete":
-        result_path.unlink()
-    elif mutation == "chmod":
-        if os.name == "posix":
-            result_path.chmod(0o644)
-        else:
-            monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
-    else:
-        result_path.write_bytes(b"corrupt")
+    _mutate_published_result(
+        monkeypatch, memory_queue, queue.state_root / reference, mutation
+    )
 
     terminal = queue.acknowledge(lease)
-    assert terminal.state == "dead"
-    assert terminal.error_code == "result_corrupt"
-    task = queue.get(task_id)
-    assert task.state == "dead"
-    assert task.error_code == "result_corrupt"
-    assert task.attempt_history[-1].outcome == "failed"
-    assert task.attempt_history[-1].error_code == "result_corrupt"
+
+    assert ((terminal.state, terminal.error_code), _task_facts(queue.get(task_id))) == (
+        ("dead", "result_corrupt"),
+        ("dead", "result_corrupt", "failed", "result_corrupt"),
+    )
 
 
 def test_acknowledge_rejects_result_reference_outside_results_dir(
@@ -1155,28 +1348,26 @@ def test_orphan_adoption_rejects_invalid_full_metadata_before_handler(
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(14))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("crashed", lease_seconds=5)
     assert lease is not None
     queue.publish_result(lease, operation_id=task_id, result=b"too-large")
-    with sqlite3.connect(queue.db_path) as connection:
-        connection.execute(
-            """UPDATE tasks SET result_reference=NULL, result_operation_id=NULL,
-                   result_sha256=NULL WHERE id=?""",
-            (task_id,),
-        )
+    _forget_result_reference(queue, task_id)
     monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1, raising=False)
     clock.advance(6)
     calls: list[str] = []
 
-    counts = memory_queue.drain_with(
-        lambda task: calls.append(task["id"]) or DeferredResult(b"new"), max_tasks=1
+    summary = _worked(
+        memory_queue, lambda task: calls.append(task["id"]) or DeferredResult(b"new")
     )
-    assert counts == {"ok": 0, "failed": 1, "dead": 1, "skipped": 0}
-    assert calls == []
-    assert queue.get(task_id).state == "dead"
-    assert queue.get(task_id).error_code == "result_corrupt"
+    task = queue.get(task_id)
+
+    assert (_counts(summary), calls, (task.state, task.error_code)) == (
+        (0, 1, 1, 0),
+        [],
+        ("dead", "result_corrupt"),
+    )
 
 
 def test_result_directory_is_fsynced_before_database_reference(
@@ -1216,11 +1407,12 @@ def test_queue_hardens_directory_database_temp_and_result(
     assert lease is not None
     queue.publish_result(lease, operation_id=task_id, result=b"answer")
     paths = {path for path, _mode in protected}
-    assert queue.run_dir in paths
-    assert queue.results_dir in paths
-    assert queue.db_path in paths
-    assert any(path.suffix == ".tmp" for path in paths)
-    assert queue.state_root / queue.get(task_id).result_reference in paths
+    result = queue.state_root / queue.get(task_id).result_reference
+
+    assert (
+        {queue.run_dir, queue.results_dir, queue.db_path, result} <= paths,
+        any(path.suffix == ".tmp" for path in paths),
+    ) == (True, True)
 
 
 def test_queue_acl_failure_is_fail_closed(
@@ -1291,14 +1483,13 @@ def test_queue_uses_secure_rollback_journal_without_wal_files(queue: MemoryQueue
     with queue._connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("UPDATE tasks SET priority=1 WHERE id=?", (task_id,))
-        assert journal.is_file()
-        assert not Path(f"{queue.db_path}-wal").exists()
-        assert not Path(f"{queue.db_path}-shm").exists()
-        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
-        if os.name == "posix":
-            assert stat.S_IMODE(queue.run_dir.stat().st_mode) == 0o700
-            assert stat.S_IMODE(queue.db_path.stat().st_mode) == 0o600
-            assert stat.S_IMODE(journal.stat().st_mode) & 0o077 == 0
+        assert (
+            journal.is_file(),
+            Path(f"{queue.db_path}-wal").exists(),
+            Path(f"{queue.db_path}-shm").exists(),
+            connection.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+        ) == (True, False, False, "delete")
+        _assert_posix_modes(queue, journal)
         connection.rollback()
 
 
@@ -1307,10 +1498,12 @@ def test_acknowledge_without_published_result_goes_dead(queue: MemoryQueue) -> N
     lease = queue.claim("worker")
     assert lease is not None
     terminal = queue.acknowledge(lease)
-    assert terminal.state == "dead"
-    assert terminal.error_code == "result_corrupt"
-    assert queue.get(lease.id).state == "dead"
-    assert queue.get(lease.id).error_code == "result_corrupt"
+    stored = queue.get(lease.id)
+
+    assert ((terminal.state, terminal.error_code), (stored.state, stored.error_code)) == (
+        ("dead", "result_corrupt"),
+        ("dead", "result_corrupt"),
+    )
 
 
 def test_dependency_block_does_not_consume_attempt(queue: MemoryQueue) -> None:
@@ -1319,10 +1512,11 @@ def test_dependency_block_does_not_consume_attempt(queue: MemoryQueue) -> None:
     assert lease is not None
     queue.fail(lease, QueueFailure("provider_missing", blocked_capability="llm.compile"))
     task = queue.get(task_id)
-    assert task.state == "blocked"
-    assert task.attempts == 0
-    assert task.blocked_capability == "llm.compile"
-    assert task.attempt_history[-1].outcome == "blocked"
+
+    assert (
+        (task.state, task.attempts, task.blocked_capability),
+        task.attempt_history[-1].outcome,
+    ) == (("blocked", 0, "llm.compile"), "blocked")
 
 
 @pytest.mark.parametrize("code", ["invalid_input", "unsupported_version"])
@@ -1396,19 +1590,20 @@ def test_eighth_failure_is_dead_and_history_is_immutable(
     queue: MemoryQueue, clock: FakeClock
 ) -> None:
     task_id = queue.enqueue("query", 1, {})
+    prefixes: list[bool] = []
     previous = ()
     for attempt in range(1, 9):
-        lease = queue.claim("worker")
-        assert lease is not None
-        queue.fail(lease, QueueFailure("temporary", retry_after=3601))
+        _fail_one_attempt(queue, clock, attempt)
         task = queue.get(task_id)
-        assert task.attempt_history[: len(previous)] == previous
+        prefixes.append(task.attempt_history[: len(previous)] == previous)
         previous = task.attempt_history
-        if attempt < 8:
-            clock.advance(3601)
-    assert queue.get(task_id).state == "dead"
-    assert queue.get(task_id).attempts == 8
-    assert len(queue.get(task_id).attempt_history) == 8
+    task = queue.get(task_id)
+
+    # Every pass left the earlier history exactly as it was.
+    assert (
+        prefixes,
+        (task.state, task.attempts, len(task.attempt_history)),
+    ) == ([True] * 8, ("dead", 8, 8))
 
 
 def test_attempt_history_rejects_database_updates_and_deletes(queue: MemoryQueue) -> None:
@@ -1430,19 +1625,22 @@ def test_eighth_expired_lease_goes_dead_without_ninth_claim(
     queue: MemoryQueue, clock: FakeClock
 ) -> None:
     task_id = queue.enqueue("query", 1, {})
-    for attempt in range(1, 9):
-        lease = queue.claim("worker", lease_seconds=1)
-        assert lease is not None and lease.attempt == attempt
-        clock.advance(2)
+    attempts = [_claim_then_expire(queue, clock) for _ in range(1, 9)]
 
-    assert queue.claim("worker", lease_seconds=1) is None
+    ninth = queue.claim("worker", lease_seconds=1)
     task = queue.get(task_id)
-    assert task.state == "dead"
-    assert task.attempts == 8
-    assert task.error_code == "attempts_exhausted"
-    assert len(task.attempt_history) == 8
-    assert task.attempt_history[-1].outcome == "lease_expired"
-    assert task.attempt_history[-1].error_code == "attempts_exhausted"
+
+    assert (
+        attempts,
+        ninth,
+        (task.state, task.attempts, task.error_code, len(task.attempt_history)),
+        _task_facts(task)[2:],
+    ) == (
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        None,
+        ("dead", 8, "attempts_exhausted", 8),
+        ("lease_expired", "attempts_exhausted"),
+    )
 
 
 def test_startup_retires_legacy_ready_task_at_attempt_limit(
@@ -1491,25 +1689,22 @@ def test_startup_repair_preserves_existing_attempt_history(
 ) -> None:
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(8))
     task_id = queue.enqueue("query", 1, {})
-    for attempt in range(8):
-        lease = queue.claim("worker")
-        assert lease is not None
-        queue.fail(lease, QueueFailure("temporary", retry_after=1))
-        if attempt < 7:
-            retry_at = queue.get(task_id).available_at
-            clock.advance((retry_at - clock()).total_seconds())
+    for attempt in range(1, 9):
+        _fail_one_attempt(queue, clock, attempt, retry_after=1, task_id=task_id)
     original = queue.get(task_id).attempt_history
-    assert len(original) == 8
     with sqlite3.connect(queue.db_path) as connection:
         connection.execute(
             "UPDATE tasks SET state='ready', error_code=NULL WHERE id=?", (task_id,)
         )
 
     repaired = MemoryQueue(tmp_path, clock=clock, rng=random.Random(9)).get(task_id)
-    assert repaired.state == "dead"
-    assert repaired.error_code == "attempts_exhausted"
-    assert repaired.attempt_history == original
-    assert len(repaired.attempt_history) == 8
+
+    # The repair settles the state the row lost, and touches no history.
+    assert (
+        len(original),
+        (repaired.state, repaired.error_code),
+        repaired.attempt_history,
+    ) == (8, ("dead", "attempts_exhausted"), original)
 
 
 def test_cancel_only_changes_nonterminal_tasks(queue: MemoryQueue) -> None:
@@ -1520,10 +1715,13 @@ def test_cancel_only_changes_nonterminal_tasks(queue: MemoryQueue) -> None:
     queue.publish_result(lease, operation_id=succeeded, result=b"ok")
     queue.acknowledge(lease)
 
-    assert queue.cancel(ready) is True
-    assert queue.get(ready).state == "cancelled"
-    assert queue.cancel(succeeded) is False
-    assert queue.get(succeeded).state == "succeeded"
+    cancelled_ready = queue.cancel(ready)
+    cancelled_terminal = queue.cancel(succeeded)
+
+    assert (
+        (cancelled_ready, queue.get(ready).state),
+        (cancelled_terminal, queue.get(succeeded).state),
+    ) == ((True, "cancelled"), (False, "succeeded"))
 
 
 def test_cancel_expired_deadline_does_not_mutate_task(queue: MemoryQueue) -> None:
@@ -1622,16 +1820,18 @@ def test_schema_upgrades_legacy_eight_attempt_constraint(tmp_path: Path) -> None
     assert upgraded.get(task_id).attempts == 9
 
 
-def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_handler_runs_with_no_transaction_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task's own work never runs inside the queue's write transaction.
+
+    The enqueued task carries the shape the module facade takes: a kind, a
+    payload and handler version 1.
+    """
     import memory_queue
 
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     task_id = memory_queue.enqueue("query", {"prompt": "hello"})
-    pending = memory_queue.list_pending()
-    assert pending[0]["id"] == task_id
-    assert pending[0]["type"] == "query"
-    assert pending[0]["handler_version"] == 1
-
     queue = memory_queue._queue()
     real_connect = queue._connect
     transaction_states_at_close: list[bool] = []
@@ -1643,24 +1843,21 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
             transaction_states_at_close.append(connection.in_transaction)
 
     monkeypatch.setattr(queue, "_connect", tracked_connect)
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
-    in_transaction: list[bool] = []
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
+    seen: list[dict[str, object]] = []
 
     def processor(task: dict[str, object]) -> bool:
-        in_transaction.append(transaction_states_at_close[-1])
+        seen.append({**task, "in_transaction": transaction_states_at_close[-1]})
         return True
 
-    assert memory_queue.drain_with(processor, max_tasks=1) == {
-        "ok": 1,
-        "failed": 0,
-        "dead": 0,
-        "skipped": 0,
-    }
-    assert in_transaction == [False]
-    assert memory_queue.list_pending() == []
-    snapshot = memory_queue.status()
-    assert snapshot["pending_total"] == 0
-    assert snapshot["queue_dir"].endswith("run")
+    summary = _worked(memory_queue, processor)
+
+    assert (
+        _counts(summary),
+        (seen[0]["id"], seen[0]["type"], seen[0]["handler_version"]),
+        seen[0]["in_transaction"],
+        queue.get(task_id).state,
+    ) == ((1, 0, 0, 0), (task_id, "query", 1), False, "succeeded")
 
 
 def test_drain_counts_corrupt_acknowledgement_as_failed_and_dead(
@@ -1669,7 +1866,7 @@ def test_drain_counts_corrupt_acknowledgement_as_failed_and_dead(
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(15))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     task_id = queue.enqueue("query", 1, {})
     real_acknowledge = queue.acknowledge
 
@@ -1679,9 +1876,10 @@ def test_drain_counts_corrupt_acknowledgement_as_failed_and_dead(
         return real_acknowledge(lease)
 
     monkeypatch.setattr(queue, "acknowledge", corrupt_then_acknowledge)
-    counts = memory_queue.drain_with(lambda task: True, max_tasks=1)
-    assert counts == {"ok": 0, "failed": 1, "dead": 1, "skipped": 0}
-    assert queue.get(task_id).state == "dead"
+
+    summary = _worked(memory_queue, lambda task: True)
+
+    assert (_counts(summary), queue.get(task_id).state) == ((0, 1, 1, 0), "dead")
 
 
 def test_cli_work_returns_nonzero_for_failed_or_dead_work(
@@ -1704,7 +1902,7 @@ def test_compat_processor_receives_preclaim_metadata(
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(2))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     task_id = queue.enqueue("query", 1, {"prompt": "hello"})
     enqueued_at = queue.get(task_id).created_at.isoformat(timespec="seconds")
     first = queue.claim("first")
@@ -1712,16 +1910,16 @@ def test_compat_processor_receives_preclaim_metadata(
     clock.advance(7)
     failure_at = clock().isoformat(timespec="seconds")
     queue.fail(first, QueueFailure("temporary", retry_after=0))
-    retry_at = queue.get(task_id).available_at
-    clock.advance((retry_at - clock()).total_seconds())
+    _wait_for_retry(queue, clock, task_id)
 
     seen: list[dict[str, object]] = []
-    assert memory_queue.drain_with(lambda task: seen.append(task) or True, max_tasks=1)[
-        "ok"
-    ] == 1
-    assert seen[0]["enqueued_at"] == enqueued_at
-    assert seen[0]["last_attempt_at"] == failure_at
-    assert seen[0]["attempts"] == 1
+    summary = _worked(memory_queue, lambda task: seen.append(task) or True)
+
+    # The handler is told what the task looked like before this claim.
+    assert (
+        summary.succeeded,
+        (seen[0]["enqueued_at"], seen[0]["last_attempt_at"], seen[0]["attempts"]),
+    ) == (1, (enqueued_at, failure_at, 1))
 
 
 def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1757,9 +1955,12 @@ def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.M
             },
         }
     )
-    assert captured[0][0] == tmp_path / "knowledge" / "daily" / "2026-07-14.md"
-    assert "major body" in captured[0][1]
-    assert captured[0][2].startswith("flush:")
+    path, block, operation_id = captured[0]
+    assert (path, "major body" in block, operation_id.startswith("flush:")) == (
+        tmp_path / "knowledge" / "daily" / "2026-07-14.md",
+        True,
+        True,
+    )
 
 
 def test_deferred_flush_operation_is_appended_once_under_lock(
@@ -1771,12 +1972,16 @@ def test_deferred_flush_operation_is_appended_once_under_lock(
     (tmp_path / "knowledge" / "notes").mkdir(parents=True)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
-    assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is True
-    assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is False
+    first = daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op")
+    again = daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op")
     content = daily.read_text(encoding="utf-8")
-    assert content.count("body") == 1
-    assert "stable-op" not in content
-    assert content.count("llm-wiki-operation:") == 1
+
+    # The second call is refused, and the operation id is never written out.
+    assert (
+        (first, again),
+        (content.count("body"), content.count("llm-wiki-operation:")),
+        "stable-op" in content,
+    ) == ((True, False), (1, 1), False)
 
 
 @pytest.mark.parametrize("day", ["../outside", "2026-7-14", "2026-07-14/../../x", ""])
@@ -1823,13 +2028,18 @@ def test_manual_query_result_is_published_by_queue_fence(
     import memory_queue
 
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(4))
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
     monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "answer")
     task_id = queue.enqueue("query", 1, {"prompt": "hello"})
-    assert memory_queue.drain_with(memory_queue._manual_processor, max_tasks=1)["ok"] == 1
+
+    summary = _worked(memory_queue, memory_queue._manual_processor)
     task = queue.get(task_id)
-    assert task.state == "succeeded"
-    assert (queue.state_root / task.result_reference).read_bytes() == b"answer"
+
+    assert (
+        summary.succeeded,
+        task.state,
+        (queue.state_root / task.result_reference).read_bytes(),
+    ) == (1, "succeeded", b"answer")
 
 
 def test_deferred_compile_runs_synchronously_and_uses_exit_status(
@@ -1881,33 +2091,13 @@ def test_deferred_compile_failure_retries_then_dies(
     monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
     monkeypatch.setattr(memory_queue.subprocess, "run", failed_run)
 
-    first = memory_queue.run_worker(
-        memory_queue._manual_processor,
-        max_tasks=1,
-        idle_seconds=0,
-        max_attempts=2,
-        retry_base_seconds=1,
-        retry_cap_seconds=1,
-        processor_runner=memory_queue._run_processor_inline,
-    )
+    first = _worked_twice_policy(memory_queue)
     retry = queue.get(task_id)
-    assert first.failed == 1
-    assert retry.state == "ready"
     clock.advance((retry.available_at - clock()).total_seconds())
 
-    second = memory_queue.run_worker(
-        memory_queue._manual_processor,
-        max_tasks=1,
-        idle_seconds=0,
-        max_attempts=2,
-        retry_base_seconds=1,
-        retry_cap_seconds=1,
-        processor_runner=memory_queue._run_processor_inline,
-    )
+    second = _worked_twice_policy(memory_queue)
     dead = queue.get(task_id)
-    assert second.failed == 1
-    assert dead.state == "dead"
-    assert dead.error_code == "processor_failed"
+
     # macOS probes the filesystem with `/sbin/mount` for cloud-sync detection,
     # so the raw call list carries unrelated commands; count the compiles.
     compile_calls = [
@@ -1915,4 +2105,8 @@ def test_deferred_compile_failure_retries_then_dies(
         for command in calls
         if any("compile_memory.py" in str(part) for part in command)
     ]
-    assert len(compile_calls) == 2
+    assert (
+        (first.failed, retry.state),
+        (second.failed, dead.state, dead.error_code),
+        len(compile_calls),
+    ) == ((1, "ready"), (1, "dead", "processor_failed"), 2)

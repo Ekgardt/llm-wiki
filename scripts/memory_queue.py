@@ -5630,51 +5630,6 @@ class MemoryQueue:
             prior_attempts=int(row["attempts"]),
         )
 
-    def _claim_task(self, task_id: str, owner: str) -> QueueLease | None:
-        """Claim one known task for the legacy mark_attempt facade."""
-        now = _as_utc(self._clock())
-        with self._connect() as connection, begin_immediate(connection):
-            self._delete_stale_source_fences(connection)
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id=? AND state='ready'", (task_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            try:
-                self._assert_payload_not_fenced(connection, str(row["payload_json"]))
-            except QueueOperationError:
-                return None
-            token = f"{self._rng.getrandbits(256):064x}"
-            expires = now + timedelta(seconds=DEFAULTS.queue_lease_seconds)
-            connection.execute(
-                """UPDATE tasks SET state='leased', attempts=attempts+1, lease_owner=?,
-                       lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
-                       attempt_started_at=?, updated_at=? WHERE id=?""",
-                (
-                    owner,
-                    token,
-                    _timestamp(expires),
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(now),
-                    task_id,
-                ),
-            )
-        return QueueLease(
-            task_id,
-            row["kind"],
-            row["handler_version"],
-            json.loads(row["payload_json"]),
-            row["input_hash"],
-            owner,
-            token,
-            expires,
-            int(row["attempts"]) + 1,
-            _parse_timestamp(row["created_at"]),
-            _parse_timestamp(row["last_attempt_at"]),
-            int(row["attempts"]),
-        )
-
     def _settle_published_expiry(
         self, connection: sqlite3.Connection, row: sqlite3.Row, now: datetime
     ) -> None:
@@ -12728,18 +12683,6 @@ def _path_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
-def _legacy_write_allowed(state_root: Path) -> bool:
-    _run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if _path_present(marker):
-        _validate_migration_marker(marker)
-        if legacy_dir.exists():
-            _post_marker_legacy_conflict(state_root)
-        raise LegacyBackendDisabled("legacy_backend_disabled")
-    if _queue_owner_is_active(state_root, "migration"):
-        raise LegacyBackendDisabled("legacy_migration_quiesced")
-    return True
-
-
 def _open_queue_ownership_db(state_root: Path) -> sqlite3.Connection:
     run_dir, _legacy_dir, db_path, _marker = _migration_paths(state_root)
     # Legacy queue ownership lives in the pre-adoption database itself, and the
@@ -13091,19 +13034,6 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
     return changed == 1
 
 
-def _queue_owner_is_active(state_root: Path, role: str) -> bool:
-    with _open_queue_ownership_db(state_root) as connection:
-        row = connection.execute(
-            "SELECT token, pid, expires_at FROM queue_ownership WHERE role=?", (role,)
-        ).fetchone()
-    if row is None or row["token"] is None:
-        return False
-    return (
-        isinstance(row["pid"], int)
-        and _pid_is_alive(row["pid"])
-    )
-
-
 def _marker_file_usable(marker: Path, metadata: os.stat_result) -> bool:
     """The marker is a real, bounded, owner-only file and not a link."""
     if marker.is_symlink() or not stat.S_ISREG(metadata.st_mode):
@@ -13414,64 +13344,6 @@ def _post_marker_legacy_conflict(state_root: Path) -> None:
                 run_dir, legacy_dir, code="legacy_backend_conflict"
             )
             raise LegacyBackendDisabled("legacy_backend_conflict")
-    finally:
-        _release_queue_owner(owner)
-
-
-def _check_legacy_marker_race(root: Path) -> None:
-    """Refuse to keep using the legacy queue once migration has claimed it."""
-    marker = _migration_paths(root)[3]
-    if not _path_present(marker):
-        return
-    _validate_migration_marker(marker)
-    raise LegacyBackendDisabled("legacy_marker_race")
-
-
-def _legacy_queue_record(task_type: str, payload: dict[str, Any]) -> dict[str, object]:
-    """The contents of a legacy queue file for a newly enqueued task."""
-    task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    return {
-        "attempts": 0,
-        "enqueued_at": _timestamp(_utc_now()),
-        "id": task_id,
-        "last_attempt_at": None,
-        "payload": payload,
-        "type": task_type,
-    }
-
-
-def _confirm_legacy_write(
-    owner: QueueOwnerLease, root: Path, target: Path, queue_dir: Path
-) -> QueueOwnerLease:
-    """Prove the legacy backend is still ours; drop the written file if it is not."""
-    try:
-        renewed = _heartbeat_queue_owner(owner)
-        _check_legacy_marker_race(root)
-        return renewed
-    except Exception:
-        target.unlink(missing_ok=True)
-        fsync_directory(queue_dir)
-        raise
-
-
-def _legacy_enqueue_file(
-    task_type: str, payload: dict[str, Any], state_root: Path | None = None
-) -> str:
-    root = Path(state_root or _state_root()).resolve()
-    _legacy_write_allowed(root)
-    owner = _acquire_queue_owner(root, "legacy", "legacy_owner_busy")
-    try:
-        _legacy_write_allowed(root)
-        record = _legacy_queue_record(task_type, payload)
-        queue_dir = root / "run" / "queue"
-        queue_dir.mkdir(parents=True, exist_ok=True)
-        _harden_owner_only(queue_dir, 0o700)
-        target = queue_dir / f"{record['id']}.json"
-        owner = _heartbeat_queue_owner(owner)
-        _check_legacy_marker_race(root)
-        _write_durable_file(target, canonical_json_bytes(record))
-        owner = _confirm_legacy_write(owner, root, target, queue_dir)
-        return str(record["id"])
     finally:
         _release_queue_owner(owner)
 
@@ -14004,37 +13876,6 @@ def _export_task_record(task: QueueTask) -> dict[str, object]:
     }
 
 
-def list_pending(max_age_days: int | None = None) -> list[dict[str, Any]]:
-    tasks = _queue().list_tasks(
-        states=("ready", "leased", "blocked", "dead"), max_age_days=max_age_days
-    )
-    return [_compat_task(task) for task in tasks]
-
-
-def _settle_legacy_attempt(queue, lease: QueueLease, task_id: str, success: bool) -> None:
-    """Publish or fail one legacy attempt under its own lease."""
-    if not success:
-        queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-        return
-    queue.publish_result(lease, operation_id=task_id, result=b"")
-    queue.acknowledge(lease)
-
-
-def mark_attempt(task_id: str, success: bool) -> None:
-    """Legacy attempt API retained for callers while storage is SQLite-backed."""
-    queue = _queue()
-    try:
-        task = queue.get(task_id)
-    except KeyError:
-        return
-    if task.state != "ready":
-        return
-    lease = queue._claim_task(task_id, f"legacy-{os.getpid()}")
-    if lease is None:
-        return
-    _settle_legacy_attempt(queue, lease, task_id, success)
-
-
 def cancel(
     task_id: str,
     *,
@@ -14222,93 +14063,6 @@ class _LeaseHeartbeat:
 
     def _renew(self) -> None:
         self._lease = self._queue.heartbeat(self._lease, lease_seconds=self._lease_seconds)
-
-
-def drain_with(
-    processor: Callable[[dict], bool | DeferredResult], max_tasks: int = 10
-) -> dict[str, int]:
-    """Run handlers outside transactions and fence completion with a result marker."""
-    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
-    queue = _queue()
-    owner = f"compat-{os.getpid()}-{uuid.uuid4().hex}"
-    for _ in range(max_tasks):
-        lease = queue.claim(owner)
-        if lease is None:
-            break
-        _drain_one_lease(queue, processor, lease, counts)
-    return counts
-
-
-def _drain_one_lease(
-    queue: MemoryQueue,
-    processor: Callable[[dict], bool | DeferredResult],
-    lease: QueueLease,
-    counts: dict[str, int],
-) -> None:
-    """Adopt, run and settle one leased task."""
-    if _adopted_counts(queue, lease, counts):
-        return
-    outcome, heartbeat_lost = _run_compat_processor(queue, processor, lease)
-    if heartbeat_lost:
-        counts["failed"] += 1
-        return
-    _settle_compat_outcome(queue, lease, outcome, counts)
-
-
-def _run_compat_processor(
-    queue: MemoryQueue,
-    processor: Callable[[dict], bool | DeferredResult],
-    lease: QueueLease,
-) -> tuple[bool | DeferredResult, bool]:
-    """(what the processor returned, whether the lease heartbeat was lost)."""
-    heartbeat = _LeaseHeartbeat(queue, lease)
-    heartbeat.start()
-    try:
-        outcome: bool | DeferredResult = _compat_processor_outcome(processor, lease)
-    finally:
-        heartbeat.stop()
-    return outcome, heartbeat.error is not None
-
-
-def _compat_processor_outcome(
-    processor: Callable[[dict], bool | DeferredResult], lease: QueueLease
-) -> bool | DeferredResult:
-    """Run the handler; a raised exception is a plain failure here."""
-    try:
-        return processor(_compat_task(lease))
-    except Exception:  # noqa: BLE001 - a compat handler may raise anything
-        print("processor_exception", file=sys.stderr)
-        return False
-
-
-def _settle_compat_outcome(
-    queue: MemoryQueue,
-    lease: QueueLease,
-    outcome: bool | DeferredResult,
-    counts: dict[str, int],
-) -> None:
-    """Publish or fail the task, counting a lost fence as a failure."""
-    try:
-        _publish_compat_outcome(queue, lease, outcome, counts)
-    except (LeaseFenceError, ResultConflictError):
-        counts["failed"] += 1
-        if queue.get(lease.id).state == "dead":
-            counts["dead"] += 1
-
-
-def _publish_compat_outcome(
-    queue: MemoryQueue,
-    lease: QueueLease,
-    outcome: bool | DeferredResult,
-    counts: dict[str, int],
-) -> None:
-    if not outcome:
-        queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-        _count_terminal(counts, queue.get(lease.id))
-        return
-    result = outcome.data if isinstance(outcome, DeferredResult) else b""
-    queue.publish_result(lease, operation_id=lease.id, result=result)
-    _count_terminal(counts, queue.acknowledge(lease))
 
 
 def _run_processor_inline(
@@ -15499,20 +15253,6 @@ def _count_terminal(counts: dict[str, int], task: QueueTask) -> None:
     counts["failed"] += 1
     if task.state == "dead":
         counts["dead"] += 1
-
-
-def status() -> dict[str, Any]:
-    queue = _queue()
-    tasks = queue.list_tasks(states=("ready", "leased", "blocked", "dead"))
-    by_type: dict[str, int] = {}
-    for task in tasks:
-        by_type[task.kind] = by_type.get(task.kind, 0) + 1
-    return {
-        "pending_total": len(tasks),
-        "by_type": by_type,
-        "permanently_failed": sum(task.state == "dead" for task in tasks),
-        "queue_dir": str(queue.run_dir),
-    }
 
 
 def _operator_status() -> dict[str, object]:
