@@ -200,8 +200,12 @@ def _judged_ids(path: Path) -> set[str]:
     return {str(row.get("question_id")) for row in _loaded_rows(path)}
 
 
-def _row_verdict(row: dict) -> float | None:
-    """The judge's word where it spoke; the deterministic score where that means something.
+JUDGE = "judge"
+TEXT_SCORE = "text_score"
+
+
+def _graded(row: dict) -> tuple[str, float] | None:
+    """Who spoke for this row and what they said, or nothing at all.
 
     On a rubric row the deterministic score is not a weaker answer, it is no
     answer: `contains_answer` cannot match a gold that describes a good reply.
@@ -212,20 +216,41 @@ def _row_verdict(row: dict) -> float | None:
     """
     verdict = row.get("judge_correct")
     if verdict is not None:
-        return float(verdict)
+        return (JUDGE, float(verdict))
     if longmemeval_score.gold_is_rubric(row):
         return None
-    return float(bool(longmemeval_score.score_question(row).get("correct")))
+    return (TEXT_SCORE, float(bool(longmemeval_score.score_question(row).get("correct"))))
 
 
-def _accuracy_row(values: list[float | None]) -> dict:
-    """One category's judged accuracy, with what stayed ungraded beside it."""
-    graded = [value for value in values if value is not None]
+def _row_verdict(row: dict) -> float | None:
+    graded = _graded(row)
+    if graded is None:
+        return None
+    return graded[1]
+
+
+def _accuracy_row(entries: list[tuple[str, float] | None]) -> dict:
+    """One category's accuracy, saying who produced each verdict it averaged.
+
+    `judge_accuracy` was never only the judge: where the judge gave no readable
+    verdict — 160 of 500 rows on the 2026-09-17 run — the substring test stood
+    in, unannounced, and the blend was published as one number. It is still a
+    blend, because a text score is real evidence where the gold is a value
+    somebody said, but the report now says how much of the mean is which.
+    """
+    graded = [entry for entry in entries if entry is not None]
+    judged = _from_judge(graded)
     return {
         "n": len(graded),
-        "ungraded": len(values) - len(graded),
-        "judge_accuracy": _mean(graded),
+        "judged": judged,
+        "from_text_score": len(graded) - judged,
+        "ungraded": len(entries) - len(graded),
+        "judge_accuracy": _mean([value for _source, value in graded]),
     }
+
+
+def _from_judge(graded: list[tuple[str, float]]) -> int:
+    return sum(1 for source, _value in graded if source == JUDGE)
 
 
 def _mean(values: list[float]) -> float | None:
@@ -247,11 +272,11 @@ def _judge_accuracy(rows: list[dict]) -> dict:
     could grade — no judge verdict and a gold no text metric can read — are
     carried as `ungraded`, not folded into the mean as wrong.
     """
-    verdicts: dict[str, list[float | None]] = {}
+    verdicts: dict[str, list] = {}
     for row in _gradable(rows):
-        verdicts.setdefault(str(row.get("category")), []).append(_row_verdict(row))
-    report = {name: _accuracy_row(values) for name, values in sorted(verdicts.items())}
-    report["overall"] = _accuracy_row([value for values in verdicts.values() for value in values])
+        verdicts.setdefault(str(row.get("category")), []).append(_graded(row))
+    report = {name: _accuracy_row(entries) for name, entries in sorted(verdicts.items())}
+    report["overall"] = _accuracy_row([entry for entries in verdicts.values() for entry in entries])
     return report
 
 

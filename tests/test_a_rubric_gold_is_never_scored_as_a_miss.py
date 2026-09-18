@@ -96,11 +96,20 @@ def test_an_ungraded_fact_row_still_falls_back_to_the_text_score() -> None:
     assert row["judge_accuracy"] == 1.0
 
 
+def test_the_report_says_how_much_of_the_mean_the_judge_actually_spoke() -> None:
+    """The figure is a blend of two metrics, and it never said which was which."""
+    rows = [{**_SPAN, "judge_correct": True}, {**_SPAN, "judge_correct": None}]
+    row = longmemeval_judge._judge_accuracy(rows)["multi-session"]
+
+    assert (row["judged"], row["from_text_score"]) == (1, 1)
+    assert (row["n"], row["judge_accuracy"]) == (2, 1.0)
+
+
 def test_a_graded_rubric_row_keeps_the_judges_word() -> None:
     report = longmemeval_judge._judge_accuracy([{**_RUBRIC, "judge_correct": True}])
     row = report["single-session-preference"]
 
-    assert (row["n"], row["ungraded"]) == (1, 0)
+    assert (row["n"], row["judged"], row["ungraded"]) == (1, 1, 0)
     assert row["judge_accuracy"] == 1.0
 
 
