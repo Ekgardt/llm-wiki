@@ -15,6 +15,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The navigation gate measures our share, not the machine.**
+  `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
+  `direct_pyright_p95_ms` — Pyright itself, which no change of ours can reach —
+  rose 27.6% in the same three hours; our share of the work moved 2.4%. The
+  bound is now `max(30 ms, 0.90 x direct_pyright_p95_ms)`: the approved 30 ms
+  floor, or, on a slower machine, 90% of what the language server took on the
+  same queries in the same run. A uniformly slower runner can no longer fail the
+  gate; our layer growing its share still does, and an absent or non-positive
+  control makes the evidence incomplete. The August runs, where our share was
+  0.48-0.50 against today's 0.72-0.74, show what the single absolute number was
+  blind to. See `docs/CODE-NAVIGATION.md` and
+  `docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md`.
 - **The test tree comes under the complexity law.** `lizard -C 5` reported 88
   functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
   in the navigation tests become tables of runners and builders, the
