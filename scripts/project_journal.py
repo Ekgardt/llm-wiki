@@ -844,9 +844,45 @@ def _portable_slug_characters(slug: str) -> bool:
     )
 
 
+def _is_reserved_slug(slug: str) -> bool:
+    return slug.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES
+
+
 def _require_unreserved_slug(slug: str) -> None:
-    if slug.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES:
+    if _is_reserved_slug(slug):
         raise ValueError("project slug uses a reserved Windows name")
+
+
+_UNUSABLE_SLUGS = frozenset({"", ".", ".."})
+
+
+def _portable_slug_characters_only(candidate: str) -> str:
+    """The candidate with every character this journal refuses removed."""
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFC", candidate).lower()
+        if _portable_slug_characters(character) and character not in "/\\"
+    ).rstrip(" .")
+
+
+def _unreserved_slug(kept: str) -> str:
+    if _is_reserved_slug(kept):
+        return f"project-{kept}"
+    return kept
+
+
+def portable_slug(candidate: str) -> str:
+    """The nearest slug this journal accepts, or "" when nothing is left.
+
+    Whoever mints a slug has to satisfy the rules below, or the project it names
+    never gets a handoff and the only trace is a line in `logs/hook-errors.log`.
+    Sharing one test is what keeps the two from drifting apart again. See
+    `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
+    """
+    kept = _portable_slug_characters_only(candidate)
+    if kept in _UNUSABLE_SLUGS:
+        return ""
+    return _unreserved_slug(kept)
 
 
 def _require_portable_slug(slug: str) -> None:
