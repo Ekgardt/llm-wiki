@@ -139,22 +139,25 @@ update of the checkout, which never pushes, never resolves a conflict, and decli
 whenever the update would touch a locally modified file — see
 `knowledge/notes/automatic-code-update-decision.md`.
 
-**Approved Reliability v3 target (not implemented):** New
-unprocessed lifecycle evidence would be create-only under `run/capture-intents/`
+**Reliability v3 (implemented; the installers adopt it):** New
+unprocessed lifecycle evidence is create-only under `run/capture-intents/`
 until an immutable terminal record proves committed Markdown, validated
-no-durable-content, or operator discard; queue enqueue alone would not permit
-deletion. Compile receipts would bind logical path plus digest and a validated
-per-source disposition; digest-only v2 receipts would remain historical evidence
-only. Queue payload hashes would be checked at every transition, and dedupe would
-alias only identical kind, handler version, and payload. All operational actors would
+no-durable-content, or operator discard; queue enqueue alone does not permit
+deletion. Compile receipts bind logical path plus digest and a validated
+per-source disposition; digest-only v2 receipts remain historical evidence
+only. Queue payload hashes are checked at every transition, and dedupe
+aliases only identical kind, handler version, and payload. All operational actors
 use one canonical fenced admission registry, including capture, project/Markdown
-writers, queue, and LSP. Explicit offline adoption would publish versioned v3
-databases and replace legacy active paths with JSON tombstones, blocking normal
-v2 queue/transaction clients after cutover. Live, expired-but-not-proven-dead, or
-unknown owners, unresolved intents, and partial adoption would block `run/` deletion.
-Doctor would
-report a quiescent snapshot only after complete adoption, and never a durable deletion
-permit.
+writers, queue, and LSP. Explicit offline adoption publishes versioned v3
+databases and replaces legacy active paths with JSON tombstones, blocking normal
+v2 queue/transaction clients after cutover; `install.sh` and `install.ps1` run that
+adoption on a fresh vault, and the nightly pass works the adopted queue and adopts
+capture intents. Live, expired-but-not-proven-dead, or
+unknown owners, unresolved intents, and partial adoption block `run/` deletion.
+Doctor
+reports a quiescent snapshot only after complete adoption, and never a durable deletion
+permit. Class names that still say "Candidate" are the pre-adoption reader, not a
+statement that the target is unbuilt.
 See `knowledge/notes/v4-reliability-contracts-decision.md`.
 
 **Derived evidence generations:** Markdown, Git, and project journals are

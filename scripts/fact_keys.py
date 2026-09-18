@@ -46,9 +46,11 @@ MAX_KEY_CHARS = 160
 MAX_TURN_CHARS = 1500
 # A nightly step keys new entries in this much time and leaves the rest for
 # the next night; the store remembers what is done. The nightly kills the step
-# at 660s; like its neighbours the step stops starting work 120s before that,
-# which is what one last provider call may take.
-# Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md
+# at this budget plus the margin one last provider call may take
+# (`scheduled_nightly.provider_margin_seconds`), which in auto mode is the whole
+# provider order and not one of them.
+# Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md,
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
 DEFAULT_BUDGET_SECONDS = 540.0
 EXTRACT_SYSTEM_PROMPT = (
     "You read turns a person wrote to an assistant and write search keys for "

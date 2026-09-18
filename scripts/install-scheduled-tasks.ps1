@@ -94,8 +94,8 @@ function Test-LLMWikiScheduledTasks {
     )
     $verified = $true
     $specifications = @(
-        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = 3 },
-        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = 5 }
+        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = 4 },
+        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = 6 }
     )
     foreach ($specification in $specifications) {
         $name = $specification.Name
@@ -273,14 +273,18 @@ $nightlyAction = New-LLMWikiScheduledAction `
 
 $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
 
-# The pass's own bounds add up to about 2.4 hours (scheduled_nightly.worst_case_seconds);
-# a one-hour limit killed it before it could release its lease or record a result.
-# See docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md.
+# The pass's own bounds add up to about 3.2 hours in auto provider mode
+# (scheduled_nightly.worst_case_seconds, which now counts the checkout update and
+# the whole provider order one call may walk); a one-hour limit killed the pass
+# before it could release its lease or record a result. The pass also stops
+# itself at that bound, so this limit is only the backstop.
+# See docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md and
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md.
 $nightlySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 15)
 
@@ -311,14 +315,15 @@ $weeklyAction = New-LLMWikiScheduledAction `
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am
 
-# The weekly pass runs the whole nightly one and more: about 3.9 hours by its own
+# The weekly pass runs the whole nightly one and more: about 4.9 hours by its own
 # bounds (scheduled_weekly.worst_case_seconds). See
-# docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md.
+# docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md and
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md.
 $weeklySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 5) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 30)
 

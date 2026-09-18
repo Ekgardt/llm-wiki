@@ -32,6 +32,20 @@ BASELINE_SYNC_COMMAND = (
 )
 FETCH_DETAIL_CHARS = 300
 
+# What one update may cost the pass that calls it, by its own timeouts: two
+# fetches (the default branch and the tracked one), the baseline sync, and the
+# thirteen ordinary git calls of a full update — `rev-parse --abbrev-ref`,
+# `config --get`, `symbolic-ref`, `rev-parse FETCH_HEAD` twice, `rev-parse HEAD`
+# twice, `merge-base --is-ancestor` twice, three `diff`s and the `merge`. The
+# nightly counts this in its own bound instead of leaving the step out of the
+# sum. Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+GIT_CALLS_PER_UPDATE = 13
+WORST_CASE_SECONDS = (
+    2 * FETCH_TIMEOUT_SECONDS
+    + SYNC_TIMEOUT_SECONDS
+    + GIT_CALLS_PER_UPDATE * GIT_TIMEOUT_SECONDS
+)
+
 
 class SelfUpdateError(RuntimeError):
     """A git command failed in a way the caller must not paper over."""

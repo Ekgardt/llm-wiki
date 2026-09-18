@@ -1642,7 +1642,10 @@ def windows_environment_resources(
 # installed manifests record it, and uninstall and rollback have to take it back.
 # See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
 WINDOWS_TASK_SPEC_VERSION = 2
-WINDOWS_TASK_LIMIT_HOURS = {"nightly": 3, "weekly": 5}
+# Above each pass's own worst case, which now counts the checkout update and
+# the whole provider order one model call may walk (about 3.2 h and 4.9 h).
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+WINDOWS_TASK_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
 
 
 def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> bytes:

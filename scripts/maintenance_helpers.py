@@ -37,6 +37,18 @@ REPORT_RETENTION_FILES = 60
 REPORT_RETENTION_BYTES = 32 * 1024 * 1024
 MAINTENANCE_REPORT_PATTERNS = ("nightly-*.md", "weekly-*.md", "lint-*.md")
 ARTIFACT_PATTERN = "*.log"
+# The files a scheduler redirects a pass into: launchd writes the first pair,
+# cron the second. They are append-only and nothing else names them, so they
+# grew for the life of the install. They are the file this very process is
+# writing, so they are trimmed in place — never renamed, never unlinked.
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+SCHEDULER_LOG_NAMES = (
+    "scheduled-nightly.log",
+    "scheduled-weekly.log",
+    "cron-nightly.log",
+    "cron-weekly.log",
+)
+SCHEDULER_LOG_KEEP_BYTES = 2 * 1024 * 1024
 
 
 def _artifact_stem(label: str) -> str:
@@ -248,6 +260,48 @@ def prune_maintenance_output() -> int:
         prune_reports(REPORTS_DIR, pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
     )
     return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN)
+
+
+def _trim_in_place(path: Path, keep_bytes: int) -> None:
+    """Keep the last `keep_bytes` of a file that is being appended to.
+
+    The writer is this pass's own redirection: renaming or unlinking the file
+    would send the rest of tonight's output to a file nobody reads, while an
+    `O_APPEND` writer simply continues at the new end after this.
+    """
+    with path.open("r+b") as handle:
+        handle.seek(-keep_bytes, os.SEEK_END)
+        tail = handle.read()
+        handle.seek(0)
+        handle.write(tail)
+        handle.truncate()
+
+
+def _trim_one_scheduler_log(path: Path, keep_bytes: int) -> int:
+    """Bytes dropped from one log; 0 when it is small enough or cannot be opened."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= keep_bytes:
+        return 0
+    try:
+        _trim_in_place(path, keep_bytes)
+    except OSError:
+        return 0
+    return size - keep_bytes
+
+
+def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
+    """Bound the append-only logs a scheduler redirects a pass into.
+
+    Returns how many bytes were dropped in total. A log held open with no
+    sharing (Windows) is left exactly as it is.
+    """
+    return sum(
+        _trim_one_scheduler_log(REPORTS_DIR / name, keep_bytes)
+        for name in SCHEDULER_LOG_NAMES
+    )
 
 
 def wait_for_compile_idle(log_fn) -> None:

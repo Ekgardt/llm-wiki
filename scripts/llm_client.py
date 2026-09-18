@@ -1024,6 +1024,18 @@ def _timeout_s() -> int:
     return DEFAULT_TIMEOUT_S
 
 
+def worst_case_call_seconds(forced: str = "") -> int:
+    """The longest one `call_llm` may take: every candidate's timeout, in turn.
+
+    A call is not one provider. In auto mode it walks the whole order until one
+    answers, so a caller's margin must cover the walk; a forced provider is one
+    candidate, which is what an installed scheduler runs with. Research:
+    docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+    """
+    selected = forced.strip().lower() or forced_provider()
+    return _timeout_s() * len(_candidate_order(selected))
+
+
 def _reported_count(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
