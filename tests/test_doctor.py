@@ -3510,7 +3510,11 @@ def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        doctor,
+        "_lsp_pid_state",
+        lambda pid: "alive" if pid in {1111, 3333} else "dead",
+    )
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
         "codes"
