@@ -283,12 +283,14 @@ class TestBuildAllTiers:
 
         stats = build_tiers.build_all_tiers(use_llm=False, verbose=False)
 
-        assert stats == {"generated": 2, "skipped": 0, "errors": 0}
         outputs = sorted(tiers.glob("*.l1.md"))
-        assert len(outputs) == 2
-        rendered = {path.read_text(encoding="utf-8") for path in outputs}
-        assert any("First." in value for value in rendered)
-        assert any("Second." in value for value in rendered)
+        rendered = "\n".join(path.read_text(encoding="utf-8") for path in outputs)
+        assert (
+            stats,
+            len(outputs),
+            "First." in rendered,
+            "Second." in rendered,
+        ) == ({"generated": 2, "skipped": 0, "errors": 0}, 2, True, True)
 
     def test_legacy_tier_cache_rejects_escaping_and_windows_names(self, tmp_path, monkeypatch):
         import build_tiers
