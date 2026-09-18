@@ -1166,9 +1166,20 @@ class _Discovery:
             self._posix_entry(root, current, depth, descriptor, kind, name, info)
 
     def _entry_info(self, entry: os.DirEntry) -> os.stat_result:
-        """This listed entry's metadata; one that has gone is a changed corpus."""
+        """This listed entry's metadata taken now; one that has gone is a changed corpus.
+
+        Not `entry.stat()`. CPython: "On Unix, this method always requires a
+        system call. On Windows, it only requires a system call if
+        follow_symlinks is True and the entry is a reparse point" — so on
+        Windows it answers out of the directory listing, a name deleted since
+        the listing still returns metadata, and the walk carries on over a file
+        that is not there until an unretryable FileNotFoundError ends the whole
+        capture. The POSIX branch already states each listed name itself
+        (`_posix_entries`). Research:
+        docs/research/2026-09-18-a-listed-entry-is-stated-now-not-remembered.md
+        """
         try:
-            return entry.stat(follow_symlinks=False)
+            return os.lstat(entry.path)
         except FileNotFoundError as exc:
             raise CorpusChanged(
                 f"corpus entry vanished during the walk: {entry.name}"

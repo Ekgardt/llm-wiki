@@ -43,7 +43,9 @@ def test_a_checkouts_row_is_headed_by_its_code_generation(vault, tmp_path):  # n
     _active_memory_generation(catalog, repository, "gen-memory")
 
     rows = repository_index.list_repositories(state_root=state)["repositories"]
-    row = next(item for item in rows if item["checkout_root"] == str(repository))
+    # As a path, not as text: `repository_scope` serialises a Windows root with
+    # forward slashes, so the row never equals what `str(WindowsPath)` spells.
+    row = next(item for item in rows if Path(item["checkout_root"]) == repository.resolve())
 
     assert (row["generation_id"], row["active"], row["code_roots"]) == (
         receipt["generation_id"],
