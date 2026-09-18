@@ -210,10 +210,20 @@ def _safe_entry(path: Path) -> tuple[float, int, Path] | None:
 
 
 def _report_entries(directory: Path, pattern: str) -> list[tuple[float, int, Path]]:
-    """(mtime, size, path) newest first; unreadable entries are ignored."""
+    """(mtime, size, path) newest first, smallest first where ages tie.
+
+    The mtime alone is not a total order. Windows moves its file-time clock in
+    ~15.6 ms ticks and HFS+ stores whole seconds, so a scheduler that redirects
+    two jobs writes a family's logs inside one tick; the sort is stable, so the
+    tie fell through to `glob` order and which log survived was an accident of
+    the filesystem. Keeping the smaller of two equally recent files is
+    deterministic and keeps the most evidence - age still decides everything
+    else. Unreadable entries are ignored. Research:
+    docs/research/2026-09-18-a-retention-order-does-not-depend-on-the-clocks-granularity.md
+    """
     entries = [_safe_entry(path) for path in directory.glob(pattern)]
     present = [entry for entry in entries if entry is not None]
-    present.sort(key=lambda entry: entry[0], reverse=True)
+    present.sort(key=lambda entry: (entry[0], -entry[1]), reverse=True)
     return present
 
 
