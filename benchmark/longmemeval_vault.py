@@ -461,6 +461,36 @@ def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool
     return any(gold.casefold() in _row_text(row).casefold() for row in rows)
 
 
+def lane_matrix(question: Mapping[str, object], rows: list[dict]) -> list[dict]:
+    """What each lane said about every candidate, and whether it carries the answer.
+
+    The rows a refit of `lane_score` needs, recorded by the run that produced
+    them: one entry per candidate, labelled from the dataset's own `has_answer`
+    turns. Written whether or not the reranker ran, so a degraded run is
+    fittable too — that is the condition the constants were never fitted under.
+    See `docs/research/2026-09-17-the-lane-score-refit-is-one-command.md`.
+    """
+    from longmemeval_coverage import evidence_turns
+
+    windows = evidence_turns(question)
+    return [_lane_row(row, windows) for row in rows]
+
+
+def _lane_row(row: Mapping[str, object], windows: list[tuple[str, ...]]) -> dict:
+    from lane_score import is_user_turn
+    from longmemeval_coverage import normalized
+
+    text = str(row.get("content") or row.get("summary") or "")
+    folded = normalized(text)
+    return {
+        "lexical_rank": row.get("bm25_rank"),
+        "dense_rank": row.get("vector_rank"),
+        "rerank_score": row.get("rerank_score"),
+        "user_turn": is_user_turn(text),
+        "evidence": any(window in folded for turn in windows for window in turn),
+    }
+
+
 # Where the answer session stands in the ranking, because that is what decides
 # whether it survives.
 #
@@ -801,6 +831,8 @@ def run_question(question: dict, work: Path) -> dict:
         # What the reader was handed, by the dataset's own evidence labels:
         # distinct answer sessions and flagged evidence turns, not row counts.
         "coverage": _coverage_of(question, rows),
+        # The rows `benchmark/fit_lane_score.py` refits the lane constants on.
+        "lane_matrix": lane_matrix(question, rows),
         **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
