@@ -8,6 +8,7 @@ Research: docs/research/2026-09-18-sess-a-lapsed-deadline-is-not-a-torn-stream.m
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -62,7 +63,14 @@ def test_any_reader_failure_makes_the_transport_fatal(
     protocol = fake_server.start(handler, fatal_callback=reasons.append)
     assert sent.wait(SHORT_TIMEOUT)
 
-    assert (_await(lambda: protocol.fatal), reasons) == (
+    # `_become_fatal` sets the flag, completes pending work, stops I/O and only
+    # then reports the reason, so waiting on the flag can find an empty list -
+    # a gap Windows widens past the poll, with a CancelSynchronousIo call that
+    # drops the GIL and a socketpair it emulates over loopback TCP. Waiting on
+    # the reason still asserts the flag, and a reason that never comes still
+    # fails.
+    assert (_await(lambda: bool(reasons)), protocol.fatal, reasons) == (
+        True,
         True,
         ["failed to read LSP stdout"],
     )
@@ -177,9 +185,19 @@ def test_a_server_that_opened_a_token_still_gets_the_whole_deadline(
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="the verified launch copy is the POSIX mechanism"
+)
 def test_the_native_launch_copy_keeps_its_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Windows has no copy to name: `__enter__` verifies the source in place.
+
+    `_LaunchServerGuard.__enter__` returns a `GenerationLaunch` only under
+    `os.name == "posix"`; elsewhere it returns the guard, which is what
+    `lsp_process` expects of it. Same mark as the guard's neighbours in
+    `tests/test_pyright_session.py`.
+    """
     import hashlib
 
     owner = tmp_path / "run" / "lsp" / ("a" * 32)

@@ -608,7 +608,6 @@ class _OwnerDirectory:
         try:
             self._publish_record_windows(handle, name, payload)
             published = True
-            self.sync_directory()
         except BaseException as error:
             operation_error = error
         self._finish_windows_temporary(
@@ -619,6 +618,13 @@ class _OwnerDirectory:
         )
         if not published:
             raise OSError("LSP evidence publication did not complete")
+        # The handle is let go before the directory is flushed, as the lease path
+        # already does. Publication is a rename through a handle that shares
+        # nothing, so until it closes the record stands under its contract name
+        # and no reader can open it - for as long as a directory FlushFileBuffers
+        # takes on that disk. Research:
+        # docs/research/2026-09-18-a-published-record-is-let-go-before-it-is-flushed.md
+        self.sync_directory()
 
     def write_record(
         self,

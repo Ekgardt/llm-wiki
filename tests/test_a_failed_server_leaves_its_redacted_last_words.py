@@ -38,13 +38,26 @@ time.sleep(1.0)
 
 
 def _failure_record(owner_root: Path) -> dict:
+    """The record, once it is named and no longer held open by its writer.
+
+    Waiting for the name alone is not enough on Windows: a record is published
+    by renaming a handle that shares nothing, so between the rename and the
+    close the file stands under its contract name and no reader can open it for
+    data. `is_file()` passes there — an attribute-only open skips the sharing
+    check — and `read_bytes()` gets ERROR_SHARING_VIOLATION as `[Errno 13]`. The
+    product tolerates the same window for the lease. A denial that outlasts the
+    deadline still fails, and names itself. Research:
+    `docs/research/2026-09-18-a-published-record-is-let-go-before-it-is-flushed.md`.
+    """
     evidence = owner_root / "failure.json"
     deadline = time.monotonic() + SHORT_TIMEOUT
-    while not evidence.is_file():
-        if time.monotonic() > deadline:
-            raise AssertionError("no failure evidence was written in time")
+    while True:
+        try:
+            return json.loads(evidence.read_bytes())
+        except (FileNotFoundError, PermissionError) as error:
+            if time.monotonic() > deadline:
+                raise AssertionError("no readable failure evidence in time") from error
         time.sleep(0.01)
-    return json.loads(evidence.read_bytes())
 
 
 def test_the_failed_server_reason_is_kept_with_its_credentials_removed(
