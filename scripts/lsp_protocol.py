@@ -1342,7 +1342,12 @@ class LspProtocol:
             self._read_until_stopped(frame_reader)
         except ProtocolViolation as exc:
             self._fail_unless_closed(str(exc), exc)
-        except (OSError, ValueError) as exc:
+        except BaseException as exc:
+            # Anything that ends this thread ends the conversation, so it has
+            # to be reported the way the writer reports its own (see
+            # `_try_write_frame`). Narrowing this to the errors we expect left
+            # every other one silent: the thread died, nothing became fatal,
+            # and every pending caller waited out its own deadline instead.
             self._fail_unless_closed("failed to read LSP stdout", exc)
         finally:
             self._close_stream(self._reader)
@@ -1382,16 +1387,29 @@ class LspProtocol:
         return stopped, skip_request, request_method
 
     def _write_deadline_outcome(self, task: _WriteTask, expired: bool, message: str) -> bool | None:
-        """None while the deadline holds; True to go on (best effort); False to stop."""
+        """None while the deadline holds; True to go on without writing this task.
+
+        Nothing was written, so the stream is exactly as it was: the caller is
+        told its deadline expired and the writer takes the next task. Only a
+        write caught in flight can tear the stream, and `_raise_timed_out` is
+        where that one is still named fatal. Before 2026-09-17 this made the
+        whole transport fatal, so one slow caller restarted the server.
+        """
         if not expired:
             return None
         if task.best_effort:
             self._complete_write(task, None)
             return True
-        error = TimeoutError(message)
-        self._become_fatal(message, cause=error)
-        self._complete_write(task, error)
-        return False
+        self._unsend_task(task)
+        self._complete_write(task, TimeoutError(message))
+        return True
+
+    def _unsend_task(self, task: _WriteTask) -> None:
+        """A request whose frame never reached the stream is queued, not sending."""
+        with self._state_lock:
+            pending = self._pending_for_locked(task)
+            if pending is not None and pending.write_phase == "sending":
+                pending.write_phase = "queued"
 
     def _try_write_frame(self, task: _WriteTask) -> bool:
         try:
@@ -1419,12 +1437,14 @@ class LspProtocol:
                 self._enqueue_cancel_locked(pending)
 
     def _finish_written_task(self, task: _WriteTask, request_method: str | None) -> bool:
+        """The frame is out; its own deadline no longer decides anything.
+
+        The bytes are on the stream and framed. A deadline that lapsed while
+        they were being written is the caller's business -- `_await_outcome`
+        still ends its wait -- and not a reason to tear down a transport that
+        is in one piece.
+        """
         self._note_sent_request(request_method)
-        outcome = self._write_deadline_outcome(
-            task, time.monotonic() > task.deadline, "LSP write exceeded its deadline"
-        )
-        if outcome is not None:
-            return outcome
         self._mark_sent(task)
         self._complete_write(task, None)
         return True

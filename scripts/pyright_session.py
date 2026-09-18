@@ -1022,6 +1022,12 @@ _NEUTRAL_PROGRESS_METHOD = "$/progress"
 # measured at 0.67-0.82 s on a small project and the caller holds a deadline.
 _PROGRESS_POLL_SECONDS = 0.02
 
+# How long a query waits for a progress-gated server that has not asked us to
+# create any work-done token. A server that reports progress asks during
+# initialization, before it answers anything, so this only has to outlast the
+# gap between the handshake and the first query -- not a project load.
+_PROGRESS_GATE_GRACE_SECONDS = 1.0
+
 # At most this many outstanding work-done tokens are remembered per generation.
 # A server that opens more than this without ending them is not one we can gate
 # on, and the bound keeps a misbehaving one from growing the session.
@@ -1725,12 +1731,19 @@ class _LaunchServerGuard:
         keep a name. The owner root is created for this process tree alone, and
         the digest was verified on the bytes that were written there. Research:
         `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+
+        The guard therefore stops owning the file: until 2026-09-17 it kept the
+        path and unlinked it on the way out of the `with` block, taking the name
+        away from the server that had just been started by it. What removes it
+        now is what removes everything else in the owner root, when the
+        generation ends.
         """
         path = self._snapshot_path
         if path is None:
             raise RuntimeError("native launch has no verified copy")
         snapshot.close()
         self._snapshot = None
+        self._snapshot_path = None
         return GenerationLaunch((str(path), *self._command[1:]), ())
 
     def _package_launch_from(self, snapshot: BinaryIO) -> GenerationLaunch:
@@ -2529,13 +2542,28 @@ class LanguageServerSession:
         generation = self._generation_nonce
         return generation is not None and self._progress_ready_generation == generation
 
+    def _progress_gate_limit_locked(self, deadline: float, grace: float) -> float:
+        """How long to wait: a server that opened no token is not loading."""
+        if self._work_done_tokens:
+            return deadline
+        return min(deadline, grace)
+
     def _await_progress_gate(self, deadline: float) -> None:
-        """Block until the project load is declared finished, or the deadline."""
+        """Block until the project load is declared finished, or the deadline.
+
+        A server that has not asked us to create a work-done token is not
+        loading a project: either it does not report progress at all, or it has
+        not started. Waiting the caller's whole deadline for a notification that
+        is not coming spends the budget the query itself needs, and the answer
+        is `not_ready` either way -- so that case waits only a short grace.
+        """
         if not self._profile.gates_on_progress():
             return
+        grace = time.monotonic() + _PROGRESS_GATE_GRACE_SECONDS
         with self._lock:
             while not self._progress_gate_satisfied_locked():
-                remaining = deadline - time.monotonic()
+                limit = self._progress_gate_limit_locked(deadline, grace)
+                remaining = limit - time.monotonic()
                 if remaining <= 0:
                     return
                 self._condition.wait(min(remaining, _PROGRESS_POLL_SECONDS))
