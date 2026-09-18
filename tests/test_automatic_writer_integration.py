@@ -41,6 +41,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/blackboard.py:_append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
     "scripts/build_guardrails.py:main",
+    "scripts/build_context.py:main",
     "scripts/daily_log_append.py:locked_append",
     "scripts/daily_log_append.py:locked_append_once",
     "scripts/feedback_capture.py:capture_from_text",
@@ -201,6 +202,7 @@ def test_scanner_writer_set_equals_behavioral_matrix():
                 "blackboard.py",
                 "bootstrap_project.py",
                 "build_guardrails.py",
+                "build_context.py",
                 "daily_log_append.py",
                 "feedback_capture.py",
                 "flush_memory.py",
@@ -314,6 +316,16 @@ def _drive_build_guardrails(d: _Drive) -> None:
     monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary, raising=False)
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
+    d.function()
+
+
+def _drive_build_context(d: _Drive) -> None:
+    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
+    monkeypatch.setattr(module, "ROOT", vault)
+    monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
+    monkeypatch.setattr(module, "build_context", lambda *args: secret)
+    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
+    monkeypatch.setattr(sys, "argv", ["build_context.py", "demo", "--write"])
     d.function()
 
 
@@ -447,6 +459,7 @@ _WRITER_DRIVERS = {
     "blackboard": _drive_blackboard,
     "bootstrap_project": _drive_bootstrap_project,
     "build_guardrails": _drive_build_guardrails,
+    "build_context": _drive_build_context,
     "daily_log_append": _drive_daily_log_append,
     "feedback_capture": _drive_feedback_capture,
     "flush_memory": _drive_flush_memory,

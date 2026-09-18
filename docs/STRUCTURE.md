@@ -561,9 +561,11 @@ or nonzero active state remains fail-closed.
   the repository ships no memory (2026-09-10). The decision pages named in
   this document are the owner's private record; the contracts are stated here.
 - `knowledge/projects/<slug>/` — generated `state.md`, append-only
-  `knowledge/projects/<slug>/journal.md`, `.blackboard/`. Template tracked; real
-  projects gitignored. A vault may still hold a legacy `context.md` from the
-  generator retired on 2026-09-17; readers keep skipping that name.
+  `knowledge/projects/<slug>/journal.md`,
+  `context.md`, `.blackboard/`. Template tracked; real projects gitignored.
+  `context.md` is written on request by
+  `uv run python scripts/build_context.py --slug <name> --write`; see
+  `docs/research/2026-09-18-the-project-context-page-gets-its-command-back.md`.
 - `knowledge/daily/archive/YYYY-MM/bag-<timestamp>-<id>/` — private immutable,
   uncompressed BagIt-style daily-log bags and
   a derived archive index. Archive means move, never delete; evidence resolves by

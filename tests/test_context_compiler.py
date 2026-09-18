@@ -213,6 +213,7 @@ def test_session_start_producers_have_one_final_context_compiler_boundary():
     scripts = Path(__file__).resolve().parent.parent / "scripts"
     producers = (
         "integration_adapter.py",
+        "build_context.py",
         "project_journal.py",
         "session_start_context.py",
         "session_start_project_state.py",

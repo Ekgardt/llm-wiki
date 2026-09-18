@@ -299,6 +299,13 @@ def test_session_start_budget_constant_is_a_context_budget():
     assert session_start_context.DEFAULT_CONTEXT_BUDGET.available_input_tokens > 0
 
 
+def test_session_and_project_context_use_the_same_budget_contract():
+    import build_context
+    import session_start_context
+
+    assert build_context.DEFAULT_CONTEXT_BUDGET is session_start_context.DEFAULT_CONTEXT_BUDGET
+
+
 def test_direct_session_start_routes_semantic_items_through_compiler(monkeypatch):
     import context_compiler
     import session_start_context
@@ -404,6 +411,91 @@ def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
     assert "session:daily_header" not in {item.item_id for item in items}
     assert "session:log_header" not in {item.item_id for item in items}
     assert rendered == ""
+
+
+def test_generated_project_context_routes_items_through_compiler(monkeypatch):
+    import build_context
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["budget"] = budget
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compiled-project"})()
+
+    monkeypatch.setattr(build_context, "compile_context_items", compile_spy)
+
+    result = build_context._pack_project_context(
+        [
+            ("orientation", "## Project context: demo"),
+            ("handoff", "### Where you left off\nresume here"),
+            ("evidence", "## Evidence\nfact"),
+            ("history", "## Recent activity\nold event"),
+        ],
+        2000,
+    )
+
+    by_text = {item.text: item for item in captured["items"]}
+    packed = (
+        result,
+        captured["budget"] is build_context.DEFAULT_CONTEXT_BUDGET,
+        captured["packing"],
+    )
+    classes = {
+        text: (by_text[text].priority_class, by_text[text].mandatory)
+        for text in ("## Project context: demo", "### Where you left off\nresume here")
+    }
+    evidence_and_history = (
+        by_text["## Evidence\nfact"].priority_class,
+        by_text["## Recent activity\nold event"].priority_class,
+    )
+
+    assert (packed, classes, evidence_and_history) == (
+        (
+            "compiled-project",
+            True,
+            {"emergency_byte_cap": 2000, "per_source_cap": 5, "per_parent_cap": 12},
+        ),
+        {
+            "## Project context: demo": ("evidence", False),
+            "### Where you left off\nresume here": ("handoff", True),
+        },
+        ("evidence", "history"),
+    )
+
+
+def test_generated_project_context_drops_history_whole_under_pressure(monkeypatch):
+    import build_context
+    from context_budget import ContextBudget
+
+    handoff = "### Where you left off\nresume-whole"
+    monkeypatch.setattr(
+        build_context,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(handoff.encode("utf-8")), 0, 0),
+    )
+    monkeypatch.setattr(build_context, "_read_state_handoff", lambda slug: "resume-whole")
+    monkeypatch.setattr(build_context, "_find_project_pages", lambda slug: [])
+    monkeypatch.setattr(
+        build_context,
+        "_find_recent_daily_activity",
+        lambda slug: ["recent-history-must-drop-whole"],
+    )
+    monkeypatch.setattr(
+        build_context,
+        "load_state",
+        lambda: {
+            "codex_heartbeats": {
+                "demo": {"reason": "last-seen-must-drop-whole", "at": "yesterday"}
+            }
+        },
+    )
+
+    result = build_context.build_context("demo")
+
+    dropped = ("recent-history" in result, "last-seen" in result, "Project context" in result)
+    assert (result, dropped) == (handoff, (False, False, False))
 
 
 def test_recovered_handoff_routes_through_compiler_as_mandatory(monkeypatch):

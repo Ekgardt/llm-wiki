@@ -370,6 +370,13 @@ class TestStatusFiltering:
             "---\nstatus: accepted\ntype: decision\n---\n\n# Page\n"
         )
 
+    def test_build_context_excludes_superseded(self):
+        """build_context must skip superseded/archived."""
+        src = (SCRIPTS / "build_context.py").read_text(encoding="utf-8")
+        assert "superseded" in src or "archived" in src, (
+            "build_context.py does not filter superseded/archived"
+        )
+
     def test_build_guardrails_excludes_superseded(self):
         """build_guardrails must skip superseded/archived."""
         src = (SCRIPTS / "build_guardrails.py").read_text(encoding="utf-8")
@@ -470,6 +477,16 @@ class TestYAMLSafety:
 # ---------------------------------------------------------------------------
 
 
+def _legacy_path_violations(search_dir: str, pattern: str) -> list:
+    """Hits of a forbidden path in active code, comments and docstrings aside."""
+    return [
+        hit
+        for py in (ROOT / search_dir).glob("*.py")
+        for hit in _pattern_hits(py, pattern)
+        if not _tolerated_hit(hit)
+    ]
+
+
 class TestNoLegacyPaths:
     """Active code must not reference forbidden root directories."""
 
@@ -486,12 +503,7 @@ class TestNoLegacyPaths:
     def test_no_legacy_path_in_active_code(self, pattern, search_dir):
         """Check that forbidden paths don't appear in active code logic
         (comments and docstrings are tolerated for historical context)."""
-        violations = [
-            hit
-            for py in (ROOT / search_dir).glob("*.py")
-            for hit in _pattern_hits(py, pattern)
-            if not _tolerated_hit(hit)
-        ]
+        violations = _legacy_path_violations(search_dir, pattern)
         assert not violations, (
             f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
             "Update to current three-zone paths."
@@ -562,20 +574,25 @@ class TestSingleDailyWritePath:
 # ---------------------------------------------------------------------------
 
 
+def _is_git_command_constant(node) -> bool:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return False
+    return bool(re.search(r"^\s*git(?:\.exe)?(?:\s|$)", node.value, re.IGNORECASE))
+
+
+def _git_command_constants(source: str) -> list[str]:
+    """Every string literal in the source that reads as a `git` command line."""
+    tree = ast.parse(source)
+    return [node.value for node in ast.walk(tree) if _is_git_command_constant(node)]
+
+
 class TestMarkdownTransactionBoundary:
     """The writer boundary must stay deterministic and fail closed."""
 
     def test_transaction_module_has_no_git_subprocess_or_command(self):
         source = (SCRIPTS / "markdown_transaction.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        git_commands = [
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and re.search(r"^\s*git(?:\.exe)?(?:\s|$)", node.value, re.IGNORECASE)
-        ]
-        assert git_commands == []
+
+        assert _git_command_constants(source) == []
 
     def test_external_work_fails_closed_while_writer_gate_is_held(self, tmp_path):
         from markdown_transaction import MarkdownCoordinator

@@ -1,5 +1,12 @@
 # The second project brief is removed
 
+**Superseded on 2026-09-18 by
+`docs/research/2026-09-18-the-project-context-page-gets-its-command-back.md`.** Two agents
+answered the same audit row in parallel: this note removed `scripts/build_context.py`, the
+other kept it and gave it the documented command it lacked. The merge kept the second
+answer — a file four readers open and a page type the contract names keeps its only writer —
+and this note stays as the record of the choice that was not taken.
+
 Dated 2026-09-17. The audit's dead-code row `scripts/build_context.py` and the `context.md` it
 writes, left to the owner and delegated back.
 
