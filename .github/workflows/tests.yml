@@ -358,7 +358,8 @@ jobs:
           - os: windows-2025
             platform: windows
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The ceiling `scripts/ci_timing_report.py` records for the `installer` class.
+    timeout-minutes: 20
     env:
       LLM_WIKI_ROOT: ${{ github.workspace }}
       LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-e2e-state-${{ matrix.platform }}
@@ -402,7 +403,8 @@ jobs:
   lexical-and-typescript:
     name: timing::focused::lexical-and-typescript
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The ceiling `scripts/ci_timing_report.py` records for the `focused` class.
+    timeout-minutes: 15
     env:
       LLM_WIKI_ROOT: ${{ github.workspace }}
       LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-lexical-state

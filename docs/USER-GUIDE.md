@@ -541,6 +541,17 @@ uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
 ```
 
+Three one-shot repairs exist for states that defects fixed in September 2026 left
+behind. A vault installed since then never meets them; an older one may, and nothing
+else reclaims those bytes. Each prints what it found and changes nothing until
+`--apply`:
+
+```bash
+uv run --locked --no-sync python scripts/repair_refused_appends.py        # blocks a lost append race never wrote
+uv run --locked --no-sync python scripts/repair_refused_page_creation.py  # pages a refused compile never wrote
+uv run --locked --no-sync python scripts/repair_exhausted_queue_tasks.py  # tasks out of attempts that still look ready
+```
+
 Recovery rolls verified prepared/applying transactions forward and quarantines a
 target that matches neither its recorded before nor after hash. It never overwrites
 unknown bytes. Undo creates a new forward transaction and works only while every

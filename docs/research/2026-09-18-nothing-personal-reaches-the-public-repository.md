@@ -49,9 +49,11 @@ is that nothing personal lives in a public repository). The research before the 
   owner's machine the guard derives them and on a clean checkout it says it cannot and skips.
   The fix is to widen what that guard reads, not to write a name into a test.
 - Two tracked files must be allowed to contain the pattern, because holding it is their
-  purpose: the guard's own examples (`/home/someone/`) and the DLP fixture in
-  `tests/test_structure.py` (`/home/alice/private.md`). They are named in the guard with that
-  reason; everything else tracked is swept.
+  purpose: the guard's own planted examples, and the DLP fixture in
+  `tests/test_structure.py` that proves the structure rule catches an invented home path.
+  They are named in the guard with that reason; everything else tracked is swept. (This note
+  does not spell those examples either — a document that quotes the pattern becomes an
+  offender of the check it describes, which is how this paragraph was first written.)
 
 ## The decision
 
