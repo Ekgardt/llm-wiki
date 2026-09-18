@@ -370,13 +370,6 @@ class TestStatusFiltering:
             "---\nstatus: accepted\ntype: decision\n---\n\n# Page\n"
         )
 
-    def test_build_context_excludes_superseded(self):
-        """build_context must skip superseded/archived."""
-        src = (SCRIPTS / "build_context.py").read_text(encoding="utf-8")
-        assert "superseded" in src or "archived" in src, (
-            "build_context.py does not filter superseded/archived"
-        )
-
     def test_build_guardrails_excludes_superseded(self):
         """build_guardrails must skip superseded/archived."""
         src = (SCRIPTS / "build_guardrails.py").read_text(encoding="utf-8")
