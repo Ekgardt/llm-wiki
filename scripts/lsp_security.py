@@ -40,6 +40,7 @@ _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
 _URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset('"<>\\^`{|}')
 _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS = frozenset('<>|?*"')
 _WINDOWS_LOG_TRAILING_PUNCTUATION = frozenset(".,;)]}")
+_WINDOWS_FORBIDDEN = '<>:"|?*'
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -202,26 +203,52 @@ def _oversized_component(component: str) -> bool:
     return len(component.encode("utf-8")) > _MAX_COMPONENT_BYTES
 
 
-def _unsafe_path_component(component: str) -> bool:
+def _unsafe_component_reason(component: str) -> str | None:
+    """Why this path component cannot be used here, or None when it can."""
     if _oversized_component(component):
-        return True
-    return _unportable_component_text(component)
+        return "is longer than a path component may be"
+    return _unportable_component_reason(component)
 
 
-def _unportable_component_text(component: str) -> bool:
-    if component[-1] in {".", " "}:
-        return True
-    if any(character in '<>:"|?*' for character in component):
-        return True
+def _unportable_component_reason(component: str) -> str | None:
+    """The Windows file-name rules, applied on every platform, and why.
+
+    One repository-relative path is one key everywhere, so the rules are the
+    strictest of the platforms rather than the host's. That does refuse a file
+    that is perfectly ordinary on Linux or macOS — `aux.py`, `notes:draft.md`,
+    a name ending in a space — which is why the refusal now names the
+    component and the rule instead of calling it "unsafe". Research:
+    `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`.
+    """
+    broken = (
+        (component[-1] in {".", " "}, "ends with a dot or a space (a Windows rule)"),
+        (
+            any(character in _WINDOWS_FORBIDDEN for character in component),
+            f"contains one of {_WINDOWS_FORBIDDEN} (a Windows rule)",
+        ),
+        (
+            _reserved_windows_stem(component),
+            "is a reserved Windows device name (a Windows rule)",
+        ),
+    )
+    return next((reason for failed, reason in broken if failed), None)
+
+
+def _reserved_windows_stem(component: str) -> bool:
     return component.split(".", 1)[0].rstrip(" .").casefold() in _WINDOWS_RESERVED
 
 
 def _require_safe_components(parts: tuple[str, ...]) -> None:
     for component in parts:
-        if _unsafe_path_component(component):
-            raise PathContainmentError(
-                "repository source path contains an unsafe component"
-            )
+        _require_safe_component(component)
+
+
+def _require_safe_component(component: str) -> None:
+    reason = _unsafe_component_reason(component)
+    if reason is not None:
+        raise PathContainmentError(
+            f"repository source path component {component!r} {reason}"
+        )
 
 
 def _require_canonical_bounded_text(value: str) -> None:
@@ -1115,16 +1142,31 @@ def normalize_provider_uri(
     if _decoded_provider_uri(uri) is None:
         return None
     try:
-        pair = _provider_path_in_root(
-            file_uri_to_path(uri, platform=os.name), repository.checkout_root
-        )
-        if pair is None:
-            return None
-        provider, root = pair
-        normalized, _parts = _validate_relative_path(provider.relative_to(root).as_posix())
-        return resolve_repository_source(repository, normalized)
-    except Exception:
+        return _normalized_provider_source(repository, uri)
+    except Exception:  # noqa: BLE001 - the contract is that nothing escapes
+        # Deliberately everything. `uri` is untrusted text a language server
+        # sent, and every failure below can carry it in its message: what must
+        # not happen is that text escaping in a traceback or a log line.
+        # `tests/test_lsp_security.py::test_provider_failures_never_raise_log_or_echo_raw_uri`
+        # pins it. The cost is that a defect in this module reads as "outside
+        # the repository"; the audit of 2026-09-17 weighed the two and kept
+        # this one. See
+        # `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`.
         return None
+
+
+def _normalized_provider_source(
+    repository: RepositoryScope, uri: str
+) -> RepositorySource | None:
+    """One provider location as a repository-relative source, or None if outside."""
+    pair = _provider_path_in_root(
+        file_uri_to_path(uri, platform=os.name), repository.checkout_root
+    )
+    if pair is None:
+        return None
+    provider, root = pair
+    normalized, _parts = _validate_relative_path(provider.relative_to(root).as_posix())
+    return resolve_repository_source(repository, normalized)
 
 
 def _quoted_value_end(value: str, value_start: int) -> int:
