@@ -1989,12 +1989,31 @@ def _forget_refresh_request(checkout) -> None:
             del _REFRESH_REQUESTED[checkout.repository_id]
 
 
+# The freshness block decorates an answer that is already computed, so a
+# generation that cannot be read must say so rather than turn a good structural
+# answer into an error at the tool boundary (audit 3, B26), and the read is
+# bounded in time like every other one on this path (audit 3, B3). Research:
+# `docs/research/2026-09-18-graph-an-unreadable-generation-must-not-fail-a-good-answer.md`.
+FRESHNESS_LIMIT_SECONDS = 5.0
+
+
 def _repository_freshness(resolved: Path) -> dict | None:
     import code_graph
 
-    lease = code_graph._active_evidence_graph(resolved)
+    try:
+        lease = code_graph._active_evidence_graph(
+            resolved, deadline=time.monotonic() + FRESHNESS_LIMIT_SECONDS
+        )
+    except code_graph.GenerationUnreadable as error:
+        return {"unavailable": error.reason}
+    except TimeoutError:
+        return {"unavailable": "deadline"}
     if lease is None:
         return None
+    return _freshness_of_lease(resolved, lease)
+
+
+def _freshness_of_lease(resolved: Path, lease) -> dict | None:
     try:
         checkout = getattr(lease, "cached_scope", None)
         if checkout is None:
@@ -2371,16 +2390,30 @@ def _check_navigation_stop(deadline: float | None) -> None:
     _check_deadline(deadline)
 
 
-def _open_navigation_graph(scope, deadline: float | None):
+def _opened_navigation_generation(scope, deadline: float | None):
+    """The generation, or None when there is none or it cannot be read.
+
+    A generation that cannot be opened degrades exactly as a missing one does
+    (audit 3, B26): all three callers of `_open_navigation_graph` answer with
+    structural or empty evidence, and none of their return types has anywhere
+    to carry a reason.
+    """
     import code_graph
 
+    try:
+        return code_graph._active_evidence_graph(
+            Path(scope.checkout_root),
+            read_only=True,
+            deadline=deadline,
+            cancelled=_operation_cancelled(),
+        )
+    except code_graph.GenerationUnreadable:
+        return None
+
+
+def _open_navigation_graph(scope, deadline: float | None):
     _check_navigation_stop(deadline)
-    graph = code_graph._active_evidence_graph(
-        Path(scope.checkout_root),
-        read_only=True,
-        deadline=deadline,
-        cancelled=_operation_cancelled(),
-    )
+    graph = _opened_navigation_generation(scope, deadline)
     _check_navigation_stop(deadline)
     if graph is None:
         return None
