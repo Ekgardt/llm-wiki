@@ -13427,9 +13427,36 @@ def _import_legacy_record(
                FROM tasks WHERE id=?""",
             (record["id"],),
         ).fetchone()
-        if stored is None or tuple(stored) != expected:
-            raise QueueOperationError("legacy_import_conflict")
+        _require_imported_record(stored, expected)
     return str(record["id"])
+
+
+# The columns of an imported task that never move again, by their position in
+# the select above: kind, payload_json, input_hash, created_at. The other six —
+# state, updated_at, available_at, attempts, last_attempt_at, error_code —
+# change the moment a worker claims the task.
+_LEGACY_IDENTITY_POSITIONS = (0, 1, 2, 4)
+
+
+def _legacy_identity(columns: Sequence[object]) -> tuple[object, ...]:
+    return tuple(columns[index] for index in _LEGACY_IDENTITY_POSITIONS)
+
+
+def _require_imported_record(
+    stored: sqlite3.Row | None, expected: tuple[object, ...]
+) -> None:
+    """This record's row, whether this run inserted it or a crashed one did.
+
+    A migration that died between the insert and the unlink imports the same
+    record again, and by then a worker may have leased it. Comparing what the
+    record owns — not what the queue has done since — is what makes the retry
+    idempotent instead of a permanent `legacy_import_conflict`. See
+    `docs/research/2026-09-18-an-import-that-already-happened-is-not-a-conflict.md`.
+    """
+    if stored is None:
+        raise QueueOperationError("legacy_import_conflict")
+    if _legacy_identity(tuple(stored)) != _legacy_identity(expected):
+        raise QueueOperationError("legacy_import_conflict")
 
 
 def _quarantine_legacy_record(
