@@ -131,13 +131,14 @@ def test_refresh_without_an_adopted_coordinator_is_reported_not_run(tmp_path, mo
     monkeypatch.setattr(
         repository_index,
         "_staleness",
-        lambda *_args: {"stale": True, "reason": "sources_changed"},
+        lambda *_args: {"stale": True, "reason": "sources_changed", "commit_moved": True},
     )
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
     admission = repository_index.admit_repository(repository, state_root=tmp_path / "state")
 
     answer = repository_index._fenced_rebuild(
-        admission, None, "generation-x", {}, tmp_path / "state", {"stale": True, "reason": "sources_changed"}, None, None
+        admission, None, "generation-x", {}, tmp_path / "state",
+        {"stale": True, "reason": "sources_changed", "commit_moved": True}, None, None
     )
 
     assert (answer["status"], answer["reason"]) == ("refresh_unavailable", "coordinator_v3_required")

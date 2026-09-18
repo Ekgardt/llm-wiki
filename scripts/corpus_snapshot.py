@@ -1191,6 +1191,21 @@ def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
     return content
 
 
+def _opened_listed_entry(name: str, descriptor: int, *, directory: bool) -> int:
+    """Open one entry the listing named; one that has gone is a changed corpus.
+
+    A file deleted between the listing and the open is the tree moving under the
+    walk, which is what `CorpusChanged` means and what `collect_corpus` retries.
+    Left as a bare `FileNotFoundError` it reached `repository_index` as "this
+    repository exceeds the corpus bounds", which is neither true nor actionable.
+    See `docs/research/2026-09-17-a-file-that-vanishes-mid-walk-is-a-changed-corpus.md`.
+    """
+    try:
+        return os.open(name, _descriptor_flags(directory=directory), dir_fd=descriptor)
+    except FileNotFoundError as exc:
+        raise CorpusChanged(f"corpus entry vanished before open: {name}") from exc
+
+
 class _Discovery:
     def __init__(
         self,
@@ -1354,7 +1369,7 @@ class _Discovery:
         """The child directory to descend into, or None once the file is stored."""
         _check_deadline(self.deadline)
         path = Path(entry.path)
-        info = entry.stat(follow_symlinks=False)
+        info = self._entry_info(entry)
         _require_safe_entry(path, info, symlink=entry.is_symlink())
         if stat.S_ISDIR(info.st_mode):
             return self._windows_child(path, entry.name, depth, kind)
@@ -1414,6 +1429,15 @@ class _Discovery:
         for name, info in sorted(entries, key=lambda item: item[0]):
             self._posix_entry(root, current, depth, descriptor, kind, name, info)
 
+    def _entry_info(self, entry: os.DirEntry) -> os.stat_result:
+        """This listed entry's metadata; one that has gone is a changed corpus."""
+        try:
+            return entry.stat(follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise CorpusChanged(
+                f"corpus entry vanished during the walk: {entry.name}"
+            ) from exc
+
     def _posix_entry(
         self,
         root: Path,
@@ -1447,7 +1471,7 @@ class _Discovery:
             return
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")
-        child = os.open(name, _descriptor_flags(directory=True), dir_fd=descriptor)
+        child = _opened_listed_entry(name, descriptor, directory=True)
         try:
             if not _same_descriptor_identity(info, os.fstat(child)):
                 raise CorpusChanged("corpus child directory changed before open")
@@ -1464,7 +1488,7 @@ class _Discovery:
         name: str,
         info: os.stat_result,
     ) -> None:
-        source = os.open(name, _descriptor_flags(directory=False), dir_fd=descriptor)
+        source = _opened_listed_entry(name, descriptor, directory=False)
         try:
             if not _same_opened_object(info, os.fstat(source)):
                 raise CorpusChanged("corpus source changed before descriptor open")

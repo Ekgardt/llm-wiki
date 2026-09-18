@@ -173,6 +173,9 @@ HASH_CHUNK_BYTES = 64 * 1024
 # two writers doing a compare-and-swap on a loaded machine can hold the write
 # lock for longer than five seconds.
 BUSY_MS = 5000
+# A commit whose body already did what cannot be undone still waits this long
+# for the write lock, whatever is left of the caller's deadline (audit 3, G-L11).
+COMMIT_BUSY_FLOOR_MS = 250
 UNBOUNDED_BUSY_MS = 30_000
 CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
@@ -2197,7 +2200,7 @@ class GenerationCatalog:
                 database.execute("BEGIN IMMEDIATE")
                 self._check_deadline(deadline)
                 yield database
-                self._apply_busy_timeout(database, deadline)
+                self._apply_commit_busy_timeout(database, deadline)
                 database.commit()
             except sqlite3.OperationalError as exc:
                 database.rollback()
@@ -2211,6 +2214,25 @@ class GenerationCatalog:
         if deadline is None:
             return
         database.execute(f"PRAGMA busy_timeout={self._remaining_busy_ms(deadline):d}")
+
+    def _apply_commit_busy_timeout(
+        self, database: sqlite3.Connection, deadline: float | None
+    ) -> None:
+        """Bound the commit's lock wait without abandoning finished work.
+
+        The body of a write transaction may already have done what cannot be
+        undone -- `discard_superseded` removes the generation's tree inside it --
+        so a deadline that passed while the body ran must not cancel the commit,
+        as `_remaining_busy_ms` would by raising. It only makes the commit's own
+        wait short. See
+        `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+        """
+        if deadline is None:
+            return
+        remaining = int(max(0.0, deadline - self._monotonic()) * 1000)
+        database.execute(
+            f"PRAGMA busy_timeout={max(COMMIT_BUSY_FLOOR_MS, min(BUSY_MS, remaining)):d}"
+        )
 
     def _readonly(self, *, deadline: float | None = None) -> sqlite3.Connection:
         return open_readonly_operational_db(

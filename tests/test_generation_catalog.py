@@ -2782,12 +2782,12 @@ def test_deadline_bounds_writer_lock_admission_and_leaves_registration_unchanged
 def test_deadline_recomputes_busy_timeout_immediately_before_commit(tmp_path, monkeypatch):
     import generation_catalog
 
+    clock = _Monotonic()
     catalog = generation_catalog.GenerationCatalog(
-        tmp_path / "state", clock=lambda: NOW, monotonic=_Monotonic()
+        tmp_path / "state", clock=lambda: NOW, monotonic=clock
     )
     _publish(catalog, "gen-1")
     real_open = generation_catalog.open_operational_db
-    remaining_values = iter((900, 800, 400))
     observed: dict[str, int] = {}
 
     class TrackedConnection:
@@ -2808,8 +2808,14 @@ def test_deadline_recomputes_busy_timeout_immediately_before_commit(tmp_path, mo
         return TrackedConnection(real_open(path, busy_ms=busy_ms))
 
     monkeypatch.setattr(generation_catalog, "open_operational_db", tracked_open)
-    monkeypatch.setattr(catalog, "_remaining_busy_ms", lambda _deadline: next(remaining_values))
 
+    def spend_the_deadline(database, deadline):
+        clock.value = deadline - 0.4
+        generation_catalog.GenerationCatalog._apply_commit_busy_timeout(
+            catalog, database, deadline
+        )
+
+    monkeypatch.setattr(catalog, "_apply_commit_busy_timeout", spend_the_deadline)
     catalog.register("gen-1", deadline=1.0)
 
     assert observed == {"commit_busy_ms": 400}

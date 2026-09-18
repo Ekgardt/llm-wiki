@@ -774,7 +774,9 @@ def _exported_hints(catalog, scope, state_root: Path | None, deadline: float | N
 # --------------------------------------------------------------------------
 
 
-def _repository_row(identifier: str, registered_at: str, manifest: Mapping) -> dict:
+def _repository_row(
+    identifier: str, registered_at: str, manifest: Mapping, holds_code: bool = False
+) -> dict:
     """One generation, flattened. `code_roots` is filled in later; see `_covered`.
 
     The generation manifest deliberately does not carry the snapshot policy --
@@ -793,6 +795,7 @@ def _repository_row(identifier: str, registered_at: str, manifest: Mapping) -> d
         "graph_schema_version": manifest.get("graph_schema_version"),
         "vector_state": manifest.get("vector_state"),
         "manifest": manifest,
+        "holds_code": holds_code,
         "generations": 1,
     }
 
@@ -809,7 +812,15 @@ def _covered(catalog, row: dict) -> list[str] | None:
 
 
 def _merge_repository_rows(rows: Iterable[dict]) -> list[dict]:
-    """One row per checkout, newest generation winning, older ones only counted."""
+    """One row per checkout: its newest code generation, else its newest one.
+
+    A checkout carries two kinds of generation since 2026-09-12, and the rows
+    arrive newest first, so "the first row wins" made the vault's row -- and
+    with it whether a worktree of the vault is followed -- depend on which kind
+    happened to be registered last. Every consumer of a row asks a code
+    question: which roots it covered, what to follow a worktree with. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
     merged: dict[object, dict] = {}
     for row in rows:
         key = (row["repository_id"], row["checkout_id"])
@@ -818,7 +829,17 @@ def _merge_repository_rows(rows: Iterable[dict]) -> list[dict]:
             merged[key] = row
             continue
         existing["generations"] += 1
+        _prefer_code_head(merged, key, row)
     return list(merged.values())
+
+
+def _prefer_code_head(merged: dict[object, dict], key: object, row: dict) -> None:
+    """Let a code generation head the checkout's row, whatever was registered last."""
+    head = merged[key]
+    if head["holds_code"] or not row["holds_code"]:
+        return
+    row["generations"] = head["generations"]
+    merged[key] = row
 
 
 def _active_generation_id(catalog, deadline: float | None) -> str | None:
@@ -847,7 +868,12 @@ def list_repositories(
     manifests = catalog.registered_manifests(deadline=deadline)
     active_id = _active_generation_id(catalog, deadline)
     rows = _merge_repository_rows(
-        _repository_row(identifier, registered_at, manifest)
+        _repository_row(
+            identifier,
+            registered_at,
+            manifest,
+            catalog.holds_code(identifier, manifest),
+        )
         for identifier, registered_at, manifest in manifests
     )
     return _listing(catalog, rows, active_id)
@@ -1042,6 +1068,7 @@ def _refresh_answer(admission: Admission, generation_id, status: str, staleness)
         "generation_id": generation_id,
         "stale": staleness["stale"],
         "reason": staleness["reason"],
+        "commit_moved": staleness["commit_moved"],
     }
 
 
@@ -1059,7 +1086,12 @@ def _staleness(catalog, admission: Admission, generation_id, manifest, deadline)
     # the checkout's current one (the identity guard in tests watches this).
     commit_moved = recorded_scope.get("git_commit") != admission.scope.git_commit
     if report["stale"]:
-        return {"stale": True, "reason": "sources_changed", "counts": report["counts"]}
+        return {
+            "stale": True,
+            "reason": "sources_changed",
+            "counts": report["counts"],
+            "commit_moved": commit_moved,
+        }
     return {"stale": False, "reason": "unchanged", "commit_moved": commit_moved}
 
 
@@ -1214,12 +1246,27 @@ def refresh_repository(
 
 
 def _current_hints(catalog, scope, root: Path, generation_id: str, deadline) -> dict:
+    """The hint table of this generation, exported again when it names another commit.
+
+    The meta block is also the answer to "was this generation confirmed against
+    the checkout as it stands now?", which is why the commit has to match: after
+    a commit that changed no source, nothing else says the index is current, and
+    every new process spawned a refresh that found nothing. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
     from code_hints import hints_path, read_meta
 
     meta = read_meta(hints_path(root, scope.checkout_id))
-    if meta is not None and meta.get("generation_id") == generation_id:
+    if meta is not None and _hints_confirm(meta, scope, generation_id):
         return {"status": "current", "generation_id": generation_id}
     return _exported_hints(catalog, scope, root, deadline)
+
+
+def _hints_confirm(meta: Mapping, scope, generation_id: str) -> bool:
+    return (meta.get("generation_id"), meta.get("git_commit")) == (
+        generation_id,
+        str(scope.git_commit or ""),
+    )
 
 
 def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict:
@@ -1252,10 +1299,21 @@ def _vault_checkout(state_root: Path | None) -> Path:
 
 
 def _indexed_already(directory: Path, state_root: Path | None, deadline: float) -> bool:
-    detected = detect_repository_changes(
-        directory, state_root=state_root, deadline=deadline
+    """Whether this checkout already has a code generation registered.
+
+    One catalog lookup. Asking `detect_repository_changes` captured the whole
+    checkout a second time every night -- and a third when it was stale -- to
+    learn something the catalog answers without reading a file. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    admission = admit_repository(directory, state_root=state_root, deadline=deadline)
+    catalog = _open_catalog(state_root_path(state_root), read_only=True)
+    if catalog is None:
+        return False
+    generation_id, _manifest = _newest_generation_for(
+        catalog, admission.scope, deadline
     )
-    return detected.get("status") != "not_indexed"
+    return generation_id is not None
 
 
 def _adopted_vault(state_root: Path | None, deadline: float) -> dict:

@@ -8136,10 +8136,13 @@ def run_generation_maintenance(
 
     `code_roots` is the generation's policy: None means the vault's own
     generation, which holds memory only (`corpus_snapshot.VAULT_CODE_ROOTS`,
-    empty); a caller that builds a generation over declared code roots — a
-    repository, or a test of the code extractor — names them here and the
-    manifest records them. `corpus_snapshot` is imported where it is used:
-    it needs PyYAML, which the production install does not carry.
+    empty). Naming roots here is a test seam and nothing else: no production
+    caller passes them, and the production path for a code generation is
+    `repository_index`, which registers it without ever activating it. A
+    generation built here with roots *is* activated, so it must not be used to
+    build one for a running vault (audit 3, G-L4). `corpus_snapshot` is
+    imported where it is used: it needs PyYAML, which the production install
+    does not carry.
     """
     _require_positive_time_budget(time_budget_seconds)
     _require_positive_source_limit(max_sources)

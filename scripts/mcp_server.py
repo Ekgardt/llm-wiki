@@ -1996,13 +1996,42 @@ def _repository_freshness(resolved: Path) -> dict | None:
         checkout = getattr(lease, "cached_scope", None)
         if checkout is None:
             return None
-        return _freshness_block(resolved, checkout, lease.repository_scope)
+        return _freshness_block(
+            resolved, checkout, lease.repository_scope, lease.generation_id
+        )
     finally:
         lease.close()
 
 
-def _freshness_block(resolved: Path, checkout, generation) -> dict:
-    stale = checkout.git_commit != generation.git_commit
+def _confirmed_at_commit(checkout, generation_id) -> bool:
+    """Whether a refresh already confirmed this generation against this commit.
+
+    A commit that changes no source leaves the generation's own commit behind
+    for ever, and the checkout would be called stale until something edited a
+    file. The hint table records the commit its generation was last confirmed
+    at. See `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    import sqlite3
+
+    from code_hints import hints_path, read_meta
+    from memory_state import STATE_ROOT
+
+    try:
+        meta = read_meta(hints_path(Path(STATE_ROOT), checkout.checkout_id))
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    if meta is None:
+        return False
+    return (meta.get("generation_id"), meta.get("git_commit")) == (
+        str(generation_id),
+        str(checkout.git_commit or ""),
+    )
+
+
+def _freshness_block(resolved: Path, checkout, generation, generation_id) -> dict:
+    stale = checkout.git_commit != generation.git_commit and not _confirmed_at_commit(
+        checkout, generation_id
+    )
     return {
         "generation_commit": generation.git_commit,
         "checkout_commit": checkout.git_commit,
@@ -2021,8 +2050,10 @@ def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
     if not stale:
         return "not_needed"
     if _is_the_vault(resolved):
-        # The vault's own generation is rebuilt and activated by the nightly
-        # pass and the freshness watch; a foreign-repository refresh refuses it.
+        # The vault's own memory generation is rebuilt and activated by the
+        # nightly pass and the freshness watch. Its code generation is refreshed
+        # by the same nightly step as every other checkout's since 2026-09-12;
+        # this path does not start one here (audit 3, G-L5).
         return "vault_nightly"
     return _request_repository_refresh(resolved, checkout)
 

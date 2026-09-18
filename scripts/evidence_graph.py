@@ -709,13 +709,18 @@ def _batch_additions(run, analysis) -> dict[str, int]:
 def _reserve_batch_rows(
     rows: dict[str, list], additions: dict[str, int], total_rows: int
 ) -> int:
+    """Refuse a batch that would take any table past its ceiling.
+
+    The aggregate ceiling this used to check in addition -- every table's
+    ceiling multiplied by the number of tables -- can never be reached while
+    each table is refused at its own, so it was a line that could not run. The
+    bound it claimed still holds; it is the sum of the per-table ones.
+    See `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
     for table, count in additions.items():
         if count > MAX_VALIDATION_ROWS - len(rows[table]):
             raise ValueError(f"{table} row ceiling exceeded")
-    total_rows += sum(additions.values())
-    if total_rows > MAX_VALIDATION_ROWS * len(rows):
-        raise ValueError("v3 aggregate row ceiling exceeded")
-    return total_rows
+    return total_rows + sum(additions.values())
 
 
 def _capability_scope_rows(run, analysis) -> tuple[list[dict], list[dict]]:
@@ -4520,9 +4525,13 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         )
         return [str(row["reached"]) for row in rows]
 
-    def _hydrate_reached(self, seen: dict[str, int], max_rows: int, _deadline):
+    def _hydrate_reached(self, seen: dict[str, int], max_rows: int, deadline):
+        """One row-read per reached node, each one inside the caller's deadline."""
         reached = _bounded_reached(seen, _bound(max_rows, "max_rows", MAX_ROWS))
-        found = [self._reached_node(node_id, depth) for node_id, depth in reached]
+        found = []
+        for node_id, depth in reached:
+            _require_query_deadline(deadline)
+            found.append(self._reached_node(node_id, depth))
         return _sorted_reached(found)
 
     def _reached_node(self, node_id: str, depth: int) -> dict[str, object] | None:
@@ -4891,12 +4900,16 @@ ORDER BY found.depth, found.assertion_ids LIMIT ?
         receiver's type is exactly what the extractor could not establish, so a
         row means "a call to something called `name` happens here", nothing
         more. `count` is exact even when the row list is cut, so a partial
-        answer can still state how much it is missing.
+        answer can still state how much it is missing. It counts over the same
+        joins the rows come from: an observation the row query could never
+        return is not part of the answer's size either (audit 3, G-L8).
         """
         parameters = _unresolved_call_parameters(name)
         totals = self._fetch(
-            f"SELECT COUNT(*) AS total FROM observation o WHERE {_UNRESOLVED_CALL_WHERE}"
-            " LIMIT ?",
+            "SELECT COUNT(*) AS total FROM observation o "
+            "JOIN evidence e ON e.observation_id = o.observation_id "
+            "JOIN source s USING(source_id) "
+            f"WHERE {_UNRESOLVED_CALL_WHERE} LIMIT ?",
             parameters,
             limit=1,
             deadline=deadline,
