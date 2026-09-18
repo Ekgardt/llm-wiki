@@ -54,7 +54,16 @@ def _left_out(image: Path) -> int:
     return len(_links(image)) + len(_empty_directories(image))
 
 
-def test_the_receipt_counts_the_link_and_the_empty_directory(tmp_path):
+def test_the_receipt_counts_the_link_and_the_image_holds_no_empty_directory(tmp_path):
+    """The one entry a publication leaves out of a fresh image is the symlink.
+
+    An empty directory never reaches the image: "Directories that end up holding
+    nothing are not part of the image, so the image is the shape of what it
+    carries" —
+    `docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md`. The
+    receipt still counts both kinds, because an image restored from an older
+    snapshot may hold either.
+    """
     import private_vault_backup as backup
 
     image, digest, left_out = _image_with_a_link_and_an_empty_directory(tmp_path)
@@ -65,6 +74,10 @@ def test_the_receipt_counts_the_link_and_the_empty_directory(tmp_path):
         image=image, vault_root=target, state_root=target, expected_manifest_sha256=digest
     )
 
-    assert receipt["unpublished_entries"] == left_out
-    assert left_out >= 2
-    assert not (target / "knowledge/notes/alias.md").exists()
+    by_kind = (len(_links(image)), len(_empty_directories(image)))
+    assert (
+        receipt["unpublished_entries"],
+        left_out,
+        by_kind,
+        (target / "knowledge/notes/alias.md").exists(),
+    ) == (1, 1, (1, 0), False)

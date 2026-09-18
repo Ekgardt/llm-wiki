@@ -108,5 +108,10 @@ def test_a_page_that_is_not_utf8_is_that_pages_error_in_the_tier_build(tmp_path)
 
     page = tmp_path / "latin.md"
     page.write_bytes(b"# Caf\xe9\n")
+    # The pass collects the cache files it means to keep; a page it could not
+    # read names none, so the prune that follows cannot mistake one for residue.
+    current: set = set()
 
-    assert build_tiers._build_page_tier(page, verbose=False) == "errors"
+    bucket = build_tiers._build_page_tier(page, verbose=False, current=current)
+
+    assert (bucket, current) == ("errors", set())

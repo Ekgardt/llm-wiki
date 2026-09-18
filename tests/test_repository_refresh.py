@@ -192,7 +192,11 @@ def test_a_structural_answer_names_its_commit_and_starts_one_refresh_per_commit(
 
     repository = _repository(tmp_path / "repository", {"app.py": "def caller():\n    callee()\n"})
     catalog = _activate_graph(tmp_path, repository)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda _directory: catalog)
+    # A structural answer opens the generation under a deadline, so this double
+    # takes the bound the product forwards instead of refusing the call.
+    monkeypatch.setattr(
+        code_graph, "_generation_catalog", lambda _directory, **_options: catalog
+    )
     monkeypatch.setattr(mcp_server, "_REFRESH_REQUESTED", {})
     spawned: list[list[str]] = []
     monkeypatch.setattr(
