@@ -989,7 +989,10 @@ def _page_with_evidence(
     if isinstance(evidence, dict):
         return evidence
     if emit_telemetry:
-        _record_page_reads(slug, evidence)
+        # One column, one identity: the page's vault-relative path, never the
+        # bare slug two pages can share. See
+        # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+        _record_page_reads(page_path.relative_to(root).as_posix(), evidence)
     return {
         "slug": slug,
         "path": str(page_path.relative_to(root)),
@@ -1100,7 +1103,8 @@ def _page_read_events(make_event, kinds) -> list:
     return events
 
 
-def _record_page_reads(slug: str, evidence: list) -> None:
+def _record_page_reads(page_path: str, evidence: list) -> None:
+    """`page_path` is the page's vault-relative path; an evidence row names its quote."""
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
@@ -1108,7 +1112,7 @@ def _record_page_reads(slug: str, evidence: list) -> None:
         )
 
         kinds = [
-            ("page_read", slug),
+            ("page_read", page_path),
             *(("evidence_read", item["sha256"]) for item in evidence),
         ]
         events = _page_read_events(best_effort_make_event, kinds)
@@ -1440,12 +1444,15 @@ def _context_result(compiled, snapshot, selection: dict, token_budget: int, incl
 
 def _context_injection_events(make_event, selected_paths: set) -> list:
     events = []
-    for slug in sorted({Path(path).stem for path in selected_paths}):
+    # One column, one identity: the page's vault-relative path, which is what
+    # `selected_paths` already holds, not the stem two pages can share. See
+    # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    for page_path in sorted(selected_paths):
         event = make_event(
             event_kind="context_injected",
             query=None,
             retrieval_mode="direct",
-            candidate_id=slug,
+            candidate_id=page_path,
             rank=None,
             generation="legacy",
             source_tool="mcp.get_context",

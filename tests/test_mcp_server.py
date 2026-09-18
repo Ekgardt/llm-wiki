@@ -540,8 +540,11 @@ def _assert_decision_filter_results(results) -> None:
 
 
 def _assert_decision_filter_rows(rows) -> None:
+    # One column, one identity: the page's vault-relative path. See
+    # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
     assert [(row.candidate_id, row.rank) for row in rows] == [
-        ("first-decision", 1), ("second-decision", 2)
+        ("knowledge/notes/first-decision.md", 1),
+        ("knowledge/notes/second-decision.md", 2),
     ]
     assert all(row.retrieval_mode == "decision-filter" for row in rows)
     assert all(row.source_tool == "mcp.get_decisions" for row in rows)
@@ -552,6 +555,10 @@ def _assert_read_page_events(rows) -> None:
         ("page_read", "mcp.read_page"),
         ("evidence_read", "mcp.read_page"),
     }
+    # A page read names the page the way every other writer of this column
+    # does — its vault-relative path, not the slug two pages can share.
+    read_event = next(row for row in rows if row.event_kind == "page_read")
+    assert read_event.candidate_id == "knowledge/notes/page.md"
 
 
 def _assert_evidence_event(rows, expected_id: str) -> None:
@@ -1305,8 +1312,10 @@ class TestHelperFunctions:
         assert "knowledge/notes/page.md" in package["repo_map"]
 
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
-        assert [(row.event_kind, row.source_tool) for row in rows] == [
-            ("context_injected", "mcp.get_context")
+        # The injected page is named by its vault-relative path, the one
+        # identity this column carries.
+        assert [(row.event_kind, row.candidate_id, row.source_tool) for row in rows] == [
+            ("context_injected", "knowledge/notes/page.md", "mcp.get_context")
         ]
 
     def test_failed_mcp_reads_emit_no_success_events(self, tmp_path, monkeypatch):

@@ -53,12 +53,27 @@ class TestRecordAccess:
         access_tracking.record_access("simple", source="direct")
 
 
+def _own_telemetry_db(tmp_path, monkeypatch):
+    """Point the telemetry at this test's own database.
+
+    `get_access_stats` merges the telemetry with the legacy log, so a test that
+    asserts a count owns both sources, or it reads whatever another test left
+    in the shared state root.
+    """
+    import retrieval_telemetry
+
+    database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
+    monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+    return database
+
+
 class TestGetAccessStats:
     """Test get_access_stats reads the JSONL log correctly."""
 
     def test_stats_for_no_access(self, tmp_path, monkeypatch):
         import access_tracking
 
+        _own_telemetry_db(tmp_path, monkeypatch)
         monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "nonexistent.jsonl")
         stats = access_tracking.get_access_stats("never-accessed")
         assert stats["total_count"] == 0
@@ -74,6 +89,7 @@ class TestGetAccessStats:
             + json.dumps({"slug": "page-b", "source": "search", "timestamp": "2026-01-03T10:00:00"}) + "\n",
             encoding="utf-8",
         )
+        _own_telemetry_db(tmp_path, monkeypatch)
         monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
 
         stats = access_tracking.get_access_stats("page-a")
@@ -108,6 +124,7 @@ class TestGetAccessStats:
     def test_legacy_stats_are_bounded_and_reject_symlink(self, tmp_path, monkeypatch):
         import access_tracking
 
+        _own_telemetry_db(tmp_path, monkeypatch)
         legacy = tmp_path / "access_log.jsonl"
         legacy.write_bytes(b"x" * 33)
         monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", legacy)
