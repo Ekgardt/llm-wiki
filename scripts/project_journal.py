@@ -2558,10 +2558,22 @@ class ProjectStore:
         and any sealed segment the fold produced; the checkpoint rows are not
         touched. Pending sequences are settled afterwards by `recover`. See
         `rebuilt_journal`.
+
+        The project is held for the whole read-fold-write, as both sibling
+        repairs hold it: without the lease a checkpoint committed between the
+        read and the write was left out of the rebuilt journal. See
+        `docs/research/2026-09-18-a-rebuild-takes-the-lease-its-siblings-take.md`.
         """
+        slug = _require_slug(slug)
+        lease = self.acquire_lease(slug, "journal-rebuild")
+        try:
+            return self._rebuild_under_lease(slug)
+        finally:
+            self._release(lease)
+
+    def _rebuild_under_lease(self, slug: str) -> dict[str, object]:
         from markdown_transaction import _mutate_knowledge
 
-        slug = _require_slug(slug)
         events = self.committed_events(slug)
         if not events:
             raise ProjectJournalReadError("no_committed_events", f"project {slug!r} has no committed checkpoints")
