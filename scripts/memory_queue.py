@@ -1535,20 +1535,33 @@ def _require_queue_v2_tasks_schema(
         )
 
 
+def _still_held(source: sqlite3.Connection, table: str, where: str) -> bool:
+    """Whether any such row is inside its lease; a null expiry cannot say, so it is.
+
+    A fence row outlives the process that took it — the live v2 queue sweeps
+    those on every open — and refusing adoption for a leftover locks a vault out
+    for good. See `docs/research/
+    2026-09-18-an-expired-fence-is-not-an-obstacle-to-adoption.md`.
+    """
+    now = _timestamp(_utc_now())
+    rows = source.execute(
+        f"SELECT expires_at FROM {table} WHERE {where}"  # noqa: S608 - fixed names
+    ).fetchall()
+    return any(row["expires_at"] is None or str(row["expires_at"]) > now for row in rows)
+
+
 def _require_unambiguous_v2_owners(
     source: sqlite3.Connection, tables: set[str]
 ) -> None:
-    """v2 fences and owners predate the identity v3 needs to fence with."""
-    if "source_fences" in tables and source.execute(
-        "SELECT 1 FROM source_fences LIMIT 1"
-    ).fetchone() is not None:
+    """A v2 fence still held predates the identity v3 needs to fence with."""
+    if "source_fences" in tables and _still_held(source, "source_fences", "1=1"):
         raise _migration_error(
             "queue_v2_source_fence_ambiguous",
             "queue v2 source fences lack process-start identity",
         )
-    if "queue_ownership" in tables and source.execute(
-        "SELECT 1 FROM queue_ownership WHERE token IS NOT NULL LIMIT 1"
-    ).fetchone() is not None:
+    if "queue_ownership" in tables and _still_held(
+        source, "queue_ownership", "token IS NOT NULL"
+    ):
         raise _migration_error(
             "queue_v2_owner_ambiguous",
             "queue v2 ownership lacks canonical process identity",
