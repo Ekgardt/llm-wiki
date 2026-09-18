@@ -29,12 +29,17 @@ import pyright_profile as _profile
 import windows_workspace as _windows_workspace
 from lsp_paths import managed_pyright_root
 from operational_ownership import process_start_identity as _process_start_identity
+from pinned_download import open_pinned_url as _open_pinned_url
 from reliable_memory import (
     _set_owner_only,
     _sqlite_lock_probe,
     canonical_json_bytes,
 )
 
+# `_open_pinned_url` is the shared opener -- no proxy table, no redirect
+# handler -- imported under this module's own private name because that is the
+# attribute its tests replace. Research:
+# `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 120.0
 NETWORK_TIMEOUT_SECONDS = 30.0
 LOCK_POLL_SECONDS = 0.01
@@ -480,34 +485,6 @@ class _HandleReader(io.RawIOBase):
         content = _read_handle(self._handle, len(buffer))
         buffer[: len(content)] = content
         return len(content)
-
-
-class _RejectRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        request: urllib.request.Request,
-        file_pointer: object,
-        code: int,
-        message: str,
-        headers: object,
-        new_url: str,
-    ) -> None:
-        raise urllib.error.HTTPError(
-            request.full_url, code, "redirect refused", headers, file_pointer
-        )
-
-
-def _open_pinned_url(
-    request: urllib.request.Request,
-    *,
-    timeout: float,
-) -> object:
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _RejectRedirect(),
-        urllib.request.HTTPSHandler(),
-    )
-    return opener.open(request, timeout=timeout)
 
 
 def _validated_deadline(deadline: float | None) -> float:
@@ -3319,6 +3296,28 @@ def _installed_result(
     )
 
 
+def _sweep_abandoned_scratch(parent: _Handle) -> None:
+    """Remove scratch no installer can still own; the lock is held here.
+
+    `.install-pyright-*` is removed on a handled failure and left behind by a
+    `SIGKILL`, a power cut or an `OOM` kill -- about 96 MB each time (audit 3,
+    B22). While this process holds the install lock nothing else is installing
+    Pyright, so whatever remains is abandoned. Research:
+    `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
+    """
+    for entry in _existing_directory_entries(parent):
+        _remove_abandoned_scratch(parent, entry)
+
+
+def _remove_abandoned_scratch(parent: _Handle, entry: _ExistingEntry) -> None:
+    if entry.name == _LOCK_NAME or not entry.name.startswith(_SCRATCH_PREFIX):
+        return
+    if os.name == "nt":
+        _delete_windows_entry(parent, entry)
+        return
+    _remove_posix_entry(parent, entry.name)
+
+
 def _install_under_lock(
     parent: _Handle,
     root: Path,
@@ -3326,6 +3325,7 @@ def _install_under_lock(
     deadline: float,
 ) -> InstalledPyright:
     _check_deadline(deadline)
+    _sweep_abandoned_scratch(parent)
     temporary = _new_owned_file(parent, "download")
     stage: _Stage | None = None
     try:

@@ -37,8 +37,9 @@ def _zip_of(entries: list[tuple[zipfile.ZipInfo, bytes]]) -> bytes:
 
 
 def _unpack(content: bytes, root: Path, **bounds) -> None:
+    """The fixture is bytes; the installer reads a seekable handle over them."""
     installer._extract(
-        content,
+        io.BytesIO(content),
         root,
         installer._Placement(strip=1),
         mode=installer._archive_mode(WINDOWS_GO_URL),
