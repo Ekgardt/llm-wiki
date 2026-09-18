@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -82,10 +82,20 @@ def _tracked_knowledge() -> list[Path]:
     return [path for path in _tracked("knowledge/") if path.suffix == ".md"]
 
 
+def _repository_path(path: Path) -> str:
+    """The path as git spells it: forward slashes, on Windows as much as here.
+
+    `str(Path)` spells a separator the way the host does, so on Windows the
+    fixture exclusions below matched nothing, this guard swept its own examples
+    and failed on itself. A repository path is a POSIX path everywhere.
+    """
+    return path.relative_to(ROOT).as_posix()
+
+
 def _tracked_text() -> list[Path]:
     """Every tracked text file except the two that hold the pattern on purpose."""
     named = (path for path in _tracked() if path.suffix in TEXT_SUFFIXES)
-    return [path for path in named if str(path.relative_to(ROOT)) not in PATTERN_FIXTURES]
+    return [path for path in named if _repository_path(path) not in PATTERN_FIXTURES]
 
 
 def _text_of(path: Path) -> str:
@@ -95,7 +105,7 @@ def _text_of(path: Path) -> str:
 def _offenders(finder) -> dict[str, set[str]]:
     """Each tracked text file that carries something private, and what it carries."""
     found = ((path, finder(_text_of(path))) for path in _tracked_text())
-    return {str(path.relative_to(ROOT)): hit for path, hit in found if hit}
+    return {_repository_path(path): hit for path, hit in found if hit}
 
 
 # A run of this product creates project directories of its own: a benchmark corpus,
@@ -109,7 +119,7 @@ def _repository_vocabulary() -> set[str]:
     """Words this repository already uses in its own tracked paths."""
     words: set[str] = set()
     for path in _tracked():
-        words.update(re.split(r"[/._-]", str(path.relative_to(ROOT)).casefold()))
+        words.update(re.split(r"[/._-]", _repository_path(path).casefold()))
     return words
 
 
@@ -254,11 +264,24 @@ def test_a_real_looking_address_is_still_caught() -> None:
 
 def test_the_sweep_reaches_past_the_knowledge_directory() -> None:
     """The names were in documents, comments and fixtures, not in published pages."""
-    swept = {str(path.relative_to(ROOT)) for path in _tracked_text()}
-    zones = {path.split("/")[0] for path in swept}
+    swept = {_repository_path(path) for path in _tracked_text()}
+    zones = {PurePosixPath(path).parts[0] for path in swept}
 
     assert {"docs", "scripts", "tests", "benchmark"} <= zones
     assert "tests/test_structure.py" not in swept
+
+
+def test_the_guard_spells_a_repository_path_the_way_git_spells_it() -> None:
+    """git prints `tests/x.py` on every platform; `str(Path)` does not.
+
+    The exclusions and the zone names below are written in git's spelling, so
+    every path this guard compares has to be spelled that way too. On Windows,
+    while it was not, the two fixture files swept themselves and the guard
+    reported its own examples as a leak.
+    """
+    spelled = _repository_path(ROOT / "tests" / "test_structure.py")
+
+    assert (spelled, spelled in PATTERN_FIXTURES) == ("tests/test_structure.py", True)
 
 
 def test_the_projects_own_address_is_not_a_leak() -> None:
