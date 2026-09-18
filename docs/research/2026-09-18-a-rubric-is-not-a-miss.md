@@ -94,6 +94,44 @@ reads `{"wrong": 0, "evidence_in_hand": 0, "evidence_missing": 0}` for a run wit
    to pick a number out of the JSON by hand. `failure_split` says when no judge
    verdict exists instead of reporting zero wrong answers.
 
+Two more instances of the same defect surfaced while re-scoring the recorded run
+with the fixed code, and are decided the same way:
+
+5. **An abstention's gold is an explanation, not a span.** It read 0 of 30 for
+   exactly the reason the rubric did — the authors' abstention template hands
+   the judge "an unanswerable question, an explanation, and a response from a
+   model" (`longmemeval_official.ABSTENTION`). It leaves the gold-text
+   denominator too.
+6. **`judge_accuracy` was never only the judge.** Where no readable verdict came
+   back — 160 of 500 rows — `contains_answer` stood in, unannounced, and the
+   blend was published as one number. The blend stays, because a text score is
+   real evidence where the gold is a value somebody said, but each per-category
+   row now carries `judged` and `from_text_score`. On the recorded run the
+   overall 473 graded rows are 340 judge verdicts and 133 substring tests, and
+   the `abstention` row's 0.9 contains no judge verdict at all — that category
+   is never sent to the judge.
+
+## What the recompute showed
+
+Re-scored over `lme500.jsonl` and `lme500.judged.jsonl` with no new run:
+
+| category | accuracy before → after | gold text in prompt | judged before → after |
+|---|---|---|---|
+| abstention | 0.9 → 0.9 /30 | n/a (30 held out) | 0.9 /30 → 0.9 /30, 0 by judge |
+| knowledge-update | 0.8472 → 0.8472 /72 | 60/72 = 0.8333 | 0.9583 /72 → 0.9583 /72 |
+| multi-session | 0.6529 → 0.6529 /121 | 58/121 = 0.4793 | 0.7355 /121 → 0.7355 /121 |
+| single-session-assistant | 0.6429 → 0.6429 /56 | 30/56 = 0.5357 | 0.8571 /56 → 0.8571 /56 |
+| single-session-preference | **0.0 → none** (30 held out) | **n/a (30 held out)** | **0.1 /30 → 1.0 /3**, 27 ungraded |
+| single-session-user | 0.8594 → 0.8594 /64 | 57/64 = 0.8906 | 0.8906 /64 → 0.8906 /64 |
+| temporal-reasoning | 0.4094 → 0.4094 /127 | 49/127 = 0.3858 | 0.7087 /127 → 0.7087 /127 |
+| overall | 0.62 → **0.6596 over 470** | 254/440 = 0.5773, 60 held out | 0.766 /500 → **0.8097 over 473**, 27 ungraded |
+
+The old headline `gold_in_prompt` 254/500 = 0.508 becomes 254/440 = 0.5773 with
+sixty questions named as out of scope instead of counted as misses, and it is
+labelled as the floor it is. `failure_split` on the judged rows reads
+`{judged: 340, wrong: 39, evidence_in_hand: 20, evidence_missing: 19}` where the
+published report said `{wrong: 0}`.
+
 Not decided here, and left to the owner: re-running the 500 questions. The
 recorded run is re-scored from its own rows; `evidence_in_prompt` is recorded by
 runs from this change onward, because the prompt text was never kept on the row.
