@@ -10,6 +10,7 @@ See `docs/research/2026-09-17-what-nothing-runs-is-removed-or-reachable.md`.
 from __future__ import annotations
 
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -63,15 +64,28 @@ def test_no_document_still_calls_a_retired_store_this_product_s_engine(path: str
     assert "lance paths" not in text
 
 
+# What an interpreter needs before it can run anything at all. A Windows Python
+# started without SystemRoot cannot seed its random numbers and dies before its
+# first import (python/cpython#105436). The point of the environment below is
+# that none of the operator's own settings reach the reader — not that the
+# interpreter cannot start.
+BOOT_VARIABLES = ("SystemRoot", "SYSTEMROOT", "windir", "TEMP", "TMP")
+
+
+def _bare_environment(**values: str) -> dict[str, str]:
+    """`values`, a default PATH, and only what the interpreter needs to boot."""
+    inherited = {name: os.environ[name] for name in BOOT_VARIABLES if name in os.environ}
+    return {"PATH": os.defpath, **inherited, **values}
+
+
 def test_the_refusal_signal_has_a_reader_an_operator_can_run(tmp_path: Path) -> None:
     """Every dropped claim writes a `refused:<gate>` row; this prints them."""
     script = SCRIPTS / "retrieval_disposition.py"
-    environment = {
-        "LLM_WIKI_ROOT": str(tmp_path / "vault"),
-        "LLM_WIKI_STATE_ROOT": str(tmp_path / "state"),
-        "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": str(SCRIPTS),
-    }
+    environment = _bare_environment(
+        LLM_WIKI_ROOT=str(tmp_path / "vault"),
+        LLM_WIKI_STATE_ROOT=str(tmp_path / "state"),
+        PYTHONPATH=str(SCRIPTS),
+    )
     (tmp_path / "vault" / "knowledge" / "notes").mkdir(parents=True)
 
     done = subprocess.run(
