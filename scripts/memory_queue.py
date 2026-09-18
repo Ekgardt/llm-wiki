@@ -9464,9 +9464,14 @@ class _QueueV3CandidateReader:
         candidates: list,
         operation: sqlite3.Row,
         operation_id: str,
-        started: float,
     ) -> list[dict[str, object]]:
-        """As many lineage links as fit one bounded page inside its time slice."""
+        """As many lineage links as one bounded page holds.
+
+        The bounds are inputs — at most 1000 candidate rows and at most 1 MiB of
+        page bytes — so a page rebuilt after a rollback is byte-identical and
+        `_write_durable_file` recognises its own work. See `docs/research/
+        2026-09-18-a-page-that-is-rewritten-must-come-out-the-same.md`.
+        """
         links: list[dict[str, object]] = []
         for child in candidates[:1000]:
             candidate = {
@@ -9484,7 +9489,7 @@ class _QueueV3CandidateReader:
                     "links": [*links, candidate],
                 }
             )
-            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+            if len(prospective) > 1024 * 1024:
                 break
             links.append(candidate)
         return links
@@ -9581,16 +9586,13 @@ class _QueueV3CandidateReader:
         package: Path,
     ) -> None:
         """One bounded step of the resumable lineage export."""
-        started = time.monotonic()
         candidates = database.execute(
             """SELECT id,state,created_at,updated_at,input_hash
                FROM tasks WHERE redrive_of=? AND id>?
                ORDER BY id LIMIT 1001""",
             (task_id, operation["cursor_task_id"]),
         ).fetchall()
-        links = self._bounded_lineage_links(
-            candidates, operation, operation_id, started
-        )
+        links = self._bounded_lineage_links(candidates, operation, operation_id)
         if links:
             self._write_lineage_page(
                 database, operation, operation_id, package, links, candidates
@@ -9605,10 +9607,14 @@ class _QueueV3CandidateReader:
         candidates: list,
         operation: sqlite3.Row,
         operation_id: str,
-        started: float,
         now: datetime,
     ) -> tuple[list[dict[str, object]], str | None]:
-        """As many children as one bounded page holds, and what stopped it."""
+        """As many children as one bounded page holds, and what stopped it.
+
+        Bounded by its inputs, never by a clock, so the page a retry rebuilds is
+        the page already on disk. See `docs/research/
+        2026-09-18-a-page-that-is-rewritten-must-come-out-the-same.md`.
+        """
         children: list[dict[str, object]] = []
         for child in candidates[:1000]:
             blocker = self._corrupt_child_purge_blocker(database, child, now=now)
@@ -9627,7 +9633,7 @@ class _QueueV3CandidateReader:
                     "children": [*children, descriptor],
                 }
             )
-            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+            if len(prospective) > 1024 * 1024:
                 return children, None
             children.append(descriptor)
         return children, None
@@ -9856,7 +9862,6 @@ class _QueueV3CandidateReader:
     ) -> CorruptPurgeProgress:
         del owner
         _require_active(deadline, cancelled)
-        started = time.monotonic()
         with closing(self._connect()) as database, begin_immediate(database):
             operation, prior, early = self._purge_page_preconditions(
                 database, task_id, operation_id, task_fence
@@ -9870,7 +9875,6 @@ class _QueueV3CandidateReader:
                 operation=operation,
                 prior=prior,
                 package=package,
-                started=started,
             )
 
     def _purge_one_lineage_page(
@@ -9882,7 +9886,6 @@ class _QueueV3CandidateReader:
         operation: sqlite3.Row,
         prior: int,
         package: Path,
-        started: float,
     ) -> CorruptPurgeProgress:
         """One bounded page of children, inside the caller's transaction."""
         pages = int(operation["page_count"])
@@ -9897,7 +9900,7 @@ class _QueueV3CandidateReader:
             )
         now = _utc_now()
         children, blocker_code = self._bounded_purge_children(
-            database, candidates, operation, operation_id, started, now
+            database, candidates, operation, operation_id, now
         )
         if not children:
             return _purge_progress(
