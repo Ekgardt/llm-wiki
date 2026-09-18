@@ -98,6 +98,7 @@ from memory_state import (  # noqa: E402
     load_state,
     update_state,
 )
+from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,
@@ -1624,9 +1625,42 @@ def _with_snapshot_actions(
     section, so the rewrite is mechanical and costs no tokens. See
     `docs/research/2026-09-17-the-compile-decides-what-the-snapshot-already-knows.md`.
     """
-    for operation in operations:
+    kept = [item for item in operations if not _names_retired_page(item, inputs)]
+    for operation in kept:
         _follow_snapshot(operation, inputs)
-    return operations
+    return kept
+
+
+def _names_retired_page(operation: dict[str, object], inputs: CompileInputs) -> bool:
+    """A page the vault has retired is history; the compile does not write into it.
+
+    Rule 12 of `CLAUDE.md`: supersede, never edit in place. Since the snapshot
+    decides the action, a drafted create for a superseded slug would otherwise
+    become an update of it. The operation is dropped and named; the rest of the
+    plan still commits, as an inadmissible claim does. See
+    `docs/research/2026-09-18-a-retired-page-is-not-updated-by-the-compile.md`.
+    """
+    target = _target_snapshot(inputs, f"knowledge/notes/{operation['slug']}.md")
+    status = _target_status(target)
+    if not is_retired(status):
+        return False
+    print(
+        f"compile_memory: {operation['slug']}: dropped, that page is {status}",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _target_status(target: TargetSnapshot | None) -> str:
+    if target is None:
+        return DEFAULT_STATUS
+    match = _PAGE_STATUS_RE.search(target.content)
+    if match is None:
+        return DEFAULT_STATUS
+    return normalized_status(match.group(1).decode("utf-8", errors="ignore"))
+
+
+_PAGE_STATUS_RE = re.compile(rb"(?m)^status:[ \t]*(.+?)[ \t]*$")
 
 
 def _follow_snapshot(operation: dict[str, object], inputs: CompileInputs) -> None:

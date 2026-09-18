@@ -150,6 +150,21 @@ def test_a_create_for_a_page_that_exists_becomes_an_update(vault, monkeypatch, c
     assert "drafted create, the snapshot says update" in capsys.readouterr().err
 
 
+def test_an_operation_for_a_retired_page_is_dropped_not_written(vault, monkeypatch, capsys):
+    """Rule 12: a superseded page is history, so the compile does not append to it."""
+    root, state_root = vault
+    daily = _daily(root)
+    (root / f"knowledge/notes/{SLUG}.md").write_bytes(
+        b"---\ntype: pattern\nstatus: superseded\n---\n# Exact Byte Pattern\n"
+    )
+    _replies(monkeypatch, [_draft("create")])
+
+    resolved = _resolved(root, state_root, daily)
+
+    assert _kinds(resolved) == []
+    assert f"{SLUG}: dropped, that page is superseded" in capsys.readouterr().err
+
+
 def test_an_update_for_a_page_that_is_absent_becomes_a_create(vault, monkeypatch):
     root, state_root = vault
     daily = _daily(root)
