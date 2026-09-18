@@ -5791,7 +5791,7 @@ class LanguageServerSessionManager:
         entry = self._idle_entry(key, session, deadline)
         if entry is None:
             return False
-        rank, last_used = entry[0], entry[1]
+        rank, last_used, _key, _session = entry
         if rank == 0:
             return False
         return now - last_used >= _IDLE_SECONDS
