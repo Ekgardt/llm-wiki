@@ -5511,13 +5511,21 @@ def _search_architecture_call(arguments: dict, deadline: float):
 
 
 def _data_flow_architecture_call(arguments: dict, deadline: float):
-    """Issue #24, B3: which argument binds which parameter, hop by hop."""
-    del deadline
+    """Issue #24, B3: which argument binds which parameter, hop by hop.
+
+    The walk carries the caller's deadline and cancellation, so it stops when
+    the caller has stopped waiting instead of holding one of the four worker
+    slots to the end (audit 3, B3).
+    """
     from code_graph import find_argument_flows
 
     directory = Path(arguments["directory"]).resolve()
     answer = find_argument_flows(
-        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+        str(arguments["symbol"]),
+        directory,
+        max_depth=arguments.get("depth"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
     )
     if answer is None:
         return {"flows": [], "mode": "index", "reason": "no_active_generation"}
@@ -5525,13 +5533,19 @@ def _data_flow_architecture_call(arguments: dict, deadline: float):
 
 
 def _cross_service_architecture_call(arguments: dict, deadline: float):
-    """Issue #24, B3: follow a request across the route it reaches."""
-    del deadline
+    """Issue #24, B3: follow a request across the route it reaches.
+
+    Bounded by the caller's deadline and cancellation, like `data_flow`.
+    """
     from code_graph import find_service_paths
 
     directory = Path(arguments["directory"]).resolve()
     answer = find_service_paths(
-        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+        str(arguments["symbol"]),
+        directory,
+        max_depth=arguments.get("depth"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
     )
     if answer is None:
         return {"hops": [], "mode": "index", "reason": "no_active_generation"}
