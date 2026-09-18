@@ -3608,11 +3608,14 @@ def _flow_hop_reached(edges: list[dict], seen: set[str]) -> list[str]:
     return [str(edge["target_node_id"]) for edge in edges if str(edge["target_node_id"]) not in seen]
 
 
-def _flow_rows(graph, seeds: list[str], depth: int) -> list[dict]:
+def _flow_rows(
+    graph, seeds: list[str], depth: int, deadline=None, cancelled=None
+) -> list[dict]:
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
     for hop in range(1, depth + 1):
+        _check_generation_stop(deadline, cancelled)
         if not frontier:
             break
         hop_rows, reached = _flow_hop(graph, frontier, seen, hop)
@@ -3639,16 +3642,24 @@ def find_argument_flows(
     *,
     with_report: bool = True,
     max_depth: int | None = None,
+    deadline: float | None = None,
+    cancelled=None,
 ) -> list[dict] | dict | None:
-    """Argument bindings reachable from `symbol`, hop by hop, or None with no generation."""
-    graph = _active_evidence_graph(directory)
+    """Argument bindings reachable from `symbol`, hop by hop, or None with no generation.
+
+    `deadline` is a `time.monotonic()` value and `cancelled` a callable; either
+    stops the walk between hops with `TimeoutError` instead of letting it run to
+    completion after its caller has given up (audit 3, B3). Research:
+    `docs/research/2026-09-18-graph-a-flow-walk-stops-when-its-caller-has.md`.
+    """
+    graph = _active_evidence_graph(directory, deadline=deadline, cancelled=cancelled)
     if graph is None:
         return None
     try:
         matched = _dependency_seed_nodes(graph, symbol)
         seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _flow_rows(graph, seeds, depth)
+        rows = _flow_rows(graph, seeds, depth, deadline, cancelled)
         report = {
             **_flow_report(graph, symbol, seeds, rows, depth),
             **_seed_cut_report(matched, FLOW_MAX_SEEDS),
@@ -3796,11 +3807,14 @@ def _service_frontier(rows: list[dict], seen: set[str]) -> list[str]:
     return sorted(set(reached))[:FLOW_MAX_ROWS]
 
 
-def _service_walk(graph, seeds: list[str], depth: int) -> list[dict]:
+def _service_walk(
+    graph, seeds: list[str], depth: int, deadline=None, cancelled=None
+) -> list[dict]:
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
     for hop in range(1, depth + 1):
+        _check_generation_stop(deadline, cancelled)
         if not frontier:
             break
         hop_rows = _service_hop(graph, frontier, hop)
@@ -3830,16 +3844,22 @@ def find_service_paths(
     *,
     with_report: bool = True,
     max_depth: int | None = None,
+    deadline: float | None = None,
+    cancelled=None,
 ) -> list[dict] | dict | None:
-    """Calls and HTTP hops reachable from `symbol`, or None with no generation."""
-    graph = _active_evidence_graph(directory)
+    """Calls and HTTP hops reachable from `symbol`, or None with no generation.
+
+    `deadline` and `cancelled` bound the walk in time the way they bound every
+    other reader here — see `find_argument_flows`.
+    """
+    graph = _active_evidence_graph(directory, deadline=deadline, cancelled=cancelled)
     if graph is None:
         return None
     try:
         matched = _dependency_seed_nodes(graph, symbol)
         seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _service_walk(graph, seeds, depth)
+        rows = _service_walk(graph, seeds, depth, deadline, cancelled)
         report = {
             **_service_report(graph, symbol, seeds, rows, depth),
             **_seed_cut_report(matched, FLOW_MAX_SEEDS),
