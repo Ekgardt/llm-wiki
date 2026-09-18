@@ -142,6 +142,64 @@ def test_the_refit_recovers_the_type_the_shipped_constants_lost(tmp_path: Path) 
     assert shares["single-session-user"] == (15, 1.0)
 
 
+def _window_deep_file(path: Path, depth: int = 12, count: int = 30) -> Path:
+    """A run whose recorder kept only the candidates the reader was handed.
+
+    Exactly `depth` rows per question, which is what the 2026-09-18 stand wrote: the
+    ordered pool is capped to the window before the matrix is taken, so nothing the
+    ranking rejected is on the file.
+    """
+    questions = [
+        {
+            "question_id": f"q{number:03d}",
+            "question_type": TYPES[number % 2],
+            "lane_matrix": [
+                _candidate(rank, rank, rank == 1, rank == 1) for rank in range(1, depth + 1)
+            ],
+        }
+        for number in range(count)
+    ]
+    path.write_bytes(b"".join(json.dumps(item).encode("utf-8") + b"\n" for item in questions))
+    return path
+
+
+def _judgeable(items, depth: int) -> int:
+    """How many of these questions the depth can leave a candidate out of."""
+    return sum(1 for item in items if fit_lane_score.informative(item, depth))
+
+
+def test_a_matrix_no_deeper_than_the_window_cannot_judge_an_order(tmp_path: Path) -> None:
+    items = fit_lane_score.questions([_window_deep_file(tmp_path / "run.jsonl")])
+
+    counted = (len(items), _judgeable(items, 12), _judgeable(items, 11))
+
+    assert counted == (30, 0, 30)
+
+
+def test_constants_are_refused_when_no_question_can_disagree(tmp_path: Path, capsys) -> None:
+    """The defect this closes: the command used to print pasteable constants from a file
+    on which both columns of its own table read 1.0000."""
+    path = _window_deep_file(tmp_path / "run.jsonl")
+
+    status = fit_lane_score.main([str(path)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "none is deeper than the reader's 12 candidates" in captured.err
+    assert not any(f"{name} = " in captured.out for name in fit_lane_score.FEATURE_NAMES)
+
+
+def test_a_shallower_depth_makes_the_same_file_judgeable(tmp_path: Path, capsys) -> None:
+    """The refusal is about the depth asked for, not about the file."""
+    path = _window_deep_file(tmp_path / "run.jsonl")
+
+    status = fit_lane_score.main([str(path), "--depth", "6"])
+
+    printed = capsys.readouterr().out
+    assert status == 0
+    assert "30 of 30 questions can disagree with a depth of 6" in printed
+
+
 def test_the_folds_split_questions_and_never_one_question_s_candidates(tmp_path: Path) -> None:
     items = fit_lane_score.questions([_run_file(tmp_path / "run.jsonl")])
 

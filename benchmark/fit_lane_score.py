@@ -17,7 +17,14 @@ Input: the per-question records a run writes (JSONL, one object per line, as
 `lane_matrix` field the stand records: one row per candidate with `lexical_rank`,
 `dense_rank`, `rerank_score`, `user_turn` and `evidence`.
 
-Research: `docs/research/2026-09-17-the-lane-score-refit-is-one-command.md`.
+The matrix must be **deeper than the reader's depth** or the command refuses. A run whose
+recorder writes only the candidates the reader was handed produces a matrix exactly as deep
+as the window, and then every question passes the metric under every weight vector: the
+table reads 1.0000 in both columns and the constants under it are unmeasured. That is what
+the 2026-09-18 run recorded, and the refusal exists so nobody pastes them.
+
+Research: `docs/research/2026-09-17-the-lane-score-refit-is-one-command.md` and
+`docs/research/2026-09-18-the-lane-refit-cannot-see-what-it-threw-away.md`.
 """
 from __future__ import annotations
 
@@ -295,6 +302,36 @@ def shipped_verdicts(items: Sequence[Question], depth: int) -> dict[str, bool]:
     return _verdicts(items, shipped_weights(), depth)
 
 
+def informative(item: Question, depth: int) -> bool:
+    """Whether this question's own matrix can leave any candidate outside the depth.
+
+    A run that records the lane matrix over the candidates the reader was handed writes
+    no more rows than the reader's depth, and then `all_evidence_in_depth` is true for
+    every weight vector there is. Measured on the 2026-09-18 stand run: `retrieved` is 12
+    for every question and so is `len(lane_matrix)`, because `scripts/retrieval.py` caps
+    the ordered pool before returning it. Such a question carries no information about the
+    order, and a table built from it reads 1.0000 whatever the constants say. See
+    `docs/research/2026-09-18-the-lane-refit-cannot-see-what-it-threw-away.md`.
+    """
+    return len(item.features) > depth
+
+
+def _refuse_vacuous(count: int, depth: int) -> None:
+    print(
+        f"{count} questions carry a lane matrix and none is deeper than the reader's "
+        f"{depth} candidates, so every one of them passes the metric under every weight "
+        "vector.",
+        file=sys.stderr,
+    )
+    print(
+        "This file cannot say whether one order beats another: the candidates a different "
+        "order would have promoted were never written down. Record the matrix over the "
+        "ranked pool, before it is capped to the window. See "
+        "docs/research/2026-09-18-the-lane-refit-cannot-see-what-it-threw-away.md.",
+        file=sys.stderr,
+    )
+
+
 def _share(values: Sequence[bool]) -> tuple[int, float]:
     if not values:
         return 0, 0.0
@@ -340,19 +377,34 @@ def _print_constants(weights: Sequence[float]) -> None:
         print(f"{name} = {value:.4f}")
 
 
+def _reported(items: Sequence[Question], judged: Sequence[Question], depth: int) -> int:
+    """The table over the questions that can disagree, and constants fitted over all rows.
+
+    The table is built from `judged` alone: a question the depth cannot leave a candidate
+    out of would count as a win for every weight vector and inflate every column equally.
+    The coefficients are fitted over every labelled row, because a truncated matrix still
+    says which of its rows carried the evidence.
+    """
+    shipped = shipped_verdicts(judged, depth)
+    refit = cross_validated(judged, depth)
+    print(f"{len(judged)} of {len(items)} questions can disagree with a depth of {depth}\n")
+    _print_table(judged, shipped, refit)
+    _print_changes(judged, shipped, refit)
+    _print_constants(fit(items))
+    print("\nRead the per-type rows before pasting: an overall gain can hide a type that lost.")
+    return 0
+
+
 def report(paths: Sequence[Path], depth: int) -> int:
     items = questions(paths)
     if not items:
         print("no question in these files carries a lane matrix with labelled evidence", file=sys.stderr)
         return 1
-    shipped = shipped_verdicts(items, depth)
-    refit = cross_validated(items, depth)
-    print(f"{len(items)} questions with labelled evidence, reader depth {depth}\n")
-    _print_table(items, shipped, refit)
-    _print_changes(items, shipped, refit)
-    _print_constants(fit(items))
-    print("\nRead the per-type rows before pasting: an overall gain can hide a type that lost.")
-    return 0
+    judged = [item for item in items if informative(item, depth)]
+    if not judged:
+        _refuse_vacuous(len(items), depth)
+        return 1
+    return _reported(items, judged, depth)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
