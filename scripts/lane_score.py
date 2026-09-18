@@ -11,6 +11,16 @@ slightly *positive* for the lexical lane, which a vote cannot express.
 The weights are a logistic fit over labelled questions, fitted offline and shipped as
 constants; nothing is trained at query time. Research:
 `docs/research/2026-09-16-one-score-over-the-lanes.md`.
+
+Re-examined 2026-09-18 against the whole 500-question stand and left unchanged. The run
+that carries the per-candidate lane matrices records them *after* the ordered pool is
+capped to the reader's twelve, so the refit's own metric — is every evidence row inside
+the reader's depth — is true for every weight vector there is, and the table it prints
+reads 1.0000 in both columns. Nothing the current order rejected was written down, so
+nothing can be shown to beat it. `benchmark/fit_lane_score.py` now refuses such a file
+instead of offering constants under it; `tests/…_constants_are_pinned.py` holds these
+seven. Research:
+`docs/research/2026-09-18-the-lane-refit-cannot-see-what-it-threw-away.md`.
 """
 from __future__ import annotations
 
