@@ -667,30 +667,6 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
 
 
 
-def call_llm_json(
-    prompt: str,
-    system_prompt: str = "",
-    max_tokens: int = 2000,
-) -> str | None:
-    """Call LLM with JSON-constraining instructions.
-
-    Works with ALL existing providers (OpenAI, Claude, Codex, Ollama) by
-    prepending a strict JSON-only instruction to the system prompt. No API
-    parameter changes needed — the constraint is at the prompt level.
-
-    Returns the LLM response (should be valid JSON). Callers should still
-    parse defensively (json.loads + try/except) as LLMs occasionally
-    add prose despite instructions.
-    """
-    json_instruction = (
-        "CRITICAL: You MUST output ONLY valid JSON. No markdown, no prose, "
-        "no code fences, no commentary. Start with { and end with }. "
-        "If you cannot answer, output {\"error\": \"unable to respond\"}."
-    )
-    full_system = f"{system_prompt}\n\n{json_instruction}" if system_prompt else json_instruction
-    return call_llm(prompt, full_system, max_tokens)
-
-
 def _candidate_order(forced: str) -> list[str]:
     """Order in which to try backends.
 
@@ -1799,9 +1775,7 @@ def _call_fake(
     return os.environ.get(
         "MEMORY_LLM_FAKE_RESPONSE",
         '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, '
-        '"contradictions": 0, "rejected": 0}}\nCOMPILE_AUDIT: verified 0 evidence '
-        "citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; "
-        "0 pages rejected as below-threshold",
+        '"contradictions": 0, "rejected": 0}}',
     ).strip()
 
 

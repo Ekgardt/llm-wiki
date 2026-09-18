@@ -808,19 +808,6 @@ def _literal_agrees(
     return sha256_bytes(literal.encode("utf-8")) == evidence["sha256"]
 
 
-def page_may_auto_supersede(ledger: Mapping[str, object] | None) -> bool:
-    if ledger is None or ledger.get("schema_version") != "claim-ledger/v1":
-        return False
-    claims = ledger.get("claims")
-    if not isinstance(claims, list):
-        return False
-    return any(_substantive_entry(item) for item in claims)
-
-
-def _substantive_entry(item: object) -> bool:
-    return isinstance(item, Mapping) and is_substantive(item)
-
-
 _EXPECTED_CLAIM_INDEX_SHAPES = (
     (
         ("id", "TEXT", 1, None, 2),

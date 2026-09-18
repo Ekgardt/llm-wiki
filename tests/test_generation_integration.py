@@ -16,7 +16,6 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import build_tiers  # noqa: E402
 import contextual_retrieval  # noqa: E402
 import search_memory  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
@@ -88,7 +87,6 @@ def _build_generation(snapshot, catalog: GenerationCatalog, generation_id: str):
         )
     )
     descriptors.extend(contextual_retrieval.build_snapshot_contexts(snapshot, generation))
-    descriptors.extend(build_tiers.build_snapshot_tiers(snapshot, generation))
     manifest = {
         "generation_id": generation_id,
         "schema_version": "corpus-generation/v1",
@@ -235,7 +233,7 @@ def test_the_vectors_carry_the_snapshot_chunks(published, numpy_module):
     assert vectors.shape == (len(published.snapshot.chunks), VECTOR_DIMENSIONS)
 
 
-def test_the_contextual_and_tier_artifacts_carry_the_snapshot_sources(published):
+def test_the_contextual_artifacts_carry_the_snapshot_sources(published):
     membership = _source_membership(published.snapshot)
     contextual = [
         (
@@ -245,18 +243,8 @@ def test_the_contextual_and_tier_artifacts_carry_the_snapshot_sources(published)
         )
         for path in sorted((published.generation / "contextual").glob("*.json"))
     ]
-    entries = json.loads((published.generation / "tiers/tiers.json").read_bytes())["entries"]
-    tiers = [
-        (
-            entry["source"]["logical_id"],
-            entry["source"]["relative_path"],
-            entry["source"]["sha256"],
-        )
-        for entry in entries
-    ]
 
     assert sorted(contextual) == sorted(membership)
-    assert tiers == membership
 
 
 @pytest.mark.parametrize(

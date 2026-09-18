@@ -106,7 +106,9 @@ def test_compile_marker_stays_three_lines_and_is_published_before_canonical_owne
         return real_acquire(registry, role, **kwargs)
 
     monkeypatch.setattr(operational_ownership.OwnershipRegistry, "acquire", observe_acquire)
-    lease, marker = fake_env.acquire_compile_owner(state_root=fake_env.STATE_ROOT)
+    lease, marker = operational_ownership.acquire_compile_owner(
+        state_root=fake_env.STATE_ROOT
+    )
     try:
         assert observed == ["running"]
         assert fake_env.LOCK_FILE.read_bytes() == (
@@ -117,7 +119,7 @@ def test_compile_marker_stays_three_lines_and_is_published_before_canonical_owne
             + b"\n"
         )
     finally:
-        fake_env.release_marker_owner(lease, marker)
+        operational_ownership.release_marker_owner(lease, marker)
     assert not fake_env.LOCK_FILE.exists()
 
 

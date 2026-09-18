@@ -5557,79 +5557,6 @@ def _contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
     return all(marker.lower() in lowered for marker in markers)
 
 
-def _parse_toml_document(text: str) -> tuple[dict[str, Any] | None, str | None]:
-    parser = STDLIB_TOML or TOMLI
-    if parser is None:
-        return None, "toml_parser_unavailable"
-    try:
-        document = parser.loads(text)
-    except (ValueError, TypeError):
-        return None, "toml_invalid"
-    return (document, None) if isinstance(document, dict) else (None, "toml_invalid")
-
-
-_CODEX_SERVER_ARG_PREFIX = ["run", "--locked", "--no-sync", "--directory"]
-_CODEX_SERVER_ARG_SUFFIX = ["python", "scripts/mcp_server.py"]
-
-
-def _codex_server_arg_shape(args: object) -> bool:
-    if not isinstance(args, list) or len(args) != 8:
-        return False
-    return all(isinstance(item, str) for item in args)
-
-
-def _codex_server_args_match(args: object) -> bool:
-    if not _codex_server_arg_shape(args):
-        return False
-    if args[:4] != _CODEX_SERVER_ARG_PREFIX:
-        return False
-    return args[5:] == _CODEX_SERVER_ARG_SUFFIX
-
-
-def _codex_server_configured(table: dict) -> bool:
-    if table.get("command") != "uv":
-        return False
-    if table.get("enabled", True) is not True:
-        return False
-    return _codex_server_args_match(table.get("args"))
-
-
-def _codex_config_text(path: Path) -> str | None:
-    try:
-        raw = read_stable_bytes(path, MAX_CONFIG_BYTES, label="Codex config")
-        return raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-
-
-def _codex_table_state(document: dict) -> tuple[bool | None, str]:
-    servers = document.get("mcp_servers")
-    table = servers.get("llm-wiki") if isinstance(servers, dict) else None
-    if not isinstance(table, dict):
-        return False, "target_missing_or_invalid"
-    if _codex_server_configured(table):
-        return True, "configured"
-    return False, "target_missing_or_invalid"
-
-
-def _codex_config_error_state(error: str) -> tuple[bool | None, str]:
-    """An absent TOML parser leaves the state unknown; anything else is a no."""
-    if error == "toml_parser_unavailable":
-        return None, error
-    return False, error
-
-
-def _codex_config_state(path: Path) -> tuple[bool | None, str]:
-    text = _codex_config_text(path) if _readable_config(path) else None
-    if text is None:
-        return False, "config_missing_or_unsafe"
-    document, error = _parse_toml_document(text)
-    if error is not None:
-        return _codex_config_error_state(error)
-    assert document is not None
-    return _codex_table_state(document)
-
-
 def _codex_shim_command(arguments: list[str]) -> list[str] | None:
     shim = shutil.which("codex.cmd")
     command_processor = os.environ.get("ComSpec")
@@ -7134,23 +7061,6 @@ class _MaintenanceHeartbeat:
     def _renew(self) -> None:
         _heartbeat_maintenance_owner(self.coordinator, self.lease)
 
-    def _beat_once(self) -> bool:
-        """True when the lease was renewed; False on a transient failure.
-
-        A fence genuinely taken by someone else ends the pass at once. Anything
-        else — a busy database, a lock held by a writer — is retried: treating a
-        locked database as a lost fence threw away whole seven-minute generation
-        builds on this vault while its own capture workers were writing.
-        """
-        try:
-            _heartbeat_maintenance_owner(self.coordinator, self.lease)
-        except RuntimeError:
-            self._lost.set()
-            return False
-        except Exception:  # noqa: BLE001 - transient; the lease still holds
-            return False
-        return True
-
     def cancelled(self) -> bool:
         return self._lost.is_set() or _deadline_reached(self.deadline)
 
@@ -8345,40 +8255,6 @@ def _guarded_generation_refresh(
         )
 
 
-def _ready_capabilities() -> set[str]:
-    from llm_client import forced_provider, probe_candidate, provider_candidates
-
-    # The provider the calls will use, not any provider that happens to be installed.
-    if not any(probe_candidate(item) for item in provider_candidates(forced_provider())):
-        return set()
-    return {"llm.compile", "llm.flush", "llm.query"}
-
-
-def _unblock_capabilities(root: Path, state_root: Path, repaired: set[str]) -> int:
-    placeholders = ",".join("?" for _ in repaired)
-    from memory_queue import active_or_legacy_memory_queue
-
-    queue = active_or_legacy_memory_queue(root, state_root)
-    with queue.connection() as database:
-        changed = database.execute(
-            f"UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL "
-            f"WHERE state='blocked' AND blocked_capability IN ({placeholders})",
-            sorted(repaired),
-        ).rowcount
-        database.commit()
-    return changed
-
-
-def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
-    path = _operational_database_path(state_root, "queue")
-    if not path.is_file():
-        return 0
-    repaired = _ready_capabilities()
-    if not repaired:
-        return 0
-    return _unblock_capabilities(root, state_root, repaired)
-
-
 _DEFERRED_BY_ACTION = {
     "runtime": {"runtime"},
     "transactions": {"transactions"},
@@ -8539,8 +8415,8 @@ def _legacy_queue_migrated(
     return migration is not None or marker_valid
 
 
-def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
-    """Repair the legacy queue and report whether the v2 queue is usable."""
+def _repair_queue_action(guard: Any, context: _RepairContext) -> None:
+    """Repair the legacy queue, and stop when its migration could not finish."""
     from markdown_transaction import _reliability_v3_records_present
     from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
 
@@ -8554,7 +8430,7 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     # and no marker to wait for (`memory_queue` applies the same rule).
     if not _reliability_v3_records_present(context.state_path):
         if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
-            return False
+            return
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the
@@ -8563,7 +8439,6 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     # "Runtime repair failed" with nothing repaired, on a vault where adoption
     # is in force, and the message named the fix.
     guard.run(active_or_legacy_memory_queue, context.root_path, context.state_path)
-    return True
 
 
 def _index_repair_failure_message(index_after: dict) -> str:
@@ -8691,23 +8566,6 @@ def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
     context.repaired.append({"action": "rebuild_claim_index"})
 
 
-def _repair_queue_followups(
-    guard: Any, context: _RepairContext, queue_v2_ready: bool
-) -> None:
-    if not queue_v2_ready:
-        return
-    unblocked = guard.run(
-        _repair_queue_capabilities, context.root_path, context.state_path
-    )
-    if unblocked:
-        context.repaired.append(
-            {"action": "unblock_capabilities", "count": unblocked}
-        )
-    # No worker runs here: within a repair's budget it could only claim a task and
-    # kill it, costing an attempt. See
-    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
-
-
 def _run_selected_repairs(
     selected: set[str], ordered: tuple, context: _RepairContext
 ) -> None:
@@ -8740,7 +8598,7 @@ def _repair_or_record(name: str, action, context: _RepairContext) -> None:
 
 def _repair_state_actions(
     guard: Any, coordinator: Any, context: _RepairContext
-) -> bool:
+) -> None:
     ordered = (
         ("runtime", lambda: guard.run(
             _repair_runtime, context.state_path, context.repaired
@@ -8752,30 +8610,18 @@ def _repair_state_actions(
     )
     _run_selected_repairs(context.selected_repairs, ordered, context)
     if "queue" not in context.selected_repairs:
-        return False
-    return _queue_state_repair(guard, context)
+        return
+    _repair_or_record("queue", lambda: _repair_queue_action(guard, context), context)
 
 
-def _queue_state_repair(guard: Any, context: _RepairContext) -> bool:
-    """The queue's own repair, whose failure is the queue's and nobody else's."""
-    ready = False
-
-    def run_queue() -> None:
-        nonlocal ready
-        ready = _repair_queue_action(guard, context)
-
-    _repair_or_record("queue", run_queue, context)
-    return ready
-
-
-def _repair_derived_actions(
-    guard: Any, context: _RepairContext, queue_v2_ready: bool
-) -> None:
+def _repair_derived_actions(guard: Any, context: _RepairContext) -> None:
+    # No worker runs here: within a repair's budget it could only claim a task and
+    # kill it, costing an attempt. See
+    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
     ordered = (
         ("indexes", lambda: _repair_index_action(guard, context)),
         ("archives", lambda: _repair_archives_action(guard, context)),
         ("indexes", lambda: _repair_claims_action(guard, context)),
-        ("queue", lambda: _repair_queue_followups(guard, context, queue_v2_ready)),
     )
     _run_selected_repairs(context.selected_repairs, ordered, context)
 
@@ -8809,8 +8655,8 @@ def _run_repairs(context: _RepairContext) -> None:
                 coordinator, lease, deadline=context.deadline
             ) as guard:
                 guard_entered = True
-                queue_v2_ready = _repair_state_actions(guard, coordinator, context)
-                _repair_derived_actions(guard, context, queue_v2_ready)
+                _repair_state_actions(guard, coordinator, context)
+                _repair_derived_actions(guard, context)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
             f"Repair failed: {describe_error(exc)}"

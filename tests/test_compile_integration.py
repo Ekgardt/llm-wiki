@@ -109,15 +109,6 @@ class TestCompileWithFakeProvider:
         result = call_llm("test prompt", "system", 100)
         assert result == test_response
 
-    def test_call_llm_json_adds_constraint(self, monkeypatch):
-        """call_llm_json adds JSON constraint instruction to system prompt."""
-        monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-        monkeypatch.setenv("MEMORY_LLM_FAKE_RESPONSE", '{"ok": true}')
-
-        from llm_client import call_llm_json
-        result = call_llm_json("test", "my system", 100)
-        assert result == '{"ok": true}'
-
     def test_legacy_critique_entry_point_is_removed(self):
         import compile_memory
 

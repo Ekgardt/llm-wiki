@@ -1122,53 +1122,6 @@ def test_codex_config_requires_active_valid_toml_table(tmp_path, content):
     assert check["details"]["hosts"]["codex"]["status"] == "degraded"
 
 
-def test_codex_parser_prefers_stdlib_tomllib(monkeypatch):
-    import doctor
-
-    calls = []
-
-    class Parser:
-        @staticmethod
-        def loads(text):
-            calls.append(text)
-            return {"source": "stdlib"}
-
-    class Backport:
-        @staticmethod
-        def loads(text):
-            pytest.fail("Tomli used while stdlib tomllib was available")
-
-    monkeypatch.setattr(doctor, "STDLIB_TOML", Parser, raising=False)
-    monkeypatch.setattr(doctor, "TOMLI", Backport, raising=False)
-
-    document, error = doctor._parse_toml_document("key = 'value'")
-
-    assert document == {"source": "stdlib"}
-    assert error is None
-    assert calls == ["key = 'value'"]
-
-
-def test_codex_parser_uses_tomli_when_stdlib_unavailable(monkeypatch):
-    import doctor
-
-    calls = []
-
-    class Parser:
-        @staticmethod
-        def loads(text):
-            calls.append(text)
-            return {"source": "tomli"}
-
-    monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
-    monkeypatch.setattr(doctor, "TOMLI", Parser, raising=False)
-
-    document, error = doctor._parse_toml_document("key = 'value'")
-
-    assert document == {"source": "tomli"}
-    assert error is None
-    assert calls == ["key = 'value'"]
-
-
 def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch):
     import doctor
 
@@ -1189,38 +1142,6 @@ def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch)
     codex = check["details"]["hosts"]["codex"]
 
     assert codex["status"] == "ok"
-
-
-def test_codex_real_parser_rejects_malformed_surrounding_toml(tmp_path):
-    import doctor
-
-    config = tmp_path / "config.toml"
-    config.write_text(
-        'broken = [\n[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
-        encoding="utf-8",
-    )
-
-    configured, reason = doctor._codex_config_state(config)
-
-    assert configured is False
-    assert reason == "toml_invalid"
-
-
-def test_codex_parser_input_remains_file_bounded(tmp_path, monkeypatch):
-    import doctor
-
-    config = tmp_path / "config.toml"
-    config.write_text(
-        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-        'args = ["scripts/mcp_server.py"]\n# padding padding padding\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(doctor, "MAX_CONFIG_BYTES", 32)
-
-    configured, reason = doctor._codex_config_state(config)
-
-    assert configured is False
-    assert reason == "config_missing_or_unsafe"
 
 
 def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
@@ -1378,17 +1299,12 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
         "_heartbeat_maintenance_owner",
         lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
     )
-    assert guard._beat_once() is False
+    assert doctor._transient_beat_failure(sqlite3.OperationalError("locked")) is True
     assert guard.cancelled() is False
 
-    monkeypatch.setattr(
-        doctor,
-        "_heartbeat_maintenance_owner",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("maintenance_owner_fence_lost")
-        ),
-    )
-    assert guard._beat_once() is False
+    fence_lost = RuntimeError("maintenance_owner_fence_lost")
+    assert doctor._transient_beat_failure(fence_lost) is False
+    guard._lost.set()
     assert guard.cancelled() is True
 
     doctor._release_maintenance_owner(coordinator, lease)

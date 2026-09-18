@@ -156,7 +156,7 @@ valid and lint covers them equally.
 ## Unified evidence retrieval architecture
 
 Markdown, Git, and append-only project journals are authoritative. The generation
-catalog, Evidence Graph, FTS, vectors, L0/L1/L2 tiers, contextual artifacts,
+catalog, Evidence Graph, FTS, vectors, contextual artifacts, the L1 tier cache,
 telemetry, and model caches are derived runtime state. A derived record may guide
 retrieval, but it cannot override its captured source bytes.
 

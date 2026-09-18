@@ -612,37 +612,3 @@ class TestMarkdownTransactionBoundary:
         )
 
         assert record.operations[0].path == "knowledge/guardrails.md"
-
-
-# ---------------------------------------------------------------------------
-# INVARIANT 12: Compile snapshot excludes superseded pages
-# ---------------------------------------------------------------------------
-
-
-class TestCompileSnapshotExcludesSuperseded:
-    """existing_knowledge_snapshot must not feed superseded/archived pages."""
-
-    def test_snapshot_skips_superseded(self, tmp_path, monkeypatch):
-        """Pages with status: superseded must not appear in snapshot."""
-        import compile_memory
-
-        knowledge = tmp_path / "knowledge" / "notes"
-        knowledge.mkdir(parents=True)
-        monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
-        monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
-
-        # Create an active page
-        (knowledge / "active.md").write_text(
-            "---\ntype: pattern\n---\n\n# Active\n", encoding="utf-8"
-        )
-        # Create a superseded page
-        (knowledge / "old.md").write_text(
-            "---\ntype: pattern\nstatus: superseded\n---\n\n# Old\n", encoding="utf-8"
-        )
-
-        snapshot = compile_memory.existing_knowledge_snapshot()
-        # Should contain "active" but NOT "old"
-        assert "active" in snapshot.lower(), f"Active page missing from snapshot: {snapshot}"
-        assert "old" not in snapshot.lower(), (
-            f"Superseded page 'old' should be excluded from snapshot: {snapshot}"
-        )

@@ -35,7 +35,6 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import operational_ownership as _operational_ownership  # noqa: E402
 import process_liveness  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
@@ -47,12 +46,6 @@ from memory_state import (  # noqa: E402
     retire_stale_lock,
     spawn_detached,
 )
-
-acquire_compile_owner = _operational_ownership.acquire_compile_owner
-
-
-def release_marker_owner(lease, marker) -> None:
-    _operational_ownership.release_marker_owner(lease, marker)
 
 COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
 LOCK_FILE = STATE_ROOT / "run" / "compile.pid"

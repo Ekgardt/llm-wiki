@@ -584,7 +584,7 @@ def test_claim_index_failed_publication_rolls_back_previous_snapshot(
 
 
 def test_substantive_and_ledgerless_policy() -> None:
-    from claims import is_substantive, page_may_auto_supersede
+    from claims import is_substantive
 
     item = raw_claim()["claims"][0]
     assert is_substantive(item)
@@ -595,8 +595,6 @@ def test_substantive_and_ledgerless_policy() -> None:
     malformed_evidence = json.loads(json.dumps(item))
     malformed_evidence["evidence"]["sha256"] = "0" * 64
     assert not is_substantive(malformed_evidence)
-    assert not page_may_auto_supersede(None)
-    assert page_may_auto_supersede({"schema_version": "claim-ledger/v1", "claims": [item]})
 
 
 def test_lint_validates_claim_ledgers_and_candidates(tmp_path: Path, monkeypatch) -> None:
