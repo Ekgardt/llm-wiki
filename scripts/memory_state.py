@@ -430,6 +430,51 @@ def _acquire_state_lock(payload: bytes, deadline: float, poll: float) -> int:
         _await_lock_turn(deadline, poll)
 
 
+# Windows will not delete a file somebody else has open. Microsoft: "The
+# DeleteFile function fails if an application attempts to delete a file that has
+# other handles open for normal I/O ... (FILE_SHARE_DELETE must have been
+# specified when other handles were opened)", and Python's open() does not ask
+# for it. Every waiter polls this lock through `_lock_bytes`, so a holder's
+# unlink lands inside a reader's handle often enough to matter — and a release
+# that gives up leaves the lock naming an owner that is alive, which no
+# staleness rule ever retires. These are the three errors `lsp_process` already
+# retries for its lease. Research:
+# docs/research/2026-09-18-a-lock-is-released-even-while-somebody-is-reading-it.md
+_WINDOWS_SHARING_ERRORS = frozenset({5, 32, 33})
+
+# A reader holds the lock file for microseconds, so this is a margin of about a
+# million against the window it races, and still well inside the lock timeout.
+LOCK_RELEASE_SECONDS = 2.0
+
+
+def _reader_blocked_unlink(exc: OSError) -> bool:
+    """Whether a reader is merely holding the file open for an instant."""
+    return getattr(exc, "winerror", None) in _WINDOWS_SHARING_ERRORS
+
+
+def _try_unlink_lock_file() -> bool | None:
+    """True when the lock is gone, False on a real error, None to try again."""
+    try:
+        os.unlink(LOCK_FILE)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        return None if _reader_blocked_unlink(exc) else False
+    return True
+
+
+def _unlink_lock_file() -> bool:
+    """Remove our lock, waiting out the readers Windows lets block a delete."""
+    deadline = time.monotonic() + LOCK_RELEASE_SECONDS
+    while True:
+        outcome = _try_unlink_lock_file()
+        if outcome is not None:
+            return outcome
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.005)
+
+
 def _release_state_lock(fd: int, payload: bytes) -> None:
     """Close the descriptor and unlink only while the lock is still ours.
 
@@ -440,11 +485,8 @@ def _release_state_lock(fd: int, payload: bytes) -> None:
         os.close(fd)
     except OSError:
         pass
-    try:
-        if LOCK_FILE.read_bytes() == payload:
-            LOCK_FILE.unlink()
-    except OSError:
-        pass
+    if _lock_bytes() == payload:
+        _unlink_lock_file()
 
 
 @contextmanager
