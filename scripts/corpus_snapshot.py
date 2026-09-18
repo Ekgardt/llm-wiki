@@ -47,7 +47,6 @@ MAX_CORPUS_CHUNKS = 100_000
 DEFAULT_DEADLINE_SECONDS = 30.0
 
 PROJECT_FILES = frozenset({"state.md", "journal.md", "context.md"})
-SESSION_RECORD_ROOT = "knowledge/raw/sessions"
 # What counts as a code-shaped path (provenance, repository policies). Not
 # what the vault's own generation indexes: that is `VAULT_CODE_ROOTS`.
 APPROVED_CODE_ROOTS = frozenset(
