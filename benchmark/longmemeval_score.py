@@ -52,6 +52,28 @@ def gold_is_rubric(row: dict) -> bool:
     return str(row.get("category") or row.get("question_type")) in RUBRIC_CATEGORIES
 
 
+def _gold_is_an_explanation(row: dict) -> bool:
+    """An abstention's gold says why the question cannot be answered.
+
+    The authors' template hands the judge "an unanswerable question, an
+    explanation, and a response from a model"
+    (`longmemeval_official.ABSTENTION`). Nobody in the sessions said that
+    sentence either.
+    """
+    return bool(row.get("is_abstention")) or str(row.get("category")) == "abstention"
+
+
+def has_verbatim_gold(row: dict) -> bool:
+    """Whether this row's gold is text somebody actually said in a session.
+
+    Only then can "did the gold reach the prompt" be asked at all. Two shapes
+    fail it — a rubric and an abstention's explanation — and on the recorded run
+    of 2026-09-17 both read a flat 0 for that reason and no other: 0 of 30
+    preference rows and 0 of 30 abstention rows.
+    """
+    return not gold_is_rubric(row) and not _gold_is_an_explanation(row)
+
+
 def normalize(text: object) -> str:
     tokens = _NON_ALNUM.sub(" ", str(text).casefold()).split()
     return " ".join(token for token in tokens if token not in _ARTICLES)
@@ -364,10 +386,11 @@ def _prompt_evidence(rows: list[dict]) -> dict:
     `gold_text_in_prompt` is the row's `gold_in_prompt` under a name that says
     what it measures: the gold string appeared in the prompt word for word. It
     is reported only over the rows whose gold is a span somebody said. A rubric
-    gold is held out — the dataset's authors wrote it, so no prompt can contain
-    it — and even among the rest it is a floor: on the recorded run of
-    2026-09-17, 101 answers the judge called right had no gold text in the
-    prompt, because their golds are computed ("6 days.") or restated.
+    gold and an abstention's explanation are held out — the dataset's authors
+    wrote both, so no prompt can contain them — and even among the rest it is a
+    floor: on the recorded run of 2026-09-17, 101 answers the judge called right
+    had no gold text in the prompt, because their golds are computed ("6 days.")
+    or restated.
 
     `evidence_in_prompt` is the dataset's own `has_answer` turns reaching the
     prompt, which is defined for every type. It is reported over the rows that
@@ -375,7 +398,7 @@ def _prompt_evidence(rows: list[dict]) -> dict:
     rather than zero. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
     """
     prompted = _prompted(rows)
-    verbatim = [row for row in prompted if not gold_is_rubric(row)]
+    verbatim = [row for row in prompted if has_verbatim_gold(row)]
     measured = [row for row in prompted if row.get("evidence_turns_labelled")]
     gold_seen = _count(verbatim, _gold_text_seen)
     evidence_seen = _count(measured, _evidence_seen)

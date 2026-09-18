@@ -124,6 +124,15 @@ def test_a_question_that_never_reached_a_prompt_is_in_no_denominator() -> None:
     assert report["gold_text_in_prompt_share"] == 1.0
 
 
+def test_an_abstentions_explanation_is_no_more_a_span_than_a_rubric_is() -> None:
+    """Its gold says why nothing can be answered; the run read 0 of 30 for that."""
+    row = _row("abstention", is_abstention=True, gold_in_prompt=False)
+    report = longmemeval_score.aggregate([row])["abstention"]
+
+    assert (report["gold_text_applicable"], report["gold_text_not_applicable"]) == (0, 1)
+    assert report["gold_text_in_prompt_share"] is None
+
+
 def test_the_evidence_turns_of_a_prompt_are_read_from_the_dataset_labels() -> None:
     """The flagged turn is found in the prompt; the unflagged one is not asked about."""
     seen = longmemeval_coverage.evidence_in_text(_QUESTION, f"context: {_EVIDENCE.upper()}")
