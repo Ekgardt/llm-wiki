@@ -31,7 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -528,18 +528,48 @@ def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int
     return 0
 
 
-def _instrumented_generator(metrics: dict, gold: str = ""):
+def _needle_seen(needle: str, prompt: str) -> bool:
+    return bool(needle) and needle in prompt.casefold()
+
+
+def _turns_seen(windows: Sequence[tuple[str, ...]], folded: str) -> int:
+    return sum(1 for turn in windows if any(window in folded for window in turn))
+
+
+def _record_prompt_evidence(metrics: dict, prompt: str, needle: str, windows: list) -> None:
+    """What of this question's evidence the model actually received.
+
+    Two different questions, kept apart because one of them has no answer for a
+    sixth of the set. `gold_in_prompt` asks whether the gold string is in the
+    prompt: real evidence where the gold is a span somebody said, and
+    unanswerable where it was computed ("6 days.") or written by the dataset's
+    authors as a rubric. `evidence_in_prompt` asks whether the turns the dataset
+    itself flags as carrying the answer reached the prompt, which is defined for
+    every question type. Both are kept, and the report names each for what it is.
+    See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    from longmemeval_coverage import normalized
+
+    seen = _turns_seen(windows, normalized(prompt))
+    metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or _needle_seen(needle, prompt)
+    metrics["evidence_turns_labelled"] = len(windows)
+    metrics["evidence_turns_in_prompt"] = max(metrics.get("evidence_turns_in_prompt", 0), seen)
+    metrics["evidence_in_prompt"] = bool(windows) and metrics["evidence_turns_in_prompt"] == len(windows)
+
+
+def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = ()):
     """The shared provider client, measuring what one retrieval hands it.
 
-    `gold_in_prompt` is the measurement the earlier signals could not make.
-    `gold_in_candidates` read a candidate's summary and heading, which almost
-    never carry the answering sentence: measured 2026-08-30 it was true for 2
-    of 50 questions, including 0 of the 17 the system answered, so it measured
-    nothing. This reads the prompt the model actually received.
+    The prompt-evidence signals are the measurement the earlier ones could not
+    make. `gold_in_candidates` read a candidate's summary and heading, which
+    almost never carry the answering sentence: measured 2026-08-30 it was true
+    for 2 of 50 questions, including 0 of the 17 the system answered, so it
+    measured nothing. These read the prompt the model actually received.
     """
     from llm_client import call_llm
 
     needle = " ".join(str(gold).split()).casefold()
+    windows = list(evidence)
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
         _count_call(metrics, system_prompt)
@@ -560,9 +590,7 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
             (len(prompt) + len(system_prompt)) / 4
         )
-        metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or (
-            bool(needle) and needle in prompt.casefold()
-        )
+        _record_prompt_evidence(metrics, prompt, needle, windows)
         started = time.monotonic()
         try:
             reply = call_llm(prompt, system_prompt, max_tokens)
@@ -708,6 +736,7 @@ def _answer_outcome(
     metrics: dict,
     profile: str,
     gold: str = "",
+    evidence: Sequence = (),
     retrieve=None,
     search=None,
     chosen: str = "refuse",
@@ -724,7 +753,7 @@ def _answer_outcome(
             retrieve=retrieve,
             search=search,
             keep_unverified=chosen == "answer",
-            generator=_instrumented_generator(metrics, gold),
+            generator=_instrumented_generator(metrics, gold, evidence),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
@@ -775,6 +804,12 @@ def _retrieval_only_outcome(question: dict, searchable: str, profile: str) -> di
     }
 
 
+def _evidence_windows(question: Mapping[str, object]) -> list[tuple[str, ...]]:
+    from longmemeval_coverage import evidence_turns
+
+    return evidence_turns(question)
+
+
 def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
     """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
     if retrieval_only():
@@ -782,6 +817,10 @@ def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, search
     return _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
+        # The turns the dataset itself flags as carrying the answer, so the row
+        # can say whether the evidence reached the prompt on a question whose
+        # gold is a rubric or a computed value.
+        evidence=_evidence_windows(question),
         # The second look's way of asking for more than the first twelve, and
         # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),

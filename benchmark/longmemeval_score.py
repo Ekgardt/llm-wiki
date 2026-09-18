@@ -193,6 +193,12 @@ def _mean(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 4)
 
 
+def _share(part: int, whole: int) -> float | None:
+    if not whole:
+        return None
+    return round(part / whole, 4)
+
+
 def _metric_values(rows: list[dict], key: str) -> list[float]:
     return [float(row[key]) for row in rows if row.get(key) is not None]
 
@@ -336,6 +342,54 @@ def _abstention_split(rows: list[dict]) -> dict:
     }
 
 
+def _prompted(rows: list[dict]) -> list[dict]:
+    """Rows where a prompt was actually built, so a prompt signal means something."""
+    return [row for row in rows if "gold_in_prompt" in row]
+
+
+def _gold_text_seen(row: dict) -> bool:
+    return row.get("gold_in_prompt") is True
+
+
+def _evidence_seen(row: dict) -> bool:
+    return row.get("evidence_in_prompt") is True
+
+
+def _prompt_evidence(rows: list[dict]) -> dict:
+    """What of the question's evidence reached the prompt the reader saw.
+
+    Two figures, each with the denominator it was taken over, because they
+    answer different questions and one of them is unanswerable for some types.
+
+    `gold_text_in_prompt` is the row's `gold_in_prompt` under a name that says
+    what it measures: the gold string appeared in the prompt word for word. It
+    is reported only over the rows whose gold is a span somebody said. A rubric
+    gold is held out — the dataset's authors wrote it, so no prompt can contain
+    it — and even among the rest it is a floor: on the recorded run of
+    2026-09-17, 101 answers the judge called right had no gold text in the
+    prompt, because their golds are computed ("6 days.") or restated.
+
+    `evidence_in_prompt` is the dataset's own `has_answer` turns reaching the
+    prompt, which is defined for every type. It is reported over the rows that
+    recorded it; runs from before 2026-09-18 did not, and their figure is None
+    rather than zero. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    prompted = _prompted(rows)
+    verbatim = [row for row in prompted if not gold_is_rubric(row)]
+    measured = [row for row in prompted if row.get("evidence_turns_labelled")]
+    gold_seen = _count(verbatim, _gold_text_seen)
+    evidence_seen = _count(measured, _evidence_seen)
+    return {
+        "gold_text_in_prompt": gold_seen,
+        "gold_text_applicable": len(verbatim),
+        "gold_text_not_applicable": len(prompted) - len(verbatim),
+        "gold_text_in_prompt_share": _share(gold_seen, len(verbatim)),
+        "evidence_in_prompt": evidence_seen,
+        "evidence_measured": len(measured),
+        "evidence_in_prompt_share": _share(evidence_seen, len(measured)),
+    }
+
+
 def _category_report(rows: list[dict]) -> dict:
     """One category's numbers, with provider failures held out of accuracy.
 
@@ -351,6 +405,7 @@ def _category_report(rows: list[dict]) -> dict:
         "n": len(rows),
         "scored": len(scored),
         **_quality_metrics(scored),
+        **_prompt_evidence(scored),
         **_abstention_split(scored),
         "provider_failures": _count(rows, is_provider_failure),
         "harness_failures": _count(rows, is_harness_failure),
