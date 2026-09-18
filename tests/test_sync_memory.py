@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -1296,6 +1297,29 @@ def test_generation_timeout_does_not_claim_nonexistent_continuation(tmp_path, mo
     assert "retry" in result["message"].casefold()
 
 
+def _installer_section(source: str, title: str) -> str:
+    """The body of the installer step called `title`, up to the next step.
+
+    Cut by the step's name rather than by its number and its row of dashes: the
+    steps have been renumbered twice — `8.` became `8a.` when a Reliability v3
+    adoption step was inserted above it — and a cut that missed used to raise
+    `IndexError` instead of saying what it could not find. The step ends where
+    the next one starts: the steps after it have outcomes of their own, which
+    the stand-in `uv` cannot answer for.
+    """
+    header = re.search(rf"^# --- \w+\. {re.escape(title)}[ -]*$", source, re.MULTILINE)
+    assert header, f"install.ps1 has no step named {title!r}"
+    return re.split(r"^# --- ", source[header.end() :], maxsplit=1, flags=re.MULTILINE)[0]
+
+
+def test_the_installer_still_carries_a_bounded_runtime_sync_step() -> None:
+    """Checked without pwsh too, so a renumbering is caught wherever it lands."""
+    block = _installer_section((ROOT / "install.ps1").read_text(encoding="utf-8"), "Bounded runtime sync")
+
+    assert "sync_memory.py" in block
+    assert "# --- " not in block
+
+
 @pytest.mark.parametrize(
     ("sync_exit", "expected_exit", "expected_text", "forbidden_text"),
     [
@@ -1311,12 +1335,7 @@ def test_powershell_installer_sync_block_behaves_by_exit_code(
     if pwsh is None:
         pytest.skip("PowerShell 7 is unavailable")
     source = (ROOT / "install.ps1").read_text(encoding="utf-8")
-    block = source.split(
-        "# --- 8. Bounded runtime sync --------------------------------------", 1
-    )[1]
-    # The sync block ends where the next step begins. Steps after it (weights, queue
-    # adoption) have outcomes of their own, which the stand-in `uv` cannot answer for.
-    block = block.split("# --- 8a.", 1)[0]
+    block = _installer_section(source, "Bounded runtime sync")
     harness = f"""
 function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
 function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}

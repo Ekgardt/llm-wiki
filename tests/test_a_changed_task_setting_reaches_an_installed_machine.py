@@ -199,14 +199,15 @@ function Register-ScheduledTask {
 
 
 def _specified_limit_hours() -> list[float]:
-    """The hour limits the script's own task table names, nightly then weekly.
+    """The hour limits the product promises, nightly then weekly.
 
-    Read from the product rather than repeated here. A pass whose bound moves
-    has to move both the table and the `New-TimeSpan` that registers it, and
-    this test is what proves those two still agree.
+    Read from `install_control.WINDOWS_TASK_LIMIT_HOURS` rather than repeated
+    here. The pair moved from 3/5 to 4/6 when the passes gained their bounds,
+    and a test that spells the numbers out again only records the day it was
+    written. `test_the_specification_names_the_limits_the_script_registers`
+    holds the script to the same constant.
     """
-    text = SCRIPT.read_text(encoding="utf-8")
-    return [float(hours) for hours in re.findall(r"LimitHours\s*=\s*(\d+)", text)]
+    return [float(hours) for hours in install_control.WINDOWS_TASK_LIMIT_HOURS.values()]
 
 
 def test_a_registration_carries_the_marker_and_the_limits(tmp_path) -> None:

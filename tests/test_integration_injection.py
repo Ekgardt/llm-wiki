@@ -72,6 +72,19 @@ def _ensure_scripts_on_path() -> None:
         sys.path.insert(0, scripts)
 
 
+def _task_limit(kind: str) -> str:
+    """The execution-time limit the product registers for a task of `kind`.
+
+    Read from the contract rather than written out again: the stub below spelled
+    `PT3H`/`PT5H` and went on saying so after the passes' bounds moved to 4 h and
+    6 h, so it offered the script a task the script rightly called stale.
+    """
+    _ensure_scripts_on_path()
+    import install_control
+
+    return f"PT{install_control.WINDOWS_TASK_LIMIT_HOURS[kind]}H"
+
+
 def _unmet_substrings(checks) -> list[tuple[int, str, bool]]:
     """(index, needle, should_be_present) for every check the text does not meet."""
     return [
@@ -4570,7 +4583,7 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
                 -UvPath {ps_literal(uv_path)} `
                 -RunnerPath {ps_literal(runner)} `
                 -PowerShellPath 'pwsh.exe'
-            $limit = if ($kind -eq 'nightly') {{ 'PT3H' }} else {{ 'PT5H' }}
+            $limit = if ($kind -eq 'nightly') {{ {ps_literal(_task_limit("nightly"))} }} else {{ {ps_literal(_task_limit("weekly"))} }}
             [pscustomobject]@{{
                 State = 'Ready'
                 Description = 'LLM-wiki task [llm-wiki-task-spec:2]'
