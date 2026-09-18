@@ -14568,12 +14568,24 @@ def _await_child_message(run: _ChildRun) -> None:
 
 
 def _stop_child_if_done_waiting(run: _ChildRun) -> None:
+    """A deadline decides whether to keep waiting, not whether to drop an answer.
+
+    Without the second look, a frame written between the poll's expiry and this
+    check became `worker_timeout` and the finished work was thrown away. See
+    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
+    """
     if run.lost():
         run.stop()
         raise QueueOperationError("lease_lost")
-    if run.remaining() <= 0:
-        run.stop()
-        raise TimeoutError
+    if _may_keep_waiting(run):
+        return
+    run.stop()
+    raise TimeoutError
+
+
+def _may_keep_waiting(run: _ChildRun) -> bool:
+    """Time left, or an answer already in the pipe; either ends this check."""
+    return run.remaining() > 0 or bool(run.receiver.poll(0))
 
 
 def _child_ready_handshake(run: _ChildRun) -> None:
@@ -14609,21 +14621,27 @@ def _child_result_frame(run: _ChildRun) -> bytes:
         raise QueueOperationError("processor_result_malformed") from None
 
 
-def _require_child_exit(run: _ChildRun) -> None:
-    """Stop the child and give up when it outlives its deadline."""
+def _child_left_in_time(run: _ChildRun) -> bool:
+    """Whether the child exited within its deadline; a lingering one is stopped."""
     remaining = run.remaining()
-    if remaining <= 0:
-        run.stop()
-        raise TimeoutError
-    run.process.join(remaining)
-    if run.process.is_alive():
-        run.stop()
-        raise TimeoutError
+    if remaining > 0:
+        run.process.join(remaining)
+    if not run.process.is_alive():
+        return True
+    run.stop()
+    return False
 
 
-def _join_child(run: _ChildRun) -> None:
-    """Wait out the child's exit within the deadline, and check how it left."""
-    _require_child_exit(run)
+def _settle_child_exit(run: _ChildRun) -> None:
+    """Check how the child left, once its answer is already in hand.
+
+    A child that will not leave is a cleanup problem — `stop` kills its tree —
+    and no longer a reason to discard the frame it already sent. One that does
+    leave is still judged by its exit code. See
+    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
+    """
+    if not _child_left_in_time(run):
+        return
     if run.process.exitcode != 0:
         raise QueueOperationError("processor_child_failed")
 
@@ -14651,7 +14669,7 @@ def _run_processor_child(
         sender.close()
         _child_ready_handshake(run)
         frame = _child_result_frame(run)
-        _join_child(run)
+        _settle_child_exit(run)
         return _decode_processor_frame(frame)
     finally:
         receiver.close()
