@@ -28,16 +28,6 @@ def _readmes() -> list[tuple[Path, str]]:
     return [(path, path.read_text(encoding="utf-8")) for path in README_FILES]
 
 
-def _missing(needles: tuple[str, ...], haystack: str) -> list[str]:
-    """What a document should say and does not — named, so one assertion carries them all."""
-    return [needle for needle in needles if needle not in haystack]
-
-
-def _present(needles: tuple[str, ...], haystack: str) -> list[str]:
-    """What a document must not say and does."""
-    return [needle for needle in needles if needle in haystack]
-
-
 def _workflow() -> dict:
     import yaml
 

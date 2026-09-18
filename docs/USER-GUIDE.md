@@ -69,8 +69,10 @@ verified network isolation.
 
 ### Option A: Local installer from an inspected checkout (recommended)
 
-Install `uv` from https://docs.astral.sh/uv/ first. The installer does not execute a
-mutable remote dependency bootstrap.
+Install `uv` from https://docs.astral.sh/uv/ first — version **0.12.3 exactly**, which is
+what `pyproject.toml` requires and what both installers and every CI job pin; any other
+version is refused with the upgrade command. The installer does not execute a mutable remote
+dependency bootstrap.
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git

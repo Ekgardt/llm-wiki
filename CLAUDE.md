@@ -472,9 +472,9 @@ uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
 uv run python scripts/compile_memory.py            # compile daily logs → notes
 uv run python scripts/lookup_mode.py               # show retrieval tier
-# v4.0 optional features (require --extra flags):
-uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio)
+uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
+# v4.0 optional features (require --extra flags):
 uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation

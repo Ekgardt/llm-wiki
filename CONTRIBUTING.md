@@ -20,6 +20,9 @@ This is a personal memory system that grew into something others might find usef
 
 ## How to develop
 
+Development needs `uv` **0.12.3 exactly** (`[tool.uv] required-version`), the version both
+installers and every CI job pin.
+
 ```bash
 git clone git@github.com:Ekgardt/llm-wiki.git
 cd llm-wiki
