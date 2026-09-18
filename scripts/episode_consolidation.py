@@ -31,9 +31,11 @@ from memory_state import ROOT, update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 
 MAX_RECORDS = 12
-# Twenty calls is a very busy day and still a bounded one.
-MAX_BATCHES_PER_DAY = 20
-MAX_RECORDS_PER_DAY = MAX_RECORDS * MAX_BATCHES_PER_DAY
+# Twenty calls is a very busy night and still a bounded one. The bound belongs to
+# the run, not to the day: a day with more batches than this stays pending and the
+# next run continues it, skipping the batches its daily log already names. See
+# `docs/research/2026-09-17-a-day-is-consolidated-whole-and-reopened-when-it-grows.md`.
+MAX_BATCHES_PER_RUN = 20
 # One budget for the day, shared between its records, instead of a fixed slice
 # per record: a real session record runs to hundreds of kilobytes, and a 12 000
 # character head showed the model the setup and none of the work — it answered
@@ -99,11 +101,24 @@ def session_day_directory(vault: Path, day: str) -> Path:
 
 
 def session_records(vault: Path, day: str) -> list[Path]:
+    """Every record of the day. What is bounded is one run, not the day."""
     directory = session_day_directory(vault, day)
     if not directory.is_dir():
         return []
-    found = sorted(path for path in directory.glob("*.md") if path.is_file())
-    return found[:MAX_RECORDS_PER_DAY]
+    return sorted(path for path in directory.glob("*.md") if path.is_file())
+
+
+def record_set_digest(vault: Path, day: str) -> str:
+    """The identity of a day's record set: the names it holds, in order.
+
+    A day is recorded as consolidated together with this digest, so a record that
+    arrives after the day was closed — a session that ended after midnight, an
+    imported history — makes the day pending again instead of being never read.
+    """
+    from reliable_memory import sha256_bytes
+
+    names = "\n".join(path.name for path in session_records(vault, day))
+    return sha256_bytes(names.encode("utf-8"))
 
 
 def record_batches(paths: list[Path]) -> list[list[Path]]:
@@ -304,13 +319,14 @@ def _operation_id(day: str, lessons: list[Lesson]) -> str:
     return f"episodes:{day}:{sha256_bytes(payload)[:16]}"
 
 
-def _record_consolidation(day: str, count: int, records: int) -> None:
+def _record_consolidation(day: str, count: int, records: int, digest: str) -> None:
     def mutate(state: dict) -> None:
         days = state.setdefault("consolidated_session_days", {})
         days[day] = {
             "at": datetime.now().isoformat(timespec="seconds"),
             "records": records,
             "items": count,
+            "record_set": digest,
         }
         progress = state.get(PROGRESS_KEY)
         if isinstance(progress, dict):
@@ -404,9 +420,28 @@ def _batch_key(vault: Path, day: str, batch: list[Path]) -> str:
     return sha256_bytes("\n".join(parts).encode("utf-8"))
 
 
-def _already_consolidated(state: dict, day: str) -> bool:
+def _consolidation_record(state: dict, day: str) -> dict | None:
     days = state.get("consolidated_session_days", {})
-    return isinstance(days, dict) and day in days
+    if not isinstance(days, dict):
+        return None
+    stored = days.get(day)
+    return stored if isinstance(stored, dict) else None
+
+
+def _already_consolidated(vault: Path, state: dict, day: str) -> bool:
+    """Closed, unless the day's records have changed since it was closed.
+
+    A day consolidated before this digest existed carries none, and stays closed:
+    re-reading the whole imported history would cost a provider call per batch of
+    it and could not find anything new.
+    """
+    stored = _consolidation_record(state, day)
+    if stored is None:
+        return False
+    recorded = stored.get("record_set")
+    if not isinstance(recorded, str) or not recorded:
+        return True
+    return recorded == record_set_digest(vault, day)
 
 
 def _call_provider(prompt: str) -> str | None:
@@ -478,7 +513,7 @@ def consolidate_day(
     if skipped is not None:
         return {"status": "skipped", "reason": skipped, "items": 0}
     paths = session_records(vault, day)
-    batches = record_batches(paths)[:MAX_BATCHES_PER_DAY]
+    batches = record_batches(paths)
     keys = [_batch_key(vault, day, batch) for batch in batches]
     progress = _day_progress(state, day)
     logged = _batches_to_find(vault, day, keys, progress)
@@ -486,7 +521,9 @@ def consolidate_day(
     run.all(batches, keys)
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
-    _record_consolidation(day, progress.items, len(paths))
+    _record_consolidation(
+        day, progress.items, len(paths), record_set_digest(vault, day)
+    )
     return _day_outcome(_finished_status(progress), progress, len(batches))
 
 
@@ -512,16 +549,25 @@ class _BatchRun:
     progress: _Progress
     deadline: float | None
     logged: frozenset[str] = frozenset()
+    attempted: int = 0
+
+    def spent(self) -> bool:
+        """This run is over: its time is up, or it has attempted its share."""
+        if _out_of_time(self.deadline):
+            return True
+        return self.attempted >= MAX_BATCHES_PER_RUN
 
     def all(self, batches: list[list[Path]], keys: list[str]) -> None:
+        """At most one run's worth of batches; the rest wait for the next run."""
         for index, (batch, key) in enumerate(zip(batches, keys)):
-            if _out_of_time(self.deadline):
+            if self.spent():
                 return
             self.one(index, batch, key)
 
     def one(self, index: int, batch: list[Path], key: str) -> None:
         if key in self.progress.done:
             return
+        self.attempted += 1
         if key in self.logged:
             self.progress.finished(key, 0, None)
             _save_progress(self.day, self.progress)
@@ -567,10 +613,11 @@ def pending_days(vault: Path, state: dict, today: str | None = None) -> list[str
     """Days before today that have records and were never consolidated, oldest first.
 
     Today is never pending: its sessions are still being written, and closing it
-    at noon would leave its evening unread.
+    at noon would leave its evening unread. A day whose records changed since it
+    was consolidated is pending again.
     """
     before = _today_or(today)
-    return [day for day in _record_days(vault) if _pending(day, before, state)]
+    return [day for day in _record_days(vault) if _pending(vault, day, before, state)]
 
 
 def _today_or(today: str | None) -> str:
@@ -579,13 +626,13 @@ def _today_or(today: str | None) -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _pending(day: str, before: str, state: dict) -> bool:
-    return day < before and not _already_consolidated(state, day)
+def _pending(vault: Path, day: str, before: str, state: dict) -> bool:
+    return day < before and not _already_consolidated(vault, state, day)
 
 
 def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
     """Why this day needs no work, or None to consolidate it."""
-    if state is not None and _already_consolidated(state, day):
+    if state is not None and _already_consolidated(vault, state, day):
         return "already_consolidated"
     if not session_records(vault, day):
         return "no_records"
