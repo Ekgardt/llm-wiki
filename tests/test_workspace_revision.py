@@ -82,6 +82,22 @@ def _linux_memfd_available() -> bool:
     return workspace_revision._private_index_platform_supported()
 
 
+def _seal_number(name: str, number: int) -> int:
+    """This seal's number, from `fcntl` where it publishes one, else the Linux ABI.
+
+    The CPython builds `uv` installs are compiled against headers that declare none
+    of the seal constants, so a test that reads them off the module dies on the
+    interpreter this project's own command selects. The numbers are a Linux ABI;
+    preferring `fcntl`'s value where there is one keeps this an independent check of
+    the numbers the product uses rather than a copy of them.
+    """
+    import fcntl
+
+    value = getattr(fcntl, name, number)
+    assert value == number
+    return value
+
+
 def _run_git(root: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
     return subprocess.run(
         ["git", *arguments],
@@ -165,46 +181,59 @@ def _verification_git_call_counts(
 
 
 def test_public_contract_has_exact_constants_dataclass_fields_and_signatures() -> None:
-    assert PYTHON_CONFIG_NAMES == frozenset(
-        {
-            ".python-version",
-            "Pipfile",
-            "Pipfile.lock",
-            "poetry.lock",
-            "pyproject.toml",
-            "pyrightconfig.json",
-            "setup.cfg",
-            "tox.ini",
-            "uv.lock",
-        }
+    # One comparison per group of facts: the complexity gate counts every `assert`
+    # as a branch, and a tuple compare of N facts costs what one assert costs.
+    assert (PYTHON_CONFIG_NAMES, MAX_REVISION_FILES, MAX_REVISION_BYTES) == (
+        frozenset(
+            {
+                ".python-version",
+                "Pipfile",
+                "Pipfile.lock",
+                "poetry.lock",
+                "pyproject.toml",
+                "pyrightconfig.json",
+                "setup.cfg",
+                "tox.ini",
+                "uv.lock",
+            }
+        ),
+        100_000,
+        2 * 1024 * 1024 * 1024,
     )
-    assert MAX_REVISION_FILES == 100_000
-    assert MAX_REVISION_BYTES == 2 * 1024 * 1024 * 1024
-    assert [field.name for field in fields(RevisionEntry)] == ["path", "kind", "sha256", "size"]
-    assert [field.name for field in fields(WorkspaceRevision)] == [
-        "repository_id",
-        "checkout_id",
-        "git_head",
-        "entries",
-        "revision_sha256",
-    ]
-    assert [field.name for field in fields(WorkspaceDelta)] == [
-        "created",
-        "changed",
-        "renamed",
-        "deleted",
-        "configuration_changed",
-    ]
-    assert RevisionEntry.__dataclass_params__.frozen
-    assert WorkspaceRevision.__dataclass_params__.frozen
-    assert WorkspaceDelta.__dataclass_params__.frozen
-    assert RevisionEntry.__slots__ == ("path", "kind", "sha256", "size")
-    assert str(inspect.signature(compute_workspace_revision)) == (
+    assert (
+        [field.name for field in fields(RevisionEntry)],
+        [field.name for field in fields(WorkspaceRevision)],
+        [field.name for field in fields(WorkspaceDelta)],
+    ) == (
+        ["path", "kind", "sha256", "size"],
+        [
+            "repository_id",
+            "checkout_id",
+            "git_head",
+            "entries",
+            "revision_sha256",
+        ],
+        [
+            "created",
+            "changed",
+            "renamed",
+            "deleted",
+            "configuration_changed",
+        ],
+    )
+    assert (
+        RevisionEntry.__dataclass_params__.frozen,
+        WorkspaceRevision.__dataclass_params__.frozen,
+        WorkspaceDelta.__dataclass_params__.frozen,
+        RevisionEntry.__slots__,
+    ) == (True, True, True, ("path", "kind", "sha256", "size"))
+    assert (
+        str(inspect.signature(compute_workspace_revision)),
+        str(inspect.signature(diff_workspace_revisions)),
+    ) == (
         "(repository: 'RepositoryScope', *, deadline: 'float | None' = None, "
-        "cancelled: 'Callable[[], bool] | None' = None) -> 'WorkspaceRevision'"
-    )
-    assert str(inspect.signature(diff_workspace_revisions)) == (
-        "(before: 'WorkspaceRevision', after: 'WorkspaceRevision') -> 'WorkspaceDelta'"
+        "cancelled: 'Callable[[], bool] | None' = None) -> 'WorkspaceRevision'",
+        "(before: 'WorkspaceRevision', after: 'WorkspaceRevision') -> 'WorkspaceDelta'",
     )
 
 
@@ -220,19 +249,19 @@ def test_revision_changes_for_dirty_untracked_deleted_and_config(repository: Pat
 
     after = compute_workspace_revision(scope)
 
-    assert after.revision_sha256 != before.revision_sha256
-    assert {item.kind for item in after.entries} >= {
-        "modified",
-        "untracked",
-        "deleted",
-        "configuration",
-    }
-    assert _entries(after)["pkg/base.py"] == RevisionEntry("pkg/base.py", "deleted", None, 0)
+    assert (
+        after.revision_sha256 != before.revision_sha256,
+        {item.kind for item in after.entries}
+        >= {"modified", "untracked", "deleted", "configuration"},
+        _entries(after)["pkg/base.py"],
+    ) == (True, True, RevisionEntry("pkg/base.py", "deleted", None, 0))
     delta = diff_workspace_revisions(before, after)
-    assert delta.created == ("pkg/new.py",)
-    assert delta.changed == ("pkg/api.py", "pyrightconfig.json")
-    assert delta.deleted == ("pkg/base.py",)
-    assert delta.configuration_changed is True
+    assert (delta.created, delta.changed, delta.deleted, delta.configuration_changed) == (
+        ("pkg/new.py",),
+        ("pkg/api.py", "pyrightconfig.json"),
+        ("pkg/base.py",),
+        True,
+    )
 
 
 def test_revision_bounds_containment_resolution_to_unique_paths(
@@ -308,6 +337,24 @@ def test_unchanged_verifier_detects_new_relevant_inventory(repository: Path) -> 
 
 def _commands_containing(calls, fragment: str) -> list:
     return [command for command, _options in calls if fragment in command]
+
+
+def _status_calls(calls) -> list:
+    """Every recorded Popen call whose command ran `git status`.
+
+    Kept out of the test body because a comprehension with a filter is two
+    branches to the complexity gate, and the test has no room for them.
+    """
+    return [call for call in calls if "status" in call[0]]
+
+
+def _status_header_records_only(status: bytes) -> bytes:
+    """`status` with every path record dropped and only its headers kept.
+
+    Used to forge a private status that reports no path at all, which must not be
+    read as agreement with an exact status that reports a deletion.
+    """
+    return b"\0".join(record for record in status.split(b"\0") if record.startswith(b"#"))
 
 
 def _assert_status_call(command, options, scope) -> None:
@@ -877,30 +924,67 @@ def test_private_index_declines_conversion_or_include_config(
     assert private_calls == 0
 
 
+def _private_xdg_git_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Path:
+    """The path of `git/<name>` under a private `XDG_CONFIG_HOME`, parents created.
+
+    The file itself is not written, so a caller can also exercise the case where
+    Git's global file does not exist.
+    """
+    config_home = tmp_path / "xdg"
+    target = config_home / "git" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    return target
+
+
+def _repository_info_attributes_path(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The repository's own `.git/info/attributes`, with its parent created."""
+    attributes = repository / ".git/info/attributes"
+    attributes.parent.mkdir(parents=True, exist_ok=True)
+    return attributes
+
+
+def _global_attributes_path(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A global attributes file Git will read through `XDG_CONFIG_HOME`."""
+    return _private_xdg_git_path(tmp_path, monkeypatch, "attributes")
+
+
+def _system_attributes_path(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A system attributes file, installed by pointing the product's list at it."""
+    attributes = tmp_path / "system-gitattributes"
+    monkeypatch.setattr(
+        workspace_revision,
+        "_SYSTEM_GIT_ATTRIBUTE_PATHS",
+        (attributes,),
+        raising=False,
+    )
+    return attributes
+
+
+# One setup per parametrize id, so the test itself needs no branching. Each returns
+# the attributes file to write an active rule into.
+_ACTIVE_ATTRIBUTE_SOURCES = {
+    "global": _global_attributes_path,
+    "info": _repository_info_attributes_path,
+    "system": _system_attributes_path,
+}
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
-@pytest.mark.parametrize("source", ["info", "global", "system"])
+@pytest.mark.parametrize("source", sorted(_ACTIVE_ATTRIBUTE_SOURCES))
 def test_private_index_declines_repository_global_and_system_attributes(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
 ) -> None:
-    if source == "info":
-        attributes = repository / ".git/info/attributes"
-        attributes.parent.mkdir(parents=True, exist_ok=True)
-    elif source == "global":
-        config_home = tmp_path / "xdg"
-        attributes = config_home / "git/attributes"
-        attributes.parent.mkdir(parents=True)
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    else:
-        attributes = tmp_path / "system-gitattributes"
-        monkeypatch.setattr(
-            workspace_revision,
-            "_SYSTEM_GIT_ATTRIBUTE_PATHS",
-            (attributes,),
-            raising=False,
-        )
+    attributes = _ACTIVE_ATTRIBUTE_SOURCES[source](repository, tmp_path, monkeypatch)
     attributes.write_text("*.py text\n", encoding="ascii")
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
@@ -909,9 +993,7 @@ def test_private_index_declines_repository_global_and_system_attributes(
         scope, expected, monkeypatch
     )
 
-    assert result is True
-    assert exact_calls == 1
-    assert private_calls == 0
+    assert (result, exact_calls, private_calls) == (True, 1, 0)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -948,51 +1030,80 @@ def test_private_index_declines_global_and_system_config_files(
     assert private_calls == 0
 
 
+def _commit_inert_attribute_file(repository: Path, name: str) -> None:
+    """Commit a nested attributes-shaped file under `docs/` that declares no rule."""
+    nested = repository / "docs"
+    nested.mkdir()
+    (nested / name).write_text("# no active rules\n", encoding="ascii")
+    _run_git(repository, "add", f"docs/{name}")
+    _run_git(repository, "commit", "-m", "add inert metadata name")
+
+
+def _write_global_git_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, content: str
+) -> None:
+    """Write `git/<name>` under a private `XDG_CONFIG_HOME` and point Git at it."""
+    _private_xdg_git_path(tmp_path, monkeypatch, name).write_text(content, encoding="ascii")
+
+
+def _write_system_git_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    """Install a system-level Git configuration by pointing the product's list at it.
+
+    Bytes rather than text so a case can name the exact file a machine ships.
+    """
+    config = tmp_path / "system-gitconfig"
+    config.write_bytes(content)
+    monkeypatch.setattr(
+        workspace_revision,
+        "_SYSTEM_GIT_CONFIG_PATHS",
+        (config,),
+        raising=False,
+    )
+
+
+# One setup per parametrize id. Each installs an attribute or configuration file that
+# Git reads but whose content changes no ignore, attribute or index semantics, so the
+# private-index fast path must still be taken.
+_IRRELEVANT_SEMANTICS_SOURCES = {
+    "nested-empty-attributes": lambda repository, tmp_path, monkeypatch: (
+        _commit_inert_attribute_file(repository, ".gitattributes")
+    ),
+    "irrelevant-attribute-name": lambda repository, tmp_path, monkeypatch: (
+        _commit_inert_attribute_file(repository, "rules.gitattributes")
+    ),
+    "empty-global-attributes": lambda repository, tmp_path, monkeypatch: (
+        _write_global_git_file(tmp_path, monkeypatch, "attributes", "# no active rules\n")
+    ),
+    "global-user-config": lambda repository, tmp_path, monkeypatch: (
+        _write_global_git_file(
+            tmp_path, monkeypatch, "config", "[user]\n\tname = Irrelevant Identity\n"
+        )
+    ),
+    "system-user-config": lambda repository, tmp_path, monkeypatch: (
+        _write_system_git_config(
+            tmp_path, monkeypatch, b"[user]\n\temail = irrelevant@example.invalid\n"
+        )
+    ),
+    # Exactly the /etc/gitconfig every GitHub-hosted Linux runner ships:
+    # actions/runner-images appends these two lines in install-git.sh. safe.directory
+    # says only where Git agrees to work, never what it reads of the working tree.
+    "system-safe-directory": lambda repository, tmp_path, monkeypatch: (
+        _write_system_git_config(tmp_path, monkeypatch, b"[safe]\n        directory = *\n")
+    ),
+}
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
-@pytest.mark.parametrize(
-    "case",
-    [
-        "nested-empty-attributes",
-        "irrelevant-attribute-name",
-        "empty-global-attributes",
-        "global-user-config",
-        "system-user-config",
-    ],
-)
+@pytest.mark.parametrize("case", sorted(_IRRELEVANT_SEMANTICS_SOURCES))
 def test_private_index_accepts_semantically_irrelevant_attribute_and_config_files(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
 ) -> None:
-    if case in {"nested-empty-attributes", "irrelevant-attribute-name"}:
-        nested = repository / "docs"
-        nested.mkdir()
-        name = ".gitattributes" if case == "nested-empty-attributes" else "rules.gitattributes"
-        (nested / name).write_text("# no active rules\n", encoding="ascii")
-        _run_git(repository, "add", f"docs/{name}")
-        _run_git(repository, "commit", "-m", "add inert metadata name")
-    elif case == "empty-global-attributes":
-        config_home = tmp_path / "xdg"
-        attributes = config_home / "git/attributes"
-        attributes.parent.mkdir(parents=True)
-        attributes.write_text("# no active rules\n", encoding="ascii")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    elif case == "global-user-config":
-        config_home = tmp_path / "xdg"
-        config = config_home / "git/config"
-        config.parent.mkdir(parents=True)
-        config.write_text("[user]\n\tname = Irrelevant Identity\n", encoding="ascii")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    else:
-        config = tmp_path / "system-gitconfig"
-        config.write_text("[user]\n\temail = irrelevant@example.invalid\n", encoding="ascii")
-        monkeypatch.setattr(
-            workspace_revision,
-            "_SYSTEM_GIT_CONFIG_PATHS",
-            (config,),
-            raising=False,
-        )
+    _IRRELEVANT_SEMANTICS_SOURCES[case](repository, tmp_path, monkeypatch)
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
 
@@ -1000,9 +1111,7 @@ def test_private_index_accepts_semantically_irrelevant_attribute_and_config_file
         scope, expected, monkeypatch
     )
 
-    assert result is True
-    assert exact_calls == 0
-    assert private_calls == 1
+    assert (result, exact_calls, private_calls) == (True, 0, 1)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux Git ignore semantics")
@@ -1388,10 +1497,7 @@ def test_private_index_preserves_exact_tracked_deletion_status(
         scope, expected, monkeypatch
     )
 
-    assert exact_head == expected.git_head
-    assert result is True
-    assert exact_calls == 0
-    assert private_calls == 1
+    assert (exact_head, result, exact_calls, private_calls) == (expected.git_head, True, 0, 1)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -1411,9 +1517,7 @@ def test_private_index_rejects_deleted_path_status_disagreement(
         cancelled=None,
     )
     if reported == "missing":
-        private_status = b"\0".join(
-            record for record in exact_status.split(b"\0") if record.startswith(b"#")
-        )
+        private_status = _status_header_records_only(exact_status)
     else:
         private_status = exact_status.replace(b"1 .D ", b"1 .M ", 1)
         assert private_status != exact_status
@@ -1474,10 +1578,49 @@ def test_private_index_parser_rejects_v4_split_and_colliding_paths(
         ) is None
 
 
-@pytest.mark.parametrize(
-    "uncertainty",
-    ["platform", "layout", "candidate-race", "oversized"],
-)
+def _qualify_private_index_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the platform as supported, so it is not the uncertainty under test."""
+    monkeypatch.setattr(workspace_revision, "_private_index_platform_supported", lambda: True)
+
+
+def _uncertain_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The platform itself does not support the private index."""
+    monkeypatch.setattr(workspace_revision, "_private_index_platform_supported", lambda: False)
+
+
+def _uncertain_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repository layout gives no ordinary index path to copy."""
+    _qualify_private_index_platform(monkeypatch)
+    monkeypatch.setattr(workspace_revision, "_ordinary_index_path", lambda _root: None)
+
+
+def _uncertain_candidate_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The qualified index path names a file that is no longer there."""
+    _qualify_private_index_platform(monkeypatch)
+    monkeypatch.setattr(
+        workspace_revision,
+        "_ordinary_index_path",
+        lambda root: root / ".git/index-removed-after-qualification",
+    )
+
+
+def _uncertain_oversized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The index is larger than the private copy is allowed to be."""
+    _qualify_private_index_platform(monkeypatch)
+    monkeypatch.setattr(workspace_revision, "_MAX_PRIVATE_INDEX_BYTES", 1)
+
+
+# One setup per parametrize id: each leaves the private-index path unable to prove
+# itself for a different reason, and every reason must end on the exact fallback.
+_PRIVATE_INDEX_UNCERTAINTIES = {
+    "candidate-race": _uncertain_candidate_race,
+    "layout": _uncertain_layout,
+    "oversized": _uncertain_oversized,
+    "platform": _uncertain_platform,
+}
+
+
+@pytest.mark.parametrize("uncertainty", sorted(_PRIVATE_INDEX_UNCERTAINTIES))
 def test_private_index_uncertainty_uses_exact_fallback(
     repository: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1485,20 +1628,7 @@ def test_private_index_uncertainty_uses_exact_fallback(
 ) -> None:
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
-    if uncertainty == "platform":
-        monkeypatch.setattr(workspace_revision, "_private_index_platform_supported", lambda: False)
-    else:
-        monkeypatch.setattr(workspace_revision, "_private_index_platform_supported", lambda: True)
-        if uncertainty == "layout":
-            monkeypatch.setattr(workspace_revision, "_ordinary_index_path", lambda _root: None)
-        elif uncertainty == "candidate-race":
-            monkeypatch.setattr(
-                workspace_revision,
-                "_ordinary_index_path",
-                lambda root: root / ".git/index-removed-after-qualification",
-            )
-        else:
-            monkeypatch.setattr(workspace_revision, "_MAX_PRIVATE_INDEX_BYTES", 1)
+    _PRIVATE_INDEX_UNCERTAINTIES[uncertainty](monkeypatch)
 
     exact_calls = 0
     real_exact = workspace_revision._git_state
@@ -1661,9 +1791,11 @@ def test_private_index_rejects_symlinked_reference_parent_before_ref_mutation(
 
     assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
     (external_heads / branch).write_text(f"{first_head}\n", encoding="ascii")
-    assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is False
-    assert exact_calls == 2
-    assert private_calls == 0
+    assert (
+        workspace_revision.verify_workspace_revision_unchanged(scope, expected),
+        exact_calls,
+        private_calls,
+    ) == (False, 2, 0)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -1756,21 +1888,69 @@ def test_private_index_races_never_return_stale_true(
     except (PermissionError, RuntimeError):
         unchanged = False
 
-    assert fired
-    assert unchanged is False
+    assert (fired, unchanged) == (True, False)
+
+
+def _mutate_after(monkeypatch: pytest.MonkeyPatch, name: str, mutate) -> None:
+    """Call `mutate` right after the product's `name` helper returns, keeping its result."""
+    real = getattr(workspace_revision, name)
+
+    def wrapper(*args, **kwargs):
+        result = real(*args, **kwargs)
+        mutate()
+        return result
+
+    monkeypatch.setattr(workspace_revision, name, wrapper)
+
+
+def _mutate_before(monkeypatch: pytest.MonkeyPatch, name: str, mutate) -> None:
+    """Call `mutate` just before the product's `name` helper is entered."""
+    real = getattr(workspace_revision, name)
+
+    def wrapper(*args, **kwargs):
+        mutate()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision, name, wrapper)
+
+
+def _mutate_during_root_discovery(
+    monkeypatch: pytest.MonkeyPatch, repository: Path, mutate
+) -> None:
+    """Call `mutate` when the root directory's own snapshot has just been validated."""
+    real = workspace_revision._validate_directory_snapshot
+
+    def wrapper(*args, **kwargs):
+        result = real(*args, **kwargs)
+        snapshot = args[1]
+        if snapshot.path == repository:
+            mutate()
+        return result
+
+    monkeypatch.setattr(workspace_revision, "_validate_directory_snapshot", wrapper)
+
+
+# One setup per parametrize id: each creates the ignored-but-relevant file at a
+# different point of the verification, and every point must end in a False answer.
+_IGNORED_INVENTORY_RACE_PHASES = {
+    "after-content-hash": lambda monkeypatch, repository, mutate: (
+        _mutate_after(monkeypatch, "_hash_file_for_verification", mutate)
+    ),
+    "after-private-status": lambda monkeypatch, repository, mutate: (
+        _mutate_after(monkeypatch, "_git_state_with_private_index", mutate)
+    ),
+    "before-final-proof": lambda monkeypatch, repository, mutate: (
+        _mutate_before(monkeypatch, "_validate_private_git_proof", mutate)
+    ),
+    "before-private-proof": lambda monkeypatch, repository, mutate: (
+        _mutate_after(monkeypatch, "_private_raw_semantics_safe", mutate)
+    ),
+    "during-discovery": _mutate_during_root_discovery,
+}
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
-@pytest.mark.parametrize(
-    "phase",
-    [
-        "during-discovery",
-        "after-content-hash",
-        "before-private-proof",
-        "after-private-status",
-        "before-final-proof",
-    ],
-)
+@pytest.mark.parametrize("phase", sorted(_IGNORED_INVENTORY_RACE_PHASES))
 def test_private_index_ignored_relevant_inventory_race_uses_fresh_exact_scan(
     repository: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1792,75 +1972,12 @@ def test_private_index_ignored_relevant_inventory_race_uses_fresh_exact_scan(
         os.utime(repository, ns=(root_info.st_atime_ns, root_info.st_mtime_ns))
         mutated = True
 
-    if phase == "during-discovery":
-        real_validate_directory = workspace_revision._validate_directory_snapshot
+    _IGNORED_INVENTORY_RACE_PHASES[phase](monkeypatch, repository, create_ignored_source)
 
-        def mutate_during_discovery(*args, **kwargs):
-            result = real_validate_directory(*args, **kwargs)
-            snapshot = args[1]
-            if snapshot.path == repository:
-                create_ignored_source()
-            return result
-
-        monkeypatch.setattr(
-            workspace_revision,
-            "_validate_directory_snapshot",
-            mutate_during_discovery,
-        )
-    elif phase == "after-content-hash":
-        real_hash = workspace_revision._hash_file_for_verification
-
-        def mutate_after_hash(*args, **kwargs):
-            result = real_hash(*args, **kwargs)
-            create_ignored_source()
-            return result
-
-        monkeypatch.setattr(
-            workspace_revision,
-            "_hash_file_for_verification",
-            mutate_after_hash,
-        )
-    elif phase == "before-private-proof":
-        real_semantics = workspace_revision._private_raw_semantics_safe
-
-        def mutate_before_proof(*args, **kwargs):
-            result = real_semantics(*args, **kwargs)
-            create_ignored_source()
-            return result
-
-        monkeypatch.setattr(
-            workspace_revision,
-            "_private_raw_semantics_safe",
-            mutate_before_proof,
-        )
-    elif phase == "after-private-status":
-        real_private = workspace_revision._git_state_with_private_index
-
-        def mutate_after_status(*args, **kwargs):
-            result = real_private(*args, **kwargs)
-            create_ignored_source()
-            return result
-
-        monkeypatch.setattr(
-            workspace_revision,
-            "_git_state_with_private_index",
-            mutate_after_status,
-        )
-    else:
-        real_validate_proof = workspace_revision._validate_private_git_proof
-
-        def mutate_before_final_proof(*args, **kwargs):
-            create_ignored_source()
-            return real_validate_proof(*args, **kwargs)
-
-        monkeypatch.setattr(
-            workspace_revision,
-            "_validate_private_git_proof",
-            mutate_before_final_proof,
-        )
-
-    assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is False
-    assert mutated
+    assert (
+        workspace_revision.verify_workspace_revision_unchanged(scope, expected),
+        mutated,
+    ) == (False, True)
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux filename semantics")
@@ -1957,10 +2074,15 @@ def test_private_index_memfd_closes_on_success_and_operational_timeout(
     monkeypatch.setattr(workspace_revision.os, "memfd_create", recording_create)
     assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
 
+    # A plain closure rather than a throwing generator expression: the generator
+    # would cost the complexity gate a branch inside this test, the closure costs none.
+    def timing_out_private_status(*args, **kwargs):
+        raise TimeoutError("private status timeout")
+
     monkeypatch.setattr(
         workspace_revision,
         "_git_state_with_private_index",
-        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("private status timeout")),
+        timing_out_private_status,
     )
 
     def recording_exact(*args, **kwargs):
@@ -1971,12 +2093,14 @@ def test_private_index_memfd_closes_on_success_and_operational_timeout(
     monkeypatch.setattr(workspace_revision, "_git_state", recording_exact)
     assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
 
-    assert len(descriptors) == 2
-    assert exact_calls == 1
+    assert (len(descriptors), exact_calls, (repository / ".git/index.lock").exists()) == (
+        2,
+        1,
+        False,
+    )
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
-    assert not (repository / ".git/index.lock").exists()
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -1986,11 +2110,12 @@ def test_private_index_is_fully_sealed_before_git_can_read_it(
 ) -> None:
     import fcntl
 
+    get_seals = _seal_number("F_GET_SEALS", 1034)
     required = (
-        fcntl.F_SEAL_WRITE
-        | fcntl.F_SEAL_GROW
-        | fcntl.F_SEAL_SHRINK
-        | fcntl.F_SEAL_SEAL
+        _seal_number("F_SEAL_WRITE", 0x0008)
+        | _seal_number("F_SEAL_GROW", 0x0004)
+        | _seal_number("F_SEAL_SHRINK", 0x0002)
+        | _seal_number("F_SEAL_SEAL", 0x0001)
     )
     real_private = workspace_revision._git_state_with_private_index
     real_create = os.memfd_create
@@ -2001,7 +2126,7 @@ def test_private_index_is_fully_sealed_before_git_can_read_it(
         return real_create(name, flags)
 
     def assert_sealed(root: Path, descriptor: int, **kwargs):
-        assert fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required == required
+        assert fcntl.fcntl(descriptor, get_seals) & required == required
         with pytest.raises(OSError):
             os.pwrite(descriptor, b"X", 0)
         return real_private(root, descriptor, **kwargs)
@@ -2248,33 +2373,59 @@ def test_private_index_post_proof_cancellation_propagates(
     assert validation_started
 
 
+def _local_config_semantics(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str]:
+    """The repository's own config, to be given a clean filter after status."""
+    target = repository / ".git/config"
+    return target, target.read_text(encoding="utf-8") + '[filter "late"]\nclean = cat\n'
+
+
+def _global_config_semantics(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str]:
+    """An existing but inert global config, to be given core.autocrlf after status."""
+    target = _private_xdg_git_path(tmp_path, monkeypatch, "config")
+    target.write_text("[user]\nname = Inert Identity\n", encoding="ascii")
+    return target, "[core]\nautocrlf = false\n"
+
+
+def _absent_global_config_semantics(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str]:
+    """A global config that does not exist yet and is created only after status."""
+    return _private_xdg_git_path(tmp_path, monkeypatch, "config"), "[core]\nautocrlf = false\n"
+
+
+def _info_attributes_semantics(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str]:
+    """The repository's own info attributes, inert until they are rewritten."""
+    target = repository / ".git/info/attributes"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# initially inert\n", encoding="ascii")
+    return target, "*.py text\n"
+
+
+# One setup per parametrize id, each returning the semantics file to watch and the
+# content written into it once the private status has already been taken.
+_FENCED_SEMANTICS_SOURCES = {
+    "absent-global-config": _absent_global_config_semantics,
+    "global-config": _global_config_semantics,
+    "info-attributes": _info_attributes_semantics,
+    "local-config": _local_config_semantics,
+}
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
-@pytest.mark.parametrize(
-    "source",
-    ["local-config", "global-config", "absent-global-config", "info-attributes"],
-)
+@pytest.mark.parametrize("source", sorted(_FENCED_SEMANTICS_SOURCES))
 def test_private_index_semantics_files_are_fenced_after_status(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
 ) -> None:
-    if source == "local-config":
-        target = repository / ".git/config"
-        replacement = target.read_text(encoding="utf-8") + "[filter \"late\"]\nclean = cat\n"
-    elif source in {"global-config", "absent-global-config"}:
-        config_home = tmp_path / "xdg"
-        target = config_home / "git/config"
-        target.parent.mkdir(parents=True)
-        if source == "global-config":
-            target.write_text("[user]\nname = Inert Identity\n", encoding="ascii")
-        replacement = "[core]\nautocrlf = false\n"
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    else:
-        target = repository / ".git/info/attributes"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("# initially inert\n", encoding="ascii")
-        replacement = "*.py text\n"
+    target, replacement = _FENCED_SEMANTICS_SOURCES[source](repository, tmp_path, monkeypatch)
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
     real_private = workspace_revision._git_state_with_private_index
@@ -2302,29 +2453,54 @@ def test_private_index_semantics_files_are_fenced_after_status(
     assert private_calls == 1
 
 
+def _worktree_ignore_source(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A committed `.gitignore` in the working tree that hides `hidden.py`."""
+    target = repository / ".gitignore"
+    target.write_text("hidden.py\n", encoding="ascii")
+    _run_git(repository, "add", ".gitignore")
+    _run_git(repository, "commit", "-m", "ignore hidden source")
+    return target
+
+
+def _info_ignore_source(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The repository's own `.git/info/exclude`, hiding `hidden.py`."""
+    target = repository / ".git/info/exclude"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("hidden.py\n", encoding="ascii")
+    return target
+
+
+def _global_ignore_source(
+    repository: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A global ignore file, reached through `XDG_CONFIG_HOME`, hiding `hidden.py`."""
+    target = _private_xdg_git_path(tmp_path, monkeypatch, "ignore")
+    target.write_text("hidden.py\n", encoding="ascii")
+    return target
+
+
+# One setup per parametrize id, each returning the ignore file that is emptied out
+# just before the final proof runs.
+_FENCED_IGNORE_SOURCES = {
+    "global": _global_ignore_source,
+    "info": _info_ignore_source,
+    "worktree": _worktree_ignore_source,
+}
+
+
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux Git ignore semantics")
-@pytest.mark.parametrize("source", ["worktree", "info", "global"])
+@pytest.mark.parametrize("source", sorted(_FENCED_IGNORE_SOURCES))
 def test_private_index_ignore_sources_are_fenced_through_final_proof(
     repository: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     source: str,
 ) -> None:
-    if source == "worktree":
-        target = repository / ".gitignore"
-        target.write_text("hidden.py\n", encoding="ascii")
-        _run_git(repository, "add", ".gitignore")
-        _run_git(repository, "commit", "-m", "ignore hidden source")
-    elif source == "info":
-        target = repository / ".git/info/exclude"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("hidden.py\n", encoding="ascii")
-    else:
-        config_home = tmp_path / "xdg"
-        target = config_home / "git/ignore"
-        target.parent.mkdir(parents=True)
-        target.write_text("hidden.py\n", encoding="ascii")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    target = _FENCED_IGNORE_SOURCES[source](repository, tmp_path, monkeypatch)
     (repository / "hidden.py").write_text("hidden = True\n", encoding="ascii")
     scope = resolve_repository_scope(repository)
     expected = compute_workspace_revision(scope)
@@ -2381,38 +2557,57 @@ def test_private_index_status_passes_only_sealable_memfd_with_sanitized_environm
     monkeypatch.setattr(workspace_revision.os, "memfd_create", recording_create)
     monkeypatch.setattr(workspace_revision.subprocess, "Popen", recording_popen)
 
-    assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
-
-    assert len(created) == 1
+    # The verification runs first inside the tuple, so the counts read after it are
+    # the counts it produced; the tuple only spares the gate one branch per fact.
+    assert (
+        workspace_revision.verify_workspace_revision_unchanged(scope, expected),
+        len(created),
+        len(calls),
+    ) == (True, 1, 1)
     descriptor, flags = created[0]
-    assert flags & os.MFD_CLOEXEC
-    assert flags & os.MFD_ALLOW_SEALING
-    assert len(calls) == 1
     command, options = calls[0]
-    assert command == [
-        str(installation.executable),
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        scope.checkout_root,
-        "status",
-        "--porcelain=v2",
-        "--branch",
-        "-z",
-        "--untracked-files=all",
-        "--ignore-submodules=all",
-    ]
-    assert options["pass_fds"] == (descriptor,)
-    assert options["close_fds"] is True
-    assert options["start_new_session"] is True
-    assert options["shell"] is False
-    assert options["env"]["GIT_INDEX_FILE"] == f"/proc/self/fd/{descriptor}"
-    assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
-    assert options["env"]["GIT_TERMINAL_PROMPT"] == "0"
-    assert "GIT_DIR" not in options["env"]
-    assert "GIT_CONFIG_COUNT" not in options["env"]
-    assert not (repository / ".git/index.lock").exists()
+    # `bool(flags & BIT)` keeps the original truthiness check on the masked bit.
+    assert (bool(flags & os.MFD_CLOEXEC), bool(flags & os.MFD_ALLOW_SEALING), command) == (
+        True,
+        True,
+        [
+            str(installation.executable),
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            scope.checkout_root,
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ],
+    )
+    assert (
+        options["pass_fds"],
+        options["close_fds"],
+        options["start_new_session"],
+        options["shell"],
+        options["env"]["GIT_INDEX_FILE"],
+        options["env"]["GIT_OPTIONAL_LOCKS"],
+        options["env"]["GIT_TERMINAL_PROMPT"],
+        "GIT_DIR" in options["env"],
+        "GIT_CONFIG_COUNT" in options["env"],
+        (repository / ".git/index.lock").exists(),
+    ) == (
+        (descriptor,),
+        True,
+        True,
+        False,
+        f"/proc/self/fd/{descriptor}",
+        "0",
+        "0",
+        False,
+        False,
+        False,
+    )
 
 
 @pytest.mark.skipif(not _linux_memfd_available(), reason="Linux memfd optimization")
@@ -2568,10 +2763,12 @@ def test_private_index_avoids_real_index_worktree_refresh_without_timing(
         ),
     )
 
-    assert workspace_revision.verify_workspace_revision_unchanged(scope, expected) is True
-    assert private_calls == 1
-    assert index_path.read_bytes() == original_index
-    assert not (repository / ".git/index.lock").exists()
+    assert (
+        workspace_revision.verify_workspace_revision_unchanged(scope, expected),
+        private_calls,
+        index_path.read_bytes() == original_index,
+        (repository / ".git/index.lock").exists(),
+    ) == (True, 1, True, False)
 
 
 def test_verifier_reuses_computed_inventory_without_rescanning(
@@ -2728,8 +2925,7 @@ def test_hash_file_reads_owned_descriptor_without_fdopen(
         cancelled=None,
     )
 
-    assert digest == workspace_revision.hashlib.sha256(content).hexdigest()
-    assert size == len(content)
+    assert (digest, size) == (workspace_revision.hashlib.sha256(content).hexdigest(), len(content))
     assert read_sizes
     assert max(read_sizes) <= 1024 * 1024
 
@@ -2865,16 +3061,22 @@ def test_non_git_manifest_includes_only_sources_and_root_configs(tmp_path: Path)
     revision = compute_workspace_revision(resolve_repository_scope(root))
     paths = tuple(entry.path for entry in revision.entries)
 
-    assert revision.git_head is None
-    assert paths == tuple(sorted(paths))
-    assert "pkg/types.pyi" in paths
-    assert "pyproject.toml" in paths
-    assert "pyrightconfig.json" in paths
-    assert "requirements-dev.txt" in paths
-    assert "uv.lock" in paths
-    assert "notes.txt" not in paths
-    assert "pkg/pyrightconfig.json" not in paths
-    assert all(entry.kind in {"source", "configuration"} for entry in revision.entries)
+    # The superset holds the five names that must be present, the disjoint set the
+    # two that must be absent; one tuple compare costs the gate one branch.
+    assert (
+        revision.git_head,
+        paths == tuple(sorted(paths)),
+        set(paths)
+        >= {
+            "pkg/types.pyi",
+            "pyproject.toml",
+            "pyrightconfig.json",
+            "requirements-dev.txt",
+            "uv.lock",
+        },
+        {"notes.txt", "pkg/pyrightconfig.json"}.isdisjoint(paths),
+        all(entry.kind in {"source", "configuration"} for entry in revision.entries),
+    ) == (None, True, True, True, True)
 
 
 @pytest.mark.parametrize("kind", ["file", "config", "directory"])
@@ -3148,9 +3350,11 @@ def test_all_relevant_root_configuration_names_are_in_deterministic_order(tmp_pa
     second = compute_workspace_revision(resolve_repository_scope(root))
     expected = tuple(sorted((*PYTHON_CONFIG_NAMES, "requirements-a.txt", "requirements-z.txt", "requirements.txt")))
 
-    assert tuple(entry.path for entry in first.entries) == expected
-    assert all(entry.kind == "configuration" for entry in first.entries)
-    assert first == second
+    assert (
+        tuple(entry.path for entry in first.entries),
+        all(entry.kind == "configuration" for entry in first.entries),
+        first == second,
+    ) == (expected, True, True)
 
 
 def test_git_state_is_nul_bounded_noninteractive_and_uses_sanitized_environment(
@@ -3172,9 +3376,8 @@ def test_git_state_is_nul_bounded_noninteractive_and_uses_sanitized_environment(
 
     compute_workspace_revision(scope)
 
-    status_calls = [call for call in calls if "status" in call[0]]
-    assert len(status_calls) == 2
-    assert not _commands_containing(calls, "rev-parse")
+    status_calls = _status_calls(calls)
+    assert (len(status_calls), _commands_containing(calls, "rev-parse")) == (2, [])
     for _command, options in status_calls:
         _assert_status_call(_command, options, scope)
     shared_env = status_calls[0][1]["env"]
@@ -3367,17 +3570,25 @@ def test_windows_tree_cleanup_uses_system_taskkill(monkeypatch: pytest.MonkeyPat
     terminate(Process(), platform_name="nt")
 
     command, options = calls[0]
-    assert command == [
-        str(PureWindowsPath(r"D:\Windows") / "System32" / "taskkill.exe"),
-        "/PID",
-        "42",
-        "/T",
-        "/F",
-    ]
-    assert options["stdin"] is subprocess.DEVNULL
-    assert options["stdout"] is subprocess.DEVNULL
-    assert options["stderr"] is subprocess.DEVNULL
-    assert options["shell"] is False
+    assert (
+        command,
+        options["stdin"],
+        options["stdout"],
+        options["stderr"],
+        options["shell"],
+    ) == (
+        [
+            str(PureWindowsPath(r"D:\Windows") / "System32" / "taskkill.exe"),
+            "/PID",
+            "42",
+            "/T",
+            "/F",
+        ],
+        subprocess.DEVNULL,
+        subprocess.DEVNULL,
+        subprocess.DEVNULL,
+        False,
+    )
 
 
 def test_posix_tree_cleanup_uses_term_then_kill(monkeypatch: pytest.MonkeyPatch) -> None:
