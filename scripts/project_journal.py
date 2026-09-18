@@ -26,6 +26,7 @@ from markdown_transaction import (
     ABSENT,
     MarkdownChange,
     MarkdownCoordinator,
+    OperationBoundElsewhereError,
     ProjectCheckpointReservation,
     ProjectPendingPriorError,
     TransactionFailure,
@@ -1369,12 +1370,6 @@ def _legacy_probe_event(project_root: Path | str) -> dict[str, object]:
     }
 
 
-# What `prepare` says when an attempt's id is bound to the request it was first
-# prepared with and the request has since changed. See
-# `ProjectStore._replayed_as_a_new_attempt`.
-REBOUND_REQUEST = "operation_id is already bound to a different request"
-
-
 def _project_lease_precondition(slug: str, lease: ProjectLease) -> dict[str, object]:
     return {
         "project": slug,
@@ -2423,8 +2418,8 @@ class ProjectStore:
             )
         except ProjectPendingPriorError:
             return None
-        except ValueError as exc:
-            return self._replayed_after_rebinding(exc, row, lease, writer_wait_seconds)
+        except OperationBoundElsewhereError:
+            return self._replayed_as_a_new_attempt(row, lease, writer_wait_seconds)
         except TransactionFailure as exc:
             return self._quarantined_or_raised(exc, row)
 
@@ -2435,17 +2430,6 @@ class ProjectStore:
             raise exc
         self._set_checkpoint_state(row.project, row.sequence, "quarantined")
         return None
-
-    def _replayed_after_rebinding(
-        self,
-        exc: ValueError,
-        row: ProjectCheckpointReservation,
-        lease: ProjectLease,
-        writer_wait_seconds: float | None,
-    ) -> CheckpointReceipt | None:
-        if REBOUND_REQUEST not in str(exc):
-            raise exc
-        return self._replayed_as_a_new_attempt(row, lease, writer_wait_seconds)
 
     def _replayed_as_a_new_attempt(
         self,

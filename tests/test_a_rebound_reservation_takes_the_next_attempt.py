@@ -20,7 +20,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import project_journal  # noqa: E402
-from markdown_transaction import TransactionFailure  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    OperationBoundElsewhereError,
+    TransactionFailure,
+)
+
+REBOUND = "operation_id is already bound to a different request"
 
 
 class _Reservation:
@@ -56,7 +61,6 @@ class _Store:
     # The three methods under test, borrowed from the real class so the fake
     # cannot drift away from what it is standing in for.
     _replayed_under_lease = project_journal.ProjectStore._replayed_under_lease
-    _replayed_after_rebinding = project_journal.ProjectStore._replayed_after_rebinding
     _replayed_as_a_new_attempt = project_journal.ProjectStore._replayed_as_a_new_attempt
     _quarantined_or_raised = project_journal.ProjectStore._quarantined_or_raised
 
@@ -70,7 +74,7 @@ def test_a_rebound_reservation_is_replayed_under_the_next_attempt(monkeypatch):
         project_journal, "_project_lease_precondition", lambda slug, lease: {}
     )
     fresh = _Reservation()
-    store = _Store(ValueError(project_journal.REBOUND_REQUEST), fresh=fresh)
+    store = _Store(OperationBoundElsewhereError(REBOUND), fresh=fresh)
 
     assert _replay(store) == "receipt from attempt 2"
     assert store.retried == ("another-project", 839)
@@ -81,15 +85,16 @@ def test_a_sequence_that_settled_meanwhile_needs_no_attempt(monkeypatch):
     monkeypatch.setattr(
         project_journal, "_project_lease_precondition", lambda slug, lease: {}
     )
-    store = _Store(ValueError(project_journal.REBOUND_REQUEST), fresh=None)
+    store = _Store(OperationBoundElsewhereError(REBOUND), fresh=None)
 
     assert _replay(store) is None
 
 
 def test_any_other_value_error_still_raises():
-    store = _Store(ValueError("something else entirely"))
+    """The same words in a plain ValueError are not this refusal."""
+    store = _Store(ValueError(REBOUND))
 
-    with pytest.raises(ValueError, match="something else"):
+    with pytest.raises(ValueError, match="already bound"):
         _replay(store)
 
 
