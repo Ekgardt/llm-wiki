@@ -2051,7 +2051,7 @@ def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
         return "not_needed"
     if _is_the_vault(resolved):
         # The vault's own memory generation is rebuilt and activated by the
-        # nightly pass and the freshness watch. Its code generation is refreshed
+        # nightly pass. Its code generation is refreshed
         # by the same nightly step as every other checkout's since 2026-09-12;
         # this path does not start one here (audit 3, G-L5).
         return "vault_nightly"
