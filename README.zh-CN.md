@@ -277,7 +277,7 @@ RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
 
 `cache/evidence-graph/catalog.sqlite3` 在 `cache/evidence-graph/generations/<generation-id>/` 中选择一个不可变的 active generation。候选 generation 只有在 manifest、source membership、artifact 哈希、数据库完整性和 evidence span 全部验证后才会注册。激活通过 compare-and-swap 更新指针。激活前构建失败或中断时，先前 generation 仍保持 active；active generation 损坏时，会跳过它并使用最新的已验证历史 generation。恢复时可注册完整的 orphan generation，但不会自动激活。
 
-删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建。在 installed-vault migration evidence 足以证明安全之前，必须保留 legacy `cache/index.sqlite`、`cache/vectors.npy` 和 `cache/vectors_meta.json`。如果无法打开已验证 generation，retrieval 会回退到这些 legacy 路径或 lexical/live extraction，并明确报告 fallback。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
+删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建。在 installed-vault migration evidence 足以证明安全之前，必须保留 legacy `cache/index.sqlite`、`cache/vectors.npy` 和 `cache/vectors_meta.json`。如果无法打开已验证 generation，retrieval 会回退到这些 legacy 路径或 lexical/live extraction，并明确报告 fallback。fallback 答案会给出原因：仓库没有 generation 时为 `no_generation`，有 generation 但无法打开时为 `generation_unreadable:<ExceptionClass>`。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
 
 Model matrix 固定候选 revision，并要求 EN/RU/ZH quality、resource、license 和 Pareto gates 全部通过后才选择 defaults。目前没有选定新的 embedding model 或 reranker：**evidence pending**。现有可选 vector 兼容路径仍使用固定的 legacy model。Token count 标记为 `reported`、`tokenizer`、`estimated`、`mixed` 或 `unknown`；货币成本另行标记为 `reported`、`estimated` 或 `unknown`。UTF-8 byte 估算只用于保守规划，并非独立于 tokenizer 的保证。
 
