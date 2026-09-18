@@ -37,27 +37,54 @@ class _StopAtCall:
         return self.calls >= self.stop_at
 
 
-def _open_graph_databases() -> list[str]:
-    targets = [os.readlink(DESCRIPTORS / name) for name in os.listdir(DESCRIPTORS) if (DESCRIPTORS / name).is_symlink()]
-    return [target for target in targets if target.endswith("evidence.sqlite3")]
+def _link_target(link: Path) -> str:
+    """Where this descriptor points, or "" when it went as we looked."""
+    try:
+        return os.readlink(link)
+    except OSError:
+        return ""
 
 
-def _stopped_open(opener, catalog, scope, stop_at: int) -> tuple[bool, list[str]]:
-    """(the open was stopped, graph databases still open afterwards)."""
+def _open_graph_databases(state_root: Path) -> set[tuple[str, str]]:
+    """(descriptor, target) for every graph database of `state_root` held open.
+
+    Scoped to this vault. `code_graph` keeps a validated reader of its own vault
+    open on purpose between calls — the warm-index cache of
+    `docs/research/2026-09-10-warm-index-answers-inside-the-loop.md` — so a
+    neighbouring test in the same session leaves graph databases open that are
+    not this open's leak, and named them here until 2026-09-18.
+    """
+    prefix = f"{state_root.resolve()}{os.sep}"
+    found = set()
+    for name in os.listdir(DESCRIPTORS):
+        target = _link_target(DESCRIPTORS / name)
+        if target.endswith("evidence.sqlite3") and target.startswith(prefix):
+            found.add((name, target))
+    return found
+
+
+def _stopped_open(opener, catalog, scope, stop_at, state_root, before) -> tuple[bool, list[str]]:
+    """(the open was stopped, graph databases this open left behind)."""
     try:
         graph = opener(catalog, scope, cancelled=_StopAtCall(stop_at))
     except TimeoutError:
-        return True, _open_graph_databases()
+        opened = _open_graph_databases(state_root) - before
+        return True, sorted(target for _descriptor, target in opened)
     graph.close()
     return False, []
 
 
-def _leaks(opener, catalog, scope) -> tuple[int, list[str]]:
-    """Every stop point until the open gets through: (how many stopped it, what stayed open)."""
+def _leaks(opener, catalog, scope, state_root: Path) -> tuple[int, list[str]]:
+    """Every stop point until the open gets through: (how many stopped it, what stayed open).
+
+    Measured against what this process already held open before the first stop,
+    so only what an open added counts against it.
+    """
+    before = _open_graph_databases(state_root)
     stopped_count = 0
     left_open: list[str] = []
     for stop_at in range(1, MAX_STOP_POINTS):
-        stopped, remaining = _stopped_open(opener, catalog, scope, stop_at)
+        stopped, remaining = _stopped_open(opener, catalog, scope, stop_at, state_root, before)
         if not stopped:
             break
         stopped_count += 1
@@ -82,6 +109,8 @@ def test_no_stop_point_of_an_open_leaves_the_graph_database_open(vault, opener_n
     # docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md
     _active_memory_generation(catalog, repository, "gen-memory")
 
-    stopped, left_open = _leaks(getattr(EvidenceGraph, opener_name), catalog, resolve_repository_scope(repository))
+    stopped, left_open = _leaks(
+        getattr(EvidenceGraph, opener_name), catalog, resolve_repository_scope(repository), state
+    )
 
     assert (stopped > 0, left_open) == (True, [])
