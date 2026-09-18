@@ -1359,6 +1359,17 @@ def _distinct_source_identities(payload: object) -> dict[str, set[str]]:
     return found
 
 
+def _payload_identity_fields(payload_json: str) -> dict[str, set[str]] | None:
+    """The identity strings a stored payload names, or None when it cannot be read."""
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    return {
+        key: set(values) for key, values in _source_identity_strings(payload).items()
+    }
+
+
 def _require_single_source_identity(found: dict[str, set[str]]) -> tuple[str, str]:
     """The one path and digest this payload names, or a refusal."""
     if len(found["paths"]) != 1 or len(found["digests"]) != 1:
@@ -5176,12 +5187,32 @@ def _insert_adopted_source_fence(
 
 
 def _task_payload_text(row: sqlite3.Row) -> str:
-    """The task payload as text for substring source-reference checks.
+    """The task payload as text for the source-reference check.
 
-    Undecodable bytes are replaced, never dropped, so a corrupt blob cannot
-    hide the ASCII daily id or digest it still carries.
+    Undecodable bytes are replaced, never dropped: the replacement makes the
+    payload unreadable as JSON, and an unreadable payload counts as referencing
+    every fenced source, which is the conservative answer at both call sites.
     """
     return bytes(row["payload_blob"]).decode("utf-8", errors="replace")
+
+
+def _record_cancelled_attempt(
+    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+) -> None:
+    """The attempt_history row for a lease that an operator cancelled."""
+    database.execute(
+        """INSERT INTO attempt_history(
+               task_id,attempt,started_at,finished_at,outcome,error_code
+           ) VALUES (?,?,?,?,?,?)""",
+        (
+            row["id"],
+            row["attempts"],
+            row["attempt_started_at"] or _timestamp(now),
+            _timestamp(now),
+            "cancelled",
+            "cancelled",
+        ),
+    )
 
 
 def _lease_row_holds(
@@ -6431,7 +6462,21 @@ class MemoryQueue:
     def _payload_references_source(
         payload_json: str, daily_id: str, source_digest: str
     ) -> bool:
-        return daily_id in payload_json or source_digest in payload_json
+        """A reference is an identity field of the payload, not a date in its text.
+
+        `daily_id` is a date, and every timestamp this product writes starts with
+        one, so the substring test this replaces fenced the whole queue while a
+        day was being archived. See `docs/research/
+        2026-09-18-a-source-is-referenced-by-a-field-not-by-a-date-in-the-text.md`.
+        """
+        found = _payload_identity_fields(payload_json)
+        if found is None:
+            return True
+        return (
+            daily_id in found["daily_ids"]
+            or source_digest in found["digests"]
+            or _daily_logical_path(daily_id) in found["paths"]
+        )
 
     def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
         now = _as_utc(self._clock())
@@ -11507,16 +11552,25 @@ class _QueueV3CandidateReader:
                 is None
             )
             if not mismatch:
-                changed = database.execute(
-                    """UPDATE tasks SET state='cancelled',error_code='cancelled',
-                           updated_at=?,lease_owner=NULL,lease_token=NULL,
-                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
-                           attempt_started_at=NULL WHERE id=? AND state=?""",
-                    (_timestamp(now), task_id, row["state"]),
-                ).rowcount == 1
+                changed = self._cancel_row(database, row, now)
         if mismatch:
             self._raise_payload_mismatch()
         return changed
+
+    @staticmethod
+    def _cancel_row(
+        database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> bool:
+        """An attempt cancelled in flight is recorded, as the legacy queue records it."""
+        if row["state"] == "leased":
+            _record_cancelled_attempt(database, row, now)
+        return database.execute(
+            """UPDATE tasks SET state='cancelled',error_code='cancelled',
+                   updated_at=?,lease_owner=NULL,lease_token=NULL,
+                   lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL WHERE id=? AND state=?""",
+            (_timestamp(now), row["id"], row["state"]),
+        ).rowcount == 1
 
     def unblock(self, task_id: str) -> None:
         """A blocked task goes back to ready; any other state is refused."""
