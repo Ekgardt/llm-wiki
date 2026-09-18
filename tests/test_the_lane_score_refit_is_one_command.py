@@ -85,6 +85,15 @@ def test_the_stand_records_the_rows_a_refit_needs() -> None:
     assert [row["lexical_rank"] for row in matrix] == [1, 5]
 
 
+def test_an_aggregated_report_is_refused_plainly_not_with_a_traceback(tmp_path: Path, capsys) -> None:
+    """An operator will point this at a run's report; that file holds no records."""
+    path = tmp_path / "report.json"
+    path.write_bytes(b'{\n  "overall": {\n    "accuracy": 0.5\n  }\n}\n')
+
+    assert fit_lane_score.main([str(path)]) == 1
+    assert "lane matrix" in capsys.readouterr().err
+
+
 def test_a_file_with_no_lane_matrix_is_refused_rather_than_fitted(tmp_path: Path, capsys) -> None:
     path = tmp_path / "old.jsonl"
     path.write_bytes(b'{"question_id": "q1", "question_type": "multi-session"}\n')

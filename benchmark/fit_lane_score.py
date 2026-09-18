@@ -157,9 +157,25 @@ def _json_array(text: str) -> list[dict]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
+def _one_record(line: str) -> dict | None:
+    """One JSONL record, or None for a line that is not one.
+
+    A run's aggregated report is a JSON object written over many lines, and an
+    operator will point this at one by mistake. That is a file with no records,
+    which the command already says plainly — not a traceback.
+    """
+    try:
+        loaded = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(loaded, dict):
+        return loaded
+    return None
+
+
 def _json_lines(text: str) -> list[dict]:
-    lines = [line for line in text.splitlines() if line.strip()]
-    return [json.loads(line) for line in lines]
+    found = [_one_record(line) for line in text.splitlines() if line.strip()]
+    return [record for record in found if record is not None]
 
 
 def _records(path: Path) -> list[dict]:
