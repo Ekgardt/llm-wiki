@@ -193,13 +193,18 @@ contradiction — an unnamed run.
 
 Five families of artefacts carry that date, and they differ in two ways at once:
 
-| family | cbm_project | us | our best | cbm | cbm tokens |
+| family | which index `cbm_project` names | us | our best | cbm | cbm tokens |
 |---|---|---:|---:|---:|---:|
-| `-run{1,2,3}` | `…-tasks` | 13/16 | 14/16 | 15/16 | 5 565 |
-| `-after-run{1,2,3}` | `…-tasks` | 16/16 | 16/16 | 15/16 | 5 632 |
-| `-final-run{1,2,3}` | `…-tasks` | 16/16 | 16/16 | 15/16 | 5 632 |
-| `-vault-run{1,2,3}` | `home-user-llm-wiki` | 16/16 | 16/16 | 14/16 | 10 863 |
-| `-vault-fast-run{1,2,3}` | `home-user-llm-wiki` | 16/16 | 16/16 | 15/16 | 10 638 |
+| `-run{1,2,3}` | a separate worktree | 13/16 | 14/16 | 15/16 | 5 565 |
+| `-after-run{1,2,3}` | a separate worktree | 16/16 | 16/16 | 15/16 | 5 632 |
+| `-final-run{1,2,3}` | a separate worktree | 16/16 | 16/16 | 15/16 | 5 632 |
+| `-vault-run{1,2,3}` | the main checkout | 16/16 | 16/16 | 14/16 | 10 863 |
+| `-vault-fast-run{1,2,3}` | the main checkout | 16/16 | 16/16 | 15/16 | 10 638 |
+
+(The project keys themselves are absolute paths with the separators turned into
+hyphens, so they carry the account name. They are named here by what they point
+at, not by their literal value; the same string still sits inside the tracked
+artefacts, which are a run's own output and are left alone.)
 
 So our 13 → 16 is our own code changing during that day (`run` → `after` →
 `final`), and the competitor's 15 → 14 is which project index it was pointed at
