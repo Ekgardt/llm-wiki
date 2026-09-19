@@ -691,6 +691,86 @@ def test_readme_recall_at_10_agentmemory():
         _assert_no_competitor_percentage(cells[1:])
 
 
+# ─── 8b. benchmark/report.md borrows no number without its source ───
+
+# The table published `Zep | 94.7% (LoCoMo)` and `Mem0 | 91.6% (LoCoMo)` under a
+# column headed `Recall@5`, beside our own BM25 retrieval recall. Both are
+# end-to-end answer-accuracy claims on a dataset we have never run, and fetched
+# 2026-09-19 neither survives its source: mem0.ai reports Mem0 LoCoMo 92.5 and
+# Zep LoCoMo 80.32%, and Zep's own blog reports 94.8% on DMR without mentioning
+# LoCoMo. The two agentmemory rows were real but cited nothing and mixed two
+# corpora into one row. So the table carries one metric, one dataset and one
+# openable source per row, and this guard keeps it that way.
+# See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+_BORROWED_HEADING = "## Context only: numbers published by other projects"
+_BORROWED_COLUMNS = ["System", "Metric", "Value", "Dataset", "Source"]
+_REPORT_REQUIRED = (
+    "Retired 2026-09-10",
+    "run_benchmark.py",
+    "A number with no source does not belong in this table",
+)
+
+
+def _table_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("|")]
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def _borrowed_table(report: str) -> list[list[str]]:
+    """The borrowed-number table as rows of cells, or nothing if it is gone."""
+    if _BORROWED_HEADING not in report:
+        return []
+    section = report.split(_BORROWED_HEADING, 1)[1].split("\n## ", 1)[0]
+    return [_table_cells(line) for line in _table_lines(section)]
+
+
+def _source_is_reachable(source: str) -> bool:
+    if source.startswith("http"):
+        return True
+    return (ROOT / source).exists()
+
+
+def _row_is_sourced(cells: list[str]) -> bool:
+    if len(cells) != len(_BORROWED_COLUMNS):
+        return False
+    if not all(cells):
+        return False
+    return _source_is_reachable(cells[-1])
+
+
+def _unsourced(rows: list[list[str]]) -> list[list[str]]:
+    return [cells for cells in rows if not _row_is_sourced(cells)]
+
+
+def _system_tables(report: str) -> list[str]:
+    """Every table row in the file whose first cell names a system, not a metric."""
+    return [line for line in _table_lines(report) if _table_cells(line)[0] == "System"]
+
+
+def test_every_borrowed_number_says_where_it_came_from():
+    """One metric, one dataset and one openable source per borrowed row — or no row."""
+    report = _read("benchmark/report.md")
+    table = _borrowed_table(report)
+    unsourced = _unsourced(table[2:])
+
+    assert _missing(_REPORT_REQUIRED, report) == []
+    assert table[:2] == [_BORROWED_COLUMNS, ["---"] * len(_BORROWED_COLUMNS)], (
+        f"benchmark/report.md borrowed-number table must have the columns "
+        f"{_BORROWED_COLUMNS}; found {table[:1]}"
+    )
+    assert len(_system_tables(report)) == 1, (
+        "benchmark/report.md has a second table of systems outside the sourced "
+        "one; a borrowed number belongs in the table that carries its source"
+    )
+    assert unsourced == [], (
+        f"benchmark/report.md rows missing a metric, a dataset or a reachable "
+        f"source: {unsourced}"
+    )
+
+
 # ─── 9. Lint check count in docs must match code ────────────────────
 
 def test_lint_check_count_matches_code():
