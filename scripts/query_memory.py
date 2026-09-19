@@ -1814,7 +1814,7 @@ def _second_look(
     fetch: Callable[[int], Iterable[object]] | None,
     search: Callable[[str, int], Iterable[object]] | None = None,
 ) -> tuple[dict[str, object], GroundedContext]:
-    """More passes when the answer counted or summed, until nothing new appears.
+    """More passes when the question asks for a count, until nothing new appears.
 
     Each step fans the question out into a few concrete sub-queries about the
     kind of thing counted, merges what they find with what the answer cited,
@@ -1825,7 +1825,7 @@ def _second_look(
     See `aggregation_pass` and the research note it cites.
     """
     current = first
-    if not _aggregated(current[0]):
+    if not _aggregating(single.question, current[0]):
         return first
     seen = _instances(current[0])
     pool = candidates
@@ -1883,7 +1883,7 @@ def _counted_again(
     search: Callable[[str, int], Iterable[object]] | None,
 ) -> tuple[tuple[dict[str, object], GroundedContext], tuple, bool]:
     """The optional part of `_count_step`."""
-    from aggregation_pass import COUNTING_RULE
+    from aggregation_pass import counting_rule
 
     answer, context = current
     widened = _widened(answer, context, fetch)
@@ -1896,7 +1896,10 @@ def _counted_again(
     # beside them: the instances are the user's own sentences, and measured
     # 2026-09-08 a pruned turn lost "my acoustic guitar" to the budget.
     second = single.run(
-        _beyond(more or pool, pool, cited), note + COUNTING_RULE, partner=False, prune=False
+        _beyond(more or pool, pool, cited),
+        note + counting_rule(single.question),
+        partner=False,
+        prune=False,
     )
     _record_second_look(single.question, context, widened is not None, bool(note), more is not None)
     return _adopted(current, second), more or pool, more is not None
@@ -1939,13 +1942,30 @@ def _computed_again(
     return _adopted(first, second)
 
 
-def _aggregated(answer: Mapping[str, object]) -> bool:
-    """An answer that went out and declared a count or a sum somewhere in it."""
-    from aggregation_pass import aggregating_claims
+def _aggregating(question: str, answer: Mapping[str, object]) -> bool:
+    """Whether the counting pass opens on this answer.
+
+    Two doors. The answer may have declared a count or a sum, which is the
+    older signal and works in any language. Or the question may ask for one in
+    so many words, which is the door added 2026-09-19: on the 500 recorded
+    rows of the 2026-09-18 run the self-report alone opened the pass on 79,
+    and 18 of the 30 multi-session failures never opened it at all, among them
+    plainly countable questions whose answer named no derivation.
+
+    The second door yields to the calendar, which owns claims that declare a
+    date difference and spends the one allowed regeneration on the
+    arithmetic; "how many days ago" is that question, not a count.
+    See `aggregation_pass.asks_to_aggregate` and the research note of
+    2026-09-19.
+    """
+    from aggregation_pass import aggregating_claims, asks_to_aggregate
+    from calendar_pass import difference_claims
 
     if answer.get("status") != "answered":
         return False
-    return bool(aggregating_claims(answer))
+    if aggregating_claims(answer):
+        return True
+    return asks_to_aggregate(question) and not difference_claims(answer)
 
 
 def _widened(
@@ -2056,9 +2076,11 @@ def _beyond(merged: tuple, first: tuple, cited: tuple) -> tuple:
 
 
 def _entity_note(answer: Mapping[str, object], single: _AnswerPass) -> str:
+    """The mentions that are one thing, clustered in the unit the question counts."""
     from aggregation_pass import (
         CLUSTER_SYSTEM_PROMPT,
         counted_inputs,
+        counted_kind,
         duplicate_groups,
         entity_note,
     )
@@ -2066,7 +2088,8 @@ def _entity_note(answer: Mapping[str, object], single: _AnswerPass) -> str:
     def cluster(prompt: str) -> str | None:
         return _provider_response(single.generator, prompt, CLUSTER_SYSTEM_PROMPT, single.deadline)
 
-    return entity_note(duplicate_groups(counted_inputs(answer), cluster))
+    kind = counted_kind(single.question)
+    return entity_note(duplicate_groups(counted_inputs(answer), cluster, kind), kind)
 
 
 def _adopted(
