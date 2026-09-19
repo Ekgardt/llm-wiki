@@ -476,6 +476,21 @@ def lane_matrix(question: Mapping[str, object], rows: list[dict]) -> list[dict]:
     return [_lane_row(row, windows) for row in rows]
 
 
+def _lane_source(row: Mapping[str, object]) -> list:
+    """The entry a candidate belongs to: its file and the heading it sits under.
+
+    Without it `lane_matrix` says what every lane scored and nothing about
+    where the chunk came from, so a rule about sources — a per-source quota,
+    say — cannot be replayed over a recorded run at all: on 2026-09-19 that
+    question could only be bounded, never measured. The key is the one
+    `retrieval._source_key` and `query_memory._entry_key` already use.
+    """
+    ancestry = row.get("heading_ancestry")
+    if not isinstance(ancestry, (list, tuple)):
+        return [str(row.get("path", "")), []]
+    return [str(row.get("path", "")), [str(item) for item in ancestry]]
+
+
 def _lane_row(row: Mapping[str, object], windows: list[tuple[str, ...]]) -> dict:
     from lane_score import is_user_turn
     from longmemeval_coverage import normalized
@@ -488,6 +503,7 @@ def _lane_row(row: Mapping[str, object], windows: list[tuple[str, ...]]) -> dict
         "rerank_score": row.get("rerank_score"),
         "user_turn": is_user_turn(text),
         "evidence": any(window in folded for turn in windows for window in turn),
+        "source": _lane_source(row),
     }
 
 

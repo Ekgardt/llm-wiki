@@ -73,9 +73,16 @@ def test_the_stand_records_the_rows_a_refit_needs() -> None:
     question = {
         "haystack_sessions": [[{"content": "I sold the drum set last May.", "has_answer": True}]]
     }
+    daily = "knowledge/daily/2023-05-26.md"
     rows = [
-        {"content": "**user:** I sold the drum set last May.", "bm25_rank": 1, "vector_rank": 2},
-        {"content": "**assistant:** Noted.", "bm25_rank": 5, "vector_rank": None},
+        {
+            "content": "**user:** I sold the drum set last May.",
+            "bm25_rank": 1,
+            "vector_rank": 2,
+            "path": daily,
+            "heading_ancestry": ["Session one"],
+        },
+        {"content": "**assistant:** Noted.", "bm25_rank": 5, "vector_rank": None, "path": daily},
     ]
 
     matrix = longmemeval_vault.lane_matrix(question, rows)
@@ -83,6 +90,7 @@ def test_the_stand_records_the_rows_a_refit_needs() -> None:
     assert [row["evidence"] for row in matrix] == [True, False]
     assert [row["user_turn"] for row in matrix] == [True, False]
     assert [row["lexical_rank"] for row in matrix] == [1, 5]
+    assert [row["source"] for row in matrix] == [[daily, ["Session one"]], [daily, []]]
 
 
 def test_an_aggregated_report_is_refused_plainly_not_with_a_traceback(tmp_path: Path, capsys) -> None:
