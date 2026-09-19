@@ -5,6 +5,7 @@ Dated 2026-09-19. Item 1 of the plan in
 twelve candidates the reader sees, and what the recorded rows can and cannot say about it.
 
 Files: `scripts/retrieval.py`, `tests/test_one_source_does_not_take_the_window.py`,
+`benchmark/longmemeval_vault.py`, `tests/test_the_lane_score_refit_is_one_command.py`,
 `docs/research/2026-09-19-one-session-does-not-take-the-window.md`.
 
 ## What was found in the code
@@ -87,6 +88,42 @@ and most freed slots go to sources that hold nothing the question needs. The cei
 ceiling and the floor is a floor; the difference between them is exactly what one run of
 the frozen tree measures and nothing else can.
 
+## The condition, and why it changes less than it should
+
+The rule is conditional: a chunk waits only while some source the pool holds has no place.
+The table above is what an **unconditional** cap does. The question is whether the
+condition ever lifts inside the window of twelve, and the answer decides whether the loss
+above is real.
+
+It lifts only when the window already holds every source the pool holds. The pool is
+`_candidate_pool(12)` = 96 chunks. Measured over the 500 recorded rows, a question's
+corpus holds 497.7 chunks over 47.8 sessions on average — **10.45 chunks per session** —
+so 96 chunks cannot come from fewer than about nine sources unless the longest sessions are
+several times the average. The window holds at most twelve, and it holds far fewer in
+practice: the labelled sessions alone took 6.05 of the 12 slots over 1.95 sessions on the
+multi-session questions that lose.
+
+Counting only the questions where the window provably cannot hold as many sources as the
+pool must contain — `12 − answer_sessions_retrieved + sessions_covered <
+ceil(96 / biggest)`, with `biggest` a generous multiple of the average session:
+
+| longest session | quota must bind | can gain (of 41 missing) | loses evidence | rows demoted | of which judged correct |
+|---|---:|---:|---:|---:|---:|
+| 1 × average | 369 of 470 | 20 | 7 | 14 | 5 |
+| 2 × average | 158 of 470 | 8 | 3 | 8 | 1 |
+| 4 × average | 56 of 470 | 0 | 1 | 3 | 1 |
+
+**The condition does not remove the loss.** Under the assumption nearest the measured
+corpus — sessions of about the average length — the quota must bind on 369 of 470
+questions and the floor is 7 questions and 14 rows, against 8 and 15 for the
+unconditional cap. What the condition changes is the *provability*, not the behaviour: on
+the questions counted out the rows simply do not say whether a source was starved.
+
+The condition is still worth having, and not only on paper. Outside this benchmark the
+product's pools are small — a vault query over a handful of compiled pages routinely
+retrieves every source it holds — and there the quota is inert by construction, where an
+unconditional cap would reorder for nothing.
+
 ## Practice on this date
 
 - **Coverage first, then fill.** Budgeted packing as monotone submodular maximisation beats
@@ -113,17 +150,28 @@ the frozen tree measures and nothing else can.
 - A per-source quota is applied to the ordered candidates after the lane sort and before
   the exact-filename promotion. The source is the entry the packer already keys on:
   `(relative_path, heading_path)`.
-- At most `SOURCE_QUOTA = 2` chunks of one source take a place in the first pass; the
-  third and later chunks are **deferred to the back of the same list**, never dropped, in
+- At most `SOURCE_QUOTA = 2` chunks of one source keep their place **while a source the
+  pool holds has no place at all**. The condition is the rule, not a decoration on it: an
+  unconditional cap pays the 2026-09-15 price on every question, including the ones where
+  nothing is starved. A source's first chunk is always kept, so having been seen and
+  having a place are the same thing and the condition is `len(seen) < len(sources)`.
+- Chunks over the quota are **deferred to the back of the same list**, never dropped, in
   their own order. `_capped` still applies the window last.
-- The quota is therefore inert when the pool holds one source: the deferred chunks follow
-  the two kept ones immediately, so the sequence is unchanged. It never defers a source's
-  first chunk, so an only chunk cannot be displaced. Within the rule the lane score keeps
-  deciding order, and a source's chunks keep their order relative to each other.
+- A source with a chunk already waiting keeps its later chunks behind it too. Without that,
+  a slot freed by demoting a source's third chunk could be spent on that same source's
+  eighth — a worse chunk in the place of a better one — and a source would overtake itself.
+- Four properties follow and each is pinned by a test: a pool whose sources all hold a
+  place is untouched; a pool holding one source is untouched; a source's first chunk is
+  never deferred, so an only chunk cannot be displaced; a source's chunks keep their order
+  relative to each other.
 - The cap is one constant so the fresh run can measure 2 against 3 without a redesign.
+- `benchmark/longmemeval_vault.py::_lane_row` now records each candidate's
+  `(path, heading_ancestry)` as `source`. One field, and the next run's `lane_matrix`
+  becomes replayable candidate by candidate instead of bounded.
 - Not settled here, and only a full run of the frozen tree can settle it: whether the
   gain ceiling or the loss floor is nearer the truth, and therefore whether the cap belongs
-  at 2, at 3, or conditioned on the question's shape.
+  at 2, at 3, or conditioned on the question's shape. The recorded rows say the loss is
+  real and small and the gain is possible and unmeasured; they cannot say which is bigger.
 
 ## Sources
 

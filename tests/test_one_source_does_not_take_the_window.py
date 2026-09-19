@@ -103,6 +103,19 @@ def test_a_pool_holding_one_source_keeps_the_order_it_had() -> None:
     assert _ids(retrieval._source_quota(ranked)) == _ids(ranked)
 
 
+def test_a_pool_whose_sources_all_hold_a_place_is_untouched() -> None:
+    """Nothing is starved, so the cap does not bind and the lane order stands."""
+    ranked = [
+        _chunk("Session one", 0),
+        _chunk("Session two", 50),
+        _chunk("Session one", 100),
+        _chunk("Session one", 200),
+        _chunk("Session two", 300),
+    ]
+
+    assert _ids(retrieval._source_quota(ranked)) == _ids(ranked)
+
+
 def test_a_source_with_one_chunk_keeps_its_place() -> None:
     """The quota never defers a source's first chunk, so an only chunk cannot fall."""
     only = _chunk("Session two", 300)
@@ -115,7 +128,7 @@ def test_a_source_with_one_chunk_keeps_its_place() -> None:
 
 
 def test_the_chunks_of_one_source_keep_their_order() -> None:
-    """Within the rule the lane score still decides: a source is never re-sorted."""
+    """A source never overtakes itself: a later chunk cannot pass a waiting one."""
     ranked = [
         _chunk("Session one", 0),
         _chunk("Session one", 100),
@@ -129,6 +142,19 @@ def test_the_chunks_of_one_source_keep_their_order() -> None:
 
     assert starts == [0, 100, 200, 400]
     assert _ids(ordered) == _ids([ranked[0], ranked[1], ranked[3], ranked[2], ranked[4]])
+
+
+def test_the_cap_lifts_once_nobody_is_starved_any_more() -> None:
+    """Two sources, both placed, and the third chunk of one keeps its place."""
+    ranked = [
+        _chunk("Session one", 0),
+        _chunk("Session one", 100),
+        _chunk("Session two", 200),
+        _chunk("Session one", 300),
+        _chunk("Session two", 400),
+    ]
+
+    assert _ids(retrieval._source_quota(ranked)) == _ids(ranked)
 
 
 def test_the_quota_defers_and_never_drops() -> None:

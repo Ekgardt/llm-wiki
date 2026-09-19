@@ -3138,23 +3138,28 @@ def _source_key(candidate: RetrievalCandidate) -> tuple[str, tuple[str, ...]]:
     return (candidate.relative_path, candidate.heading_path)
 
 
-def _place_in_quota(
-    candidate: RetrievalCandidate,
-    place: int,
-    kept: list[RetrievalCandidate],
-    deferred: list[RetrievalCandidate],
-) -> None:
-    """A chunk within its source's quota keeps its place; a later one waits."""
+def _quota_waits(place: int, starved: bool, waiting: bool) -> bool:
+    """Whether this chunk waits behind the rest of the list.
+
+    Being over the quota only costs a chunk its place while a source of the
+    pool has no place at all. Once every source the pool holds has one, there
+    is nobody left to make room for and the quota stops binding: the rest of
+    the order is the lane score's, exactly as before this rule existed.
+
+    The second half of the condition keeps a source from overtaking itself. A
+    source with a chunk already waiting keeps its later chunks behind it, or a
+    slot freed by demoting a source's third chunk could be spent on that same
+    source's eighth — a worse chunk in the place of a better one.
+    """
     if place <= SOURCE_QUOTA:
-        kept.append(candidate)
-        return
-    deferred.append(candidate)
+        return False
+    return starved or waiting
 
 
 def _source_quota(
     candidates: Sequence[RetrievalCandidate],
 ) -> tuple[RetrievalCandidate, ...]:
-    """At most two chunks of one source while another source has none.
+    """At most two chunks of one source *while* a source of the pool has none.
 
     The packer already spends its budget this way — `query_memory._shed_one`
     drops the second span of a page already present before the only span of
@@ -3163,26 +3168,43 @@ def _source_quota(
     was never applied one step earlier, where the twelve candidates are chosen,
     and that is where the 2026-09-18 run lost its multi-session questions.
 
+    The condition is the whole rule, not a decoration on it. An unconditional
+    cap is the shape our own measurement of 2026-09-15 priced at all-turns@12
+    0.566 against 0.698 for plain relevance order, and it takes that price on
+    every question, including the ones where no source is starved at all. So a
+    chunk over the quota waits only while some source the pool holds has no
+    place yet. A source's first chunk is always kept, so having been seen and
+    having a place are the same thing, and the condition is exactly
+    `len(seen) < len(sources)`.
+
     Nothing is dropped. The chunks over the quota are deferred to the back of
     the same list in their own order, and `_capped` applies the window after,
-    so this is a demotion and not a filter. Three properties follow from that
+    so this is a demotion and not a filter. Four properties follow from that
     shape and each is pinned by a test:
 
-    * a pool holding one source is untouched — its deferred chunks follow the
-      kept ones immediately, which is the order it already had;
+    * a pool whose sources all already hold a place is untouched — nothing is
+      starved, so nothing is deferred;
+    * a pool holding one source is untouched, which is that property's
+      sharpest case;
     * a source's first chunk is never deferred, so an only chunk cannot lose
       its place to the quota;
     * a source's chunks keep their order relative to each other.
 
     Research: `docs/research/2026-09-19-one-session-does-not-take-the-window.md`.
     """
+    sources = {_source_key(candidate) for candidate in candidates}
     taken: dict[tuple[str, tuple[str, ...]], int] = {}
+    waiting: set[tuple[str, tuple[str, ...]]] = set()
     kept: list[RetrievalCandidate] = []
     deferred: list[RetrievalCandidate] = []
     for candidate in candidates:
         key = _source_key(candidate)
         taken[key] = taken.get(key, 0) + 1
-        _place_in_quota(candidate, taken[key], kept, deferred)
+        if _quota_waits(taken[key], len(taken) < len(sources), key in waiting):
+            waiting.add(key)
+            deferred.append(candidate)
+            continue
+        kept.append(candidate)
     return tuple(kept + deferred)
 
 
