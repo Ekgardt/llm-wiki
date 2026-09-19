@@ -56,31 +56,31 @@ def _values(beliefs) -> list[str]:
 
 def test_an_inferred_claim_does_not_close_what_the_user_said():
     records = [
-        _claim("c1", "fix-pip", EARLY),
-        _claim("c2", "agenticos", LATE, authority="inferred", confidence="low"),
+        _claim("c1", "project-alpha", EARLY),
+        _claim("c2", "project-beta", LATE, authority="inferred", confidence="low"),
     ]
 
     first, second = history(records)
 
     assert first.expired_at is None
     assert first.invalid_at is None
-    assert _values(as_of(records, valid_at=LATER)) == ["agenticos", "fix-pip"]
+    assert _values(as_of(records, valid_at=LATER)) == ["project-alpha", "project-beta"]
 
 
 def test_a_user_claim_closes_an_earlier_model_claim():
     records = [
-        _claim("c1", "fix-pip", EARLY, authority="ai-derived", confidence="high"),
-        _claim("c2", "agenticos", LATE),
+        _claim("c1", "project-alpha", EARLY, authority="ai-derived", confidence="high"),
+        _claim("c2", "project-beta", LATE),
     ]
 
     first, second = history(records)
 
     assert first.expired_at == LATE
-    assert _values(as_of(records, valid_at=LATER)) == ["agenticos"]
+    assert _values(as_of(records, valid_at=LATER)) == ["project-beta"]
 
 
 def test_equal_standing_still_means_newest_wins():
-    records = [_claim("c1", "fix-pip", EARLY), _claim("c2", "agenticos", LATE)]
+    records = [_claim("c1", "project-alpha", EARLY), _claim("c2", "project-beta", LATE)]
 
     first, second = history(records)
 
@@ -90,8 +90,8 @@ def test_equal_standing_still_means_newest_wins():
 
 def test_a_reliable_third_claim_closes_both_open_ones():
     records = [
-        _claim("c1", "fix-pip", EARLY),
-        _claim("c2", "agenticos", LATE, authority="inferred"),
+        _claim("c1", "project-alpha", EARLY),
+        _claim("c2", "project-beta", LATE, authority="inferred"),
         _claim("c3", "llm-wiki", LATER),
     ]
 
@@ -105,8 +105,8 @@ def test_a_reliable_third_claim_closes_both_open_ones():
 
 def test_confidence_breaks_a_tie_on_authority():
     records = [
-        _claim("c1", "fix-pip", EARLY, confidence="high"),
-        _claim("c2", "agenticos", LATE, confidence="low"),
+        _claim("c1", "project-alpha", EARLY, confidence="high"),
+        _claim("c2", "project-beta", LATE, confidence="low"),
     ]
 
     first, _second = history(records)

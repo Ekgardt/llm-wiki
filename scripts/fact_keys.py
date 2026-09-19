@@ -8,8 +8,16 @@ is read: a fact a model wrote is never a citation, so the key points at the
 user's turn, and the turn is what the reader gets.
 
 Keys are extracted at compile, in the nightly window, never at capture; they
-live in a disposable store under `cache/fact-keys/` beside the generation and
-touch no generation artifact; a turn is keyed once, by the hash of its bytes.
+live in a disposable store under `cache/fact-keys/` beside the generation; a
+turn is keyed once, by the hash of its bytes. The store has one reader: the
+next generation build copies the keys into the `keys` column of its search
+table (`docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`), which
+is the shape the paper measured as the good one. The separate keys leg, its
+vectors and its own full-text table were removed on 2026-09-17
+(`docs/research/2026-09-17-the-keys-live-in-the-index-and-nowhere-else.md`).
+The keys are a model's words: a build made after the store was deleted carries
+different keys, so two builds of one snapshot need not be byte-identical. The
+artifact is sealed by its own digest and stays disposable.
 See `docs/research/2026-09-09-fact-keys-beside-the-turn.md`.
 
     uv run python scripts/fact_keys.py            # key the turns that have none yet
@@ -27,11 +35,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-# numpy (the hybrid profile) is imported where vectors are computed, so this module and
-# the answer path that imports it load on a base install. See
-# `docs/research/2026-09-14-a-base-install-can-search.md`.
-
-
 SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -43,8 +46,13 @@ MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
 MAX_TURN_CHARS = 1500
 # A nightly step keys new entries in this much time and leaves the rest for
-# the next night; the store remembers what is done.
-DEFAULT_BUDGET_SECONDS = 600.0
+# the next night; the store remembers what is done. The nightly kills the step
+# at this budget plus the margin one last provider call may take
+# (`scheduled_nightly.provider_margin_seconds`), which in auto mode is the whole
+# provider order and not one of them.
+# Research: docs/research/2026-09-17-a-step-no-provider-answered-is-not-green.md,
+# docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+DEFAULT_BUDGET_SECONDS = 540.0
 EXTRACT_SYSTEM_PROMPT = (
     "You read turns a person wrote to an assistant and write search keys for "
     "them. For each turn, list up to five short facts the person states about "
@@ -63,11 +71,14 @@ CREATE TABLE IF NOT EXISTS keys(
     byte_start INTEGER NOT NULL,
     byte_end INTEGER NOT NULL,
     span_sha256 TEXT NOT NULL,
-    key TEXT NOT NULL,
-    vector BLOB
+    key TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS key_fts USING fts5(key, tokenize = 'porter unicode61');
+CREATE TABLE IF NOT EXISTS attempts(span_sha256 TEXT PRIMARY KEY, asked INTEGER NOT NULL);
 """
+# A turn the provider's reply never covers is asked this many nights and then left
+# to be found by its own text. Without the bound the same failing batch was first in
+# line every night and spent the step's budget before any new turn was reached.
+MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,30 @@ def user_turns(chunks: Iterable[object]) -> list[Turn]:
     return turns
 
 
+def keys_by_span(path: Path) -> dict[str, str]:
+    """Every key, gathered per turn span, for the index to carry beside the chunk.
+
+    Key expansion is the shape LongMemEval measured as the good one: a turn is found under
+    the facts it states as well as under its text, and the reader still gets the turn.
+    Research: `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
+    if not path.exists():
+        return {}
+    store = KeyStore(path)
+    try:
+        rows = store.connection.execute("SELECT span_sha256, key FROM keys ORDER BY id").fetchall()
+    finally:
+        store.close()
+    return _joined_keys(rows)
+
+
+def _joined_keys(rows: Iterable[tuple[object, object]]) -> dict[str, str]:
+    by_span: dict[str, list[str]] = {}
+    for span, key in rows:
+        by_span.setdefault(str(span), []).append(str(key))
+    return {span: "\n".join(keys) for span, keys in by_span.items()}
+
+
 class KeyStore:
     """The disposable store of keys, one SQLite file under cache/."""
 
@@ -139,59 +174,42 @@ class KeyStore:
     def keyed(self) -> set[str]:
         return {row[0] for row in self.connection.execute("SELECT span_sha256 FROM keyed")}
 
-    def add(self, turn: Turn, keys: Sequence[str], vectors: Sequence[Sequence[float]] | None) -> None:
-        """Record the turn as keyed, and each of its keys with its vector when given."""
+    def add(self, turn: Turn, keys: Sequence[str]) -> None:
+        """Record the turn as keyed, and each of its keys."""
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         self.connection.execute("INSERT OR REPLACE INTO keyed VALUES (?, ?)", (turn.span_sha256, stamp))
-        for index, key in enumerate(keys):
-            self._add_key(turn, key, _blob(vectors, index))
+        self.connection.executemany(
+            "INSERT INTO keys(source_path, byte_start, byte_end, span_sha256, key) VALUES (?, ?, ?, ?, ?)",
+            [(turn.source_path, turn.byte_start, turn.byte_end, turn.span_sha256, key) for key in keys],
+        )
         self.connection.commit()
 
-    def _add_key(self, turn: Turn, key: str, vector: bytes | None) -> None:
-        cursor = self.connection.execute(
-            "INSERT INTO keys(source_path, byte_start, byte_end, span_sha256, key, vector) VALUES (?, ?, ?, ?, ?, ?)",
-            (turn.source_path, turn.byte_start, turn.byte_end, turn.span_sha256, key, vector),
+    def asked(self) -> dict[str, int]:
+        """How many times each still-unkeyed turn has been put to the provider."""
+        rows = self.connection.execute("SELECT span_sha256, asked FROM attempts")
+        return {str(span): int(count) for span, count in rows}
+
+    def note_asked(self, turns: Sequence[Turn]) -> None:
+        """Count one more attempt for each of these turns."""
+        self.connection.executemany(
+            "INSERT INTO attempts VALUES (?, 1) ON CONFLICT(span_sha256) DO UPDATE SET asked = asked + 1",
+            [(turn.span_sha256,) for turn in turns],
         )
-        self.connection.execute("INSERT INTO key_fts(rowid, key) VALUES (?, ?)", (cursor.lastrowid, key))
+        self.connection.commit()
 
     def count(self) -> tuple[int, int]:
         turns = self.connection.execute("SELECT COUNT(*) FROM keyed").fetchone()[0]
         keys = self.connection.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
         return int(turns), int(keys)
 
-    def lexical(self, query: str, limit: int) -> list[tuple]:
-        from search_memory import _fts_query
-
-        expression = _fts_query(query)
-        if not expression:
-            return []
-        return self.connection.execute(
-            "SELECT k.source_path, k.byte_start, k.byte_end, k.key FROM key_fts f "
-            "JOIN keys k ON k.id = f.rowid WHERE key_fts MATCH ? ORDER BY bm25(key_fts) LIMIT ?",
-            (expression, limit),
-        ).fetchall()
-
-    def dense(self, vector: Sequence[float], limit: int) -> list[tuple]:
-        rows = self.connection.execute(
-            "SELECT source_path, byte_start, byte_end, key, vector FROM keys WHERE vector IS NOT NULL"
-        ).fetchall()
-        if not rows:
-            return []
-        import numpy as np
-
-        matrix = np.stack([np.frombuffer(row[4], dtype=np.float32) for row in rows])
-        query = np.asarray(vector, dtype=np.float32)
-        scores = matrix @ query / (np.linalg.norm(matrix, axis=1) * (np.linalg.norm(query) or 1.0) + 1e-9)
-        order = np.argsort(-scores, kind="stable")[:limit]
-        return [rows[int(index)][:4] for index in order]
-
-
-def _blob(vectors: Sequence[Sequence[float]] | None, index: int) -> bytes | None:
-    if vectors is None or index >= len(vectors):
-        return None
-    import numpy as np
-
-    return np.asarray(vectors[index], dtype=np.float32).tobytes()
+    def given_up(self) -> int:
+        """Turns that used up their attempts and were never keyed."""
+        row = self.connection.execute(
+            "SELECT COUNT(*) FROM attempts WHERE asked >= ? "
+            "AND span_sha256 NOT IN (SELECT span_sha256 FROM keyed)",
+            (MAX_ATTEMPTS,),
+        ).fetchone()
+        return int(row[0])
 
 
 def _batch_prompt(turns: Sequence[Turn]) -> str:
@@ -224,51 +242,62 @@ def _loaded(raw: str | None) -> dict:
     return document
 
 
-def _turn_indices(document: Mapping[str, object], size: int) -> list[int]:
-    numbered = (int(name) for name in document if re.fullmatch(r"\d+", str(name)))
-    return [index for index in numbered if index < size]
+def _turn_indices(document: Mapping[str, object], size: int) -> dict[int, str]:
+    """Each turn index the reply covers, with the name the reply wrote it under.
+
+    The value can only be read back under the reply's own spelling: "00" is turn
+    0, and looking it up as "0" raised and failed the nightly step. The first
+    spelling of an index wins.
+    """
+    named: dict[int, str] = {}
+    for name in document:
+        if re.fullmatch(r"\d+", str(name)):
+            named.setdefault(int(name), name)
+    return {index: name for index, name in named.items() if index < size}
 
 
 def _parsed_batch(raw: str | None, size: int) -> dict[int, list[str]]:
     """Keys per turn index, from the reply; an unreadable reply keys nothing."""
     document = _loaded(raw)
-    return {index: _clean_keys(document[str(index)]) for index in _turn_indices(document, size)}
+    return {index: _clean_keys(document[name]) for index, name in _turn_indices(document, size).items()}
 
 
-def extract(turns: Sequence[Turn], ask: Callable[[str, str], str | None]) -> dict[str, list[str]]:
-    """Keys per turn hash, one provider call per batch of turns."""
-    found: dict[str, list[str]] = {}
-    for start in range(0, len(turns), BATCH_TURNS):
-        batch = turns[start : start + BATCH_TURNS]
-        parsed = _parsed_batch(ask(_batch_prompt(batch), EXTRACT_SYSTEM_PROMPT), len(batch))
-        found.update({batch[index].span_sha256: keys for index, keys in parsed.items()})
-    return found
+def _found(batch: Sequence[Turn], raw: str | None) -> dict[str, list[str]]:
+    """Keys per turn hash, read from the one reply a batch of turns got."""
+    parsed = _parsed_batch(raw, len(batch))
+    return {batch[index].span_sha256: keys for index, keys in parsed.items()}
 
 
-def _encoded(keys: Sequence[str], encode: Callable | None) -> Sequence[Sequence[float]] | None:
-    if encode is None or not keys:
-        return None
-    import numpy as np
+def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
+    """The user turns still to be keyed: never-asked first, given-up ones left out.
 
-    return np.asarray(encode(list(keys), False), dtype=np.float32).tolist()
+    The sort is stable, so among turns asked equally often the chunk order holds.
+    """
+    done = store.keyed()
+    asked = store.asked()
+    waiting = [
+        turn
+        for turn in user_turns(chunks)
+        if turn.span_sha256 not in done and asked.get(turn.span_sha256, 0) < MAX_ATTEMPTS
+    ]
+    return sorted(waiting, key=lambda turn: asked.get(turn.span_sha256, 0))
 
 
 def key_turns(
     store: KeyStore,
     chunks: Iterable[object],
     ask: Callable[[str, str], str | None],
-    encode: Callable | None = None,
     deadline: float | None = None,
 ) -> int:
     """Key every user turn the store has not seen; how many turns were keyed."""
-    done = store.keyed()
-    pending = [turn for turn in user_turns(chunks) if turn.span_sha256 not in done]
+    pending = waiting_turns(store, chunks)
     keyed = 0
     for start in range(0, len(pending), BATCH_TURNS):
         if _past(deadline):
             break
         batch = pending[start : start + BATCH_TURNS]
-        keyed += _key_batch(store, batch, extract(batch, ask), encode)
+        raw = ask(_batch_prompt(batch), EXTRACT_SYSTEM_PROMPT)
+        keyed += _key_batch(store, batch, _found(batch, raw), bool(raw))
     return keyed
 
 
@@ -276,48 +305,38 @@ def _past(deadline: float | None) -> bool:
     return deadline is not None and time.monotonic() > deadline
 
 
-def _key_batch(store: KeyStore, batch: Sequence[Turn], found: Mapping[str, list[str]], encode) -> int:
+def _key_batch(
+    store: KeyStore, batch: Sequence[Turn], found: Mapping[str, list[str]], replied: bool = True
+) -> int:
     """Record the turns the reply named; a turn it did not cover is asked again.
 
     Every turn of a batch used to be marked keyed, so a reply that failed or
     skipped a turn left it keyless forever. An empty list is the model saying the
     turn states nothing, and counts. See
     `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
+
+    Asked again, but not for ever: a turn a reply left out has used one of its
+    `MAX_ATTEMPTS`. A provider that said nothing at all used none — an outage is
+    not the turn's fault, and three silent nights must not retire every turn.
     """
     answered = [turn for turn in batch if turn.span_sha256 in found]
     for turn in answered:
-        keys = found[turn.span_sha256]
-        store.add(turn, keys, _encoded(keys, encode))
+        store.add(turn, found[turn.span_sha256])
+    store.note_asked(_left_out(batch, found, replied))
     return len(answered)
 
 
-def search(store: KeyStore, question: str, limit: int, encode: Callable | None = None) -> list[dict]:
-    """The turns whose keys match the question, as candidates a context can resolve.
-
-    Lexical hits and, with an encoder, dense hits, one vote each; a turn two
-    legs agree on comes first.
-    """
-    hits = list(store.lexical(question, limit))
-    if encode is not None:
-        hits.extend(store.dense(encode([question], True)[0], limit))
-    votes: dict[tuple, int] = {}
-    for source_path, byte_start, byte_end, _key in hits:
-        votes[(source_path, byte_start, byte_end)] = votes.get((source_path, byte_start, byte_end), 0) + 1
-    ranked = sorted(votes, key=lambda span: (-votes[span], list(votes).index(span)))[:limit]
-    return [{"path": path, "byte_start": start, "byte_end": end, "cited": True} for path, start, end in ranked]
-
-
-def _resident_encoder():
-    from query_memory import _sentence_encoder
-
-    return _sentence_encoder()
+def _left_out(batch: Sequence[Turn], found: Mapping[str, list[str]], replied: bool) -> list[Turn]:
+    """The turns a reply was given and did not cover; none when there was no reply."""
+    if not replied:
+        return []
+    return [turn for turn in batch if turn.span_sha256 not in found]
 
 
 def _daily_paths(vault: Path) -> list[str]:
-    daily = vault / "knowledge" / "daily"
-    if not daily.is_dir():
-        return []
-    return sorted(path.relative_to(vault).as_posix() for path in daily.glob("*.md"))
+    from memory_state import daily_logs
+
+    return [path.relative_to(vault).as_posix() for path in daily_logs(vault / "knowledge" / "daily")]
 
 
 def _provider_ask(prompt: str, system_prompt: str) -> str | None:
@@ -334,14 +353,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true", help="print how many turns and keys the store holds")
     parser.add_argument("--budget-seconds", type=float, default=DEFAULT_BUDGET_SECONDS)
     args = parser.parse_args(argv)
+    # The step's clock starts with the step: collecting the corpus is part of it.
+    deadline = time.monotonic() + args.budget_seconds
     store = KeyStore(store_path(STATE_ROOT))
     if args.status:
         turns, keys = store.count()
-        print(f"keyed turns={turns} keys={keys}")
+        print(f"keyed turns={turns} keys={keys} given up={store.given_up()}")
         return 0
     snapshot = collect_corpus(ROOT, code_roots=(), daily_paths=_daily_paths(ROOT))
-    keyed = key_turns(store, snapshot.chunks, _provider_ask, None, time.monotonic() + args.budget_seconds)
-    print(f"keyed {keyed} turns")
+    waiting = len(waiting_turns(store, snapshot.chunks))
+    keyed = key_turns(store, snapshot.chunks, _provider_ask, deadline)
+    print(f"keyed {keyed} of {waiting} waiting turns")
+    return _step_exit(waiting, keyed)
+
+
+def _step_exit(waiting: int, keyed: int) -> int:
+    """Turns were waiting and none was keyed: the step did nothing, and says so."""
+    if waiting > 0 and keyed == 0:
+        print("fact_keys: turns are waiting and none was keyed", file=sys.stderr)
+        return 1
     return 0
 
 

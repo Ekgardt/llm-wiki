@@ -34,16 +34,80 @@ COVERAGE_NOTE = (
 )
 
 
-def _current_sha(directory: Path, relative: str) -> str | None:
+MAX_HASHED_BYTES = 16 * 1024 * 1024
+# Never a digest: 64 hex characters cannot spell it.
+UNREADABLE = "unreadable"
+
+
+def contained_scope(directory: Path, deadline: float):
+    """The repository scope rooted at exactly this directory, or None.
+
+    Audit 3, A2: the file on disk is read only through the contained reader the
+    precise modes use, never by joining the caller's text onto a directory.
+    Research: `docs/research/2026-09-17-coverage-reads-only-inside-the-repository.md`.
+    """
+    from repository_scope import resolve_repository_scope
+
     try:
-        return hashlib.sha256((directory / relative).read_bytes()).hexdigest()
+        scope = resolve_repository_scope(Path(directory), deadline=deadline)
+    except TimeoutError:
+        raise
     except OSError:
         return None
+    if Path(scope.checkout_root) != Path(directory).resolve():
+        return None
+    return scope
+
+
+def _exists_inside(scope, relative: str) -> bool | None:
+    """True or False for a path inside the scope; None when it is not inside."""
+    import os
+
+    from lsp_security import resolve_repository_source
+
+    if scope is None:
+        return None
+    try:
+        source = resolve_repository_source(scope, relative, must_exist=False)
+    except (TypeError, ValueError):
+        return None
+    return os.path.lexists(source.absolute_path)
+
+
+def _contained_sha(scope, relative: str, deadline: float) -> str:
+    from lsp_security import PathContainmentError, read_repository_source_bytes
+
+    try:
+        content = read_repository_source_bytes(
+            scope, relative, max_bytes=MAX_HASHED_BYTES, deadline=deadline
+        )
+    except PathContainmentError:
+        return UNREADABLE
+    return hashlib.sha256(content).hexdigest()
+
+
+def _current_sha(scope, relative: str, deadline: float) -> str | None:
+    """The file's digest, None when it is absent, UNREADABLE when refused."""
+    exists = _exists_inside(scope, relative)
+    if exists is None:
+        return UNREADABLE
+    if not exists:
+        return None
+    return _contained_sha(scope, relative, deadline)
+
+
+_DISK_STATES = {None: "missing_on_disk", UNREADABLE: UNREADABLE}
 
 
 def _freshness(recorded: str | None, current: str | None) -> str:
-    if current is None:
-        return "missing_on_disk"
+    """What the disk says first; only a digest is compared with the index."""
+    disk_state = _DISK_STATES.get(current)
+    if disk_state is not None:
+        return disk_state
+    return _indexed_freshness(recorded, current)
+
+
+def _indexed_freshness(recorded: str | None, current: str | None) -> str:
     if recorded is None:
         return "not_indexed"
     return "fresh" if recorded == current else "stale"
@@ -178,11 +242,12 @@ def coverage_for_path(directory: Path, relative: str, deadline: float) -> dict:
 def _coverage_answer(graph, directory: Path, relative: str, deadline: float) -> dict:
     source = graph.source_by_path(relative, deadline=deadline)
     recorded = source.get("sha256") if source else None
+    current = _current_sha(contained_scope(directory, deadline), relative, deadline)
     answer = {
         "path": relative,
         "generation_id": str(graph.generation_id),
         **_source_fields(graph, source, relative, deadline),
-        "freshness": _freshness(recorded, _current_sha(directory, relative)),
+        "freshness": _freshness(recorded, current),
         "note": COVERAGE_NOTE,
     }
     answer.update(_node_count(graph, relative, deadline))

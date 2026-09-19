@@ -122,7 +122,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
 - AI-агент, которым вы уже пользуетесь (Claude Code, OpenCode или Codex)
 
 ### Установка из исходников
@@ -152,6 +152,9 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 и задавайте это значение: bootstrap получает точный commit, проверяет `HEAD`, identity
 репозитория и обязательные файлы, затем запускает только установщик из checkout. Имена
 веток и тегов отклоняются.
+Проверенный commit становится локальной веткой `main`, которая следит за `origin/main`,
+поэтому ночное fast-forward-обновление доходит до такого хранилища так же, как до
+клонированного; `git -C ~/LLM-wiki checkout --detach` замораживает его на текущем commit.
 
 Локальный установщик синхронизирует locked production baseline, запускает ограниченный
 production smoke, создаёт runtime-директории и подключает поддерживаемых агентов. Полный
@@ -172,7 +175,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 Установить именно этот коммит:
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### Общий транспорт HTTP (необязательно)
@@ -208,8 +212,11 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
 `run/`. С offline apply-флагами (`--apply --adopt-ownership-v3
 --confirm-all-agents-stopped`) команда выполняет переход на v3 для свежего или
-неактивного хранилища; установщик делает это сам, потому что до перехода захват сессий
-отклоняется (issue #17). Команда никогда не удаляет
+неактивного хранилища; на свежем хранилище установщик делает это сам, потому что до
+перехода захват сессий отклоняется (issue #17). Хранилище, в котором уже есть прежняя
+очередь, переходит на v3 только когда вы сами сказали установщику, что ни один агент не
+запущен (`--confirm-all-agents-stopped`, в PowerShell `-ConfirmAllAgentsStopped`); иначе
+установщик называет команду и очередь не трогает. Команда никогда не удаляет
 `run/`, knowledge, retired databases, legacy caches или compatibility markers.
 
 Опциональные extras добавляются без удаления уже выбранных оператором пакетов:
@@ -286,7 +293,7 @@ RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 
 `cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в `cache/evidence-graph/generations/<generation-id>/`. Candidate регистрируется только после проверки manifest, состава source, хешей artifacts, целостности базы и evidence spans. Активация меняет указатель через compare-and-swap. Сбой или прерывание до активации оставляет предыдущее поколение активным; повреждённое активное поколение пропускается в пользу последнего проверенного предыдущего. Полные orphan generations могут быть зарегистрированы при recovery, но автоматически не активируются.
 
-Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
+Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Ответ с fallback называет причину: `no_generation`, если у репозитория поколения нет, или `generation_unreadable:<ExceptionClass>`, если поколение есть, но открыть его не удалось. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
 
 Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. Новая embedding model или reranker пока не выбраны: **evidence pending**. Существующая опциональная vector-совместимость продолжает использовать закреплённую legacy model. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
 
@@ -318,7 +325,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence; недельный прогон запускает этот архиватор сам, а команда выше — его ручная форма. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 
@@ -340,13 +347,19 @@ uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-cla
 
 Локальный stdio MCP-сервер предоставляет **12 task-shaped инструментов**, включая `doctor`, единый response envelope и health/context resources. `find_dead_code(directory)` возвращает консервативные кандидаты, а `get_architecture(directory)` — entry points, routes, hotspots по canonical symbol ID и communities. Анализ файловой системы требует явно заданную существующую директорию, не принимает корень диска и не использует CWD как fallback.
 
-Точные Python-режимы `definition`, `references`, `implementations`, `type`,
-`diagnostics` и позиционные `callers`/`callees` используют закреплённый
-**Pyright 1.1.411**. Установите его явно; запросы ничего не скачивают и не
-обновляют:
+Точные режимы `definition`, `references`, `implementations`, `type`,
+`diagnostics` и позиционные `callers`/`callees` используют четыре закреплённых
+управляемых языковых сервера: **Pyright 1.1.411** (Python),
+**typescript-language-server 6.0.0** с tsserver 5.9.3 (TypeScript/JavaScript),
+**gopls v0.23.0** (Go, собирается из закреплённого тулчейна Go 1.27.1) и
+**rust-analyzer 1.98.1** (Rust, вместе со своим закреплённым тулчейном Rust).
+Установите каждый явно; запросы ничего не скачивают и не обновляют:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 Этот путь поддерживается только в **доверенных локальных репозиториях** и

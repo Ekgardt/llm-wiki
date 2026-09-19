@@ -37,6 +37,17 @@ from reliable_memory import (
 _MAX_ENTRIES = 1_000_000
 _CHUNK_BYTES = 1024 * 1024
 _MAX_REPOSITORY_FILE_BYTES = 16 * 1024
+_MAX_GIT_LISTING_BYTES = 8 * 1024 * 1024
+
+# What the image never carries. `cache/`, `logs/` and `run/` are the runtime
+# (the `run/` half is staged separately); a clone restores `.git`, `uv sync`
+# restores `.venv`, and the rest are tool caches — the class Restic's own
+# `--exclude-caches` is for. Research:
+# docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md
+_EXCLUDED_TOP_LEVEL = frozenset({"cache", "logs", "run", ".git", ".venv"})
+_REGENERABLE_DIRECTORY_NAMES = frozenset(
+    {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"}
+)
 _RESTIC_VERSION = "0.19.1"
 _ACTIVE_DATABASES = (
     "markdown-transactions-v3.sqlite3",
@@ -309,10 +320,13 @@ def _skip_source_entry(
     name: str,
     excluded_top_level: frozenset[str],
     excluded_files: frozenset[str],
+    carried: frozenset[str] = frozenset(),
 ) -> bool:
     if not relative.parts and name in excluded_top_level:
         return True
-    return name in excluded_files
+    if name in excluded_files:
+        return True
+    return (relative / name).as_posix() in carried
 
 
 def _stable_file_entry(
@@ -378,6 +392,7 @@ def _scan_tree(
     deadline: float,
     excluded_top_level: frozenset[str] = frozenset(),
     excluded_files: frozenset[str] = frozenset(),
+    carried: frozenset[str] = frozenset(),
 ) -> tuple[_Entry, ...]:
     entries: list[_Entry] = []
 
@@ -386,7 +401,7 @@ def _scan_tree(
         for child in _directory_children(directory):
             _deadline(deadline)
             if _skip_source_entry(
-                relative, child.name, excluded_top_level, excluded_files
+                relative, child.name, excluded_top_level, excluded_files, carried
             ):
                 continue
             child_path = Path(child.path)
@@ -544,6 +559,7 @@ def _maintain_heartbeat(
     lease: OwnerLease,
     stop: threading.Event,
     failures: list[BaseException],
+    held_since: float,
 ) -> None:
     # A busy database is retried until the lease expires; a lost fence is final.
     # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
@@ -555,6 +571,7 @@ def _maintain_heartbeat(
         interval=lease.heartbeat_seconds,
         lease_seconds=lease.ttl_seconds,
         attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+        held_since=held_since,
         stop=stop,
     )
     if ended is not None:
@@ -587,9 +604,11 @@ def _stop_heartbeat(
 def _heartbeat(registry: OwnershipRegistry, lease: OwnerLease) -> Iterator[None]:
     stop = threading.Event()
     failures: list[BaseException] = []
+    # The owner is already held; its expiry is counted from here.
+    held_since = time.monotonic()
     thread = threading.Thread(
         target=_maintain_heartbeat,
-        args=(registry, lease, stop, failures),
+        args=(registry, lease, stop, failures, held_since),
         name="backup-owner-heartbeat",
         daemon=True,
     )
@@ -727,6 +746,70 @@ def _require_runtime_valid(
         raise BackupError(code, invalid)
 
 
+def _git_paths(root: Path, arguments: tuple[str, ...], deadline: float) -> frozenset[str] | None:
+    """The NUL-separated paths one git query lists; None when git cannot answer.
+
+    A missing binary, a root that is no repository, a listing past the bound:
+    all mean the same thing here — nothing may be left out on git's word.
+    """
+    try:
+        result = _run_bounded(
+            ["git", "-C", str(root), *arguments],
+            cwd=root,
+            deadline=deadline,
+            max_output_bytes=_MAX_GIT_LISTING_BYTES,
+        )
+    except BackupError:
+        return None
+    if result.returncode != 0:
+        return None
+    listing = result.stdout.decode("utf-8", errors="replace").split("\0")
+    return frozenset(item for item in listing if item)
+
+
+def _git_carried_paths(root: Path, deadline: float) -> frozenset[str]:
+    """Vault-relative paths Git holds exactly as they are on disk.
+
+    A fresh clone already has these, so the image carries everything else — the
+    memory, the owner's untracked files, and any tracked file modified since the
+    last commit, because uncommitted work is what a backup is for. Research:
+    docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md
+    """
+    tracked = _git_paths(root, ("ls-files", "-z"), deadline)
+    if tracked is None:
+        return frozenset()
+    modified = _git_paths(root, ("diff", "--name-only", "-z", "HEAD"), deadline)
+    return tracked - (modified or frozenset())
+
+
+def _logical_prefixes(logical: str) -> Iterator[str]:
+    parts = logical.split("/")
+    for index in range(1, len(parts)):
+        yield "/".join(parts[:index])
+
+
+def _without_empty_directories(entries: tuple[_Entry, ...]) -> tuple[_Entry, ...]:
+    """Drop the directories the image would hold nothing in.
+
+    Whole trees of the product are left out because Git carries them; their
+    directories would otherwise stand in the image as empty shapes.
+    """
+    kept = _directories_on_the_way(entries)
+    return tuple(entry for entry in entries if _entry_belongs(entry, kept))
+
+
+def _directories_on_the_way(entries: tuple[_Entry, ...]) -> set[str]:
+    """Every directory that leads to something the image carries."""
+    leaves = [entry.path for entry in entries if entry.kind != "directory"]
+    return {prefix for path in leaves for prefix in _logical_prefixes(path)}
+
+
+def _entry_belongs(entry: _Entry, kept: set[str]) -> bool:
+    if entry.kind != "directory":
+        return True
+    return entry.path in kept
+
+
 def _source_entries(
     root: Path, state_root: Path, deadline: float
 ) -> tuple[tuple[_Entry, ...], tuple[_Entry, ...]]:
@@ -734,7 +817,9 @@ def _source_entries(
         root,
         prefix="vault",
         deadline=deadline,
-        excluded_top_level=frozenset({"cache", "logs", "run"}),
+        excluded_top_level=_EXCLUDED_TOP_LEVEL,
+        excluded_files=_REGENERABLE_DIRECTORY_NAMES,
+        carried=_git_carried_paths(root, deadline),
     )
     runtime_entries = _scan_tree(
         state_root / "run",
@@ -742,7 +827,7 @@ def _source_entries(
         deadline=deadline,
         excluded_files=frozenset(_ACTIVE_DATABASES) | _DATABASE_SIDECARS,
     )
-    return vault_entries, runtime_entries
+    return _without_empty_directories(vault_entries), runtime_entries
 
 
 def _create_image_structure(image: Path) -> None:
@@ -1203,6 +1288,7 @@ def _restic_backup(base: list[str], image: Path, deadline: float) -> str:
         + [
             "backup",
             "--json",
+            "--quiet",
             "--tag",
             "llm-wiki-private-v1",
             ".",
@@ -1254,7 +1340,8 @@ def _restore_inputs(
 
 
 def _validate_restore_counter(summary: dict[str, object], key: str) -> None:
-    value = summary.get(key)
+    """Restic leaves a zero counter out of its summary (`omitempty`)."""
+    value = summary.setdefault(key, 0)
     if type(value) is not int:
         raise BackupError("restic_restore_output_invalid")
     if value < 0:
@@ -1313,6 +1400,7 @@ def _run_restore(
             "restore",
             snapshot_id,
             "--json",
+            "--quiet",
             "--target",
             str(target),
         ],
@@ -1425,6 +1513,24 @@ def _files_under(source_root: Path, destination_root: Path) -> list[tuple[Path, 
     ]
 
 
+def _left_out_of_publication(path: Path) -> bool:
+    """A symlink or an empty directory: publication writes regular files only."""
+    if path.is_symlink():
+        return True
+    return path.is_dir() and not any(path.iterdir())
+
+
+def _left_out_under(half: Path) -> int:
+    if not half.is_dir():
+        return 0
+    return len([path for path in half.rglob("*") if _left_out_of_publication(path)])
+
+
+def _unpublished_entries(image: Path) -> int:
+    """How many entries of the image a publication does not write, for the receipt."""
+    return sum(_left_out_under(image / half) for half, _key in _IMAGE_ROOTS)
+
+
 def _same_bytes(source: Path, destination: Path) -> bool:
     return _hash_file(source, float("inf")) == _hash_file(destination, float("inf"))
 
@@ -1438,7 +1544,9 @@ def _destination_state(source: Path, destination: Path) -> str:
     return "conflict"
 
 
-def _planned_publication(pairs: list[tuple[Path, Path]]) -> tuple[list[tuple[Path, Path]], int]:
+def _planned_publication(
+    pairs: list[tuple[Path, Path]], image: Path
+) -> tuple[list[tuple[Path, Path]], int]:
     """(the files to write, how many are already identical); refused before any write.
 
     See `docs/research/2026-09-14-a-publication-is-all-or-nothing.md`.
@@ -1446,35 +1554,50 @@ def _planned_publication(pairs: list[tuple[Path, Path]]) -> tuple[list[tuple[Pat
     grouped: dict[str, list[tuple[Path, Path]]] = {"absent": [], "identical": [], "conflict": []}
     for source, destination in pairs:
         grouped[_destination_state(source, destination)].append((source, destination))
-    _refuse_conflicts(grouped["conflict"])
+    _refuse_conflicts(grouped["conflict"], image)
     return grouped["absent"], len(grouped["identical"])
 
 
-def _refuse_conflicts(conflicts: list[tuple[Path, Path]]) -> None:
+def _publish_conflict(source: Path, image: Path) -> BackupError:
+    """The refusal names the file by its place in the image, the same on every machine.
+
+    See `docs/research/2026-09-17-a-refused-publication-names-its-file.md`.
+    """
+    return BackupError("publish_conflict", (source.relative_to(image).as_posix(),))
+
+
+def _refuse_conflicts(conflicts: list[tuple[Path, Path]], image: Path) -> None:
     if conflicts:
-        raise BackupError("publish_conflict", (str(conflicts[0][1]),))
+        raise _publish_conflict(conflicts[0][0], image)
 
 
 def _write_new(source: Path, destination: Path) -> None:
     """Create exclusively and make it durable: the file and the entry that names it."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(destination, "xb") as handle:
-            handle.write(source.read_bytes())
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError:
-        raise BackupError("publish_conflict", (str(destination),)) from None
+    with open(destination, "xb") as handle:
+        handle.write(source.read_bytes())
+        handle.flush()
+        os.fsync(handle.fileno())
     fsync_directory(destination.parent)
 
 
-def _write_all_or_none(pairs: list[tuple[Path, Path]], deadline: float) -> None:
+def _write_or_refuse(source: Path, destination: Path, image: Path) -> None:
+    """A file that appeared since the plan is the same refusal, not an overwrite."""
+    try:
+        _write_new(source, destination)
+    except FileExistsError:
+        raise _publish_conflict(source, image) from None
+
+
+def _write_all_or_none(
+    pairs: list[tuple[Path, Path]], deadline: float, image: Path
+) -> None:
     """Every file, or none: a failure part-way removes what this run created."""
     written: list[Path] = []
     try:
         for source, destination in pairs:
             _deadline(deadline)
-            _write_new(source, destination)
+            _write_or_refuse(source, destination, image)
             written.append(destination)
     except BaseException:
         for path in written:
@@ -1502,14 +1625,15 @@ def publish_restored_image(
     staged = Path(image).resolve(strict=True)
     _validate_restored_image(staged, expected_manifest_sha256, deadline=deadline)
     pairs = _publication_targets(staged, Path(vault_root).resolve(), Path(state_root).resolve())
-    to_write, identical = _planned_publication(pairs)
-    _write_all_or_none(to_write, deadline)
+    to_write, identical = _planned_publication(pairs, staged)
+    _write_all_or_none(to_write, deadline, staged)
     _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
     return {
         "schema_version": "private-vault-publish-receipt/v1",
         "manifest_sha256": expected_manifest_sha256,
         "published_files": len(to_write),
         "identical_files": identical,
+        "unpublished_entries": _unpublished_entries(staged),
     }
 
 
@@ -1598,12 +1722,16 @@ def _run_cli_command(
     )
 
 
+# A stable code, or a place inside the image (`vault/...`, `state/...`): the
+# same on every machine, so it says nothing about where this vault lives.
+_SAFE_DETAIL = re.compile(
+    r"[a-z0-9_:-]{1,128}"
+    r"|(?:vault|state)(?:/(?!\.{1,2}(?:/|$))[^/\\\x00-\x1f\x7f]{1,255}){1,64}"
+)
+
+
 def _safe_error_details(details: tuple[str, ...]) -> list[str]:
-    safe = []
-    for detail in details:
-        if re.fullmatch(r"[a-z0-9_:-]{1,128}", detail):
-            safe.append(detail)
-    return safe
+    return [detail for detail in details if _SAFE_DETAIL.fullmatch(detail)]
 
 
 def _print_json(value: dict[str, object]) -> None:

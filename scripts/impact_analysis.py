@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -366,8 +367,21 @@ def _parse_raw_record(fields: list[bytes], index: int, comparison: str) -> tuple
         "new_path": new_path,
         "old_oid": parts[2].decode("ascii", errors="strict"),
         "new_oid": parts[3].decode("ascii", errors="strict"),
+        "old_mode": parts[0].decode("ascii", errors="strict"),
+        "new_mode": parts[1].decode("ascii", errors="strict"),
     }
     return record, index + 1 + path_count
+
+
+# The only modes whose bytes are a file's source. `160000` is a submodule
+# commit, which has no blob; `120000` is a symlink, whose bytes are a path.
+# Audit 3, B31/B32: asking for either aborted the whole diff. Research:
+# `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+_REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+
+
+def _holds_source(record: dict, side: str) -> bool:
+    return record[f"{side}_mode"] in _REGULAR_FILE_MODES
 
 
 def _raw_header_parts(header: bytes) -> list[bytes]:
@@ -505,7 +519,7 @@ class _ChangeCollector:
             self._add_record(record, worktree_new)
 
     def _add_record(self, record: dict, worktree_new: bool) -> None:
-        old_blob = self._object_blob(record["old_oid"])
+        old_blob = self._old_blob(record)
         new_blob = self._new_blob(record, worktree_new)
         self.total_bytes += len(old_blob or b"") + len(new_blob or b"")
         if self.total_bytes > self.bounds.max_total_blob_bytes:
@@ -517,7 +531,14 @@ class _ChangeCollector:
     def _object_blob(self, oid: str) -> bytes | None:
         return _object_blob(self.root, oid, deadline=self.deadline, limit=self.bounds.max_blob_bytes)
 
+    def _old_blob(self, record: dict) -> bytes | None:
+        if not _holds_source(record, "old"):
+            return None
+        return self._object_blob(record["old_oid"])
+
     def _new_blob(self, record: dict, worktree_new: bool) -> bytes | None:
+        if not _holds_source(record, "new"):
+            return None
         if worktree_new and record["status"] != "D":
             return _worktree_blob(self.root, record["new_path"], self.bounds.max_blob_bytes)
         return self._object_blob(record["new_oid"])
@@ -526,54 +547,8 @@ class _ChangeCollector:
 _LEGACY_RANGE = r"([^.]\S*)\.\.([^.]\S*)"
 
 
-def get_changed_files(git_range: str | None = None) -> list[str]:
-    """Compatibility wrapper; ranges are accepted only as explicit commit pairs."""
-    try:
-        return _changed_paths(_changes_for_range(git_range))
-    except (OSError, TimeoutError, ValueError):
-        return []
-
-
-def _changes_for_range(git_range: str | None) -> list[dict]:
-    if git_range is None:
-        return collect_git_changes(ROOT)
-    match = re.fullmatch(_LEGACY_RANGE, git_range)
-    if match is None:
-        return []
-    return collect_git_changes(
-        ROOT, comparison="two-commits", base=match.group(1), target=match.group(2)
-    )
-
-
 def _changed_paths(changes: list[dict]) -> list[str]:
     return sorted({str(item["new_path"] or item["old_path"]) for item in changes})
-
-
-def extract_symbols_from_file(file_path: Path) -> list[str]:
-    """Extract names for the explicitly low-confidence textual fallback."""
-    if not file_path.exists():
-        return []
-    try:
-        return _parsed_symbols(file_path)
-    except (ImportError, OSError, ValueError):
-        return _textual_file_symbols(file_path)
-
-
-def _parsed_symbols(file_path: Path) -> list[str]:
-    from code_graph import parse_file
-
-    parsed = parse_file(file_path)
-    return sorted(
-        {item["name"] for key in ("functions", "classes") for item in parsed.get(key, [])}
-    )
-
-
-def _textual_file_symbols(file_path: Path) -> list[str]:
-    try:
-        content = file_path.read_bytes()
-    except OSError:
-        return []
-    return _textual_symbols(content)
 
 
 def _textual_symbols(content: bytes | None) -> list[str]:
@@ -783,12 +758,37 @@ def _changed_ranges(
     if prefix == len(old_lines) == len(new_lines):
         return []
     suffix = _common_suffix(old_lines, new_lines, prefix, deadline)
+    old_side = _range_side(prefix, len(old_lines) - suffix, old_offsets)
+    inserted = new_lines[prefix : len(new_lines) - suffix]
     return [
         {
-            "old": _range_side(prefix, len(old_lines) - suffix, old_offsets),
+            "old": _anchored_insertion(old_side, prefix, inserted),
             "new": _range_side(prefix, len(new_lines) - suffix, new_offsets),
         }
     ]
+
+
+def _continues_the_block_above(inserted: list[bytes]) -> bool:
+    """An indented first line belongs to what precedes it; anything else starts anew."""
+    for line in inserted:
+        if line.strip():
+            return line[:1] in (b" ", b"\t")
+    return False
+
+
+def _anchored_insertion(old_side: dict, prefix: int, inserted: list[bytes]) -> dict:
+    """Which old line an insertion-only hunk is tested against.
+
+    An insertion lies between old lines `prefix` and `prefix + 1`. Only the
+    second was ever tested, so a line appended to a function matched nobody, or
+    the next function (audit 3, A13). Research:
+    `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+    """
+    if old_side["byte_end"] > old_side["byte_start"]:
+        return old_side
+    if prefix < 1 or not _continues_the_block_above(inserted):
+        return old_side
+    return {**old_side, "line_start": prefix, "line_end": prefix}
 
 
 def _line_offsets(lines: list[bytes], deadline: float | None) -> list[int]:
@@ -829,26 +829,48 @@ def _range_side(prefix: int, end: int, offsets: list[int]) -> dict:
     }
 
 
-def _active_graph(root: Path, deadline: float):
-    try:
-        from evidence_graph import EvidenceGraph
-        from generation_catalog import GenerationCatalog
-        from repository_scope import resolve_repository_scope
+class GenerationUnreadable(RuntimeError):
+    """The catalog or the active generation exists but could not be read.
 
-        state_root = STATE_ROOT
-        catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
-        if not catalog_path.is_file():
-            return None
-        scope = resolve_repository_scope(root, deadline=deadline)
-        return EvidenceGraph.open_active_for_repository(
-            GenerationCatalog(state_root, catalog_path=catalog_path),
-            scope,
-            deadline=deadline,
-        )
+    Separate from "this repository has no active generation", which is None:
+    a corrupt catalog, a generation that keeps changing under the open, or a
+    refused read used to be reported as missing evidence (audit 3, B26).
+    """
+
+
+def _active_graph(root: Path, deadline: float):
+    """The active generation of `root`, None when it has none."""
+    try:
+        return _opened_active_graph(root, deadline)
     except TimeoutError:
         raise
-    except (OSError, PermissionError, TypeError, ValueError):
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise GenerationUnreadable(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _opened_active_graph(root: Path, deadline: float):
+    from evidence_graph import EvidenceGraph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    state_root = STATE_ROOT
+    catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    if not catalog_path.is_file():
         return None
+    from code_graph import _opened_code_or_active
+
+    scope = resolve_repository_scope(root, deadline=deadline)
+    # A diff maps to code, so this asks for the checkout's code generation and falls
+    # through to the pointer only when it has none — the two steps every other code
+    # reader takes. See
+    # `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    return _opened_code_or_active(
+        EvidenceGraph,
+        GenerationCatalog(state_root, catalog_path=catalog_path),
+        scope,
+        deadline,
+        None,
+    )
 
 
 def _overlaps(occurrence: dict, changed: dict) -> bool:
@@ -1004,13 +1026,31 @@ _KIND_GROUPS = {
 }
 
 
+_FRONTIER_CHUNK = 512  # evidence_graph.MAX_NODE_FILTER
+
+
+def _edges_into(graph, frontier: list[str], bounds: ImpactLimits, deadline: float) -> list[dict]:
+    """Every traversed edge that points at the frontier, asked in slices.
+
+    Audit 3, A14: the whole edge set of seven types was read with one row
+    ceiling, which a real generation exceeds, so `affected` was silently empty.
+    Research: `docs/research/2026-09-17-impact-reads-what-the-diff-really-holds.md`.
+    """
+    edges: list[dict] = []
+    for index in range(0, len(frontier), _FRONTIER_CHUNK):
+        edges.extend(
+            graph.edges(
+                edge_types=tuple(sorted(TRAVERSED_EDGES)),
+                target_node_ids=frontier[index : index + _FRONTIER_CHUNK],
+                max_rows=bounds.max_graph_rows,
+                deadline=deadline,
+            )
+        )
+    return edges
+
+
 def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline: float) -> dict:
-    edges = graph.edges(
-        edge_types=tuple(sorted(TRAVERSED_EDGES)),
-        max_rows=bounds.max_graph_rows,
-        deadline=deadline,
-    )
-    used = _reaching_edges(edges, set(symbol_ids), bounds.max_depth)
+    used = _reaching_edges(graph, set(symbol_ids), bounds, deadline)
     groups = _empty_affected()
     for node_id, edge in used.items():
         _add_affected(groups, graph, node_id, edge, bounds, deadline)
@@ -1019,24 +1059,33 @@ def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline:
     return groups
 
 
-def _reaching_edges(edges: list[dict], reached: set[str], max_depth: int) -> dict[str, dict]:
-    """The confirmed edge that first reached each source node, over at most max_depth rounds."""
+def _reaching_edges(
+    graph, reached: set[str], bounds: ImpactLimits, deadline: float
+) -> dict[str, dict]:
+    """The confirmed edge that first reached each source node, one hop a round."""
     used: dict[str, dict] = {}
-    for _depth in range(max_depth):
-        if not _extend_reach(edges, reached, used):
+    frontier = sorted(reached)
+    for _depth in range(bounds.max_depth):
+        if not frontier:
             break
+        _check_impact_stop(deadline)
+        frontier = _extend_reach(_edges_into(graph, frontier, bounds, deadline), reached, used)
     return used
 
 
-def _extend_reach(edges: list[dict], reached: set[str], used: dict[str, dict]) -> bool:
-    added = False
+def _extend_reach(edges: list[dict], reached: set[str], used: dict[str, dict]) -> list[str]:
+    """The nodes this round reached for the first time: the next round's frontier.
+
+    `reached` grows only after the round is read, so a round is exactly one hop
+    and `max_depth` is a depth (audit 3, B33).
+    """
+    fresh: dict[str, dict] = {}
     for edge in edges:
-        if not _extends_reach(edge, reached):
-            continue
-        reached.add(edge["source_node_id"])
-        used[edge["source_node_id"]] = edge
-        added = True
-    return added
+        if _extends_reach(edge, reached):
+            fresh[edge["source_node_id"]] = edge
+    reached.update(fresh)
+    used.update(fresh)
+    return sorted(fresh)
 
 
 def _extends_reach(edge: dict, reached: set[str]) -> bool:
@@ -1100,8 +1149,13 @@ def analyze_impact(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    textual_fallback: bool = True,
 ) -> dict:
-    """Map explicit Git endpoints through canonical graph symbols and edges."""
+    """Map explicit Git endpoints through canonical graph symbols and edges.
+
+    `textual_fallback=False` skips the note scan for a caller that refuses its
+    word-match guesses anyway (the session start, audit 3 B30).
+    """
     bounds = _limits_or_default(limits)
     comparison, base, target = _legacy_endpoints(git_range, comparison, base, target)
     root = Path(root).resolve(strict=True)
@@ -1111,7 +1165,9 @@ def analyze_impact(
     run.collect(root, comparison=comparison, base=base, target=target, branch=branch)
     run.describe()
     run.map_changes(graph, root)
-    fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
+    fallback: list[dict] = []
+    if textual_fallback:
+        fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
     return run.report(comparison, fallback)
 
 
@@ -1182,17 +1238,23 @@ class _ImpactRun:
             self.public_changes.append({key: change[key] for key in _PUBLIC_CHANGE_KEYS})
 
     def map_changes(self, graph, root: Path) -> None:
-        selected = _selected_graph(graph, root, self.deadline)
+        try:
+            selected = _selected_graph(graph, root, self.deadline)
+        except GenerationUnreadable as exc:
+            self._note_missing_graph(f"The active Evidence Graph is unreadable: {exc}")
+            return
         if selected is None:
-            self._note_missing_graph()
+            self._note_missing_graph(
+                "No valid active Evidence Graph generation is available."
+            )
             return
         self.generation_id = getattr(selected, "generation_id", None)
         self._map_graph(selected, owns_graph=graph is None)
 
-    def _note_missing_graph(self) -> None:
+    def _note_missing_graph(self, reason: str) -> None:
         self.graph_missing = True
         if self.changes:
-            self.warnings.append("No valid active Evidence Graph generation is available.")
+            self.warnings.append(reason)
 
     def _map_graph(self, graph, *, owns_graph: bool) -> None:
         try:
@@ -1283,29 +1345,35 @@ def _textual_fallback(
 
 
 def format_for_advisory(impact: dict, max_pages: int = 3) -> str:
-    """Format the impact for SessionStart, without textual-name-match guesses.
+    """Format the impact for SessionStart: the pages and decisions the graph proved.
 
-    A page that only contains a changed name as a word flagged three Karpathy pages for
-    the symbol `words` in every session. See
-    `docs/research/2026-09-14-less-noise-at-session-start.md`.
+    Word-match guesses stay out: a page that only contains a changed name as a word
+    flagged three Karpathy pages for the symbol `words` in every session
+    (`docs/research/2026-09-14-less-noise-at-session-start.md`). What is printed is
+    `affected`, reached from the changed symbols over confirmed edges — the list
+    this block never read, so it could print nothing (audit 3 B30,
+    `docs/research/2026-09-17-the-session-start-advisory-prints-what-the-graph-proved.md`).
     """
-    stale = _advisory_pages(impact)
-    if not stale:
+    proven = _advisory_pages(impact)
+    if not proven:
         return ""
     lines = ["### Code-Knowledge Impact", impact["summary"], ""]
-    lines.extend(_advisory_line(page) for page in stale[:max_pages])
-    if len(stale) > max_pages:
-        lines.append(f"... and {len(stale) - max_pages} more.")
+    lines.extend(_advisory_line(page) for page in proven[:max_pages])
+    if len(proven) > max_pages:
+        lines.append(f"... and {len(proven) - max_pages} more.")
     return "\n".join(lines)
 
 
+_ADVISORY_GROUPS = ("decisions", "pages")
+
+
 def _advisory_pages(impact: dict) -> list[dict]:
-    return [page for page in impact.get("stale_pages", []) if page.get("method") != "textual-name-match"]
+    affected = impact.get("affected", {})
+    return [item for group in _ADVISORY_GROUPS for item in affected.get(group, [])]
 
 
 def _advisory_line(page: dict) -> str:
-    marker = "!!!" if page["confidence"] == "high" else "!"
-    return f"{marker} **{page['slug']}** - {page['reason']}"
+    return f"! **{page['path']}** - {page['via']} reaches changed code; check it still holds"
 
 
 def main() -> int:

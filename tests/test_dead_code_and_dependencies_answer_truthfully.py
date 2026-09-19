@@ -187,7 +187,11 @@ def graph_directory(tmp_path, monkeypatch):
     )
     catalog.register("active")
     catalog.activate("active", expected_active=None)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    # An answer asked under a deadline forwards that bound to the catalog, so
+    # this double takes the options instead of refusing the call.
+    monkeypatch.setattr(
+        code_graph, "_generation_catalog", lambda directory, **_options: catalog
+    )
     monkeypatch.setattr(
         code_graph,
         "_workspace_call_graph",

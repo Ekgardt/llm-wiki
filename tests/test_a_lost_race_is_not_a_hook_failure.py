@@ -1,6 +1,6 @@
 """A writer that lost a race did not fail: the next session carries the event.
 
-Measured on this vault on 2026-09-07: `no-hands` logged four checkpoint errors
+Measured on this vault on 2026-09-07: `another-project` logged four checkpoint errors
 in four minutes — `owner_busy` and `operation_id is already bound to a
 different request` — while its committed sequence advanced from 836 to 838. No
 checkpoint was lost. Every one of those lines was a session that arrived while

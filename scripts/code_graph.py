@@ -39,6 +39,7 @@ try:
         EMPTY_REGISTRY,
         SymbolRegistry,
         build_python_symbol_registry,
+        directory_skipped,
         resolve_python_imports_and_calls,
     )
 except ImportError:
@@ -47,6 +48,7 @@ except ImportError:
         EMPTY_REGISTRY,
         SymbolRegistry,
         build_python_symbol_registry,
+        directory_skipped,
         resolve_python_imports_and_calls,
     )
 
@@ -89,7 +91,6 @@ MAX_CALL_PAIR_ROWS = 200_000
 # candidate set from 8,546 of 10,000 rows (17% headroom) to 3,621 (2.8x).
 DEAD_CODE_NAME_PREFIXES = ("test_",)
 
-CO_CHANGE_EDGE = "CO_CHANGED_WITH"
 CODE_TOOLS_SCHEMA_VERSION = 1
 _MANIFEST_WRITE_LOCK = threading.Lock()
 
@@ -347,355 +348,6 @@ def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: 
     return [_enriched_call(script, call, workspace) for call in calls]
 
 
-def _co_change_pathspec(directory: Path, repo_root: Path) -> str | None:
-    try:
-        pathspec = directory.resolve().relative_to(repo_root).as_posix()
-    except ValueError:
-        return None
-    return pathspec or "."
-
-
-def _git_name_status_output(
-    repo_root: Path, pathspec: str, timeout: float
-) -> bytes | None:
-    try:
-        result = subprocess.run(  # noqa: S603, S607
-            [
-                "git", "log", "--reverse", "--max-count=2000", "--no-merges",
-                "--name-status", "-z",
-                "--find-renames=50%", "--find-copies=50%", "--format=COMMIT%x00%H",
-                "--", pathspec,
-            ],
-            cwd=str(repo_root),
-            capture_output=True,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0 or not result.stdout:
-        return None
-    return result.stdout
-
-
-def _pairs_in_commit(files) -> list[tuple]:
-    ordered = sorted(files)
-    return [
-        (source, target)
-        for index, source in enumerate(ordered)
-        for target in ordered[index + 1:]
-    ]
-
-
-def _shared_commit_counts(normalized: list) -> Counter:
-    shared: Counter = Counter()
-    for files in normalized:
-        shared.update(_pairs_in_commit(files))
-    return shared
-
-
-def _co_change_measures(
-    together: int, source_count: int, target_count: int, total: int
-) -> tuple[float, float, float]:
-    """Ochiai, lift, and NPMI for one pair of files changed together."""
-    ochiai = together / math.sqrt(source_count * target_count)
-    support = together / total
-    lift = together * total / (source_count * target_count)
-    denominator = -math.log(support)
-    npmi = 0.0
-    if denominator:
-        npmi = math.log(lift) / denominator
-    return ochiai, lift, npmi
-
-
-def _co_change_edge(
-    source: str,
-    target: str,
-    together: int,
-    file_commits: Counter,
-    total: int,
-    preferred: dict,
-    min_ochiai: float,
-) -> dict | None:
-    source_count = file_commits[source]
-    target_count = file_commits[target]
-    ochiai, lift, npmi = _co_change_measures(
-        together, source_count, target_count, total
-    )
-    if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
-        return None
-    return {
-        "source": preferred.get(source, source),
-        "target": preferred.get(target, target),
-        "type": CO_CHANGE_EDGE,
-        "weight": round(ochiai, 6),
-        "ochiai": round(ochiai, 6),
-        "npmi": round(npmi, 6),
-        "lift": round(lift, 6),
-        "support": round(together / total, 6),
-        "shared_commits": together,
-    }
-
-
-def _bounded_commits(commits: list, max_commit_files: int) -> list:
-    return [
-        identities
-        for identities in commits
-        if 1 <= len(identities) <= max_commit_files
-    ]
-
-
-def _co_change_history(directory: Path, timeout: float):
-    """Rename-aware git history for this directory, or None when unavailable."""
-    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
-    pathspec = _co_change_pathspec(directory, repo_root)
-    if pathspec is None:
-        return None
-    stdout = _git_name_status_output(repo_root, pathspec, timeout)
-    if stdout is None:
-        return None
-    return _parse_git_name_status(stdout)
-
-
-def _admitted_co_change_edge(
-    pair, together, file_commits, total, preferred, min_shared_commits, min_ochiai
-):
-    if together < min_shared_commits:
-        return None
-    source, target = pair
-    return _co_change_edge(
-        source, target, together, file_commits, total, preferred, min_ochiai
-    )
-
-
-def _co_change_edges(
-    normalized: list, preferred: dict, min_shared_commits: int, min_ochiai: float
-) -> list[dict]:
-    file_commits = Counter(identity for files in normalized for identity in files)
-    total = len(normalized)
-    edges = []
-    for pair, together in _shared_commit_counts(normalized).items():
-        edge = _admitted_co_change_edge(
-            pair, together, file_commits, total, preferred,
-            min_shared_commits, min_ochiai,
-        )
-        if edge is not None:
-            edges.append(edge)
-    return edges
-
-
-def analyze_co_changes(
-    directory: Path,
-    *,
-    min_shared_commits: int = 3,
-    max_commit_files: int = 50,
-    min_ochiai: float = 0.5,
-    timeout: float = 10,
-) -> list[dict]:
-    """Find statistically meaningful file-level logical coupling in git history."""
-    history = _co_change_history(directory, timeout)
-    if history is None:
-        return []
-    commits, preferred = history
-    normalized = _bounded_commits(commits, max_commit_files)
-    edges = _co_change_edges(normalized, preferred, min_shared_commits, min_ochiai)
-    return sorted(
-        edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"])
-    )
-
-
-def _usable_git_output(result) -> bool:
-    return result.returncode == 0 and bool(result.stdout) and b"\0" not in result.stdout
-
-
-def _repo_root_from_output(result) -> Path | None:
-    if not _usable_git_output(result):
-        return None
-    root = Path(result.stdout.decode("utf-8", errors="surrogateescape").strip())
-    if not root.is_absolute():
-        return None
-    return root.resolve()
-
-
-def _git_repo_root(directory: Path, timeout: float) -> Path | None:
-    try:
-        result = subprocess.run(  # noqa: S603, S607
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(directory),
-            capture_output=True,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return _repo_root_from_output(result)
-
-
-class _GitIdentities:
-    """Path-to-identity allocation that follows renames across commits."""
-
-    def __init__(self) -> None:
-        self.active: dict[str, int] = {}
-        self.preferred: dict[int, str] = {}
-        self._next = 0
-
-    def new(self, path: str) -> int:
-        identity = self._next
-        self._next += 1
-        self.active[path] = identity
-        self.preferred[identity] = path
-        return identity
-
-    def rename(self, old_path: str, new_path: str) -> int:
-        identity = self.active.pop(old_path, None)
-        if identity is None:
-            return self.new(new_path)
-        self.active[new_path] = identity
-        self.preferred[identity] = new_path
-        return identity
-
-    def existing(self, path: str) -> int:
-        identity = self.active.get(path)
-        if identity is None:
-            return self.new(path)
-        return identity
-
-
-def _starts_commit(fields: list[str], index: int, record: str) -> bool:
-    return record == "COMMIT" and index + 1 < len(fields)
-
-
-def _outside_commit(fields: list[str], index: int, current) -> bool:
-    return not fields[index] or current is None
-
-
-def _append_git_change(fields: list[str], index: int, status: str, current) -> int:
-    if status.startswith(("R", "C")) and index + 2 < len(fields):
-        old_path, new_path = fields[index + 1:index + 3]
-        current.append(
-            (status, _normalize_git_path(old_path), _normalize_git_path(new_path))
-        )
-        return index + 3
-    if index + 1 < len(fields):
-        current.append((status, _normalize_git_path(fields[index + 1])))
-        return index + 2
-    return index + 1
-
-
-def _scan_git_field(fields: list[str], index: int, records: list, current):
-    record = fields[index].lstrip("\r\n")
-    if _starts_commit(fields, index, record):
-        started: list[tuple[str, ...]] = []
-        records.append(started)
-        return started, index + 2
-    if _outside_commit(fields, index, current):
-        return current, index + 1
-    return current, _append_git_change(fields, index, record, current)
-
-
-def _git_status_records(fields: list[str]) -> list:
-    """Group the -z name-status stream into one change list per commit."""
-    records: list[list[tuple[str, ...]]] = []
-    current: list[tuple[str, ...]] | None = None
-    index = 0
-    while index < len(fields):
-        current, index = _scan_git_field(fields, index, records, current)
-    return records
-
-
-def _folded_plain_change(change: tuple[str, ...], identities) -> int:
-    path = change[1]
-    identity = identities.existing(path)
-    if change[0].startswith("D"):
-        identities.active.pop(path, None)
-    return identity
-
-
-def _folded_change(change: tuple[str, ...], identities) -> int:
-    status = change[0]
-    if status.startswith("R"):
-        return identities.rename(change[1], change[2])
-    if status.startswith("C"):
-        return identities.new(change[2])
-    return _folded_plain_change(change, identities)
-
-
-def _parse_git_name_status(data: bytes) -> tuple[list[set[int]], dict[int, str]]:
-    fields = [
-        field.decode("utf-8", errors="surrogateescape") for field in data.split(b"\0")
-    ]
-    records = _git_status_records(fields)
-    identities = _GitIdentities()
-    commits = [
-        {_folded_change(change, identities) for change in changes}
-        for changes in records
-    ]
-    return commits, identities.preferred
-
-
-def _normalize_git_path(path: str) -> str:
-    return path.replace("\\", "/")
-
-
-def _co_change_root(directory: Path | None) -> Path | None:
-    if directory is None:
-        return None
-    return _git_repo_root(directory, 10) or directory.resolve()
-
-
-def _coupling_key(source: object, target: object, root: Path | None) -> frozenset:
-    return frozenset((
-        _normalize_edge_path(source, root), _normalize_edge_path(target, root)
-    ))
-
-
-def _coupling_index(co_change_edges: list[dict], root: Path | None) -> dict:
-    return {
-        _coupling_key(edge["source"], edge["target"], root): edge
-        for edge in co_change_edges
-        if edge.get("type") == CO_CHANGE_EDGE
-    }
-
-
-def _carries_co_change(edge: dict, match: dict | None) -> bool:
-    return (
-        edge.get("type") == "CALLS"
-        and edge.get("confidence") == "confirmed"
-        and bool(match)
-    )
-
-
-def _refined_call_edge(edge: dict, coupling: dict, root: Path | None) -> dict:
-    updated = dict(edge)
-    match = coupling.get(
-        _coupling_key(edge.get("source", ""), edge.get("target", ""), root)
-    )
-    if not _carries_co_change(edge, match):
-        return updated
-    evidence = dict(edge.get("evidence", {}))
-    evidence["co_change_weight"] = match["weight"]
-    updated["evidence"] = evidence
-    return updated
-
-
-def refine_call_edges_with_co_changes(
-    call_edges: list[dict], co_change_edges: list[dict], directory: Path | None = None
-) -> list[dict]:
-    """Add co-change evidence to confirmed calls without changing edge semantics."""
-    root = _co_change_root(directory)
-    coupling = _coupling_index(co_change_edges, root)
-    return [_refined_call_edge(edge, coupling, root) for edge in call_edges]
-
-
-def _normalize_edge_path(path: str, root: Path | None) -> str:
-    normalized = _normalize_git_path(path)
-    candidate = Path(normalized)
-    if root and candidate.is_absolute():
-        try:
-            normalized = candidate.resolve().relative_to(root).as_posix()
-        except ValueError:
-            pass
-    return _normalize_git_path(normalized)
-
-
 def _git_log_line(file_path: Path) -> str:
     """The one-line git record for this file, or empty when git cannot answer."""
     parent = file_path.parent
@@ -896,39 +548,18 @@ def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
     return tuple(groups[name] for name in _SYMBOL_KINDS)
 
 
-_PYTHON_CALL_KEYWORDS = {"if", "for", "while", "def", "class", "print"}
 _SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}
 
 
 def _regex_python_definitions(
     line: str, number: int, functions: list, classes: list
 ) -> None:
-    match = re.match(r"\s*def\s+(\w+)", line)
+    match = re.match(r"\s*(?:async\s+)?def\s+(\w+)", line)
     if match:
         functions.append(_regex_function(match.group(1), line, number))
     match = re.match(r"\s*class\s+(\w+)", line)
     if match:
         classes.append({"name": match.group(1), "line": number, "end_line": number})
-
-
-def _regex_python_call(line: str, number: int, calls: list) -> None:
-    match = re.match(r"\s*(\w+)\s*\(", line)
-    if match and match.group(1) not in _PYTHON_CALL_KEYWORDS:
-        calls.append({"name": match.group(1), "line": number})
-
-
-def _regex_python_import(line: str, number: int, imports: list) -> None:
-    match = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
-    if match:
-        imports.append({"name": match.group(1), "line": number})
-
-
-def _regex_parse_python_line(
-    line: str, number: int, functions: list, classes: list, calls: list, imports: list
-) -> None:
-    _regex_python_definitions(line, number, functions, classes)
-    _regex_python_call(line, number, calls)
-    _regex_python_import(line, number, imports)
 
 
 def _regex_parse_python(
@@ -939,13 +570,13 @@ def _regex_parse_python(
     functions: list,
     classes: list,
 ) -> tuple[list, list]:
-    """Python calls and imports come from the resolver, not from the regex pass."""
-    calls: list = []
-    imports: list = []
+    """Python calls and imports come from the resolver, not from the regex pass.
+
+    The pass therefore collects definitions only; it used to match a call and an
+    import pattern on every line and throw both lists away (audit 3, C7).
+    """
     for number, line in enumerate(content.splitlines(), 1):
-        _regex_parse_python_line(
-            line, number, functions, classes, calls, imports
-        )
+        _regex_python_definitions(line, number, functions, classes)
     imports, calls = resolve_python_imports_and_calls(
         file_path, registry, workspace_root
     )
@@ -1027,6 +658,71 @@ def _regex_parse_by_language(
     return imports, calls
 
 
+# Audit 3, B24. The regex fallback used to write `end_line = line`, so no call
+# was ever inside a function: live `callees` answered `[]` and live `dead_code`
+# named called functions as dead. A block now has an end: by indentation where
+# the language delimits by indentation, by brace depth elsewhere. Research:
+# `docs/research/2026-09-17-graph-one-live-walk-one-parse.md`.
+_INDENT_BLOCK_LANGUAGES = frozenset({"python", "ruby"})
+
+
+def _indent_of(text: str) -> int:
+    return len(text) - len(text.lstrip())
+
+
+def _header_end(lines: list[str], start: int) -> int:
+    """The line where the declaration's own parentheses close (1-based)."""
+    depth = 0
+    for number in range(start, len(lines) + 1):
+        depth += sum(_paren_delta(char) for char in lines[number - 1])
+        if depth <= 0:
+            return number
+    return start
+
+
+def _indent_block_end(lines: list[str], start: int) -> int:
+    base = _indent_of(lines[start - 1])
+    end = _header_end(lines, start)
+    for number in range(end + 1, len(lines) + 1):
+        text = lines[number - 1]
+        if not text.strip():
+            continue
+        if _indent_of(text) <= base:
+            break
+        end = number
+    return end
+
+
+def _first_brace_line(lines: list[str], start: int) -> int | None:
+    """The declaration line, or the next one when it opens the block alone."""
+    if "{" in lines[start - 1]:
+        return start
+    if start < len(lines) and lines[start].lstrip().startswith("{"):
+        return start + 1
+    return None
+
+
+def _brace_block_end(lines: list[str], start: int) -> int:
+    opening = _first_brace_line(lines, start)
+    if opening is None:
+        return start
+    depth = 0
+    for number in range(opening, len(lines) + 1):
+        text = lines[number - 1]
+        depth += text.count("{") - text.count("}")
+        if depth <= 0:
+            return number
+    return start
+
+
+def _close_regex_blocks(lines: list[str], lang: str, symbols: list[dict]) -> None:
+    block_end = _brace_block_end
+    if lang in _INDENT_BLOCK_LANGUAGES:
+        block_end = _indent_block_end
+    for symbol in symbols:
+        symbol["end_line"] = block_end(lines, symbol["line"])
+
+
 def _regex_parse(
     file_path: Path, lang: str, registry: SymbolRegistry, workspace_root: Path
 ) -> dict:
@@ -1047,6 +743,7 @@ def _regex_parse(
         calls,
         imports,
     )
+    _close_regex_blocks(content.splitlines(), lang, [*functions, *classes])
     git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
@@ -1223,15 +920,40 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
         imports.append({"name": name.strip(), "line": line_number})
 
 
-_INDEX_SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", "venv"})
+def _parsable_names(parent: Path, names: list[str]) -> list[Path]:
+    found = [parent / name for name in names]
+    return [
+        path for path in found
+        if path.suffix.lower() in LANGUAGE_MAP and path.is_file()
+    ]
 
 
-def _indexable_source(path: Path, extensions: set) -> bool:
-    if not path.is_file():
-        return False
-    if path.suffix.lower() not in extensions:
-        return False
-    return not any(skip in path.parts for skip in _INDEX_SKIP_DIRS)
+def _live_source_files(directory: Path) -> list[Path]:
+    """Every source the live fallback parses, under one directory rule.
+
+    Audit 3, B27. Three walkers used to disagree here: one did not know `venv`,
+    only one pruned hidden directories (so live `callers` still parsed every
+    `.claude/` agent worktree), and all three tested the *absolute* path, so a
+    repository checked out under `/x/venv/` had no definitions at all. The rule
+    is `import_resolver.directory_skipped`, applied where `os.walk` meets a
+    directory below the root: a skipped tree is never listed, and a name on the
+    way to the root is never judged. Research:
+    `docs/research/2026-09-17-graph-one-live-walk-one-parse.md`.
+    """
+    collected: list[Path] = []
+    for current, directories, files in os.walk(directory):
+        directories[:] = [name for name in directories if not directory_skipped(name)]
+        collected.extend(_parsable_names(Path(current), files))
+    return sorted(collected)
+
+
+def _parsed_live_sources(directory: Path) -> list[tuple[Path, dict]]:
+    """The workspace parsed once; every live answer and its report share it."""
+    registry = build_python_symbol_registry(directory)
+    return [
+        (path, _parse_file(path, registry, directory))
+        for path in _live_source_files(directory)
+    ]
 
 
 def _accumulate_index_stats(stats: dict, result: dict) -> None:
@@ -1260,11 +982,8 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
     if not directory.exists():
         return stats
-    extensions = set(LANGUAGE_MAP.keys())
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if _indexable_source(path, extensions):
-            _accumulate_index_stats(stats, _parse_file(path, registry, directory))
+    for _path, result in _parsed_live_sources(directory):
+        _accumulate_index_stats(stats, result)
     if verbose:
         _print_index_stats(stats)
     return stats
@@ -1386,6 +1105,11 @@ def _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled):
     the code one first. Every other repository has no memory generation and
     falls straight through. Decision:
     `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+
+    The pointer is asked only when the repository has no code generation
+    registered at all. One that is registered and cannot be opened is "no usable
+    index", never a confident empty answer out of the memory generation. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
     code = _bounded_call(
         graph_class.open_code_for_repository, catalog, scope,
@@ -1393,6 +1117,12 @@ def _opened_code_or_active(graph_class, catalog, scope, deadline, cancelled):
     )
     if code is not None:
         return code
+    registered = _bounded_call(
+        catalog.code_generations_for_repository, scope,
+        deadline=deadline, cancelled=cancelled,
+    )
+    if registered:
+        return None
     return _bounded_call(
         graph_class.open_active_for_repository, catalog, scope,
         deadline=deadline, cancelled=cancelled,
@@ -1440,6 +1170,29 @@ def _leased_active_graph(directory, read_only, deadline, cancelled):
     )
 
 
+# Audit 3, B26. `None` used to mean three different things: this repository has
+# no generation, this repository has one that could not be opened, and a
+# programming error inside the opening path (`TypeError` was caught). The first
+# is normal and falls back to a live parse; the other two are failures and must
+# say so. `PermissionError` was redundant with `OSError`, and `TimeoutError` is
+# itself an `OSError`, which is why its clause stands first. Research:
+# `docs/research/2026-09-17-graph-a-generation-that-cannot-be-read-is-not-a-generation-that-is-absent.md`.
+NO_GENERATION = "no_generation"
+
+
+class GenerationUnreadable(RuntimeError):
+    """This repository has a generation and it could not be opened.
+
+    `reason` names the class of the underlying error and nothing else: no
+    message and no path, so the reason can be carried into an answer without
+    carrying vault content with it.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.reason = f"generation_unreadable:{type(error).__name__}"
+        super().__init__(self.reason)
+
+
 def _active_evidence_graph(
     directory: Path,
     *,
@@ -1451,8 +1204,16 @@ def _active_evidence_graph(
         return _leased_active_graph(directory, read_only, deadline, cancelled)
     except TimeoutError:
         raise
-    except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
-        return None
+    except (OSError, ValueError, sqlite3.Error) as error:
+        raise GenerationUnreadable(error) from error
+
+
+def _stored_or_reason(attempt) -> tuple[object, str]:
+    """The stored answer, and when there is none, why there is none."""
+    try:
+        return attempt(), NO_GENERATION
+    except GenerationUnreadable as error:
+        return None, error.reason
 
 
 def _stored_location(graph, node_id: str, _directory: Path) -> tuple[str, int]:
@@ -1732,13 +1493,16 @@ def _live_unresolved_count(
 
 
 def _live_report(
-    directory: Path, parsed: list[tuple[Path, dict]] | None = None
+    directory: Path,
+    parsed: list[tuple[Path, dict]] | None = None,
+    reason: str = NO_GENERATION,
 ) -> dict[str, object]:
     return {
         "source_generation": None,
         "graph_complete": False,
         "unresolved_count": _live_unresolved_count(directory, parsed),
         "fallback": True,
+        "fallback_reason": reason,
     }
 
 
@@ -1774,11 +1538,40 @@ def _call_walk_depth(max_depth: int | None) -> int:
     return max(1, min(int(max_depth), CALL_WALK_MAX_DEPTH))
 
 
+# Audit 3, A5-A7: a name is resolved, cut and sliced on this side of the reader,
+# whose own bounds refuse by name instead of truncating. Research:
+# `docs/research/2026-09-17-a-name-is-resolved-before-the-graph-is-asked.md`.
+SEED_LOOKUP_ROWS = 10_000  # evidence_graph.MAX_ROWS
+
+
+def _in_node_chunks(node_ids: list[str], ask) -> list:
+    """Every row `ask` returns for these ids, asked in slices the reader accepts."""
+    rows: list = []
+    for index in range(0, len(node_ids), _LOCATION_CHUNK):
+        rows.extend(ask(node_ids[index : index + _LOCATION_CHUNK]))
+    return rows
+
+
+def _named_node_ids(graph, kinds: tuple[str, ...], name: str) -> list[str]:
+    """Every node of these kinds with this name, in the reader's own order.
+
+    Asked up to the reader's row ceiling: a seed limit passed as `max_rows` is a
+    refusal for every common name (`main`, `__init__`), not a cut.
+    """
+    nodes = graph.find_nodes(kinds=kinds, name=name, max_rows=SEED_LOOKUP_ROWS)
+    return [str(item["node_id"]) for item in nodes]
+
+
+def _seed_cut_report(matched: list[str], limit: int) -> dict[str, object]:
+    """Nothing for a whole answer; the size of the cut when there was one."""
+    if len(matched) <= limit:
+        return {}
+    return {"matching_symbol_nodes": len(matched), "symbol_nodes_truncated": True}
+
+
 def _walk_seeds(graph, function_name: str) -> list[str]:
-    nodes = graph.find_nodes(
-        kinds=("function", "method"), name=function_name, max_rows=10_000
-    )
-    return sorted({str(item["node_id"]) for item in nodes})[:CALL_WALK_MAX_SEEDS]
+    """Every node the name resolves to, sorted; the walk cuts and reports."""
+    return sorted(set(_named_node_ids(graph, ("function", "method"), function_name)))
 
 
 def _keep_shallowest(merged: dict, row: dict) -> None:
@@ -1866,27 +1659,20 @@ def _store_walk_calls(
     if graph is None:
         return None
     try:
-        seeds = _walk_seeds(graph, function_name)
+        matched = _walk_seeds(graph, function_name)
+        seeds = matched[:CALL_WALK_MAX_SEEDS]
         rows = _walked_rows(
             graph, _walked_nodes(graph, seeds, direction, depth), function_name, direction
         )
         report = {
             **_store_report(graph),
             **_walk_report(graph, function_name, direction, seeds, rows, depth),
+            **_seed_cut_report(matched, CALL_WALK_MAX_SEEDS),
         }
         key = "callers" if direction == "in" else "callees"
         return _with_report(key, rows, report, with_report)
     finally:
         graph.close()
-
-
-_SEARCH_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv"}
-
-
-def _searchable_source(path: Path) -> bool:
-    if not path.is_file() or path.suffix.lower() not in set(LANGUAGE_MAP.keys()):
-        return False
-    return not any(skip in path.parts for skip in _SEARCH_SKIP_PARTS)
 
 
 def _named_function(result: dict, function_name: str) -> dict | None:
@@ -2017,15 +1803,11 @@ def _live_unresolved_fields(unresolved: list[dict]) -> dict[str, object]:
 
 
 def _live_caller_scan(
-    directory: Path, function_name: str
+    parsed: list[tuple[Path, dict]], function_name: str
 ) -> tuple[list[dict], list[dict]]:
     callers: list[dict] = []
     unresolved: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        if not _searchable_source(path):
-            continue
-        result = _parse_file(path, registry, directory)
+    for path, result in parsed:
         callers.extend(_live_callers_in_file(path, result, function_name))
         unresolved.extend(_live_unresolved_in_file(path, result, function_name))
     return callers, unresolved
@@ -2051,12 +1833,19 @@ def find_callers(
     #24, B4); rows then carry `depth`, and the report `depth_applied` and
     `depth_frontier_open`. The live fallback answers one hop and says so.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_callers(function_name, directory, with_report, max_depth)
-        if stored is not None:
-            return stored
-    callers, unresolved = _live_caller_scan(directory, function_name)
-    report = {**_live_report(directory), **_live_unresolved_fields(unresolved)}
+        stored, reason = _stored_or_reason(
+            lambda: _stored_callers(function_name, directory, with_report, max_depth)
+        )
+    if stored is not None:
+        return stored
+    parsed = _parsed_live_sources(directory)
+    callers, unresolved = _live_caller_scan(parsed, function_name)
+    report = {
+        **_live_report(directory, parsed, reason),
+        **_live_unresolved_fields(unresolved),
+    }
     return _with_report("callers", callers, report, with_report)
 
 
@@ -2090,12 +1879,12 @@ def _store_find_callers(
     if graph is None:
         return None
     try:
-        targets = graph.find_nodes(
-            kinds=("function", "method"), name=function_name, max_rows=10_000
-        )
-        target_ids = sorted({item["node_id"] for item in targets})
-        edges = graph.edges(
-            edge_types=("CALLS",), target_node_ids=target_ids, max_rows=10_000
+        target_ids = _walk_seeds(graph, function_name)
+        edges = _in_node_chunks(
+            target_ids,
+            lambda ids: graph.edges(
+                edge_types=("CALLS",), target_node_ids=ids, max_rows=10_000
+            ),
         )
         rows = [
             _stored_caller_row(graph, edge, function_name, directory) for edge in edges
@@ -2121,12 +1910,7 @@ def _stored_callees(
     return _store_find_callees(function_name, directory)
 
 
-def _live_callees_in_file(
-    path: Path, registry, directory: Path, function_name: str
-) -> list[dict]:
-    if not _searchable_source(path):
-        return []
-    result = _parse_file(path, registry, directory)
+def _live_callees_in_file(path: Path, result: dict, function_name: str) -> list[dict]:
     func_def = _named_function(result, function_name)
     if func_def is None:
         return []
@@ -2146,15 +1930,20 @@ def find_callees(
     Returns list of {file, line, callee}. `max_depth` above 1 walks the
     generation's CALLS closure that deep (issue #24, B4).
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_callees(function_name, directory, with_report, max_depth)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_callees(function_name, directory, with_report, max_depth)
+        )
+    if stored is not None:
+        return stored
     callees: list[dict] = []
-    registry = build_python_symbol_registry(directory)
-    for path in sorted(directory.rglob("*")):
-        callees.extend(_live_callees_in_file(path, registry, directory, function_name))
-    return _with_report("callees", callees, _live_report(directory), with_report)
+    parsed = _parsed_live_sources(directory)
+    for path, result in parsed:
+        callees.extend(_live_callees_in_file(path, result, function_name))
+    return _with_report(
+        "callees", callees, _live_report(directory, parsed, reason), with_report
+    )
 
 
 def _stored_callee_row(graph, edge, directory: Path) -> dict | None:
@@ -2182,12 +1971,12 @@ def _store_find_callees(
     if graph is None:
         return None
     try:
-        sources = graph.find_nodes(
-            kinds=("function", "method"), name=function_name, max_rows=10_000
-        )
-        source_ids = sorted({item["node_id"] for item in sources})
-        edges = graph.edges(
-            edge_types=("CALLS",), source_node_ids=source_ids, max_rows=10_000
+        source_ids = _walk_seeds(graph, function_name)
+        edges = _in_node_chunks(
+            source_ids,
+            lambda ids: graph.edges(
+                edge_types=("CALLS",), source_node_ids=ids, max_rows=10_000
+            ),
         )
         rows = [_stored_callee_row(graph, edge, directory) for edge in edges]
         results = _sorted_stored_rows(rows, _callee_sort_key)
@@ -2258,17 +2047,23 @@ def find_dead_code(
     verdict for that name is unchanged — a file that does not mention the name
     cannot reference it — and the report says how many sources were skipped.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_dead_code_result(directory, with_report, symbol)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _stored_dead_code_result(directory, with_report, symbol)
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     incoming = {edge["target"] for edge in edges}
     candidates: list[dict] = []
     for path, result in parsed:
         candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
     candidates = _ordered_dead_candidates(candidates)
-    report = {**_live_report(directory, parsed), **_dead_code_counts(candidates)}
+    report = {
+        **_live_report(directory, parsed, reason),
+        **_dead_code_counts(candidates),
+    }
     return _with_report("candidates", candidates, report, with_report)
 
 
@@ -2443,12 +2238,6 @@ def _dead_code_verdict(
     if _dispatched_definition(index, path, name, location[1]):
         return (None, "framework_dispatched")
     return (_dead_candidate_row(node, location, called_names, index), None)
-
-
-def _stored_dead_candidate(
-    graph, node: dict, directory: Path, called_names: frozenset[str] | None, index=None
-) -> dict | None:
-    return _dead_code_verdict(graph, node, directory, called_names, index)[0]
 
 
 def _called_names(graph) -> frozenset[str] | None:
@@ -2678,10 +2467,13 @@ def get_architecture(
 ) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
     bound = summary_listing_limit(limit)
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _store_get_architecture(directory, bound)
-        if stored is not None:
-            return stored
+        stored, reason = _stored_or_reason(
+            lambda: _store_get_architecture(directory, bound)
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points, routes = _live_architecture_points(parsed)
     communities, counts = _live_community_answer(definitions, edges)
@@ -2695,7 +2487,7 @@ def get_architecture(
         **counts,
         "graph_complete": False,
     }
-    return {**architecture, **_live_report(directory, parsed)}
+    return {**architecture, **_live_report(directory, parsed, reason)}
 
 
 # Entry points and routes are listed the way hotspots already are: with the
@@ -2911,20 +2703,17 @@ def detect_communities(
     here — see `_communities_holding` for the measurement — so "which module
     does X belong to" needs an anchor, exactly as who-calls does.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _stored_detect_communities(directory, symbol, with_report)
-        if stored is not None:
-            return stored
-    communities, counts = _detect_live_communities(directory, symbol)
-    report = {**_live_report(directory), **counts}
+        stored, reason = _stored_or_reason(
+            lambda: _stored_detect_communities(directory, symbol, with_report)
+        )
+    if stored is not None:
+        return stored
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    communities, counts = _live_community_answer(definitions, edges, symbol)
+    report = {**_live_report(directory, parsed, reason), **counts}
     return _with_report("communities", communities, report, with_report)
-
-
-def _detect_live_communities(
-    directory: Path, symbol: str | None = None
-) -> tuple[list, dict]:
-    _parsed, definitions, edges = _workspace_call_graph(directory)
-    return _live_community_answer(definitions, edges, symbol)
 
 
 def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
@@ -2997,12 +2786,14 @@ def _dependency_seed_nodes(graph, symbol: str) -> list[str]:
     A path is accepted too, because "what does this file depend on" is the
     question this mode is asked with — `scripts/retrieval.py`, not
     `scripts.retrieval` — and a module node carries both.
+
+    Every match is returned; the caller cuts to its seed limit and reports the
+    cut (`_seed_cut_report`). Asking the reader for only that many rows made it
+    refuse every common name (audit 3, A6).
     """
-    by_name = graph.find_nodes(
-        kinds=DEPENDENCY_SEED_KINDS, name=symbol, max_rows=DEPENDENCY_SEED_LIMIT
-    )
+    by_name = _named_node_ids(graph, DEPENDENCY_SEED_KINDS, symbol)
     if by_name:
-        return [str(item["node_id"]) for item in by_name]
+        return by_name
     return _dependency_seed_by_path(graph, symbol)
 
 
@@ -3097,13 +2888,15 @@ def _store_find_dependencies(
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:DEPENDENCY_SEED_LIMIT]
         depth = _dependency_depth(max_depth)
         rows = _stored_dependency_rows(graph, seeds, reverse, depth)
         report = {
             **_store_report(graph),
             **_dependency_resolution(symbol, seeds),
             **_dependency_reach(rows, depth),
+            **_seed_cut_report(matched, DEPENDENCY_SEED_LIMIT),
         }
         return _with_report("dependencies", rows, report, with_report)
     finally:
@@ -3140,23 +2933,77 @@ def find_dependencies(
     and therefore answered `[]` for every symbol ever asked — silently, with
     the same `graph_complete: false` caveat a correct answer carries.
     """
+    stored, reason = None, NO_GENERATION
     if not live:
-        stored = _store_find_dependencies(
-            node_id,
-            directory,
-            reverse=reverse,
-            with_report=with_report,
-            max_depth=max_depth,
+        stored, reason = _stored_or_reason(
+            lambda: _store_find_dependencies(
+                node_id,
+                directory,
+                reverse=reverse,
+                with_report=with_report,
+                max_depth=max_depth,
+            )
         )
-        if stored is not None:
-            return stored
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     dependencies = _find_live_dependencies(
         node_id, definitions, edges, reverse=reverse
     )
     return _with_report(
-        "dependencies", dependencies, _live_report(directory, parsed), with_report
+        "dependencies",
+        dependencies,
+        _live_report(directory, parsed, reason),
+        with_report,
     )
+
+
+PATH_MAX_ENDPOINTS = 5
+PATH_MAX_ROWS = 10
+
+
+def _paths_between(graph, sources: list[str], targets: list[str]) -> list[dict]:
+    """Paths for every resolved pair of ends, until the answer is full."""
+    paths: list[dict] = []
+    pairs = [(source, target) for source in sources for target in targets]
+    for source, target in pairs:
+        if len(paths) >= PATH_MAX_ROWS:
+            break
+        paths.extend(
+            graph.path(
+                source, target, max_depth=8, max_rows=PATH_MAX_ROWS, max_work=10_000
+            )
+        )
+    return paths[:PATH_MAX_ROWS]
+
+
+def _path_end_report(label: str, matched: list[str]) -> dict[str, object]:
+    report: dict[str, object] = {f"{label}_resolved_nodes": len(matched)}
+    if len(matched) > PATH_MAX_ENDPOINTS:
+        report[f"{label}_nodes_truncated"] = True
+    return report
+
+
+def _store_find_paths(
+    source: str, target: str, directory: Path, with_report: bool
+) -> list[dict] | dict | None:
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        sources = _dependency_seed_nodes(graph, source)
+        targets = _dependency_seed_nodes(graph, target)
+        paths = _paths_between(
+            graph, sources[:PATH_MAX_ENDPOINTS], targets[:PATH_MAX_ENDPOINTS]
+        )
+        report = {
+            **_store_report(graph),
+            **_path_end_report("source", sources),
+            **_path_end_report("target", targets),
+        }
+        return _with_report("paths", paths, report, with_report)
+    finally:
+        graph.close()
 
 
 def find_paths(
@@ -3167,25 +3014,24 @@ def find_paths(
     live: bool = False,
     with_report: bool = False,
 ) -> list[dict] | dict:
-    """Find bounded canonical graph paths, preferring the active generation."""
+    """Find bounded canonical graph paths, preferring the active generation.
+
+    Both ends may be a name, a repository-relative path or a node id, resolved
+    the way `dependencies` resolves its symbol (audit 3, A5).
+    """
+    stored, reason = None, NO_GENERATION
     if not live:
-        graph = _active_evidence_graph(directory)
-        if graph is not None:
-            try:
-                paths = graph.path(
-                    source_node_id,
-                    target_node_id,
-                    max_depth=8,
-                    max_rows=10,
-                    max_work=10_000,
-                )
-                return _with_report("paths", paths, _store_report(graph), with_report)
-            finally:
-                graph.close()
+        stored, reason = _stored_or_reason(
+            lambda: _store_find_paths(
+                source_node_id, target_node_id, directory, with_report
+            )
+        )
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     paths = _find_live_paths(source_node_id, target_node_id, definitions, edges)
     return _with_report(
-        "paths", paths, _live_report(directory, parsed), with_report
+        "paths", paths, _live_report(directory, parsed, reason), with_report
     )
 
 
@@ -3323,36 +3169,6 @@ def _find_live_paths(
     return paths
 
 
-_WORKSPACE_SKIP_PARTS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
-
-
-def _inside_hidden_directory(path: Path, directory: Path) -> bool:
-    """A hidden directory under the workspace root, the file itself aside.
-
-    The one directory rule the vault's other walkers already agree on:
-    `corpus_snapshot._directory_excluded` and
-    `import_resolver._directory_skipped` both prune every hidden directory,
-    which is why the corpus and the symbol registry never see `.claude` agent
-    worktrees. This walk did not, and it was the whole of NEW-110: measured on
-    the live vault, 7,686 parsable files of which 7,261 — 94% — sit under
-    `.claude/`, throwaway checkouts belonging to other agents. A hidden name
-    on the file itself is not a directory and stays admissible.
-    """
-    try:
-        relative = path.relative_to(directory)
-    except ValueError:
-        return False
-    return any(part.startswith(".") for part in relative.parts[:-1])
-
-
-def _parsable_workspace_file(path: Path, directory: Path) -> bool:
-    if not path.is_file() or path.suffix.lower() not in LANGUAGE_MAP:
-        return False
-    if _inside_hidden_directory(path, directory):
-        return False
-    return not any(skip in path.parts for skip in _WORKSPACE_SKIP_PARTS)
-
-
 def _index_workspace_definitions(
     path: Path,
     result: dict,
@@ -3432,19 +3248,19 @@ def _workspace_call_edges(
 def _workspace_call_graph(
     directory: Path,
 ) -> tuple[list[tuple[Path, dict]], dict[str, dict], list[dict]]:
-    """Parse a workspace and resolve calls to canonical path/owner/name IDs."""
+    """Parse a workspace and resolve calls to canonical path/owner/name IDs.
+
+    The hidden-directory rule of `_live_source_files` was the whole of NEW-110:
+    measured on the live vault, 7,686 parsable files of which 7,261 — 94% — sat
+    under `.claude/`, throwaway checkouts belonging to other agents.
+    """
     directory = directory.resolve()
-    registry = build_python_symbol_registry(directory)
-    parsed: list[tuple[Path, dict]] = []
+    parsed = _parsed_live_sources(directory)
     definitions: dict[str, dict] = {}
     by_name: dict[str, list[dict]] = {}
     by_qualified: dict[str, dict] = {}
-    for path in sorted(directory.rglob("*")):
-        if not _parsable_workspace_file(path, directory):
-            continue
-        result = _parse_file(path, registry, directory)
+    for path, result in parsed:
         _annotate_function_ids(path, result, directory)
-        parsed.append((path, result))
         _index_workspace_definitions(
             path, result, directory, definitions, by_name, by_qualified
         )
@@ -3776,7 +3592,10 @@ def _flow_row(graph, edge: dict, depth: int) -> dict | None:
 
 def _flow_hop(graph, frontier: list[str], seen: set[str], depth: int) -> tuple[list[dict], list[str]]:
     """One hop of binding edges, and the nodes it opens for the next hop."""
-    edges = graph.argument_bindings(source_node_ids=frontier, max_rows=FLOW_MAX_ROWS)
+    edges = _in_node_chunks(
+        frontier,
+        lambda ids: graph.argument_bindings(source_node_ids=ids, max_rows=FLOW_MAX_ROWS),
+    )
     return _flow_hop_rows(graph, edges, depth), _flow_hop_reached(edges, seen)
 
 
@@ -3789,11 +3608,14 @@ def _flow_hop_reached(edges: list[dict], seen: set[str]) -> list[str]:
     return [str(edge["target_node_id"]) for edge in edges if str(edge["target_node_id"]) not in seen]
 
 
-def _flow_rows(graph, seeds: list[str], depth: int) -> list[dict]:
+def _flow_rows(
+    graph, seeds: list[str], depth: int, deadline=None, cancelled=None
+) -> list[dict]:
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
     for hop in range(1, depth + 1):
+        _check_generation_stop(deadline, cancelled)
         if not frontier:
             break
         hop_rows, reached = _flow_hop(graph, frontier, seen, hop)
@@ -3820,18 +3642,29 @@ def find_argument_flows(
     *,
     with_report: bool = True,
     max_depth: int | None = None,
+    deadline: float | None = None,
+    cancelled=None,
 ) -> list[dict] | dict | None:
-    """Argument bindings reachable from `symbol`, hop by hop, or None with no generation."""
-    graph = _active_evidence_graph(directory)
+    """Argument bindings reachable from `symbol`, hop by hop, or None with no generation.
+
+    `deadline` is a `time.monotonic()` value and `cancelled` a callable; either
+    stops the walk between hops with `TimeoutError` instead of letting it run to
+    completion after its caller has given up (audit 3, B3). Research:
+    `docs/research/2026-09-18-graph-a-flow-walk-stops-when-its-caller-has.md`.
+    """
+    graph = _active_evidence_graph(directory, deadline=deadline, cancelled=cancelled)
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _flow_rows(graph, seeds, depth)
-        return _with_report(
-            "flows", rows, _flow_report(graph, symbol, seeds, rows, depth), with_report
-        )
+        rows = _flow_rows(graph, seeds, depth, deadline, cancelled)
+        report = {
+            **_flow_report(graph, symbol, seeds, rows, depth),
+            **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+        }
+        return _with_report("flows", rows, report, with_report)
     finally:
         graph.close()
 
@@ -3877,8 +3710,11 @@ def _handler_rows(graph, routes: list[str], depth: int) -> list[dict]:
     """Turn around at a route: the handler that exposes it serves the request."""
     if not routes:
         return []
-    edges = graph.edges(
-        edge_types=("EXPOSES",), target_node_ids=routes, max_rows=FLOW_MAX_ROWS
+    edges = _in_node_chunks(
+        routes,
+        lambda ids: graph.edges(
+            edge_types=("EXPOSES",), target_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     rows = [_service_row(graph, _reversed_edge(edge), depth, "handled_by") for edge in edges]
     return [row for row in rows if row is not None]
@@ -3934,8 +3770,11 @@ def _foreign_row(source: dict, observation: dict, match: dict, depth: int) -> di
 
 
 def _foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
-    observations = graph.unresolved_edges(
-        edge_types=("HTTP_CALLS",), source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    observations = _in_node_chunks(
+        frontier,
+        lambda ids: graph.unresolved_edges(
+            edge_types=("HTTP_CALLS",), source_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     return [row for item in observations for row in _foreign_route_rows(graph, item, depth)]
 
@@ -3949,8 +3788,11 @@ def _quiet_foreign_rows(graph, frontier: list[str], depth: int) -> list[dict]:
 
 
 def _service_hop(graph, frontier: list[str], depth: int) -> list[dict]:
-    edges = graph.edges(
-        edge_types=SERVICE_EDGES, source_node_ids=frontier, max_rows=FLOW_MAX_ROWS
+    edges = _in_node_chunks(
+        frontier,
+        lambda ids: graph.edges(
+            edge_types=SERVICE_EDGES, source_node_ids=ids, max_rows=FLOW_MAX_ROWS
+        ),
     )
     rows = _service_rows_of(graph, edges, depth)
     rows += _handler_rows(graph, _route_node_ids(graph, rows), depth)
@@ -3965,11 +3807,14 @@ def _service_frontier(rows: list[dict], seen: set[str]) -> list[str]:
     return sorted(set(reached))[:FLOW_MAX_ROWS]
 
 
-def _service_walk(graph, seeds: list[str], depth: int) -> list[dict]:
+def _service_walk(
+    graph, seeds: list[str], depth: int, deadline=None, cancelled=None
+) -> list[dict]:
     rows: list[dict] = []
     seen = set(seeds)
     frontier = list(seeds)
     for hop in range(1, depth + 1):
+        _check_generation_stop(deadline, cancelled)
         if not frontier:
             break
         hop_rows = _service_hop(graph, frontier, hop)
@@ -3999,18 +3844,27 @@ def find_service_paths(
     *,
     with_report: bool = True,
     max_depth: int | None = None,
+    deadline: float | None = None,
+    cancelled=None,
 ) -> list[dict] | dict | None:
-    """Calls and HTTP hops reachable from `symbol`, or None with no generation."""
-    graph = _active_evidence_graph(directory)
+    """Calls and HTTP hops reachable from `symbol`, or None with no generation.
+
+    `deadline` and `cancelled` bound the walk in time the way they bound every
+    other reader here — see `find_argument_flows`.
+    """
+    graph = _active_evidence_graph(directory, deadline=deadline, cancelled=cancelled)
     if graph is None:
         return None
     try:
-        seeds = _dependency_seed_nodes(graph, symbol)[:FLOW_MAX_SEEDS]
+        matched = _dependency_seed_nodes(graph, symbol)
+        seeds = matched[:FLOW_MAX_SEEDS]
         depth = _flow_depth(max_depth)
-        rows = _service_walk(graph, seeds, depth)
-        return _with_report(
-            "hops", rows, _service_report(graph, symbol, seeds, rows, depth), with_report
-        )
+        rows = _service_walk(graph, seeds, depth, deadline, cancelled)
+        report = {
+            **_service_report(graph, symbol, seeds, rows, depth),
+            **_seed_cut_report(matched, FLOW_MAX_SEEDS),
+        }
+        return _with_report("hops", rows, report, with_report)
     finally:
         graph.close()
 

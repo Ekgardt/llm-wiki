@@ -35,11 +35,10 @@ def _completed(returncode: int, stdout: str, stderr: str):
 
 
 def _claude_returning(monkeypatch, returncode: int, stdout: str, stderr: str = ""):
+    """The CLI backends run through `_run_cli`, which ends the whole tree."""
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
     monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
-    monkeypatch.setattr(
-        llm_client.subprocess, "run", _completed(returncode, stdout, stderr)
-    )
+    monkeypatch.setattr(llm_client, "_run_cli", _completed(returncode, stdout, stderr))
     return llm_client.provider_candidates("claude", max_tokens=2000)[0]
 
 

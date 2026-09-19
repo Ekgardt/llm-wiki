@@ -73,8 +73,12 @@ def main() -> int:
         return 0
     try:
         _append_breadcrumb(payload)
-    except OSError as e:
-        print(f"tool_breadcrumb_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - the helper's contract is exit 0; the reason is kept
+        from daily_log_append import report_helper_failure
+
+        report_helper_failure(
+            "tool_breadcrumb_append", "opencode_tool_breadcrumb", error, payload.get("sessionId")
+        )
     return 0
 
 

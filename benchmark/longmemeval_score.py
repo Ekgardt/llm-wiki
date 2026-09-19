@@ -27,6 +27,52 @@ PROVIDER_ERROR_KINDS = frozenset(
     {"provider_no_response", "provider_invalid_json", "provider_deadline"}
 )
 
+# One LongMemEval type is graded against a rubric instead of against a fact, and
+# every text metric in this file is undefined there. The authors' own template
+# says so: "I will give you a question, a rubric for desired personalized
+# response, and a response from a model ... The model does not need to reflect
+# all the points in the rubric" (`benchmark/longmemeval_official.py::PREFERENCE`,
+# copied character for character from their `src/evaluation/evaluate_qa.py`).
+#
+# A gold of that shape was written by the dataset's authors, not said by anyone
+# in the sessions — "The user would prefer responses that suggest resources
+# specifically tailored to Adobe Premiere Pro". No answer contains it and no
+# prompt can either, so `contains`, `em`, `f1` and the prompt-evidence signal
+# all read 0 there whatever the system does. Measured on the recorded run of
+# 2026-09-17: 0 of 30 by containment, and the judge called right every one of
+# the three rows it managed to grade.
+#
+# An undefined metric reports nothing. It never reports a miss.
+# See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+RUBRIC_CATEGORIES = frozenset({"single-session-preference"})
+
+
+def gold_is_rubric(row: dict) -> bool:
+    """Whether this row's gold describes a good answer instead of being one."""
+    return str(row.get("category") or row.get("question_type")) in RUBRIC_CATEGORIES
+
+
+def _gold_is_an_explanation(row: dict) -> bool:
+    """An abstention's gold says why the question cannot be answered.
+
+    The authors' template hands the judge "an unanswerable question, an
+    explanation, and a response from a model"
+    (`longmemeval_official.ABSTENTION`). Nobody in the sessions said that
+    sentence either.
+    """
+    return bool(row.get("is_abstention")) or str(row.get("category")) == "abstention"
+
+
+def has_verbatim_gold(row: dict) -> bool:
+    """Whether this row's gold is text somebody actually said in a session.
+
+    Only then can "did the gold reach the prompt" be asked at all. Two shapes
+    fail it — a rubric and an abstention's explanation — and on the recorded run
+    of 2026-09-17 both read a flat 0 for that reason and no other: 0 of 30
+    preference rows and 0 of 30 abstention rows.
+    """
+    return not gold_is_rubric(row) and not _gold_is_an_explanation(row)
+
 
 def normalize(text: object) -> str:
     tokens = _NON_ALNUM.sub(" ", str(text).casefold()).split()
@@ -121,6 +167,8 @@ def score_question(result: dict) -> dict:
     """Attach deterministic metrics to one per-question result record."""
     if result.get("is_abstention"):
         return _scored_abstention(result)
+    if gold_is_rubric(result):
+        return _scored_rubric(result)
     gold = result.get("gold", "")
     hypothesis = result.get("hypothesis", "")
     return {
@@ -129,6 +177,22 @@ def score_question(result: dict) -> dict:
         "contains": contains_answer(gold, hypothesis),
         "f1": round(token_f1(gold, hypothesis), 4),
         "correct": contains_answer(gold, hypothesis),
+        "abstained": declined_to_answer(result),
+    }
+
+
+def _scored_rubric(result: dict) -> dict:
+    """No text metric speaks here, so this row claims none of them.
+
+    `abstained` is still recorded: whether the system refused is a fact about
+    the run, not a comparison against the gold text.
+    """
+    return {
+        **result,
+        "em": None,
+        "contains": None,
+        "f1": None,
+        "correct": None,
         "abstained": declined_to_answer(result),
     }
 
@@ -149,6 +213,12 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return round(sum(values) / len(values), 4)
+
+
+def _share(part: int, whole: int) -> float | None:
+    if not whole:
+        return None
+    return round(part / whole, 4)
 
 
 def _metric_values(rows: list[dict], key: str) -> list[float]:
@@ -185,11 +255,24 @@ def _flags(rows: list[dict], key: str) -> list[float]:
     return [float(bool(row.get(key))) for row in rows]
 
 
+def _text_scored(scored: list[dict]) -> list[dict]:
+    """The rows a text metric can speak about; a rubric gold is not one of them."""
+    return [row for row in scored if row.get("correct") is not None]
+
+
 def _quality_metrics(scored: list[dict]) -> dict:
+    """Accuracy over the rows the metric applies to, with that count beside it.
+
+    `text_scored` is the denominator and `text_not_applicable` is what was held
+    out, so the figure can never be read as if it covered every question.
+    """
+    graded = _text_scored(scored)
     return {
-        "accuracy": _mean(_flags(scored, "correct")),
-        "em": _mean(_flags(scored, "em")),
-        "f1": _mean(_metric_values(scored, "f1")),
+        "text_scored": len(graded),
+        "text_not_applicable": len(scored) - len(graded),
+        "accuracy": _mean(_flags(graded, "correct")),
+        "em": _mean(_flags(graded, "em")),
+        "f1": _mean(_metric_values(graded, "f1")),
     }
 
 
@@ -281,6 +364,55 @@ def _abstention_split(rows: list[dict]) -> dict:
     }
 
 
+def _prompted(rows: list[dict]) -> list[dict]:
+    """Rows where a prompt was actually built, so a prompt signal means something."""
+    return [row for row in rows if "gold_in_prompt" in row]
+
+
+def _gold_text_seen(row: dict) -> bool:
+    return row.get("gold_in_prompt") is True
+
+
+def _evidence_seen(row: dict) -> bool:
+    return row.get("evidence_in_prompt") is True
+
+
+def _prompt_evidence(rows: list[dict]) -> dict:
+    """What of the question's evidence reached the prompt the reader saw.
+
+    Two figures, each with the denominator it was taken over, because they
+    answer different questions and one of them is unanswerable for some types.
+
+    `gold_text_in_prompt` is the row's `gold_in_prompt` under a name that says
+    what it measures: the gold string appeared in the prompt word for word. It
+    is reported only over the rows whose gold is a span somebody said. A rubric
+    gold and an abstention's explanation are held out — the dataset's authors
+    wrote both, so no prompt can contain them — and even among the rest it is a
+    floor: on the recorded run of 2026-09-17, 101 answers the judge called right
+    had no gold text in the prompt, because their golds are computed ("6 days.")
+    or restated.
+
+    `evidence_in_prompt` is the dataset's own `has_answer` turns reaching the
+    prompt, which is defined for every type. It is reported over the rows that
+    recorded it; runs from before 2026-09-18 did not, and their figure is None
+    rather than zero. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    prompted = _prompted(rows)
+    verbatim = [row for row in prompted if has_verbatim_gold(row)]
+    measured = [row for row in prompted if row.get("evidence_turns_labelled")]
+    gold_seen = _count(verbatim, _gold_text_seen)
+    evidence_seen = _count(measured, _evidence_seen)
+    return {
+        "gold_text_in_prompt": gold_seen,
+        "gold_text_applicable": len(verbatim),
+        "gold_text_not_applicable": len(prompted) - len(verbatim),
+        "gold_text_in_prompt_share": _share(gold_seen, len(verbatim)),
+        "evidence_in_prompt": evidence_seen,
+        "evidence_measured": len(measured),
+        "evidence_in_prompt_share": _share(evidence_seen, len(measured)),
+    }
+
+
 def _category_report(rows: list[dict]) -> dict:
     """One category's numbers, with provider failures held out of accuracy.
 
@@ -296,6 +428,7 @@ def _category_report(rows: list[dict]) -> dict:
         "n": len(rows),
         "scored": len(scored),
         **_quality_metrics(scored),
+        **_prompt_evidence(scored),
         **_abstention_split(scored),
         "provider_failures": _count(rows, is_provider_failure),
         "harness_failures": _count(rows, is_harness_failure),

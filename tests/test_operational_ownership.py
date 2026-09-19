@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass, replace
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import markdown_transaction
 import operational_ownership as ownership
+import process_liveness
 import pytest
 from reliable_memory import capture_runtime_file_identity, sha256_bytes
 
@@ -166,24 +168,28 @@ def test_takeover_requires_expiry_and_positive_process_death(
     )
     offset = timedelta(seconds=-1 if expired else 1)
     _expire(state_root, first, clock.value + offset)
-    takeover_allowed = expired and process_state == "dead"
 
-    if takeover_allowed:
-        second = registry.acquire(
-            "doctor", scope="global", actor_id="second-actor", token="second-token"
-        )
-        assert second.epoch == first.epoch + 1
-        assert second.token == "second-token"
+    if expired and process_state == "dead":
+        _assert_taken_over(registry, state_root, first)
         return
+    _assert_refused(registry, state_root, _refusal_code(expired, process_state))
 
+
+def _assert_taken_over(registry, state_root: Path, first) -> None:
+    second = registry.acquire(
+        "doctor", scope="global", actor_id="second-actor", token="second-token"
+    )
+
+    assert (second.epoch, second.token) == (first.epoch + 1, "second-token")
+
+
+def _assert_refused(registry, state_root: Path, code: str) -> None:
     with pytest.raises(ownership.OperationalOwnershipError) as error:
         registry.acquire(
             "doctor", scope="global", actor_id="second-actor", token="second-token"
         )
-    assert (error.value.code, _owner_count(state_root)) == (
-        _refusal_code(expired, process_state),
-        1,
-    )
+
+    assert (error.value.code, _owner_count(state_root)) == (code, 1)
 
 
 @pytest.mark.parametrize(
@@ -223,11 +229,20 @@ def test_denied_liveness_is_unknown_and_blocks_takeover(
     assert _owner_count(state_root) == 1
 
 
+_CHANGED_LEASE = {
+    "token": lambda lease: replace(lease, token="stale-token"),
+    "epoch": lambda lease: replace(lease, epoch=lease.epoch + 1),
+    "pid": lambda lease: replace(
+        lease, process=replace(lease.process, pid=lease.process.pid + 1)
+    ),
+    "start_identity": lambda lease: replace(
+        lease, process=replace(lease.process, start_identity="different-process")
+    ),
+}
+
+
 @pytest.mark.parametrize("method", ["heartbeat", "release"])
-@pytest.mark.parametrize(
-    "change",
-    ["token", "epoch", "pid", "start_identity"],
-)
+@pytest.mark.parametrize("change", sorted(_CHANGED_LEASE))
 def test_heartbeat_and_release_verify_one_affected_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -239,23 +254,12 @@ def test_heartbeat_and_release_verify_one_affected_row(
     lease = registry.acquire(
         "doctor", scope="global", actor_id="actor", token="exact-token"
     )
-    if change == "token":
-        stale = replace(lease, token="stale-token")
-    elif change == "epoch":
-        stale = replace(lease, epoch=lease.epoch + 1)
-    elif change == "pid":
-        stale = replace(lease, process=replace(lease.process, pid=lease.process.pid + 1))
-    else:
-        stale = replace(
-            lease,
-            process=replace(lease.process, start_identity="different-process"),
-        )
+    stale = _CHANGED_LEASE[change](lease)
 
     with pytest.raises(ownership.OperationalOwnershipError) as error:
         getattr(registry, method)(stale)
 
-    assert error.value.code == "owner_fence_lost"
-    assert _owner_count(state_root) == 1
+    assert (error.value.code, _owner_count(state_root)) == ("owner_fence_lost", 1)
     registry.release(lease)
 
 
@@ -320,20 +324,31 @@ def test_every_other_acquisition_rejects_runtime_deletion_check(
         token="snapshot-token",
     )
 
-    for index, role in enumerate(role for role in ALL_ROLES if role != snapshot.role):
-        marker = _marker(state_root, role) if role in MARKER_ROLES else None
-        with pytest.raises(ownership.OperationalOwnershipError) as error:
-            registry.acquire(
-                role,
-                scope="global",
-                actor_id=f"blocked-actor-{index}",
-                token=f"blocked-token-{index}",
-                marker=marker,
-            )
-        assert error.value.code == "runtime_deletion_check_active"
-        assert _owner_count(state_root) == 1
+    blocked = [
+        _blocked_acquisition(registry, state_root, role, index)
+        for index, role in enumerate(
+            role for role in ALL_ROLES if role != snapshot.role
+        )
+    ]
 
+    assert blocked == [("runtime_deletion_check_active", 1)] * (len(ALL_ROLES) - 1)
     registry.release(snapshot)
+
+
+def _blocked_acquisition(
+    registry, state_root: Path, role: str, index: int
+) -> tuple[str, int]:
+    """(the refusal this role meets, how many owner rows survived it)."""
+    marker = _marker(state_root, role) if role in MARKER_ROLES else None
+    with pytest.raises(ownership.OperationalOwnershipError) as error:
+        registry.acquire(
+            role,
+            scope="global",
+            actor_id=f"blocked-actor-{index}",
+            token=f"blocked-token-{index}",
+            marker=marker,
+        )
+    return (error.value.code, _owner_count(state_root))
 
 
 def test_heartbeat_require_release_and_successor_use_exact_fence(
@@ -386,7 +401,7 @@ def test_process_identity_dispatch_liveness_and_actor_contracts(
 ) -> None:
     monkeypatch.setattr(ownership, "_platform_system", lambda: "Linux")
     monkeypatch.setattr(
-        ownership, "_linux_process_start_identity", lambda pid: f"linux:boot:{pid}"
+        ownership, "process_start_identity", lambda pid: f"linux:boot:{pid}"
     )
     monkeypatch.setattr(ownership.os, "getpid", lambda: 77)
     monkeypatch.setattr(ownership.os, "getuid", lambda: 501, raising=False)
@@ -397,19 +412,21 @@ def test_process_identity_dispatch_liveness_and_actor_contracts(
     assert ownership.process_identity_state(identity) == "alive"
     assert ownership.current_actor_identity() == "posix-uid:501"
 
-    monkeypatch.setattr(ownership, "_platform_system", lambda: "Darwin")
-    monkeypatch.setattr(
-        ownership, "_darwin_process_start_identity", lambda pid: f"darwin:1:{pid}"
-    )
-    assert ownership.process_start_identity(77) == "darwin:1:77"
-
     monkeypatch.setattr(ownership, "_platform_system", lambda: "Windows")
-    monkeypatch.setattr(
-        ownership, "_windows_process_start_identity", lambda pid: f"windows:{pid}"
-    )
     monkeypatch.setattr(ownership, "_windows_actor_identity", lambda: "windows-sid:S-1-5-21")
-    assert ownership.process_start_identity(77) == "windows:77"
     assert ownership.current_actor_identity() == "windows-sid:S-1-5-21"
+
+
+def test_an_unsupported_platform_refuses_the_identity_by_its_ownership_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probes moved; the refusal callers match on did not."""
+    monkeypatch.setattr(ownership.process_liveness, "_platform_system", lambda: "Plan9")
+
+    with pytest.raises(ownership.OperationalOwnershipError) as refusal:
+        ownership.process_start_identity(77)
+
+    assert refusal.value.code == "unsupported_platform"
 
 
 def test_current_platform_actor_identity_is_bounded_and_namespaced() -> None:
@@ -419,20 +436,10 @@ def test_current_platform_actor_identity_is_bounded_and_namespaced() -> None:
     assert len(actor.encode("utf-8")) <= 256
 
 
-def test_linux_identity_binds_boot_id_and_start_ticks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stat = b"42 (worker name) S " + b" ".join(str(value).encode() for value in range(1, 23))
-
-    def read(path: Path, _maximum: int) -> bytes:
-        if path == Path("/proc/42/stat"):
-            return stat
-        return b"550e8400-e29b-41d4-a716-446655440000\n"
-
-    monkeypatch.setattr(ownership, "_read_bounded_system_file", read)
-
-    assert ownership._linux_process_start_identity(42) == (
-        "linux:550e8400-e29b-41d4-a716-446655440000:19"
+def test_the_identity_probe_is_the_one_in_process_liveness() -> None:
+    """One implementation, two names: the registry re-exports, never re-implements."""
+    assert ownership.process_start_identity(os.getpid()) == (
+        process_liveness.process_start_identity(os.getpid())
     )
 
 

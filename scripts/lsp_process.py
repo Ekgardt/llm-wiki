@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import secrets
+import selectors
 import shutil
 import stat
 import subprocess as _subprocess
@@ -42,7 +43,8 @@ from lsp_protocol import (
     _LocalRequestViolation,
     _ProtocolStartupCleanupError,
 )
-from operational_ownership import OwnerLease, OwnershipRegistry
+from lsp_security import redact_lsp_text
+from process_liveness import process_state
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
@@ -84,12 +86,17 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
 _MAX_EVIDENCE_BYTES = 4096
+# The redacted last words of a failed server, as JSON encodes them. The rest of
+# the record is under 300 bytes, so the whole file stays well inside its bound.
+_STDERR_TAIL_BYTES = 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
-_IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
 _RECOVERY_RETRY_SECONDS = 0.05
+# Where the recovery beat stops doubling. A cleanup that is stuck is stuck;
+# past this the retries cost more than they can win back.
+_RECOVERY_RETRY_CEILING_SECONDS = 2.0
 _MAX_PENDING_CHILD_HANDLES = 8
 _MAX_PENDING_TEMP_NAMES = 1
 _MAX_STARTUP_CLEANUP_OWNERS = 8
@@ -601,7 +608,6 @@ class _OwnerDirectory:
         try:
             self._publish_record_windows(handle, name, payload)
             published = True
-            self.sync_directory()
         except BaseException as error:
             operation_error = error
         self._finish_windows_temporary(
@@ -612,6 +618,13 @@ class _OwnerDirectory:
         )
         if not published:
             raise OSError("LSP evidence publication did not complete")
+        # The handle is let go before the directory is flushed, as the lease path
+        # already does. Publication is a rename through a handle that shares
+        # nothing, so until it closes the record stands under its contract name
+        # and no reader can open it - for as long as a directory FlushFileBuffers
+        # takes on that disk. Research:
+        # docs/research/2026-09-18-a-published-record-is-let-go-before-it-is-flushed.md
+        self.sync_directory()
 
     def write_record(
         self,
@@ -1137,6 +1150,34 @@ class _FailureEvidenceIdentity:
     owner_nonce: str
     generation_nonce: str
     pid: int | None
+    stderr_tail: str | None = None
+
+
+@dataclass(slots=True)
+class _StderrWake:
+    """The pipe a POSIX drain thread watches beside stderr; closing it stops the thread.
+
+    A server that left its process group keeps stderr's write end open, so
+    end-of-file is not ours to wait for. The thread owns `read_fd`; cleanup
+    owns `write_fd`.
+    """
+
+    read_fd: int
+    write_fd: int | None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def request(self) -> None:
+        """Ask the drain thread to finish; asking twice is harmless."""
+        with self.lock:
+            descriptor, self.write_fd = self.write_fd, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def abandon(self) -> None:
+        """Both ends, for a drain thread that was never started."""
+        self.request()
+        with contextlib.suppress(OSError):
+            os.close(self.read_fd)
 
 
 @dataclass(slots=True)
@@ -1151,6 +1192,7 @@ class _Generation:
     stderr_size: list[int] = field(default_factory=lambda: [0])
     stderr_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     stderr_thread: threading.Thread | None = None
+    stderr_wake: _StderrWake | None = None
     exit_thread: threading.Thread | None = None
     expected_exit: threading.Event = field(default_factory=threading.Event, repr=False)
     failure_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -1318,8 +1360,6 @@ class _LifecycleCoordinator:
     heartbeat_stop: threading.Event = field(default_factory=threading.Event, repr=False)
     heartbeat_wake: threading.Event = field(default_factory=threading.Event, repr=False)
     heartbeat_thread: threading.Thread | None = None
-    ownership_registry: OwnershipRegistry | None = field(default=None, repr=False)
-    ownership_lease: OwnerLease | None = field(default=None, repr=False)
     seen_failures: set[tuple[str | None, bool]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
@@ -1465,25 +1505,6 @@ class LspProcess:
         return _start_lsp_process(cls, command, cwd=cwd, owner_root=owner_root)
 
     @classmethod
-    def _start_with_v3_candidate(
-        cls,
-        command: Sequence[str],
-        *,
-        cwd: Path,
-        owner_root: Path,
-        state_root: Path,
-    ) -> LspProcess:
-        return _start_lsp_process_impl(
-            cls,
-            command,
-            cwd=cwd,
-            owner_root=owner_root,
-            configured_deadline=None,
-            generation_configuration=_unconfigured_generation(),
-            ownership_state_root=Path(state_root),
-        )
-
-    @classmethod
     def start_configured(
         cls,
         command: Sequence[str],
@@ -1573,9 +1594,6 @@ class LspProcess:
 
     def close(self, deadline: float) -> None:
         _shutdown_lsp_process(self, deadline)
-
-    def idle_expired(self, now: float) -> bool:
-        return _idle_expired_lsp_process(self, now)
 
     def stderr_bytes(self) -> bytes:
         with self._stderr_projection_lock:
@@ -1868,6 +1886,7 @@ def _adopt_generation_tree(
 def _start_stderr_drain(
     generation: _Generation, process: object, generation_nonce: str, deadline: float
 ) -> None:
+    generation.stderr_wake = _new_stderr_wake()
     stderr_thread = threading.Thread(
         target=_drain_stderr,
         args=(
@@ -1875,6 +1894,7 @@ def _start_stderr_drain(
             generation.stderr,
             generation.stderr_size,
             generation.stderr_lock,
+            generation.stderr_wake,
         ),
         name=f"lsp-stderr-{generation_nonce}",
         daemon=True,
@@ -2021,7 +2041,22 @@ def _monitor_generation_exit(
     except BaseException as error:
         _queue_generation_failure(coordinator, generation, str(error))
         return
+    _await_last_words(generation)
     _fail_on_unexpected_exit(coordinator, generation)
+
+
+def _await_last_words(generation: _Generation) -> None:
+    """Let the drain thread finish before the exit is reported.
+
+    The server is gone, so its end of the pipe is closed and the thread is
+    about to see end-of-file. Waiting here is what puts the server's last
+    words in the failure evidence instead of a race. The bound is the one
+    cleanup itself uses; a process that escaped the group and kept the write
+    end open costs that much and no more, on a thread that holds no lock.
+    """
+    _join_owned_thread(
+        generation.stderr_thread, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    )
 
 
 def _fail_on_unexpected_exit(coordinator: _LifecycleCoordinator, generation: _Generation) -> None:
@@ -2043,7 +2078,6 @@ def _write_generation_lease(
     owner_nonce: str,
     deadline: float,
     retry_stop: threading.Event,
-    ownership: OwnerLease | None = None,
 ) -> None:
     process = generation.process
     server_pid = process.pid if process is not None else generation.server_pid
@@ -2062,8 +2096,6 @@ def _write_generation_lease(
             "server_pid": server_pid,
             "state": "live",
         }
-    if ownership is not None:
-        record.update(_canonical_lsp_fields(ownership))
     owner.write_lease(
         record,
         deadline=deadline,
@@ -2384,18 +2416,9 @@ def _validated_cwd(cwd: Path) -> Path:
 
 
 def _claim_startup_ownership(
-    coordinator: _LifecycleCoordinator,
-    owner_root: Path,
-    ownership_state_root: Path | None,
-    owner_nonce: str,
+    coordinator: _LifecycleCoordinator, owner_root: Path
 ) -> _OwnerDirectory:
-    """Take the registry lease, if there is a registry, and open the owner."""
-    if ownership_state_root is not None:
-        registry = OwnershipRegistry(ownership_state_root)
-        coordinator.ownership_registry = registry
-        coordinator.ownership_lease = registry.acquire(
-            "lsp", scope=f"lsp:{owner_nonce}"
-        )
+    """Open the owner directory this startup will own."""
     owner = _OwnerDirectory.open(owner_root)
     coordinator.owner_directory = owner
     return owner
@@ -2403,13 +2426,12 @@ def _claim_startup_ownership(
 
 def _startup_owner_record(
     arguments: Sequence[str],
-    coordinator: _LifecycleCoordinator,
     *,
     generation_nonce: str,
     owner_nonce: str,
     started_at: str,
 ) -> dict[str, object]:
-    record: dict[str, object] = {
+    return {
         "command_basename": Path(arguments[0]).name,
         "generation_nonce": generation_nonce,
         "owner_nonce": owner_nonce,
@@ -2417,9 +2439,6 @@ def _startup_owner_record(
         "started_at": started_at,
         "state": ProcessState.PROCESS_RUNNING.value,
     }
-    if coordinator.ownership_lease is not None:
-        record.update(_canonical_lsp_fields(coordinator.ownership_lease))
-    return record
 
 
 def _require_generation_owners(
@@ -2597,7 +2616,6 @@ def _start_lsp_process_impl(
     owner_root: Path,
     configured_deadline: float | None,
     generation_configuration: _GenerationConfiguration,
-    ownership_state_root: Path | None = None,
     environment_overrides: Mapping[str, str] | None = None,
 ) -> LspProcess:
     cwd = _validated_cwd(cwd)
@@ -2618,9 +2636,7 @@ def _start_lsp_process_impl(
     driver_acquired = False
 
     try:
-        owner = _claim_startup_ownership(
-            coordinator, owner_root, ownership_state_root, owner_nonce
-        )
+        owner = _claim_startup_ownership(coordinator, owner_root)
         startup_deadline = _resolved_startup_deadline(configured_deadline)
         _acquire_driver(coordinator, startup_deadline)
         driver_acquired = True
@@ -2638,7 +2654,6 @@ def _start_lsp_process_impl(
             generation_nonce=generation_nonce,
             owner_record=_startup_owner_record(
                 arguments,
-                coordinator,
                 generation_nonce=generation_nonce,
                 owner_nonce=owner_nonce,
                 started_at=started_at,
@@ -2897,19 +2912,6 @@ def _lease_write_targets(
         _release_lifecycle(coordinator)
 
 
-def _heartbeat_ownership_lease(
-    coordinator: _LifecycleCoordinator,
-) -> OwnerLease | None:
-    """Refresh the registry lease, when there is a registry holding one."""
-    ownership = coordinator.ownership_lease
-    registry = coordinator.ownership_registry
-    if ownership is None or registry is None:
-        return ownership
-    ownership = registry.heartbeat(ownership)
-    coordinator.ownership_lease = ownership
-    return ownership
-
-
 def _publish_current_lease(
     instance: LspProcess,
     coordinator: _LifecycleCoordinator,
@@ -2917,23 +2919,12 @@ def _publish_current_lease(
     generation: _Generation,
     deadline: float,
 ) -> None:
-    ownership = _heartbeat_ownership_lease(coordinator)
-    if ownership is None:
-        _write_generation_lease(
-            owner,
-            generation,
-            instance.owner_nonce,
-            deadline,
-            coordinator.heartbeat_stop,
-        )
-        return
     _write_generation_lease(
         owner,
         generation,
         instance.owner_nonce,
         deadline,
         coordinator.heartbeat_stop,
-        ownership,
     )
 
 
@@ -3031,10 +3022,26 @@ class _RecoveryState:
 
     request_retry: bool = False
     terminal_retry_code: str | None = None
+    retry_seconds: float = _RECOVERY_RETRY_SECONDS
 
     @property
     def pending(self) -> bool:
         return self.request_retry or self.terminal_retry_code is not None
+
+    def slow_down(self) -> None:
+        """A pass that changed nothing earns a longer wait before the next.
+
+        Cleanup that cannot finish — a descendant that will not die, a handle
+        another process holds — used to be retried twenty times a second for
+        the life of the process, each pass a `killpg` and an `fsync`.
+        """
+        self.retry_seconds = min(
+            self.retry_seconds * 2, _RECOVERY_RETRY_CEILING_SECONDS
+        )
+
+    def quicken(self) -> None:
+        """Nothing is owed: the next retry starts from the short beat again."""
+        self.retry_seconds = _RECOVERY_RETRY_SECONDS
 
 
 def _recovery_wait(
@@ -3042,13 +3049,15 @@ def _recovery_wait(
     coordinator: _LifecycleCoordinator,
     state: _RecoveryState,
 ) -> None:
-    """Wait for work: a short retry beat, or until the next drain deadline."""
+    """Wait for work: a backing-off retry beat, or the next drain deadline."""
     if state.pending:
         coordinator.recovery_wake.clear()
         if coordinator.recovery_stop.is_set():
             return
-        coordinator.recovery_wake.wait(_RECOVERY_RETRY_SECONDS)
+        coordinator.recovery_wake.wait(state.retry_seconds)
+        state.slow_down()
         return
+    state.quicken()
     drain_deadline = _next_drain_deadline(instance)
     wait_for = (
         None
@@ -3694,7 +3703,22 @@ def _require_serving_lifecycle_locked(
     raise RuntimeError("LSP process is closed")
 
 
-def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
+class _GenerationChannel(NamedTuple):
+    """One generation and the two ends of its channel, taken together.
+
+    Cleanup drops `generation.protocol` and `generation.process` on another
+    thread. Reading them after the lifecycle lock is released could therefore
+    see None on a generation that had both when it was chosen. Holding our own
+    references instead means a retire that lands now ends in the protocol's own
+    `ProtocolViolation` — the retry path — not in a broken invariant.
+    """
+
+    generation: _Generation
+    protocol: LspProtocol
+    process: object
+
+
+def _request_generation(instance: LspProcess, deadline: float) -> _GenerationChannel:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
@@ -3704,7 +3728,7 @@ def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
         if generation is None or not _generation_has_channel(generation):
             raise RuntimeError("LSP process generation is unavailable")
         instance.last_used_monotonic = time.monotonic()
-        return generation
+        return _GenerationChannel(generation, generation.protocol, generation.process)
     finally:
         _release_lifecycle(coordinator)
 
@@ -3938,7 +3962,7 @@ def _objectively_fatal(
 
 def _serve_lsp_request(
     instance: LspProcess,
-    generation: _Generation,
+    channel: _GenerationChannel,
     method: str,
     params: object,
     *,
@@ -3947,8 +3971,7 @@ def _serve_lsp_request(
     attempt: int,
 ) -> object:
     """Send the request on this generation, retrying only a fatal one."""
-    protocol = generation.protocol
-    process = generation.process
+    generation, protocol, process = channel
     try:
         return protocol.request(
             method,
@@ -3981,18 +4004,15 @@ def _attempt_lsp_request(
     attempt: int,
 ) -> object:
     """One attempt; the retry sentinel means the generation moved under us."""
-    generation = _request_generation(instance, deadline)
-    protocol = generation.protocol
-    process = generation.process
-    assert protocol is not None and process is not None
-    unusable = _generation_unusable(protocol, process)
+    channel = _request_generation(instance, deadline)
+    unusable = _generation_unusable(channel.protocol, channel.process)
     if unusable is not None:
         return _refuse_unusable_generation(
-            instance, generation, unusable, deadline, attempt
+            instance, channel.generation, unusable, deadline, attempt
         )
     return _serve_lsp_request(
         instance,
-        generation,
+        channel,
         method,
         params,
         deadline=deadline,
@@ -4032,10 +4052,7 @@ def _notify_lsp_process(
     deadline: float,
 ) -> None:
     deadline = _validated_deadline(deadline)
-    generation = _request_generation(instance, deadline)
-    protocol = generation.protocol
-    process = generation.process
-    assert protocol is not None and process is not None
+    generation, protocol, process = _request_generation(instance, deadline)
     unusable = _generation_unusable(protocol, process)
     if unusable is not None:
         _queue_generation_failure(instance._coordinator, generation, unusable)
@@ -4157,7 +4174,7 @@ def _notify_lsp_process_generation(
 ) -> bool:
     deadline = _validated_deadline(deadline)
     _require_generation_nonce(generation_nonce)
-    generation = _request_generation(instance, deadline)
+    generation = _request_generation(instance, deadline).generation
     if generation.nonce != generation_nonce:
         return False
     coordinator = instance._coordinator
@@ -4260,7 +4277,41 @@ def _failure_identity(
         _failure_owner_nonce(instance, owner),
         generation_nonce,
         _failure_server_pid(instance, generation),
+        _failure_stderr_tail(generation),
     )
+
+
+def _failure_stderr_tail(generation: _Generation | None) -> str | None:
+    """The last words the failed server wrote, redacted, or None when it wrote none.
+
+    This is the only thing a failed start leaves an operator to read, so it
+    goes through `redact_lsp_text` before it is written and is bounded so the
+    evidence record stays inside `_MAX_EVIDENCE_BYTES`.
+    """
+    if generation is None:
+        return None
+    with generation.stderr_lock:
+        written = b"".join(generation.stderr)
+    return _bounded_stderr_tail(written[-_STDERR_TAIL_BYTES:])
+
+
+def _redacted_lines(tail: bytes) -> str:
+    """Every non-empty line, redacted on its own.
+
+    A credential assignment runs to the end of its line, so the redactor is
+    given one line at a time: one `authorization:` must not swallow every
+    message the server printed after it.
+    """
+    lines = tail.decode("utf-8", errors="replace").splitlines()
+    return "\n".join(redact_lsp_text(line) for line in lines if line)
+
+
+def _bounded_stderr_tail(tail: bytes) -> str | None:
+    """The tail as the record will carry it, halved until its encoding fits."""
+    text = _redacted_lines(tail)
+    while text and len(json.dumps(text)) > _STDERR_TAIL_BYTES:
+        text = text[len(text) // 2 :]
+    return text or None
 
 
 def _remember_mandatory_terminal_failure(
@@ -4854,17 +4905,6 @@ def _cancel_all_lsp_process(instance: LspProcess, reason: str) -> None:
     protocol.cancel_all(reason)
 
 
-def _idle_expired_lsp_process(instance: LspProcess, now: float) -> bool:
-    now = _validated_deadline(now)
-    coordinator = instance._coordinator
-    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-    _acquire_lifecycle(coordinator, deadline)
-    try:
-        return now - instance.last_used_monotonic >= _IDLE_SECONDS
-    finally:
-        _release_lifecycle(coordinator)
-
-
 def _exit_stream_owners(
     instance: LspProcess, coordinator: _LifecycleCoordinator, deadline: float
 ) -> tuple[threading.Thread | None, threading.Thread | None]:
@@ -5021,6 +5061,7 @@ def _write_failure_evidence_once(
             owner_nonce=identity.owner_nonce,
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
+            stderr_tail=identity.stderr_tail,
         )
     except FileExistsError:
         _validate_failure_record(
@@ -5029,6 +5070,7 @@ def _write_failure_evidence_once(
             owner_nonce=identity.owner_nonce,
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
+            stderr_tail=identity.stderr_tail,
         )
         owner.sync_directory()
 
@@ -5622,28 +5664,6 @@ def _forget_closed_owner_locked(coordinator: _LifecycleCoordinator) -> None:
         coordinator.owner_directory = None
 
 
-def _release_ownership_lease_locked(run: _CleanupRun) -> None:
-    """Hand the registry lease back once the owner directory is gone."""
-    coordinator = run.coordinator
-    if not run.terminal or coordinator.owner_directory is not None:
-        return
-    if not _registry_lease_held(coordinator):
-        return
-    try:
-        coordinator.ownership_registry.release(coordinator.ownership_lease)
-        coordinator.ownership_lease = None
-    except BaseException as error:
-        run.failed("lease_removal", error)
-
-
-def _registry_lease_held(coordinator: _LifecycleCoordinator) -> bool:
-    """A registry lease this coordinator can still hand back."""
-    return (
-        coordinator.ownership_lease is not None
-        and coordinator.ownership_registry is not None
-    )
-
-
 def _forget_lease_generation_locked(coordinator: _LifecycleCoordinator) -> None:
     if coordinator.owner_directory is None:
         coordinator.lease_generation = None
@@ -5727,7 +5747,6 @@ def _close_cleanup_locked(run: _CleanupRun, *, outcome_ready: bool) -> None:
     coordinator = run.coordinator
     _forget_released_generations_locked(coordinator)
     _forget_closed_owner_locked(coordinator)
-    _release_ownership_lease_locked(run)
     _forget_lease_generation_locked(coordinator)
     _forget_active_generation_locked(coordinator, terminal=run.terminal)
     _settle_ownership_pending_locked(run, outcome_ready=outcome_ready)
@@ -5902,22 +5921,50 @@ def _close_one_pipe(
     return True
 
 
+def _stop_stderr_drain(generation: _Generation, deadline: float) -> bool:
+    """Wake the drain thread and wait for it within the deadline; True once it is gone.
+
+    The thread closes stderr itself. Closing it from here while the thread sat
+    in a read waited for the read, and the read waited for a process outside
+    the group: a cleanup that no deadline covered.
+    """
+    thread = generation.stderr_thread
+    wake = generation.stderr_wake
+    if thread is None or _thread_never_started(thread):
+        if wake is not None:
+            wake.abandon()
+        return True
+    if wake is not None:
+        wake.request()
+    return _join_owned_thread(thread, deadline)
+
+
 def _close_generation_pipes(
     generation: _Generation,
     process_exited: bool,
+    deadline: float,
     result: _CleanupResult,
     errors: list[BaseException],
     flags: _GenerationCleanup,
 ) -> bool:
-    """Close the server's pipes once it is gone; False when one refused."""
+    """Close the server's pipes once it is gone; False when one is still held."""
     process = generation.process
     if process is None or not process_exited:
         return True
-    streams = (process.stdin, process.stdout, process.stderr)
-    closed = True
-    for stream in streams:
-        closed = _close_one_pipe(stream, result, errors, flags) and closed
-    return closed
+    drained = _stop_stderr_drain(generation, deadline)
+    outcomes = [
+        _close_one_pipe(stream, result, errors, flags)
+        for stream in _closable_pipes(process, drained)
+    ]
+    return drained and all(outcomes)
+
+
+def _closable_pipes(process: object, drained: bool) -> list[BinaryIO | None]:
+    """Every pipe of ours; stderr only once its drain thread no longer holds it."""
+    streams = [process.stdin, process.stdout]
+    if drained:
+        streams.append(process.stderr)
+    return streams
 
 
 def _release_posix_tree(
@@ -6064,7 +6111,9 @@ def _release_one_generation(
     _terminate_generation_tree(generation, deadline, result, errors, flags)
     exited = _generation_process_exited(generation, result, errors, flags)
     _finish_generation_protocol(generation, exited, deadline, result, errors, flags)
-    pipes_closed = _close_generation_pipes(generation, exited, result, errors, flags)
+    pipes_closed = _close_generation_pipes(
+        generation, exited, deadline, result, errors, flags
+    )
     _release_posix_tree(generation, result, errors, flags)
     _join_generation_threads(generation, exited, deadline, result, errors, flags)
     ready = _windows_release_ready(generation, exited)
@@ -6181,8 +6230,6 @@ def _owner_directory_open(coordinator: _LifecycleCoordinator) -> bool:
 
 
 def _coordinator_has_ownership_locked(coordinator: _LifecycleCoordinator) -> bool:
-    if coordinator.ownership_lease is not None:
-        return True
     if _any_generation_held(coordinator) or _any_worker_alive(coordinator):
         return True
     return _owner_directory_open(coordinator)
@@ -6306,10 +6353,8 @@ def _same_program_name(
 
 
 def _is_inherited_descriptor(name: str, pass_fds: Sequence[int]) -> bool:
-    if not _is_descriptor_path(name):
-        return False
-    number = name.rsplit("/", 1)[-1]
-    return number.isdecimal() and int(number) in tuple(pass_fds)
+    number = _descriptor_number(name)
+    return number is not None and number in tuple(pass_fds)
 
 
 def _check_argument_strings(arguments: Sequence[object]) -> None:
@@ -6344,8 +6389,31 @@ def _checked_arguments(arguments: list[str]) -> list[str]:
 DESCRIPTOR_ROOTS = ("/proc/self/fd/", "/dev/fd/")
 
 
+_DESCRIPTOR_NUMBER = re.compile(r"[0-9]+")
+
+
+def _descriptor_number(name: str) -> int | None:
+    """The descriptor a path names, or None when it names anything else.
+
+    Only `<root><decimal digits>` is a descriptor path. `/proc/self/fd/../../x`
+    begins with the same characters and reaches a file of somebody else's
+    choosing, and `os.stat` on it would follow it there.
+    """
+    for root in DESCRIPTOR_ROOTS:
+        if name.startswith(root):
+            return _decimal_descriptor(name[len(root) :])
+    return None
+
+
+def _decimal_descriptor(tail: str) -> int | None:
+    """The whole remainder as a plain decimal descriptor number, or None."""
+    if _DESCRIPTOR_NUMBER.fullmatch(tail) is None:
+        return None
+    return int(tail)
+
+
 def _is_descriptor_path(name: str) -> bool:
-    return name.startswith(DESCRIPTOR_ROOTS)
+    return _descriptor_number(name) is not None
 
 
 def _resolved_executable(name: str, cwd: Path) -> Path:
@@ -6500,12 +6568,125 @@ def _reject_protocol_callback_lifecycle(instance: LspProcess) -> None:
 
 def _validated_owner_root(owner_root: Path) -> str:
     owner_nonce = owner_root.name
-    if re.fullmatch(r"[0-9a-f]{32}", owner_nonce) is None:
+    if _OWNER_NONCE_PATTERN.fullmatch(owner_nonce) is None:
         raise ValueError(
             "owner_root basename must be 32 lowercase hexadecimal characters"
         )
     _require_fresh_owner_root(owner_root)
+    _sweep_dead_owner_roots(owner_root)
     return owner_nonce
+
+
+_OWNER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
+# The sweep looks at no more owner roots than doctor reports on.
+_MAX_SWEPT_OWNER_ROOTS = 128
+
+
+def _sweep_dead_owner_roots(owner_root: Path) -> None:
+    """Remove sibling owner roots whose owner is dead and which kept no evidence.
+
+    A controlled close removes its own root; a failure or an abrupt death
+    leaves one behind, with its records and any sealed `launch-` tree, and
+    nothing else in the product ever removes it. There is no daemon, so the
+    sweep runs at the one moment the product is already working in this
+    directory: starting a new server. It never raises — a sweep that cannot
+    finish is no reason to fail a start. Research:
+    `docs/research/2026-09-17-lsp-the-owner-record-names-the-first-generation-only.md`.
+    """
+    with contextlib.suppress(OSError):
+        _sweep_owner_parent(owner_root.parent, owner_root.name)
+
+
+def _sweep_owner_parent(parent: Path, mine: str) -> None:
+    with os.scandir(parent) as entries:
+        for scanned, entry in enumerate(entries, 1):
+            if scanned > _MAX_SWEPT_OWNER_ROOTS:
+                return
+            _sweep_one_owner_root(Path(entry.path), entry.name, mine)
+
+
+def _sweep_one_owner_root(root: Path, name: str, mine: str) -> None:
+    if name == mine or _OWNER_NONCE_PATTERN.fullmatch(name) is None:
+        return
+    if not _owner_root_is_dead(root):
+        return
+    with contextlib.suppress(OSError):
+        _remove_owner_root_tree(root)
+
+
+def _owner_root_is_dead(root: Path) -> bool:
+    """No retained evidence, and every process the records name is proven gone."""
+    if (root / "failure.json").exists():
+        return False
+    pids = _owner_root_pids(root)
+    if not pids:
+        return False
+    return all(process_state(pid) == "dead" for pid in pids)
+
+
+def _owner_root_pids(root: Path) -> tuple[int, ...]:
+    """Every process this root's records name, or () when they cannot be read.
+
+    The owner record must be there: without it the root belongs to a start
+    that has not published yet, which is a live one. The lease may be absent —
+    a controlled cleanup removes it — but if it is there it names the
+    generation running now, which after a restart is not the one the owner
+    record names.
+    """
+    owner = _record_pids(root / "owner.json", ("owner_pid",), required=True)
+    lease = _record_pids(
+        root / "lease.json", ("manager_pid", "server_pid"), required=False
+    )
+    if owner is None or lease is None:
+        return ()
+    return owner + lease
+
+
+def _record_pids(
+    path: Path, names: tuple[str, ...], *, required: bool
+) -> tuple[int, ...] | None:
+    """The pids the record names; () when absent and allowed to be; None otherwise."""
+    try:
+        payload = _bounded_record_bytes(path)
+    except FileNotFoundError:
+        return None if required else ()
+    except OSError:
+        return None
+    return _payload_pids(payload, names)
+
+
+def _bounded_record_bytes(path: Path) -> bytes:
+    with open(path, "rb") as handle:
+        payload = handle.read(_MAX_EVIDENCE_BYTES + 1)
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise OSError("LSP evidence record exceeds its byte bound")
+    return payload
+
+
+def _payload_pids(payload: bytes, names: tuple[str, ...]) -> tuple[int, ...] | None:
+    """Those fields as process identifiers, or None when any one is not."""
+    try:
+        record = _canonical_evidence_record(payload)
+    except ValueError:
+        return None
+    pids = tuple(record.get(name) for name in names)
+    if not all(_is_server_pid(pid) for pid in pids):
+        return None
+    return pids
+
+
+def _remove_owner_root_tree(root: Path) -> None:
+    """Take one dead owner root down, unsealing the launch trees it may hold."""
+    for directory, _subdirectories, files in os.walk(root):
+        _unseal_for_removal(Path(directory), files)
+    shutil.rmtree(root)
+
+
+def _unseal_for_removal(directory: Path, files: Sequence[str]) -> None:
+    """A sealed launch tree is 0o500 and 0o400; nothing can be unlinked inside it."""
+    os.chmod(directory, 0o700)
+    for name in files:
+        os.chmod(directory / name, 0o600)
 
 
 def _require_fresh_owner_root(owner_root: Path) -> None:
@@ -6689,15 +6870,25 @@ def _write_owner_record(
     owner_directory.write_record("owner.json", record)
 
 
-def _canonical_lsp_fields(ownership: OwnerLease) -> dict[str, object]:
-    return {
-        "canonical_role": ownership.role,
-        "canonical_scope": ownership.scope,
-        "actor_id": ownership.actor_id,
-        "owner_token": ownership.token,
-        "fencing_epoch": ownership.epoch,
-        "process_start_identity": ownership.process.start_identity,
-    }
+def _new_stderr_wake() -> _StderrWake | None:
+    """A wake pipe where a pipe can be selected on; Windows ends stderr itself.
+
+    There the Job Object kills every holder of the write end, so end-of-file
+    always arrives and the drain thread needs no second descriptor.
+    """
+    if os.name == "nt":
+        return None
+    read_fd, write_fd = os.pipe()
+    return _StderrWake(read_fd, write_fd)
+
+
+@dataclass(frozen=True, slots=True)
+class _StderrRing:
+    """Where the drain thread keeps the last bytes the server wrote."""
+
+    chunks: deque[bytes]
+    size: list[int]
+    lock: threading.Lock
 
 
 def _drain_stderr(
@@ -6705,31 +6896,74 @@ def _drain_stderr(
     chunks: deque[bytes],
     size: list[int],
     lock: threading.Lock,
+    wake: _StderrWake | None = None,
 ) -> None:
+    """Own the server's stderr: read it as it arrives and close it at the end.
+
+    Nothing else reads or closes this stream while the thread lives, so no
+    cleanup can wait behind a read that an escaped process keeps open.
+    """
     try:
-        _read_stderr_forever(stream, chunks, size, lock)
+        _read_stderr_forever(stream, _StderrRing(chunks, size, lock), wake)
     except (OSError, ValueError):
         return
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
+        if wake is not None:
+            with contextlib.suppress(OSError):
+                os.close(wake.read_fd)
+
+
+def _take_stderr_chunk(descriptor: int, ring: _StderrRing) -> bool:
+    """Append what the pipe holds now; False once the stream has ended."""
+    chunk = os.read(descriptor, _STDERR_CHUNK_BYTES)
+    if not chunk:
+        return False
+    with ring.lock:
+        ring.chunks.append(chunk)
+        ring.size[0] += len(chunk)
+        _trim_stderr_chunks(ring.chunks, ring.size)
+    return True
+
+
+def _ready_descriptors(selector: selectors.BaseSelector, timeout: float | None) -> set[int]:
+    return {key.fd for key, _events in selector.select(timeout)}
+
+
+def _take_waiting_stderr(
+    selector: selectors.BaseSelector, descriptor: int, ring: _StderrRing
+) -> None:
+    """After the wake-up: what is already in the pipe, and never more than the ring."""
+    for _ in range(MAX_STDERR_BYTES // _STDERR_CHUNK_BYTES + 1):
+        if descriptor not in _ready_descriptors(selector, 0):
+            return
+        if not _take_stderr_chunk(descriptor, ring):
+            return
+
+
+def _read_stderr_until_woken(
+    selector: selectors.BaseSelector, descriptor: int, wake_fd: int, ring: _StderrRing
+) -> None:
+    while wake_fd not in _ready_descriptors(selector, None):
+        if not _take_stderr_chunk(descriptor, ring):
+            return
+    _take_waiting_stderr(selector, descriptor, ring)
 
 
 def _read_stderr_forever(
-    stream: BinaryIO,
-    chunks: deque[bytes],
-    size: list[int],
-    lock: threading.Lock,
+    stream: BinaryIO, ring: _StderrRing, wake: _StderrWake | None
 ) -> None:
-    """Append every chunk the server writes until its stream ends."""
-    while True:
-        chunk = stream.read(_STDERR_CHUNK_BYTES)
-        if not chunk:
-            return
-        with lock:
-            chunks.append(chunk)
-            size[0] += len(chunk)
-            _trim_stderr_chunks(chunks, size)
+    """Append every chunk the server writes until its stream ends or we are woken."""
+    descriptor = stream.fileno()
+    if wake is None:
+        while _take_stderr_chunk(descriptor, ring):
+            pass
+        return
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_READ)
+        selector.register(wake.read_fd, selectors.EVENT_READ)
+        _read_stderr_until_woken(selector, descriptor, wake.read_fd, ring)
 
 
 def _trim_stderr_chunks(chunks: deque[bytes], size: list[int]) -> None:
@@ -6761,6 +6995,7 @@ def _write_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None = None,
 ) -> None:
     failure_record: dict[str, object] = {
         "code": code,
@@ -6770,12 +7005,15 @@ def _write_failure_record(
     }
     if pid is not None:
         failure_record["server_pid"] = pid
+    if stderr_tail is not None:
+        failure_record["stderr_tail"] = stderr_tail
     _validate_failure_record(
         failure_record,
         code=code,
         owner_nonce=owner_nonce,
         generation_nonce=generation_nonce,
         pid=pid,
+        stderr_tail=stderr_tail,
     )
     # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
     owner_directory.write_record("failure.json", failure_record)
@@ -6801,9 +7039,13 @@ def _is_server_pid(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+_FAILURE_OPTIONAL_FIELDS = frozenset({"server_pid", "stderr_tail"})
+
+
 def _validate_failure_shape(record: Mapping[str, object]) -> None:
-    allowed = (_FAILURE_REQUIRED_FIELDS, _FAILURE_REQUIRED_FIELDS | {"server_pid"})
-    if frozenset(record) not in allowed:
+    names = frozenset(record)
+    known = _FAILURE_REQUIRED_FIELDS | _FAILURE_OPTIONAL_FIELDS
+    if not _FAILURE_REQUIRED_FIELDS <= names or not names <= known:
         raise ValueError("LSP failure evidence has an invalid shape")
 
 
@@ -6850,6 +7092,7 @@ def _expected_failure_identity(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None,
 ) -> dict[str, object]:
     """The exact field values this terminal record has to carry."""
     identity: dict[str, object] = {
@@ -6857,8 +7100,8 @@ def _expected_failure_identity(
         "owner_nonce": owner_nonce,
         "generation_nonce": generation_nonce,
     }
-    if pid is not None:
-        identity["server_pid"] = pid
+    optional = (("server_pid", pid), ("stderr_tail", stderr_tail))
+    identity.update({name: value for name, value in optional if value is not None})
     return identity
 
 
@@ -6866,9 +7109,19 @@ def _validate_failure_identity(
     record: Mapping[str, object], expected: Mapping[str, object]
 ) -> None:
     observed = {name: record.get(name) for name in expected}
-    expected_fields = _FAILURE_REQUIRED_FIELDS | (frozenset(expected) & {"server_pid"})
+    expected_fields = _FAILURE_REQUIRED_FIELDS | (
+        frozenset(expected) & _FAILURE_OPTIONAL_FIELDS
+    )
     if observed != dict(expected) or frozenset(record) != expected_fields:
         raise ValueError("LSP failure evidence does not match expected terminal identity")
+
+
+def _validate_failure_tail(record: Mapping[str, object]) -> None:
+    if "stderr_tail" not in record:
+        return
+    tail = record["stderr_tail"]
+    if not isinstance(tail, str) or not 0 < len(json.dumps(tail)) <= _STDERR_TAIL_BYTES:
+        raise ValueError("LSP failure evidence has an invalid stderr_tail")
 
 
 def _validate_failure_record(
@@ -6878,12 +7131,14 @@ def _validate_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    stderr_tail: str | None = None,
 ) -> None:
     _validate_failure_shape(record)
     _validate_failure_code(record)
     _validate_failure_nonces(record)
     _validate_failure_timestamp(record)
     _validate_failure_pid(record)
+    _validate_failure_tail(record)
     _validate_failure_identity(
         record,
         _expected_failure_identity(
@@ -6891,6 +7146,7 @@ def _validate_failure_record(
             owner_nonce=owner_nonce,
             generation_nonce=generation_nonce,
             pid=pid,
+            stderr_tail=stderr_tail,
         ),
     )
 

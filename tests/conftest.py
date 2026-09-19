@@ -84,7 +84,7 @@ def _isolate_test_state_root():
 #
 # The watch is deliberately uneven, because the live runtime writes here too:
 #   * `knowledge/projects` is compared by name only — a real session working in
-#     `agenticos` or `fix-pip` appends to its own journal while the suite runs,
+#     `project-beta` or `project-alpha` appends to its own journal while the suite runs,
 #     and that is the owner's work, not a leak. A leaking test creates a project
 #     of its own, which shows up as a new name.
 #   * `knowledge/notes` is compared file by file — only a nightly compile writes
@@ -145,6 +145,37 @@ def _no_writes_into_the_live_vault():
     yield
     leaked = _leaked_entries(before, _knowledge_entries())
     assert not leaked, "tests wrote into the live vault: " + ", ".join(leaked[:20])
+
+
+SHIPPED_APPEND_BUDGETS = "shipped_append_budgets"
+_APPEND_BUDGETS = (
+    "daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS",
+    "daily_log_append.LIFECYCLE_APPEND_BUDGET_SECONDS",
+)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{SHIPPED_APPEND_BUDGETS}: the test measures the hooks' append budgets and sees the shipped values",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _unhurried_hook_appends(request, monkeypatch):
+    """A test of what a hook writes does not race the hook's append budget.
+
+    The budget fits the host's timeout, not a loaded CI runner: the first append into a
+    fresh vault took 1.4-5.6 s on the Windows shards, the breadcrumb budget is 3 s, and a
+    writer past it gives up by design. Patched by name, so a reloaded module is patched too.
+    Research: docs/research/2026-09-17-a-content-test-does-not-race-the-hook-budget.md.
+    """
+    if request.node.get_closest_marker(SHIPPED_APPEND_BUDGETS):
+        return
+    from tests.slow_machine import LONG_TIMEOUT
+
+    for budget in _APPEND_BUDGETS:
+        monkeypatch.setattr(budget, LONG_TIMEOUT)
 
 
 # Default fake provider for any accidental live LLM calls in unit tests.

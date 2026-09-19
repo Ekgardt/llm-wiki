@@ -2853,6 +2853,10 @@ _LSP_LEASE_FIELDS = {
     "state",
 }
 _LSP_FAILURE_FIELDS = {"code", "generation_nonce", "owner_nonce", "timestamp"}
+# `stderr_tail` is the redacted last kilobyte the failed server wrote, bounded
+# by its JSON encoding in `lsp_process._STDERR_TAIL_BYTES`.
+_LSP_FAILURE_TAIL_CHARS = 1024
+_LSP_FAILURE_KNOWN_FIELDS = _LSP_FAILURE_FIELDS | {"server_pid", "stderr_tail"}
 _LSP_OWNER_ENTRY_NAMES = {"cancellation", "failure.json", "lease.json", "owner.json"}
 _LSP_RECORD_NAMES = {"failure.json", "lease.json", "owner.json"}
 
@@ -2978,8 +2982,22 @@ def _valid_lsp_failure_evidence(record: dict[str, Any], owner_nonce: str) -> boo
     )
 
 
+def _valid_lsp_failure_tail(record: dict[str, Any]) -> bool:
+    """The redacted last words of the failed server, if the writer kept any."""
+    if "stderr_tail" not in record:
+        return True
+    tail = record["stderr_tail"]
+    return isinstance(tail, str) and 0 < len(tail) <= _LSP_FAILURE_TAIL_CHARS
+
+
+def _valid_lsp_failure_shape(record: dict[str, Any]) -> bool:
+    """Every required field, and nothing this reader does not know."""
+    names = set(record)
+    return _LSP_FAILURE_FIELDS <= names and names <= _LSP_FAILURE_KNOWN_FIELDS
+
+
 def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
-    if set(record) not in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"}):
+    if not _valid_lsp_failure_shape(record) or not _valid_lsp_failure_tail(record):
         return False
     if not _valid_lsp_failure_evidence(record, owner_nonce):
         return False
@@ -3115,24 +3133,6 @@ def _record_pyright_degradation(identity, details: dict, codes: list[str]) -> No
     _extend_unique(codes, identity.degradation_codes)
     if identity.version != "1.1.411":
         _extend_unique(codes, ("pyright_version_mismatch",))
-
-
-def _navigation_optional_check(
-    state_root: Path,
-    check_id: str,
-    run_check: Callable[[], dict],
-) -> dict:
-    """Skip navigation diagnostics when the feature is not configured."""
-    lsp_root = state_root / "run" / "lsp"
-    managed = state_root / "cache" / "code-tools" / "pyright"
-    if not lsp_root.exists() and not managed.exists():
-        return _result(
-            check_id,
-            "skipped",
-            "Code navigation is not configured.",
-            {"configured": False},
-        )
-    return run_check()
 
 
 _LSP_RECORD_BYTES = 64 * 1024
@@ -3837,9 +3837,15 @@ def _validated_lsp_records(
 
 
 def _lsp_nonces_match(owner: dict, lease: dict, entry_name: str) -> bool:
-    if owner.get("owner_nonce") != entry_name or lease.get("owner_nonce") != entry_name:
-        return False
-    return owner.get("generation_nonce") == lease.get("generation_nonce")
+    """Both records belong to this owner directory.
+
+    The generation nonces are deliberately not compared. `owner.json` is
+    immutable create-only and names the generation the owner started with; a
+    recovery restart installs a second generation and republishes the lease,
+    and no record may be rewritten to agree with it.
+    """
+    owned = (owner.get("owner_nonce"), lease.get("owner_nonce"))
+    return owned == (entry_name, entry_name)
 
 
 def _lsp_start_within_window(
@@ -3860,8 +3866,6 @@ def _lsp_records_match(
     heartbeat_at: datetime | None,
 ) -> bool:
     if not _lsp_nonces_match(owner, lease, entry_name):
-        return False
-    if owner.get("owner_pid") != lease.get("server_pid"):
         return False
     return _lsp_start_within_window(owner, now, heartbeat_at)
 
@@ -3922,14 +3926,6 @@ def _lsp_liveness(
     return _lsp_pid_liveness(pids, heartbeat_at, deadline)
 
 
-def _failure_identity_mismatch(owner: dict, failure: dict) -> bool:
-    if failure.get("generation_nonce") != owner.get("generation_nonce"):
-        return True
-    return "server_pid" in failure and failure.get("server_pid") != owner.get(
-        "owner_pid"
-    )
-
-
 def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
     owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
     failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
@@ -3943,9 +3939,7 @@ def _failure_contradicts_owner(
 ) -> bool:
     if not isinstance(owner, dict) or not isinstance(failure, dict):
         return False
-    return _failure_identity_mismatch(owner, failure) or _failure_time_invalid(
-        owner, failure, now
-    )
+    return _failure_time_invalid(owner, failure, now)
 
 
 def _validated_failure_record(
@@ -4465,6 +4459,13 @@ def _identity_stale(facts: _GenerationFacts, complete_v2: bool) -> bool:
     return facts.graph_extraction_state != "current" or not complete_v2
 
 
+# The search artifact family a validated generation carries. The artifact names its own
+# version (`corpus-search/v1` without the keys column, `/v2` with it) and the validator
+# accepts both, so health names the family rather than guessing one version for all.
+# See `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+_SEARCH_SCHEMA_FAMILY = "corpus-search"
+
+
 def _generation_search_fields(complete_v2: bool) -> dict:
     if not complete_v2:
         return {
@@ -4474,7 +4475,7 @@ def _generation_search_fields(complete_v2: bool) -> dict:
         }
     return {
         "search_index": "valid",
-        "search_schema": "corpus-search/v1",
+        "search_schema": _SEARCH_SCHEMA_FAMILY,
         "search_integrity": "valid",
     }
 
@@ -4585,7 +4586,7 @@ def _diagnose_invalid_generation(
         return
     if diagnostic.get("schema_version") != "corpus-generation/v2":
         return
-    state["invalid_details"]["search_schema"] = "corpus-search/v1"
+    state["invalid_details"]["search_schema"] = _SEARCH_SCHEMA_FAMILY
     state["invalid_details"].update(
         _diagnostic_search_state(generation_path, diagnostic, state_root, deadline)
     )
@@ -5213,7 +5214,7 @@ _HOOK_ERROR_LINE = re.compile(r"^\[(?P<at>[^\]]+)\]\s+(?P<kind>[^:]+):(?P<rest>.
 # A kind whose name says the writer lost a race. The event is carried by the
 # next session end, so it is retried work and not lost work, and counting it as
 # a failure made this check permanently red on a machine that runs several
-# agents. Measured on this vault 2026-09-07: `no-hands` logged four of these in
+# agents. Measured on this vault 2026-09-07: `another-project` logged four of these in
 # four minutes while its committed sequence advanced from 836 to 838.
 CONTENTION_KIND_MARKER = "contention"
 CONTENTION_MESSAGES = (
@@ -5317,7 +5318,7 @@ def _quiet_hook_message(failures: int, contended: int) -> str:
 
 
 # A project's checkpoints are ordered, so one sequence that cannot finish holds
-# every later one. Measured on this vault 2026-08-30: `fix-pip` sequence 320
+# every later one. Measured on this vault 2026-08-30: one project's sequence 320
 # stood `reserved` behind a `discarded` transaction from 08-28 and refused every
 # checkpoint for that project for two days, while 744 of them queued in
 # `run/state.json`. Nothing reported it. An hour is long enough that no live
@@ -5566,79 +5567,6 @@ def _contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
         return False
     lowered = text.lower()
     return all(marker.lower() in lowered for marker in markers)
-
-
-def _parse_toml_document(text: str) -> tuple[dict[str, Any] | None, str | None]:
-    parser = STDLIB_TOML or TOMLI
-    if parser is None:
-        return None, "toml_parser_unavailable"
-    try:
-        document = parser.loads(text)
-    except (ValueError, TypeError):
-        return None, "toml_invalid"
-    return (document, None) if isinstance(document, dict) else (None, "toml_invalid")
-
-
-_CODEX_SERVER_ARG_PREFIX = ["run", "--locked", "--no-sync", "--directory"]
-_CODEX_SERVER_ARG_SUFFIX = ["python", "scripts/mcp_server.py"]
-
-
-def _codex_server_arg_shape(args: object) -> bool:
-    if not isinstance(args, list) or len(args) != 8:
-        return False
-    return all(isinstance(item, str) for item in args)
-
-
-def _codex_server_args_match(args: object) -> bool:
-    if not _codex_server_arg_shape(args):
-        return False
-    if args[:4] != _CODEX_SERVER_ARG_PREFIX:
-        return False
-    return args[5:] == _CODEX_SERVER_ARG_SUFFIX
-
-
-def _codex_server_configured(table: dict) -> bool:
-    if table.get("command") != "uv":
-        return False
-    if table.get("enabled", True) is not True:
-        return False
-    return _codex_server_args_match(table.get("args"))
-
-
-def _codex_config_text(path: Path) -> str | None:
-    try:
-        raw = read_stable_bytes(path, MAX_CONFIG_BYTES, label="Codex config")
-        return raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-
-
-def _codex_table_state(document: dict) -> tuple[bool | None, str]:
-    servers = document.get("mcp_servers")
-    table = servers.get("llm-wiki") if isinstance(servers, dict) else None
-    if not isinstance(table, dict):
-        return False, "target_missing_or_invalid"
-    if _codex_server_configured(table):
-        return True, "configured"
-    return False, "target_missing_or_invalid"
-
-
-def _codex_config_error_state(error: str) -> tuple[bool | None, str]:
-    """An absent TOML parser leaves the state unknown; anything else is a no."""
-    if error == "toml_parser_unavailable":
-        return None, error
-    return False, error
-
-
-def _codex_config_state(path: Path) -> tuple[bool | None, str]:
-    text = _codex_config_text(path) if _readable_config(path) else None
-    if text is None:
-        return False, "config_missing_or_unsafe"
-    document, error = _parse_toml_document(text)
-    if error is not None:
-        return _codex_config_error_state(error)
-    assert document is not None
-    return _codex_table_state(document)
 
 
 def _codex_shim_command(arguments: list[str]) -> list[str] | None:
@@ -6333,8 +6261,10 @@ def _lock_metadata(pid: int, token: str, now: datetime) -> bytes:
 
 
 def _create_owned_lock(path: Path, token: str, now: datetime) -> bool:
+    """Binary: the metadata written is the metadata a reader parses back."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(path, flags, 0o600)
     except FileExistsError:
         return False
     try:
@@ -6412,13 +6342,19 @@ def _read_lock_fd(fd: int) -> tuple[dict | None, os.stat_result | None]:
 
 
 def _create_windows_lock_handle(ctypes, path: Path):
+    """Open the lock file through the loader that keeps the error and the width.
+
+    `ctypes.windll` declares no argument types and keeps no last error, so the
+    handle was passed on as a C int. Research:
+    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
+    """
+    from markdown_transaction import _windows_kernel32
+
     generic_read_write = 0x80000000 | 0x40000000
     share_read_write_delete = 0x1 | 0x2 | 0x4
     open_existing = 3
     file_attribute_normal = 0x80
-    create_file = ctypes.windll.kernel32.CreateFileW
-    create_file.restype = ctypes.c_void_p
-    handle = create_file(
+    handle = _windows_kernel32().CreateFileW(
         str(path),
         generic_read_write,
         share_read_write_delete,
@@ -6434,13 +6370,15 @@ def _open_windows_lock(path: Path) -> int | None:
     import ctypes
     import msvcrt
 
+    from markdown_transaction import _windows_kernel32
+
     handle = _create_windows_lock_handle(ctypes, path)
     if handle is None:
         return None
     try:
         return msvcrt.open_osfhandle(handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
     except OSError:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        _windows_kernel32().CloseHandle(handle)
         return None
 
 
@@ -7095,6 +7033,8 @@ class _MaintenanceHeartbeat:
         self.lease = lease
         self.deadline = deadline
         self.interval = _heartbeat_interval(lease)
+        # The owner row is already written; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._lost = threading.Event()
         self._thread: threading.Thread | None = None
@@ -7128,6 +7068,7 @@ class _MaintenanceHeartbeat:
             interval=self.interval,
             lease_seconds=_lease_seconds(self.lease),
             attempt_seconds=reliable_memory.DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             transient=_transient_beat_failure,
         )
@@ -7136,23 +7077,6 @@ class _MaintenanceHeartbeat:
 
     def _renew(self) -> None:
         _heartbeat_maintenance_owner(self.coordinator, self.lease)
-
-    def _beat_once(self) -> bool:
-        """True when the lease was renewed; False on a transient failure.
-
-        A fence genuinely taken by someone else ends the pass at once. Anything
-        else — a busy database, a lock held by a writer — is retried: treating a
-        locked database as a lost fence threw away whole seven-minute generation
-        builds on this vault while its own capture workers were writing.
-        """
-        try:
-            _heartbeat_maintenance_owner(self.coordinator, self.lease)
-        except RuntimeError:
-            self._lost.set()
-            return False
-        except Exception:  # noqa: BLE001 - transient; the lease still holds
-            return False
-        return True
 
     def cancelled(self) -> bool:
         return self._lost.is_set() or _deadline_reached(self.deadline)
@@ -7169,7 +7093,13 @@ class _MaintenanceHeartbeat:
         return result
 
     def cleanup(self, operation, /, *args, **kwargs):
-        _require_maintenance_owner(self.coordinator, self.lease)
+        """Release first, report the fence after.
+
+        Cleanup is the releasing half of a repair — today only the index lock,
+        whose release is token-checked and so can never touch another owner's
+        lock. Requiring the fence first meant a fence lost mid-rebuild left our
+        own lock file on disk until its staleness rule expired it.
+        """
         result = operation(*args, **kwargs)
         _require_maintenance_owner(self.coordinator, self.lease)
         return result
@@ -7542,13 +7472,23 @@ def _partition_code_extraction(
     return _source_partitions(source_ids, state, check_stop, SourceExtraction)
 
 
+def _is_memory_source(snapshot, source) -> bool:
+    """A source the memory walk collected; a code root named `knowledge` holds code.
+
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    from corpus_snapshot import is_memory_path
+
+    return is_memory_path(source.record.relative_path, snapshot.policy.code_roots)
+
+
 def _code_extraction_sources(snapshot):
     return tuple(
         sorted(
             (
                 source
                 for source in snapshot.sources
-                if not source.record.relative_path.startswith("knowledge/")
+                if not _is_memory_source(snapshot, source)
             ),
             key=lambda source: (
                 source.record.logical_id,
@@ -7563,7 +7503,7 @@ def _knowledge_extraction_sources(snapshot):
     return tuple(
         source
         for source in snapshot.sources
-        if source.record.relative_path.startswith("knowledge/")
+        if _is_memory_source(snapshot, source)
         and not source.record.relative_path.startswith("knowledge/projects/")
     )
 
@@ -7606,6 +7546,11 @@ class _SourceExtractionAdapter:
 
     def __init__(self, snapshot, repository_id: str) -> None:
         self.by_id = {source.record.logical_id: source for source in snapshot.sources}
+        self.memory_ids = frozenset(
+            source.record.logical_id
+            for source in snapshot.sources
+            if _is_memory_source(snapshot, source)
+        )
         self.code_sources = _code_extraction_sources(snapshot)
         self.knowledge_sources = _knowledge_extraction_sources(snapshot)
         self.repository_id = repository_id
@@ -7623,12 +7568,11 @@ class _SourceExtractionAdapter:
         return _source_extraction(SourceExtraction, result, content)
 
     def _result_for(self, captured, source_bytes, deadline, cancelled):
-        path = captured.record.relative_path
-        if path.startswith("knowledge/projects/"):
+        if captured.record.logical_id not in self.memory_ids:
+            return self._code_result(captured, source_bytes, deadline, cancelled)
+        if captured.record.relative_path.startswith("knowledge/projects/"):
             return _project_extraction(captured, deadline, cancelled)
-        if path.startswith("knowledge/"):
-            return self._knowledge_result(captured, source_bytes, deadline, cancelled)
-        return self._code_result(captured, source_bytes, deadline, cancelled)
+        return self._knowledge_result(captured, source_bytes, deadline, cancelled)
 
     def _knowledge_result(self, captured, source_bytes, deadline, cancelled):
         self.knowledge_partitions = _memoized(
@@ -7762,7 +7706,7 @@ def _workspace_manifest_sha256(snapshot: object) -> str:
             source.record.language,
         ]
         for source in snapshot.sources
-        if not source.record.relative_path.startswith("knowledge/")
+        if not _is_memory_source(snapshot, source)
     )
     return hashlib.sha256(canonical_json_bytes(membership)).hexdigest()
 
@@ -8209,10 +8153,13 @@ def run_generation_maintenance(
 
     `code_roots` is the generation's policy: None means the vault's own
     generation, which holds memory only (`corpus_snapshot.VAULT_CODE_ROOTS`,
-    empty); a caller that builds a generation over declared code roots — a
-    repository, or a test of the code extractor — names them here and the
-    manifest records them. `corpus_snapshot` is imported where it is used:
-    it needs PyYAML, which the production install does not carry.
+    empty). Naming roots here is a test seam and nothing else: no production
+    caller passes them, and the production path for a code generation is
+    `repository_index`, which registers it without ever activating it. A
+    generation built here with roots *is* activated, so it must not be used to
+    build one for a running vault (audit 3, G-L4). `corpus_snapshot` is
+    imported where it is used: it needs PyYAML, which the production install
+    does not carry.
     """
     _require_positive_time_budget(time_budget_seconds)
     _require_positive_source_limit(max_sources)
@@ -8340,39 +8287,6 @@ def _guarded_generation_refresh(
         return _maintenance_outcome(
             "error", type(exc).__name__, partial=False, repairs=repaired
         )
-
-
-def _ready_capabilities() -> set[str]:
-    from llm_client import probe_candidate, provider_candidates
-
-    if not any(probe_candidate(item) for item in provider_candidates()):
-        return set()
-    return {"llm.compile", "llm.flush", "llm.query"}
-
-
-def _unblock_capabilities(root: Path, state_root: Path, repaired: set[str]) -> int:
-    placeholders = ",".join("?" for _ in repaired)
-    from memory_queue import active_or_legacy_memory_queue
-
-    queue = active_or_legacy_memory_queue(root, state_root)
-    with queue.connection() as database:
-        changed = database.execute(
-            f"UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL "
-            f"WHERE state='blocked' AND blocked_capability IN ({placeholders})",
-            sorted(repaired),
-        ).rowcount
-        database.commit()
-    return changed
-
-
-def _repair_queue_capabilities(root: Path, state_root: Path) -> int:
-    path = _operational_database_path(state_root, "queue")
-    if not path.is_file():
-        return 0
-    repaired = _ready_capabilities()
-    if not repaired:
-        return 0
-    return _unblock_capabilities(root, state_root, repaired)
 
 
 _DEFERRED_BY_ACTION = {
@@ -8535,8 +8449,8 @@ def _legacy_queue_migrated(
     return migration is not None or marker_valid
 
 
-def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
-    """Repair the legacy queue and report whether the v2 queue is usable."""
+def _repair_queue_action(guard: Any, context: _RepairContext) -> None:
+    """Repair the legacy queue, and stop when its migration could not finish."""
     from markdown_transaction import _reliability_v3_records_present
     from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
 
@@ -8550,7 +8464,7 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     # and no marker to wait for (`memory_queue` applies the same rule).
     if not _reliability_v3_records_present(context.state_path):
         if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
-            return False
+            return
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the
@@ -8559,7 +8473,6 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> bool:
     # "Runtime repair failed" with nothing repaired, on a vault where adoption
     # is in force, and the message named the fix.
     guard.run(active_or_legacy_memory_queue, context.root_path, context.state_path)
-    return True
 
 
 def _index_repair_failure_message(index_after: dict) -> str:
@@ -8640,15 +8553,25 @@ def _repair_archives_action(guard: Any, context: _RepairContext) -> None:
         return
     if archive_before["status"] == "ok":
         return
+    _record_recovered_archives(_recovered_archives(guard, context), context)
+
+
+def _recovered_archives(guard: Any, context: _RepairContext) -> list:
     from archive_daily import DailyArchiver
 
-    guard.run(
+    return guard.run(
         lambda: DailyArchiver(context.root_path, context.state_path).recover(
             deadline=context.deadline,
             cancelled=guard.cancelled,
         )
     )
-    context.repaired.append({"action": "recover_archives"})
+
+
+def _record_recovered_archives(recovered: list, context: _RepairContext) -> None:
+    """A repair that recovered nothing is not recorded as work that was done."""
+    if not recovered:
+        return
+    context.repaired.append({"action": "recover_archives", "count": len(recovered)})
 
 
 def _claim_sources(root_path: Path) -> list[Path]:
@@ -8677,33 +8600,39 @@ def _repair_claims_action(guard: Any, context: _RepairContext) -> None:
     context.repaired.append({"action": "rebuild_claim_index"})
 
 
-def _repair_queue_followups(
-    guard: Any, context: _RepairContext, queue_v2_ready: bool
+def _run_selected_repairs(
+    selected: set[str], ordered: tuple, context: _RepairContext
 ) -> None:
-    if not queue_v2_ready:
-        return
-    unblocked = guard.run(
-        _repair_queue_capabilities, context.root_path, context.state_path
-    )
-    if unblocked:
-        context.repaired.append(
-            {"action": "unblock_capabilities", "count": unblocked}
-        )
-    # No worker runs here: within a repair's budget it could only claim a task and
-    # kill it, costing an attempt. See
-    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
+    """Run each named repair the caller selected, in the order given.
 
-
-def _run_selected_repairs(selected: set[str], ordered: tuple) -> None:
-    """Run each named repair the caller selected, in the order given."""
+    The repairs are independent, so one that raises is recorded under its own
+    name and the rest still run: a `ValueError` from the generation catalog used
+    to skip the transactions, the queue, the index, the archives and the claims,
+    and the report called all of that "Runtime repair failed". A lost fence and a
+    reached deadline are the exception and end the pass — no repair may work
+    without the fence. See
+    `docs/research/2026-09-17-one-failed-repair-does-not-cancel-the-others.md`.
+    """
     for name, action in ordered:
         if name in selected:
-            action()
+            _repair_or_record(name, action, context)
+
+
+def _repair_or_record(name: str, action, context: _RepairContext) -> None:
+    try:
+        action()
+    except (MaintenanceFenceLost, TimeoutError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - one repair's fault is its own
+        context.repair_errors.setdefault(name, []).append(
+            f"{name} repair failed: {describe_error(exc)}"
+        )
+        context.repair_deferred.update(_DEFERRED_BY_ACTION[name])
 
 
 def _repair_state_actions(
     guard: Any, coordinator: Any, context: _RepairContext
-) -> bool:
+) -> None:
     ordered = (
         ("runtime", lambda: guard.run(
             _repair_runtime, context.state_path, context.repaired
@@ -8713,22 +8642,22 @@ def _repair_state_actions(
             guard, coordinator, context
         )),
     )
-    _run_selected_repairs(context.selected_repairs, ordered)
+    _run_selected_repairs(context.selected_repairs, ordered, context)
     if "queue" not in context.selected_repairs:
-        return False
-    return _repair_queue_action(guard, context)
+        return
+    _repair_or_record("queue", lambda: _repair_queue_action(guard, context), context)
 
 
-def _repair_derived_actions(
-    guard: Any, context: _RepairContext, queue_v2_ready: bool
-) -> None:
+def _repair_derived_actions(guard: Any, context: _RepairContext) -> None:
+    # No worker runs here: within a repair's budget it could only claim a task and
+    # kill it, costing an attempt. See
+    # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
     ordered = (
         ("indexes", lambda: _repair_index_action(guard, context)),
         ("archives", lambda: _repair_archives_action(guard, context)),
         ("indexes", lambda: _repair_claims_action(guard, context)),
-        ("queue", lambda: _repair_queue_followups(guard, context, queue_v2_ready)),
     )
-    _run_selected_repairs(context.selected_repairs, ordered)
+    _run_selected_repairs(context.selected_repairs, ordered, context)
 
 
 def _release_unentered_maintenance(
@@ -8760,8 +8689,8 @@ def _run_repairs(context: _RepairContext) -> None:
                 coordinator, lease, deadline=context.deadline
             ) as guard:
                 guard_entered = True
-                queue_v2_ready = _repair_state_actions(guard, coordinator, context)
-                _repair_derived_actions(guard, context, queue_v2_ready)
+                _repair_state_actions(guard, coordinator, context)
+                _repair_derived_actions(guard, context)
     except Exception as exc:  # noqa: BLE001
         context.repair_errors.setdefault("runtime", []).append(
             f"Repair failed: {describe_error(exc)}"

@@ -405,7 +405,7 @@ def _payable_row_constants(key: str, value) -> dict:
 
 # The third columnar move, 2026-09-12: a string column can hold one prefix on
 # every row. The architecture summary lists 110 entry points, and each row spelt
-# `/home/user/llm-wiki-tasks/` again — 2 156 of that answer's tokens, a quarter
+# the vault's own absolute path again — 2 156 of that answer's tokens, a quarter
 # of them one prefix said 110 times, in an answer whose top level already names
 # the directory. Stated once under `<key>_row_prefixes`, the value is still in
 # the answer and the rows carry what differs. Chosen by measuring both shapes,
@@ -453,6 +453,11 @@ def _prefixes_if_cheaper(key: str, rows: list) -> dict:
     prefixes = _row_prefixes(rows)
     if not prefixes:
         return {}
+    return _cheaper_of(key, rows, prefixes)
+
+
+def _cheaper_of(key: str, rows: list, prefixes: dict) -> dict:
+    """The prefixed shape, but only when it really costs fewer tokens."""
     compacted = {key: _without_prefixes(rows, prefixes), f"{key}_row_prefixes": prefixes}
     if estimate_tokens(compacted) >= estimate_tokens({key: rows}):
         return {}
@@ -584,6 +589,11 @@ def _row_without_its_module(mapping: dict) -> dict:
 def _without_repeated_modules(value, depth: int):
     if depth > _MAX_DEPTH:
         return value
+    return _module_free_container(value, depth)
+
+
+def _module_free_container(value, depth: int):
+    """A mapping loses its repeated module; a list passes each item on; a scalar stands."""
     if isinstance(value, dict):
         return _module_free_dict(value, depth)
     if isinstance(value, list):

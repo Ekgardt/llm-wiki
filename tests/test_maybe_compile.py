@@ -106,20 +106,20 @@ def test_compile_marker_stays_three_lines_and_is_published_before_canonical_owne
         return real_acquire(registry, role, **kwargs)
 
     monkeypatch.setattr(operational_ownership.OwnershipRegistry, "acquire", observe_acquire)
-    lease, marker = fake_env.acquire_compile_owner(state_root=fake_env.STATE_ROOT)
+    lease, marker = operational_ownership.acquire_compile_owner(
+        state_root=fake_env.STATE_ROOT
+    )
     try:
         assert observed == ["running"]
         assert fake_env.LOCK_FILE.read_bytes() == (
             f"{os.getpid()}\n".encode()
-            + lease.acquired_at.isoformat(timespec="seconds")
-            .replace("+00:00", "Z")
-            .encode()
+            + operational_ownership._timestamp(lease.acquired_at).encode()
             + b"\n"
             + lease.token.encode()
             + b"\n"
         )
     finally:
-        fake_env.release_marker_owner(lease, marker)
+        operational_ownership.release_marker_owner(lease, marker)
     assert not fake_env.LOCK_FILE.exists()
 
 
@@ -163,35 +163,39 @@ def test_is_compile_running_with_alive_pid(fake_env, monkeypatch):
     assert "running" in reason
 
 
-def test_a_live_process_holds_its_lock_however_old_the_file_is(fake_env, monkeypatch):
-    """A lock is stale with its process, never by age (audit OPS-01)."""
+def test_a_live_process_holds_its_lock_however_old_the_file_is(fake_env):
+    """A lock is stale with its process, never by age (audit OPS-01).
+
+    The live process is this one: a PID nobody runs cannot stand in for a live
+    owner now that the lock is judged by the process, not by the number.
+    """
+    live = os.getpid()
     old = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
-    fake_env.LOCK_FILE.write_text(f"99999\n{old}\n", encoding="utf-8")
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
+    fake_env.LOCK_FILE.write_text(f"{live}\n{old}\n", encoding="utf-8")
 
     is_running, reason = fake_env._is_compile_running()
     cleared = fake_env._clear_lock()
     status = fake_env.status()
 
     assert (is_running, cleared, status["compile_running"]) == (True, False, True)
-    assert reason == f"running pid=99999 since {old}"
+    assert reason == f"running pid={live} since {old}"
     assert fake_env.LOCK_FILE.exists()
 
 
 def test_a_lost_claim_names_the_lock_that_won_not_a_race(fake_env, monkeypatch):
     """The reason after a lost claim is the lock's real state (audit OPS-01)."""
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda: True)
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
+    live = os.getpid()
 
     def claimed_by_someone_else() -> bool:
-        fake_env._write_lock(4242)
+        fake_env._write_lock(live)
         return False
 
     monkeypatch.setattr(fake_env, "_try_claim_lock", claimed_by_someone_else)
 
     spawned, skipped, reason = fake_env._spawn_outcome(False)
 
-    assert (spawned, skipped, reason.startswith("skipped: running pid=4242")) == (
+    assert (spawned, skipped, reason.startswith(f"skipped: running pid={live}")) == (
         False,
         True,
         True,
@@ -257,8 +261,8 @@ def test_spawn_happens_when_idle_and_work_pending(fake_env, monkeypatch):
 
 def test_force_refuses_live_lock(fake_env, monkeypatch):
     """--force refuses to steal a LIVE lock (race risk); prints a warning."""
-    fake_env._write_lock(99999)
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
+    live = os.getpid()
+    fake_env._write_lock(live)
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
     monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
 
@@ -268,7 +272,7 @@ def test_force_refuses_live_lock(fake_env, monkeypatch):
     # The live lock is left intact.
     lock = fake_env._read_lock()
     assert lock is not None
-    assert lock["pid"] == 99999
+    assert lock["pid"] == live
 
 
 def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):

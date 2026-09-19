@@ -50,16 +50,47 @@ class _Renewal:
             raise outcome
 
 
-def _run(clock: _Clock, renewal: _Renewal, lease_seconds: float = 30.0, attempt_seconds: float = 0.0):
+def _run(
+    clock: _Clock,
+    renewal: _Renewal,
+    lease_seconds: float = 30.0,
+    attempt_seconds: float = 0.0,
+    held_since: float = 0.0,
+):
     return renew_until_stopped(
         renewal,
         interval=10.0,
         lease_seconds=lease_seconds,
         attempt_seconds=attempt_seconds,
+        held_since=held_since,
         stop=threading.Event(),
         wait=clock.wait,
         monotonic=clock.monotonic,
     )
+
+
+def test_the_lease_expires_from_when_it_was_taken():
+    """The renewer started 5 s after the lease was written; it must not add them back.
+
+    The lease was taken at 0 and lasts 30 s. Each renewal blocks its full 10 s
+    busy wait, so the failure at 25 leaves no room for a retry and the renewer
+    gives up there. Counting the 30 s from the thread's own start instead put
+    the expiry at 35 and kept retrying for five seconds after the fence had
+    lapsed for everybody else. See
+    `docs/research/2026-09-18-a-lease-expires-from-when-it-was-taken.md`.
+    """
+    clock = _Clock(stop_after=600.0)
+    clock.now = 5.0
+    locked = sqlite3.OperationalError("database is locked")
+
+    ended = _run(
+        clock,
+        _Renewal(clock, [locked] * 100, cost=10.0),
+        attempt_seconds=10.0,
+        held_since=0.0,
+    )
+
+    assert (isinstance(ended, sqlite3.OperationalError), clock.now) == (True, 25.0)
 
 
 def test_a_slow_locked_renewal_is_retried_before_the_lease_expires():

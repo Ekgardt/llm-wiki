@@ -173,6 +173,9 @@ HASH_CHUNK_BYTES = 64 * 1024
 # two writers doing a compare-and-swap on a loaded machine can hold the write
 # lock for longer than five seconds.
 BUSY_MS = 5000
+# A commit whose body already did what cannot be undone still waits this long
+# for the write lock, whatever is left of the caller's deadline (audit 3, G-L11).
+COMMIT_BUSY_FLOOR_MS = 250
 UNBOUNDED_BUSY_MS = 30_000
 CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
@@ -221,7 +224,6 @@ _MANIFEST_KEYS = {
     "artifacts",
     "vector_state",
     "repository_scope",
-    "code_capture",
     # A generation that holds code names its roots; a memory generation has no
     # such key, which is how one checkout can carry both and a reader can tell
     # them apart (decision 2026-09-12, the vault is a repository too).
@@ -230,7 +232,6 @@ _MANIFEST_KEYS = {
 _REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {
     "parent_generation_id",
     "repository_scope",
-    "code_capture",
     "code_roots",
 }
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
@@ -802,6 +803,16 @@ def _selected_token(
         return None
     encoded = canonical_json_bytes(selected)
     return encoded, sha256_bytes(encoded)
+
+
+def _unlink_manifest(generation_path: Path) -> None:
+    """Remove the one file that makes a tree a publication; a linked directory is left alone."""
+    try:
+        linked = _is_link_or_reparse(generation_path)
+    except FileNotFoundError:
+        return
+    if not linked:
+        (generation_path / "manifest.json").unlink(missing_ok=True)
 
 
 def _still_referenced(database: sqlite3.Connection, identifier: str) -> bool:
@@ -1477,8 +1488,8 @@ def _graph_fields(value: dict[str, object]) -> tuple[str | None, str | None]:
     graph_extractor = _optional_version(
         "graph_extractor_version", value["graph_extractor_version"]
     )
-    if graph_schema not in {None, "evidence-graph/v2", "evidence-graph/v3"}:
-        raise ValueError("graph schema must be null, evidence-graph/v2, or evidence-graph/v3")
+    if graph_schema not in {None, "evidence-graph/v2"}:
+        raise ValueError("graph schema must be null or evidence-graph/v2")
     if (graph_schema is None) != (graph_extractor is None):
         raise ValueError("graph schema and extractor versions must be both set or null")
     return graph_schema, graph_extractor
@@ -1492,14 +1503,6 @@ def _normalized_scope_section(value: dict[str, object], _parent: str | None) -> 
     return RepositoryScope.from_dict(value["repository_scope"]).as_dict()
 
 
-def _normalized_capture_section(value: dict[str, object], _parent: str | None) -> object:
-    from code_workspace import validate_code_capture
-
-    return validate_code_capture(value["code_capture"])
-
-
-# Insertion order is the manifest's own section order and is load-bearing only
-# for readability; canonical JSON sorts keys before anything is hashed.
 def _normalized_code_roots_section(value: dict[str, object], _parent: str | None) -> object:
     roots = value["code_roots"]
     if not isinstance(roots, list) or not all(isinstance(name, str) for name in roots):
@@ -1512,7 +1515,6 @@ def _normalized_code_roots_section(value: dict[str, object], _parent: str | None
 _OPTIONAL_MANIFEST_SECTIONS = {
     "parent_generation_id": _normalized_parent_section,
     "repository_scope": _normalized_scope_section,
-    "code_capture": _normalized_capture_section,
     "code_roots": _normalized_code_roots_section,
 }
 
@@ -1691,25 +1693,9 @@ def _require_complete_vectors(
     )
 
 
-def _require_graph_v3_contract(
-    normalized: dict[str, object], graph_schema: str | None
-) -> None:
-    if graph_schema != "evidence-graph/v3":
-        return
-    _require_v3_manifest(normalized)
-
-
-def _require_v3_manifest(normalized: dict[str, object]) -> None:
-    if normalized["schema_version"] == "corpus-generation/v1":
-        raise ValueError("evidence-graph/v3 requires corpus-generation/v2")
-    if "code_capture" not in normalized:
-        raise ValueError("evidence-graph/v3 requires code_capture")
-
-
 def _require_schema_contract(
     normalized: dict[str, object], graph_schema: str | None, seen: set[str]
 ) -> None:
-    _require_graph_v3_contract(normalized, graph_schema)
     if normalized["schema_version"] != "corpus-generation/v2":
         return
     _require_v2_contract(normalized, graph_schema, seen)
@@ -1725,7 +1711,7 @@ def _require_v2_contract(
     normalized: dict[str, object], graph_schema: str | None, seen: set[str]
 ) -> None:
     _require_v2_artifacts(seen)
-    if graph_schema not in {"evidence-graph/v2", "evidence-graph/v3"}:
+    if graph_schema != "evidence-graph/v2":
         raise ValueError("corpus-generation/v2 requires the Evidence Graph schema")
     if "repository_scope" not in normalized:
         raise ValueError("corpus-generation/v2 requires a validated repository scope")
@@ -1764,7 +1750,7 @@ def _validate_artifact_databases(
             cancelled=cancelled,
         )
         return
-    if graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:
+    if graph_schema == "evidence-graph/v2":
         validate_generation_artifact(
             generation_path,
             normalized,
@@ -1773,58 +1759,6 @@ def _validate_artifact_databases(
             monotonic=monotonic,
             cancelled=cancelled,
         )
-
-
-def _source_membership(source_manifest: dict, source_sizes: dict) -> list[tuple]:
-    return [
-        (
-            source["logical_id"],
-            source["relative_path"],
-            source["sha256"],
-            source_sizes.get(source["logical_id"]),
-        )
-        for source in source_manifest["sources"]
-    ]
-
-
-def _captured_membership(normalized: dict[str, object]) -> list[tuple]:
-    return [
-        (item["source_id"], item["relative_path"], item["sha256"], item["stat"]["size"])
-        for item in normalized["code_capture"]["files"]
-    ]
-
-
-def _stored_source_sizes(database_path: Path) -> dict[str, int]:
-    with closing(
-        sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0)
-    ) as database:
-        return {
-            row[0]: row[1]
-            for row in database.execute(
-                "SELECT source_id, size FROM source ORDER BY source_id"
-            ).fetchall()
-        }
-
-
-def _validate_code_capture_membership(
-    generation_path: Path, normalized: dict[str, object], state_root: Path
-) -> None:
-    import corpus_snapshot
-    import evidence_graph
-
-    raw = read_runtime_bytes(
-        generation_path / "source-manifest.json",
-        state_root,
-        max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
-    )
-    try:
-        source_manifest = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("source manifest must contain valid UTF-8 JSON") from exc
-    source_manifest = corpus_snapshot.validate_canonical_source_manifest(source_manifest)
-    sizes = _stored_source_sizes(generation_path / "evidence.sqlite3")
-    if _captured_membership(normalized) != _source_membership(source_manifest, sizes):
-        raise ValueError("code_capture files must match canonical source membership")
 
 
 def _normalized_manifest(
@@ -1965,8 +1899,6 @@ def _validate_databases_once(
             monotonic=monotonic,
             cancelled=cancelled,
         )
-        if "code_capture" in normalized:
-            _validate_code_capture_membership(generation_path, normalized, state_root)
     except ValueError as exc:
         _remember_verdict(key, str(exc))
         raise
@@ -2026,11 +1958,45 @@ def _validate_generation(
     return normalized, _content_seal(final_seal, digests)
 
 
-def _holds_code_for(manifest: dict[str, object], scope: RepositoryScope) -> bool:
-    """True when this manifest is a code generation of exactly this repository."""
-    if not manifest.get("code_roots"):
-        return False
-    return _manifest_belongs_to(manifest, scope)
+def _recorded_artifact_digest(manifest: dict[str, object], name: str) -> str | None:
+    for artifact in manifest.get("artifacts") or []:
+        if artifact.get("path") == name:
+            return str(artifact.get("sha256"))
+    return None
+
+
+def _policy_code_roots(
+    generation_path: Path, manifest: dict[str, object], state_root: Path
+) -> tuple[str, ...]:
+    """The code roots of the snapshot policy, read only when the bytes are the recorded ones.
+
+    A generation built before the manifest named its roots (2026-09-12) still
+    says what it was built from in `source-manifest.json`, whose digest the
+    manifest binds. Unreadable, or not the recorded bytes: no roots — nobody can
+    read such a generation either. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    import evidence_graph
+
+    try:
+        raw = read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
+        )
+    except (OSError, ValueError):
+        return ()
+    if sha256_bytes(raw) != _recorded_artifact_digest(manifest, "source-manifest.json"):
+        return ()
+    return _decoded_policy_roots(raw)
+
+
+def _decoded_policy_roots(raw: bytes) -> tuple[str, ...]:
+    try:
+        policy = json.loads(raw).get("policy") or {}
+        return tuple(str(name) for name in policy.get("code_roots") or ())
+    except (AttributeError, TypeError, ValueError):
+        return ()
 
 
 class GenerationCatalog:
@@ -2065,6 +2031,7 @@ class GenerationCatalog:
         # One validation per generation per process, re-checked by its cheap
         # entry seal. See `_validate` below for what that trades away.
         self._validated: dict[str, tuple[tuple[_EntrySeal, ...], tuple]] = {}
+        self._held_code: dict[str, bool] = {}
         self._read_only = False
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
@@ -2107,6 +2074,7 @@ class GenerationCatalog:
         catalog._clock = clock or (lambda: datetime.now(timezone.utc))
         catalog._candidate_issuer = object()
         catalog._validated = {}
+        catalog._held_code = {}
         catalog._read_only = True
         check_stop()
         with closing(catalog._readonly()):
@@ -2151,7 +2119,7 @@ class GenerationCatalog:
                 database.execute("BEGIN IMMEDIATE")
                 self._check_deadline(deadline)
                 yield database
-                self._apply_busy_timeout(database, deadline)
+                self._apply_commit_busy_timeout(database, deadline)
                 database.commit()
             except sqlite3.OperationalError as exc:
                 database.rollback()
@@ -2165,6 +2133,25 @@ class GenerationCatalog:
         if deadline is None:
             return
         database.execute(f"PRAGMA busy_timeout={self._remaining_busy_ms(deadline):d}")
+
+    def _apply_commit_busy_timeout(
+        self, database: sqlite3.Connection, deadline: float | None
+    ) -> None:
+        """Bound the commit's lock wait without abandoning finished work.
+
+        The body of a write transaction may already have done what cannot be
+        undone -- `discard_superseded` removes the generation's tree inside it --
+        so a deadline that passed while the body ran must not cancel the commit,
+        as `_remaining_busy_ms` would by raising. It only makes the commit's own
+        wait short. See
+        `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+        """
+        if deadline is None:
+            return
+        remaining = int(max(0.0, deadline - self._monotonic()) * 1000)
+        database.execute(
+            f"PRAGMA busy_timeout={max(COMMIT_BUSY_FLOOR_MS, min(BUSY_MS, remaining)):d}"
+        )
 
     def _readonly(self, *, deadline: float | None = None) -> sqlite3.Connection:
         return open_readonly_operational_db(
@@ -2836,6 +2823,20 @@ class GenerationCatalog:
                 return None
             return self._delete_registration(database, identifier)
 
+    def _unseal_unregistered(self, identifier: str) -> None:
+        """Make the unregistered tree unrecoverable before its removal can be stopped.
+
+        The tree removal honours the caller's deadline; this does not. A complete
+        tree with no row used to be registered again by `recover_orphans`, as the
+        newest generation of its checkout. See
+        `docs/research/2026-09-17-a-retired-generation-does-not-come-back.md`.
+        """
+        cleanup_deadline = self._monotonic() + CLEANUP_CATALOG_FENCE_SECONDS
+        with self._write_transaction(cleanup_deadline) as database:
+            if _still_referenced(database, identifier):
+                return
+            _unlink_manifest(self.generations_path / identifier)
+
     @staticmethod
     def _delete_registration(database: sqlite3.Connection, identifier: str) -> bool:
         registered = database.execute(
@@ -2883,6 +2884,7 @@ class GenerationCatalog:
         removed_registration = self._drop_registration(identifier)
         if removed_registration is None:
             return False
+        self._unseal_unregistered(identifier)
 
         # The committed delete cannot be rolled back by filesystem failures. A
         # second writer fence keeps activation and registration from racing the
@@ -3083,13 +3085,51 @@ class GenerationCatalog:
         (None, None) when the repository has none yet. Decision:
         `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
         """
+        held = self.code_generations_for_repository(
+            repository_scope, deadline=deadline, cancelled=cancelled
+        )
+        if not held:
+            return None, None
+        return held[0]
+
+    def code_generations_for_repository(
+        self,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Every registered code generation of this repository, newest first.
+
+        Retention keeps a second one for a reader behind a refresh; a reader
+        that cannot open the newest walks on to it.
+        """
         expected = RepositoryScope.from_dict(repository_scope.as_dict())
-        for identifier, _registered_at, manifest in self.registered_manifests(
-            deadline=deadline, cancelled=cancelled
-        ):
-            if _holds_code_for(manifest, expected):
-                return identifier, manifest
-        return None, None
+        return [
+            (identifier, manifest)
+            for identifier, _registered_at, manifest in self.registered_manifests(
+                deadline=deadline, cancelled=cancelled
+            )
+            if _manifest_belongs_to(manifest, expected)
+            and self.holds_code(identifier, manifest)
+        ]
+
+    def holds_code(self, identifier: str, manifest: dict[str, object]) -> bool:
+        """True when this generation was built from code roots, not from the memory walk.
+
+        The manifest says so since 2026-09-12; an older one is asked through the
+        snapshot policy it binds. Remembered per id: a generation is immutable.
+        See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+        """
+        if manifest.get("code_roots"):
+            return True
+        if identifier not in self._held_code:
+            self._held_code[identifier] = bool(
+                _policy_code_roots(
+                    self.generations_path / identifier, manifest, self.state_root
+                )
+            )
+        return self._held_code[identifier]
 
     def registered_manifests(
         self,
@@ -3142,13 +3182,17 @@ class GenerationCatalog:
         activate, indexing one would make the vault's own scope unresolvable and
         every knowledge query would fall back to the legacy index -- NEW-65,
         recreated deliberately.
+
+        The pointer path answers memory questions, so a code generation is
+        never its answer: a code reader asks `code_generations_for_repository`.
+        See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
         """
         if repository_scope is None:
             return None
         for identifier, _registered_at, manifest in self.registered_manifests(
             deadline=deadline, cancelled=cancelled
         ):
-            if not _manifest_belongs_to(manifest, repository_scope):
+            if not self._memory_of(identifier, manifest, repository_scope):
                 continue
             selected = self._validated_scoped_generation(
                 identifier, deadline, cancelled
@@ -3156,6 +3200,13 @@ class GenerationCatalog:
             if selected is not None:
                 return selected
         return None
+
+    def _memory_of(
+        self, identifier: str, manifest: dict[str, object], scope: RepositoryScope
+    ) -> bool:
+        if not _manifest_belongs_to(manifest, scope):
+            return False
+        return not self.holds_code(identifier, manifest)
 
     def _validated_scoped_generation(
         self,

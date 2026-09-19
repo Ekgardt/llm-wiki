@@ -7,16 +7,16 @@ read (`docs/research/2026-09-12-when-we-would-drop-the-other-tool.md`).
 
 ## How it was run, including what is not ideal about it
 
-Both sides answered about the **same checkout**, `/home/user/llm-wiki-tasks` at
+Both sides answered about the **same checkout**, `<vault>` at
 `42f4f03`: llm-wiki through a repository-scoped generation built by
 `scripts/repository_index.py index … --roots scripts tests benchmark
 integrations` (551 Python sources, 29 570 nodes), codebase-memory-mcp through
 its own index of the same directory (38 791 nodes, 189 725 edges). The stand ran
-from that worktree with `LLM_WIKI_STATE_ROOT=/home/user/llm-wiki`.
+from that worktree with `LLM_WIKI_STATE_ROOT=<vault>`.
 
 Not ideal, and named rather than hidden:
 
-- The measurement is **not the installed vault**. `/home/user/llm-wiki` cannot
+- The measurement is **not the installed vault**. `<vault>` cannot
   answer about its own code at all — see
   `docs/research/2026-09-12-the-parity-run-found-the-stand-first.md`. The
   worktree stands in for it.

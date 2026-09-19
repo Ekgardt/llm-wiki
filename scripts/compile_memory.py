@@ -2,7 +2,10 @@
 
 CLI:
     uv run python scripts/compile_memory.py              # compile changed daily logs
-    uv run python scripts/compile_memory.py --all        # compile every daily log
+    uv run python scripts/compile_memory.py --all        # deprecated, does nothing and
+                                                         # says so: a day with a
+                                                         # committed receipt is never
+                                                         # compiled again
     uv run python scripts/compile_memory.py --file PATH  # compile one daily log
     uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
     uv run python scripts/compile_memory.py --trigger auto|manual
@@ -38,6 +41,7 @@ from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
+import process_liveness  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
@@ -75,6 +79,8 @@ from evidence_resolver import (  # noqa: E402
 from llm_client import (  # noqa: E402
     call_candidate,
     call_ceiling,
+    chain_stops_after,
+    forced_provider,
     probe_candidate,
     provider_candidates,
 )
@@ -88,10 +94,11 @@ from memory_queue import active_or_legacy_memory_queue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
-    _is_pid_alive,
+    daily_logs,
     load_state,
     update_state,
 )
+from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,
@@ -179,7 +186,10 @@ DRAFT_PROGRAM = (
     "compile-draft/v4: skeptical complete-line evidence semantic operations "
     "with derived-provenance claims"
 )
-CRITIQUE_PROGRAM = "compile-critique/v2: specificity durability evidence completeness"
+CRITIQUE_PROGRAM = (
+    "compile-critique/v3: specificity durability evidence completeness, "
+    "one verdict for every operation"
+)
 DRAFT_SYSTEM = "You are a skeptical memory editor. Return only the requested JSON."
 CRITIQUE_SYSTEM = "You are a strict memory-plan critic. Return only the requested JSON."
 RAW_PLAN_SCHEMA = {
@@ -377,19 +387,6 @@ class CompileApplyResult:
     commit_sequence: int
     committed_at: str
     action_key: str
-
-
-def assess_claim_contradictions(
-    source: bytes,
-    extraction: Mapping[str, object],
-    *,
-    pipeline: ContradictionPipeline,
-    benchmark_gate: bool = False,
-):
-    """Run verified claim extraction through the sole lifecycle policy boundary."""
-    return pipeline.assess_raw(
-        source, extraction, benchmark_gate=benchmark_gate
-    )
 
 
 def _logical_path(path: Path) -> str:
@@ -977,7 +974,6 @@ def _require_operation_integrity(
 
 
 # Historical compatibility only. Selection and archive authority use v3 readers.
-parse_compile_receipt = parse_compile_receipt_v2
 read_compile_receipt = read_compile_receipt_v2
 
 
@@ -994,12 +990,26 @@ def resolve_compile_plan(
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
     attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
-    forced = os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
-    for candidate in provider_candidates(forced, max_tokens=4000):
+    resolved = _first_resolved_plan(attempt)
+    if resolved is None:
+        raise RuntimeError(_no_plan_message(attempt.lineage))
+    return resolved
+
+
+def _first_resolved_plan(attempt: _CompileAttempt) -> ResolvedCompilePlan | None:
+    """The first provider that answers with a plan; a timeout ends the chain.
+
+    A deadline is the budget of the whole compile call, so the next provider
+    would spend a second one the step was never given. `chain_stops_after` is the
+    one rule all three provider chains of the product ask.
+    """
+    for candidate in provider_candidates(forced_provider(), max_tokens=4000):
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved
-    raise RuntimeError(_no_plan_message(attempt.lineage))
+        if attempt.out_of_time:
+            return None
+    return None
 
 
 def _no_plan_message(lineage: Sequence[str]) -> str:
@@ -1044,6 +1054,7 @@ class _CompileAttempt:
         self.batch = batch
         self.token_adapters = token_adapters
         self.lineage: tuple[str, ...] = ()
+        self.out_of_time = False
         self.source_descriptors = tuple(
             SourceDescriptor(item.logical_path, len(item.content), item.sha256)
             for item in inputs.sources
@@ -1090,6 +1101,7 @@ class _CompileAttempt:
         should say what it disagreed with.
         """
         self.lineage += (_failure_lineage(stage, descriptor, failure),)
+        self.out_of_time = self.out_of_time or chain_stops_after(failure)
         _report_stage_detail(stage, failure, detail)
         return None
 
@@ -1139,7 +1151,8 @@ class _CompileAttempt:
     ) -> ResolvedCompilePlan | None:
         try:
             operations = _with_derived_claims(
-                _draft_operations(draft_text), self.inputs
+                _with_snapshot_actions(_draft_operations(draft_text), self.inputs),
+                self.inputs,
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return self._record(
@@ -1172,8 +1185,8 @@ class _CompileAttempt:
         Sixteen operations of a long day cost about twice the draft prompt, so
         one review of all of them cannot fit and the whole plan used to be
         thrown away. Each batch is reviewed whole, with its evidence, and the
-        drop lists are merged; nothing is reviewed twice and nothing goes
-        unreviewed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
+        drop lists are merged; nothing is reviewed twice, and an operation
+        with no verdict is asked about again rather than passed. See docs/research/2026-08-24-reviewing-more-than-fits.md.
         """
         dropped: set[str] = set()
         for batch in self._critique_batches(descriptor, operations):
@@ -1181,11 +1194,26 @@ class _CompileAttempt:
         return _without_dropped(operations, dropped)
 
     def _reviewed_batch(self, descriptor: object, batch: list[object]) -> set[str]:
+        """Only a `pass` lets an operation through; a skipped one is asked again.
+
+        The reviewer used to be read for its drops alone, so an operation it
+        left out, or named with a mistyped slug, was written unreviewed. What a
+        reply does not name is asked about once more, alone — a small prompt,
+        not a new draft — and what is still unnamed refuses the critique.
+        """
+        verdicts = self._verdicts(descriptor, batch)
+        skipped = _unreviewed(batch, verdicts)
+        if skipped:
+            verdicts = {**verdicts, **self._verdicts(descriptor, skipped)}
+        _require_every_verdict(batch, verdicts)
+        return {slug for slug, verdict in verdicts.items() if verdict == "drop"}
+
+    def _verdicts(self, descriptor: object, batch: list[object]) -> dict[str, str]:
         prompt = _critique_prompt(self.inputs, batch)
         critique = self._call(descriptor, prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA)
         if critique.text is None:
             raise _ProviderStageFailure(critique.failure_class or "provider_error")
-        return set(_dropped_slugs(critique.text))
+        return _review_verdicts(critique.text)
 
     def _critique_batches(
         self, descriptor: object, operations: list[object]
@@ -1337,7 +1365,8 @@ def _draft_operations(draft_text: str) -> list[object]:
     return operations
 
 
-def _dropped_slugs(critique_text: str) -> set[object]:
+def _review_verdicts(critique_text: str) -> dict[str, str]:
+    """The verdict each named slug received; a slug named twice keeps its drop."""
     critique_plan = _parse_json_object(critique_text, "reviews")
     _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
     if set(critique_plan) != {"reviews"}:
@@ -1345,15 +1374,32 @@ def _dropped_slugs(critique_text: str) -> set[object]:
     reviews = critique_plan.get("reviews")
     if not isinstance(reviews, list):
         raise ValueError("critique reviews must be an array")
-    return _dropped_from_reviews(reviews)
+    verdicts: dict[str, str] = {}
+    for item in reviews:
+        _merge_verdict(verdicts, item)
+    return verdicts
 
 
-def _dropped_from_reviews(reviews: list[object]) -> set[object]:
-    return {
-        item.get("slug")
-        for item in reviews
-        if isinstance(item, dict) and item.get("verdict") == "drop"
-    }
+def _merge_verdict(verdicts: dict[str, str], review: Mapping[str, object]) -> None:
+    slug = str(review["slug"])
+    if verdicts.get(slug) == "drop":
+        return
+    verdicts[slug] = str(review["verdict"])
+
+
+def _unreviewed(batch: list[object], verdicts: Mapping[str, str]) -> list[object]:
+    return [
+        item
+        for item in batch
+        if isinstance(item, dict) and item.get("slug") not in verdicts
+    ]
+
+
+def _require_every_verdict(batch: list[object], verdicts: Mapping[str, str]) -> None:
+    skipped = _unreviewed(batch, verdicts)
+    if skipped:
+        names = ", ".join(sorted(str(item.get("slug")) for item in skipped))
+        raise ValueError(f"critique gave no verdict for: {names}")
 
 
 def _without_dropped(
@@ -1498,7 +1544,8 @@ def _critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
         cited.extend(_cited_evidence(semantic, bindings))
     return f"""{CRITIQUE_PROGRAM}
 Drop operations that are not specific, durable, complete, and exactly evidenced.
-Return reviews with slug, verdict pass|drop, and reason.
+Return exactly one review for every operation: its slug, verdict pass|drop, and reason.
+An operation without a review is not written.
 
 OPERATIONS
 {canonical_json_bytes(normalized).decode('utf-8')}
@@ -1563,6 +1610,77 @@ def _operation_kind(semantic: Mapping[str, object]) -> str:
     if semantic["action"] == "create":
         return "create"
     return "replace"
+
+
+def _with_snapshot_actions(
+    operations: list[object], inputs: CompileInputs
+) -> list[object]:
+    """Let the snapshot say whether each page exists; the model was never shown.
+
+    The draft prompt carries only the context pages that fit, so on a real vault
+    the model has not seen most slugs and cannot know whether its page is new.
+    A `create` for a page that exists used to refuse the whole plan, and the
+    retry asked the same blind question again at the price of a full draft.
+    Both actions carry the same fields and an update only appends a dated
+    section, so the rewrite is mechanical and costs no tokens. See
+    `docs/research/2026-09-17-the-compile-decides-what-the-snapshot-already-knows.md`.
+    """
+    kept = [item for item in operations if not _names_retired_page(item, inputs)]
+    for operation in kept:
+        _follow_snapshot(operation, inputs)
+    return kept
+
+
+def _names_retired_page(operation: dict[str, object], inputs: CompileInputs) -> bool:
+    """A page the vault has retired is history; the compile does not write into it.
+
+    Rule 12 of `CLAUDE.md`: supersede, never edit in place. Since the snapshot
+    decides the action, a drafted create for a superseded slug would otherwise
+    become an update of it. The operation is dropped and named; the rest of the
+    plan still commits, as an inadmissible claim does. See
+    `docs/research/2026-09-18-a-retired-page-is-not-updated-by-the-compile.md`.
+    """
+    target = _target_snapshot(inputs, f"knowledge/notes/{operation['slug']}.md")
+    status = _target_status(target)
+    if not is_retired(status):
+        return False
+    print(
+        f"compile_memory: {operation['slug']}: dropped, that page is {status}",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _target_status(target: TargetSnapshot | None) -> str:
+    if target is None:
+        return DEFAULT_STATUS
+    match = _PAGE_STATUS_RE.search(target.content)
+    if match is None:
+        return DEFAULT_STATUS
+    return normalized_status(match.group(1).decode("utf-8", errors="ignore"))
+
+
+_PAGE_STATUS_RE = re.compile(rb"(?m)^status:[ \t]*(.+?)[ \t]*$")
+
+
+def _follow_snapshot(operation: dict[str, object], inputs: CompileInputs) -> None:
+    """The draft schema has already made this an object with a slug and an action."""
+    target = _target_snapshot(inputs, f"knowledge/notes/{operation['slug']}.md")
+    decided = _snapshot_action(target)
+    if decided == operation["action"]:
+        return
+    print(
+        f"compile_memory: {operation['slug']}: drafted {operation['action']}, "
+        f"the snapshot says {decided}",
+        file=sys.stderr,
+    )
+    operation["action"] = decided
+
+
+def _snapshot_action(target: TargetSnapshot | None) -> str:
+    if target is None:
+        return "create"
+    return "update"
 
 
 def _require_target_state(
@@ -3580,7 +3698,10 @@ def _transaction_authority(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--all", action="store_true")
+    # Deprecated, and hidden from --help so no new command line learns it. It is
+    # still accepted, and says so, because old command lines and notes name it;
+    # it cannot be made real, because a committed day is never compiled again.
+    p.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--file", type=str, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
@@ -3598,6 +3719,12 @@ def parse_args() -> argparse.Namespace:
         help="Source of invocation. 'auto' is set by flush_memory when a hook "
         "fires the compile; any direct CLI run defaults to 'manual'.",
     )
+    p.add_argument(
+        "--lock-token",
+        default=None,
+        help="The compile lock written for this run by the process that spawned "
+        "it. Passed by maybe_compile; a direct CLI run has none.",
+    )
     return p.parse_args()
 
 
@@ -3605,16 +3732,13 @@ def parse_args() -> argparse.Namespace:
 # lint and the session-start context already filter on this name; compile did
 # not, so that one file entered the candidate list and failed the whole pass
 # on `logical_path must name a canonical daily source`.
-DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+# The rule itself lives in `memory_state` (`DAILY_LOG_NAME`, `daily_logs`), so
+# that no reader of the directory can miss it again.
 
 
 def _canonical_dailies() -> list[Path]:
     """Every daily log in the vault, and nothing else that lives beside them."""
-    return sorted(
-        path
-        for path in DAILY_DIR.glob("*.md")
-        if DAILY_LOG_NAME.fullmatch(path.name) is not None
-    )
+    return daily_logs(DAILY_DIR)
 
 
 def _receipt_predicate(
@@ -3683,7 +3807,62 @@ def discard_unusable_receipts() -> list[str]:
         print(f"compile_memory: discarding {path.name}: {reason}", file=sys.stderr)
         path.unlink()
         discarded.append(path.name)
+    _forget_discarded_days(discarded)
     return discarded
+
+
+def _forget_discarded_days(discarded: Sequence[str]) -> None:
+    """Take the days whose receipts were discarded out of the mirror.
+
+    The mirror is only a cheap diagnostic copy of what the receipts say, but a
+    day left in it is never offered to a compile again — so discarding a receipt
+    without clearing the mirror left the day "compiled" with no evidence, which
+    is the one thing the receipt contract forbids. The day is found from the
+    receipt's file name, which is the identity of its source, so an unreadable
+    receipt names its day as well as a readable one. Days recorded before
+    receipts existed carry no discarded receipt and are left alone.
+    """
+    owners = _receipt_owners()
+    forgotten = sorted({owners[name] for name in discarded if name in owners})
+    if not forgotten:
+        return
+    print(
+        f"compile_memory: {len(forgotten)} day(s) are pending again: "
+        + ", ".join(forgotten),
+        file=sys.stderr,
+    )
+    update_state(lambda state: _drop_mirror_days(state, forgotten))
+
+
+def _drop_mirror_days(state: dict, names: Sequence[str]) -> None:
+    mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    for name in names:
+        mirror.pop(name, None)
+
+
+def _receipt_owners() -> dict[str, str]:
+    """Which daily each receipt file name belongs to, by the name alone."""
+    owners: dict[str, str] = {}
+    for path in _canonical_dailies():
+        _record_receipt_owners(owners, path)
+    return owners
+
+
+def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
+    content = _readable_daily(path)
+    if content is None:
+        return
+    logical = path.relative_to(ROOT).as_posix()
+    owners[f"{sha256_bytes(content)}.md"] = path.name
+    for part in _daily_parts(logical, content):
+        owners[f"v3-{compile_source_identity(logical, part.sha256)}.md"] = path.name
+
+
+def _readable_daily(path: Path) -> bytes | None:
+    try:
+        return read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    except (OSError, ValueError):
+        return None
 
 
 def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
@@ -3774,171 +3953,6 @@ def _unchanged_since_last_compile(
     if "/" in key or "\\" in key or key in {"", ".", ".."}:
         return False
     return compiled_hashes.get(key) == digest and path == DAILY_DIR / key
-
-
-def _page_text(path: Path) -> str | None:
-    """A page's text, or None when it cannot be read at all."""
-    try:
-        return path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
-
-
-def _first_h1(text: str) -> str:
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            return stripped[2:].strip()
-    return ""
-
-
-def _first_summary(text: str) -> str:
-    for line in text.splitlines():
-        if line.strip().lower().startswith("one-sentence summary:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def _extract_title_and_summary(path: Path) -> tuple[str, str]:
-    """First H1 and `One-sentence summary:` line from a knowledge page.
-
-    Gives the compiler enough to detect semantic overlap rather than only
-    filename collisions. Falls back to the filename stem when the page has
-    no H1, and to an empty summary when it has no summary line.
-    """
-    text = _page_text(path) or ""
-    return _first_h1(text) or path.stem, _first_summary(text)
-
-
-def existing_knowledge_snapshot() -> str:
-    """Return existing knowledge pages WITH title + summary for dedup.
-
-    Previously returned only filenames, which left the LLM unable to
-    detect semantic overlap (a new page about "hook failure modes"
-    would not match an existing "hook-scripts-defense-in-depth" by
-    slug alone). The enriched snapshot lets the compiler satisfy the
-    DEDUP-BEFORE-CREATE rule from the prompt.
-
-    Format per entry:
-        - <category>/<file>.md «<title>» — <summary>
-
-    Falls back gracefully:
-        - title only (no summary line) → «<title>»
-        - summary only (no H1)          → — <summary>
-        - neither                       → bare filename
-    """
-    entries = [
-        _dedup_entry(page) for page in _knowledge_pages() if _is_dedup_candidate(page)
-    ]
-    return "\n".join(entries) or "(no pages yet)"
-
-
-def _knowledge_pages() -> list[Path]:
-    """Every knowledge page outside the archive subtree, in a stable order.
-
-    A flat scan of the whole tree: pages living outside the legacy category
-    directories are still surfaced. Archived pages are not merge targets.
-    """
-    if not KNOWLEDGE.exists():
-        return []
-    return [
-        path for path in sorted(KNOWLEDGE.rglob("*.md")) if "archive" not in path.parts
-    ]
-
-
-def _is_dedup_candidate(page: Path) -> bool:
-    """Live pages only: a superseded or archived page is not a merge target."""
-    text = _page_text(page)
-    if text is None:
-        return False
-    return "status: superseded" not in text and "status: archived" not in text
-
-
-def _summary_tail(summary: str) -> str:
-    return f" — {summary}" if summary else ""
-
-
-def _dedup_entry(page: Path) -> str:
-    """One line naming a page, carrying whatever title and summary it has.
-
-    The guillemets separate title from summary and give the model a clear
-    "title goes here" anchor.
-    """
-    title, summary = _extract_title_and_summary(page)
-    head = f"- {page.relative_to(KNOWLEDGE).as_posix()}"
-    named = title if title != page.stem else ""
-    if named and summary:
-        return f"{head} — «{named}»: {summary}"
-    return head + (f" — «{named}»" if named else _summary_tail(summary))
-
-
-def parse_compile_audit(raw: str) -> dict:
-    """Extract structured audit counts from a COMPILE_AUDIT line.
-
-    The new prompt emits a self-audit sentinel alongside COMPILE_DONE:
-        COMPILE_AUDIT: verified <a> evidence citations; <b> dedup checks
-        performed; <c> stubs skipped; <d> contradictions handled;
-        <e> pages rejected as below-threshold
-
-    Returns a dict with keys verified/dedup/stubs/contradictions/rejected
-    (ints) or empty dict if the line is absent (e.g. legacy compiles,
-    pre-upgrade runs). Tolerant of missing fields — accepts partial
-    audits. Used by `_run` to surface audit signal in state.json so
-    operators can detect regressions ("verified=0 but touched=5" is a
-    red flag the LLM skipped the verify step).
-    """
-    if not raw or not raw.strip():
-        return {}
-    line = _audit_line(raw)
-    if not line:
-        return {}
-    return _audit_counts(line.split(":", 1)[1])
-
-
-# The number comes BEFORE the descriptor in the emitted line:
-#   "verified 7 evidence citations; 12 dedup checks performed; 2 stubs
-#    skipped; 1 contradictions handled; 0 pages rejected as below-threshold"
-_AUDIT_COUNTS = (
-    ("verified", r"verified\s+(\d+)\s+evidence"),
-    ("dedup", r"(\d+)\s+dedup checks"),
-    ("stubs", r"(\d+)\s+stubs skipped"),
-    ("contradictions", r"(\d+)\s+contradictions handled"),
-    ("rejected", r"(\d+)\s+pages rejected"),
-)
-
-
-def _audit_line(raw: str) -> str:
-    """The last COMPILE_AUDIT line, or empty when the run emitted none."""
-    for line in reversed(raw.splitlines()):
-        if line.strip().startswith("COMPILE_AUDIT:"):
-            return line.strip()
-    return ""
-
-
-def _audit_counts(body: str) -> dict[str, int]:
-    """Every count the line carries; a missing one is simply absent."""
-    found = (
-        (key, re.search(pattern, body, re.IGNORECASE))
-        for key, pattern in _AUDIT_COUNTS
-    )
-    return {key: int(match.group(1)) for key, match in found if match}
-
-
-def _compile_succeeded(raw: str) -> bool:
-    """Did an LLM compile run complete with a valid COMPILE_DONE marker?
-
-    Three cases:
-      - No backend, or a backend failure: `raw` starts with `(` → False.
-      - Output without the COMPILE_DONE marker (truncated, rate-limited,
-        crashed mid-response) → False.
-      - Output carrying the marker → True.
-
-    Gates writes to `compiled_daily_hashes`: marking a failed run as compiled
-    makes the next run skip the day and silently lose pending content.
-    """
-    if not raw or raw.startswith("("):
-        return False
-    return "COMPILE_DONE:" in raw
 
 
 def _mark_started(trigger: str) -> None:
@@ -4038,9 +4052,19 @@ def _lock_lines(lock_file: Path) -> list[str] | None:
         return None
     text = lock_file.read_text(encoding="utf-8").strip()
     if not text:
-        lock_file.unlink()
+        _remove_abandoned_empty_lock(lock_file)
         return None
     return text.splitlines()
+
+
+def _remove_abandoned_empty_lock(lock_file: Path) -> None:
+    """An empty lock inside the spawn window belongs to a writer still writing it.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    if maybe_compile._file_age(lock_file) <= maybe_compile._PID0_TTL_SECONDS:
+        return
+    _unlink_quietly(lock_file)
 
 
 def _lock_is_ours(lines: list[str]) -> bool:
@@ -4050,7 +4074,14 @@ def _lock_is_ours(lines: list[str]) -> bool:
         return True
     if pid == 0:
         return False
-    return not _is_pid_alive(pid)
+    return not process_liveness.owner_alive(pid, _lock_identity(lines))
+
+
+def _lock_identity(lines: list[str]) -> str:
+    """The owner's process start identity, absent in a lock of three lines."""
+    if len(lines) <= 3:
+        return ""
+    return lines[3].strip()
 
 
 def _lock_pid(lines: list[str]) -> int | None:
@@ -4078,13 +4109,44 @@ def _unlink_quietly(path: Path) -> None:
 COMPILE_PROVIDER_CEILING_S = 300
 
 
+def _report_deprecated_flags(args: argparse.Namespace) -> None:
+    """Say plainly that a flag does nothing rather than letting it look busy."""
+    if not args.all:
+        return
+    print(
+        "compile_memory: --all is deprecated and does nothing: every pending "
+        "daily log is compiled anyway, and a day with a committed receipt is "
+        "never compiled again. The flag will be removed.",
+        file=sys.stderr,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    _report_deprecated_flags(args)
     if args.discard_unusable_receipts:
         discarded = discard_unusable_receipts()
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
-    lock_token, refusal = _acquire_compile_lock()
+    return _compile_under_lock(args)
+
+
+def _compile_under_lock(
+    args: argparse.Namespace,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+    owner: OwnerLease | None = None,
+) -> int:
+    """The one guarded way into `_run`: lock, start stamp, call ceiling, release.
+
+    The command line and the in-process entry (the MCP `compile` tool) both come
+    through here. The in-process one used to call `_run` bare: it ran beside a
+    spawned compile, drafted under the 90s default, and its finish stamp
+    overwrote the status of the compile still running.
+    Research: docs/research/2026-09-17-every-compile-takes-the-compile-lock.md
+    """
+    lock_token, refusal = _acquire_compile_lock(getattr(args, "lock_token", None))
     if lock_token is None:
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
         _mark_refused(args.trigger, refusal)
@@ -4092,7 +4154,7 @@ def main() -> int:
     _mark_started(args.trigger)
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
-            return _run(args)
+            return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
         raise
@@ -4103,7 +4165,7 @@ def main() -> int:
 SPAWNED_LOCK = "spawned"
 
 
-def _acquire_compile_lock() -> tuple[str | None, str]:
+def _acquire_compile_lock(spawn_token: str | None = None) -> tuple[str | None, str]:
     """Claim the compile lock for a direct run: (lock handle, reason).
 
     The handle is the owner token when this run claimed the lock,
@@ -4117,7 +4179,7 @@ def _acquire_compile_lock() -> tuple[str | None, str]:
     try:
         if maybe_compile._try_claim_lock():
             return (_claim_direct_lock(), "claimed")
-        if _spawned_lock_is_ours(maybe_compile):
+        if _spawned_lock_is_ours(maybe_compile, spawn_token):
             return (SPAWNED_LOCK, "spawned")
         return (None, f"lock held by another compile ({maybe_compile._lock_state()[1]})")
     except Exception as exc:  # noqa: BLE001 - any lock failure refuses the run
@@ -4130,9 +4192,21 @@ def _claim_direct_lock() -> str:
     return maybe_compile.lock_owner_token() or ""
 
 
-def _spawned_lock_is_ours(maybe_compile: object) -> bool:
+def _spawned_lock_is_ours(maybe_compile: object, spawn_token: str | None = None) -> bool:
+    """The lock the spawner wrote for us: our PID, or the token it handed us.
+
+    A child that reaches the lock before its spawner replaced the PID-0
+    placeholder used to refuse itself, and the night lost that compile.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
     lock = maybe_compile._read_lock()
-    return bool(lock) and lock.get("pid") == os.getpid()
+    if not lock:
+        return False
+    return lock.get("pid") == os.getpid() or _token_matches(lock, spawn_token)
+
+
+def _token_matches(lock: dict, spawn_token: str | None) -> bool:
+    return bool(spawn_token) and lock.get("owner") == spawn_token
 
 
 def _release_compile_lock(lock_token: str | None) -> None:
@@ -4381,7 +4455,7 @@ def run_pending_compile(
     """Compile pending daily logs in-process under caller-owned bounds."""
     if trigger not in {"auto", "manual"}:
         raise ValueError("compile trigger must be auto or manual")
-    return _run(
+    return _compile_under_lock(
         argparse.Namespace(file=None, all=False, dry_run=False, trigger=trigger),
         deadline=deadline,
         cancelled=cancelled,

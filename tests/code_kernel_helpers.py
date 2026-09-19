@@ -9,51 +9,17 @@ import io
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from code_intelligence import (
-    AnalysisIdentity,
-    AnalysisOutcome,
-    AnalysisRun,
-    AnalysisScope,
-    Capability,
-    Coverage,
-    CoverageStatus,
-    Diagnostic,
-    DiagnosticSeverity,
-    EvidenceLevel,
-    ExpectedSource,
-    NormalizedAnalysis,
-    PositionEncoding,
-    PositionRange,
-    RelatedLocation,
-    Relationship,
-    RelationshipClaim,
-    RelationshipResolution,
-    SubjectKind,
-    SymbolClaim,
-    SymbolIdentity,
-    SymbolRole,
-    Validity,
-    ValidityStatus,
-    VerifiedAnalysisBatch,
-)
 from corpus_snapshot import (
     CapturedSource,
-    CodeCaptureContract,
-    CodeCaptureFile,
     CorpusSnapshot,
-    DirectoryMembership,
-    FileStatMetadata,
-    RepositoryCodeLimits,
-    RepositoryCodePolicy,
     SnapshotPolicy,
     SourceMetadata,
     SourceRecord,
@@ -329,13 +295,53 @@ def _write_pyright_lockfile(
     )
 
 
+_DEFAULT_BUNDLES = {"pyright-langserver.js": b"synthetic pyright bundle\n"}
+
+
+def _write_pyright_bundles(package_root: Path, bundles: Mapping[str, bytes]) -> None:
+    """The `package/dist` files the shim loads, which the receipt now attests."""
+    from pyright_profile import PYRIGHT_EXECUTED_TREE_RELATIVE
+
+    dist = package_root.parent / PYRIGHT_EXECUTED_TREE_RELATIVE
+    dist.mkdir(parents=True, exist_ok=True)
+    for name, content in bundles.items():
+        (dist / name).write_bytes(content)
+
+
+def pyright_executed_tree_sha256(
+    server_bytes: bytes, bundles: Mapping[str, bytes]
+) -> str:
+    """The receipt's digest over the shim and the `package/dist` files with it."""
+    from pyright_profile import (
+        PYRIGHT_EXECUTED_TREE_RELATIVE,
+        PYRIGHT_SERVER_RELATIVE,
+        executed_tree_digest,
+    )
+
+    entries = [
+        (PYRIGHT_SERVER_RELATIVE.as_posix(), hashlib.sha256(server_bytes).hexdigest())
+    ]
+    entries.extend(
+        (
+            (PYRIGHT_EXECUTED_TREE_RELATIVE / name).as_posix(),
+            hashlib.sha256(content).hexdigest(),
+        )
+        for name, content in bundles.items()
+    )
+    return executed_tree_digest(entries)
+
+
 def _write_pyright_manifest(
     destination: Path,
     build_manifest,
     server_bytes: bytes,
+    bundles: Mapping[str, bytes],
     overrides: Mapping[str, object] | None,
 ) -> None:
-    manifest = build_manifest(server_sha256=hashlib.sha256(server_bytes).hexdigest())
+    manifest = build_manifest(
+        server_sha256=hashlib.sha256(server_bytes).hexdigest(),
+        executed_tree_sha256=pyright_executed_tree_sha256(server_bytes, bundles),
+    )
     manifest.update(dict(overrides or {}))
     (destination / "install-manifest.json").write_bytes(canonical_json_bytes(manifest))
 
@@ -350,14 +356,11 @@ def create_pyright_fixture(
     lockfile_version: int | None = 3,
     lockfile_link: bool = False,
     server_bytes: bytes = b"synthetic pyright language server\n",
+    bundle_bytes: Mapping[str, bytes] | None = None,
     manifest_overrides: Mapping[str, object] | None = None,
 ) -> Path:
     """Create a synthetic package tree without invoking npm or the network."""
-    from pyright_profile import (
-        PYRIGHT_PACKAGE_INTEGRITY,
-        PYRIGHT_PACKAGE_URL,
-        build_pyright_install_manifest,
-    )
+    from pyright_profile import PYRIGHT_PACKAGE_INTEGRITY, PYRIGHT_PACKAGE_URL
 
     integrity = PYRIGHT_PACKAGE_INTEGRITY if integrity is None else integrity
     package_root = destination / "package" if managed else destination / "node_modules/pyright"
@@ -375,10 +378,30 @@ def create_pyright_fixture(
             _lockfile_entry(integrity, PYRIGHT_PACKAGE_URL, package_version, lockfile_link),
         )
     if managed:
-        _write_pyright_manifest(
-            destination, build_pyright_install_manifest, server_bytes, manifest_overrides
+        _write_managed_receipt(
+            destination, package_root, server_bytes, bundle_bytes, manifest_overrides
         )
     return server
+
+
+def _write_managed_receipt(
+    destination: Path,
+    package_root: Path,
+    server_bytes: bytes,
+    bundle_bytes: Mapping[str, bytes] | None,
+    manifest_overrides: Mapping[str, object] | None,
+) -> None:
+    from pyright_profile import build_pyright_install_manifest
+
+    bundles = _DEFAULT_BUNDLES if bundle_bytes is None else dict(bundle_bytes)
+    _write_pyright_bundles(package_root, bundles)
+    _write_pyright_manifest(
+        destination,
+        build_pyright_install_manifest,
+        server_bytes,
+        bundles,
+        manifest_overrides,
+    )
 
 
 def source_bytes(snapshot: CorpusSnapshot, source_id: str) -> bytes:
@@ -401,188 +424,6 @@ def source_by_path(snapshot: CorpusSnapshot, relative_path: str) -> CapturedSour
     if len(matches) != 1:
         raise KeyError(relative_path)
     return matches[0]
-
-
-def make_analysis_scope(snapshot: CorpusSnapshot) -> AnalysisScope:
-    expected_sources = tuple(
-        sorted(
-            (
-                ExpectedSource(source.record.logical_id, source.record.sha256, "included")
-                for source in snapshot.sources
-            ),
-            key=lambda item: item.source_id,
-        )
-    )
-    source_ids = tuple(item.source_id for item in expected_sources)
-    run_id = "run:" + hashlib.sha256(
-        canonical_json_bytes(
-            {"kind": "native-test-run", "source_manifest_sha256": snapshot.corpus_sha256}
-        )
-    ).hexdigest()
-    scope_id = "scope:" + hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "build_configuration": "default",
-                "build_target": "default",
-                "run_id": run_id,
-                "source_ids": list(source_ids),
-            }
-        )
-    ).hexdigest()
-    return AnalysisScope(
-        scope_id=scope_id,
-        run_id=run_id,
-        source_manifest_sha256=snapshot.corpus_sha256,
-        build_target="default",
-        build_configuration="default",
-        expected_sources=expected_sources,
-        generated_sources="not-required",
-        dependency_resolution="complete",
-        analyzer_support="complete",
-    )
-
-
-def make_analysis_identity(
-    snapshot: CorpusSnapshot,
-    scope: AnalysisScope,
-) -> AnalysisIdentity:
-    if scope.source_manifest_sha256 != snapshot.corpus_sha256:
-        raise ValueError("scope source manifest must match snapshot")
-    components = {
-        name: hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "component": name,
-                    "scope_id": scope.scope_id,
-                    "source_manifest_sha256": snapshot.corpus_sha256,
-                }
-            )
-        ).hexdigest()
-        for name in (
-            "manifest_sha256",
-            "lockfile_sha256",
-            "sdk_sha256",
-            "target_sha256",
-            "configuration_sha256",
-            "feature_sha256",
-            "invocation_sha256",
-            "environment_sha256",
-            "dependency_state_sha256",
-        )
-    }
-    return AnalysisIdentity.create(
-        source_manifest_sha256=snapshot.corpus_sha256,
-        position_encoding=PositionEncoding.UTF8,
-        **components,
-    )
-
-
-def make_run(
-    snapshot: CorpusSnapshot, outcome: str = "complete", repository_scope=None
-) -> AnalysisRun:
-    scope = make_analysis_scope(snapshot)
-    identity = make_analysis_identity(snapshot, scope)
-    return AnalysisRun(
-        run_id=scope.run_id,
-        identity=identity,
-        source_manifest_sha256=snapshot.corpus_sha256,
-        analysis_mode="native-syntax",
-        repository_id=(
-            repository_scope.repository_id
-            if repository_scope is not None
-            else "repository:test-fixture"
-        ),
-        checkout_id=(
-            repository_scope.checkout_id
-            if repository_scope is not None
-            else "checkout:test-fixture"
-        ),
-        source_generation_id="generation:test-fixture",
-        analyzer_family="native-test",
-        analyzer_version="1",
-        protocol="native",
-        protocol_version="1",
-        executable_sha256=hashlib.sha256(b"native-test").hexdigest(),
-        declared_capabilities=(Capability.DEFINITIONS,),
-        evidence_level=EvidenceLevel.SYNTAX,
-        qualified=True,
-        outcome=AnalysisOutcome(outcome),
-        receipt_sha256=None,
-        receipt_output_sha256=None,
-        consent_grant_id=None,
-        consent_revision=None,
-        lease_id=None,
-        started_at="2026-07-21T00:00:00Z",
-        ended_at="2026-07-21T00:00:01Z",
-    )
-
-
-def make_normalized_analysis(
-    snapshot: CorpusSnapshot,
-    scope: AnalysisScope,
-    repository_scope=None,
-) -> NormalizedAnalysis:
-    run = make_run(snapshot, repository_scope=repository_scope)
-    if scope.run_id != run.run_id:
-        raise ValueError("scope run_id must match fixture run")
-    coverage = tuple(
-        Coverage(
-            scope_id=scope.scope_id,
-            source_id=source_id,
-            capability=Capability.DEFINITIONS,
-            status=CoverageStatus.COMPLETE,
-            closed_world_eligible=True,
-            reason=None,
-        )
-        for source_id in scope.expected_source_ids
-    )
-    symbols: tuple[SymbolClaim, ...] = ()
-    validity: tuple[Validity, ...] = ()
-    if scope.expected_source_ids:
-        source_id = scope.expected_source_ids[0]
-        content = source_bytes(snapshot, source_id)
-        if content:
-            claim_id = "claim:" + hashlib.sha256(
-                canonical_json_bytes(
-                    {"scope_id": scope.scope_id, "source_id": source_id, "kind": "fixture"}
-                )
-            ).hexdigest()
-            symbols = (
-                SymbolClaim(
-                    claim_id=claim_id,
-                    run_id=run.run_id,
-                    scope_id=scope.scope_id,
-                    source_id=source_id,
-                    capability=Capability.DEFINITIONS,
-                    identity=SymbolIdentity("fixture", source_id),
-                    display_name="fixture",
-                    symbol_kind="fixture",
-                    role=SymbolRole.DEFINITION,
-                    range=PositionRange(0, 1),
-                    evidence_level=EvidenceLevel.SYNTAX,
-                    ambiguity=False,
-                ),
-            )
-            validity = (
-                Validity(
-                    validity_id="validity:"
-                    + hashlib.sha256(claim_id.encode("utf-8")).hexdigest(),
-                    subject_kind=SubjectKind.SYMBOL,
-                    subject_id=claim_id,
-                    status=ValidityStatus.CURRENT,
-                    stale_reason=None,
-                ),
-            )
-    return NormalizedAnalysis(
-        run=run,
-        scopes=(scope,),
-        coverage=coverage,
-        symbols=symbols,
-        relationships=(),
-        diagnostics=(),
-        validity=validity,
-        receipt=None,
-    )
 
 
 def basic_graph_records() -> dict[str, object]:
@@ -706,252 +547,13 @@ def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
     )
 
 
-def _capture_files(snapshot: CorpusSnapshot) -> tuple:
-    return tuple(
-        CodeCaptureFile(
-            source.record.logical_id,
-            source.record.relative_path,
-            source.record.sha256,
-            FileStatMetadata(source.record.size, 0, 0, stat.S_IFREG, 0, 0),
-        )
-        for source in snapshot.sources
-    )
-
-
-def _capture_file_row(item) -> dict:
-    return {
-        "source_id": item.source_id,
-        "relative_path": item.relative_path,
-        "sha256": item.sha256,
-        "stat": {
-            name: getattr(item.stat, name) for name in item.stat.__dataclass_fields__
-        },
-    }
-
-
-def _capture_directory_row(item) -> dict:
-    return {
-        "relative_path": item.relative_path,
-        "entry_count": item.entry_count,
-        "entries_sha256": item.entries_sha256,
-    }
-
-
-def _membership_digest(files: tuple, directories: tuple) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "files": [_capture_file_row(item) for item in files],
-                "directories": [_capture_directory_row(item) for item in directories],
-            }
-        )
-    ).hexdigest()
-
-
-def _capture_policy(files: tuple, directories: tuple) -> RepositoryCodePolicy:
-    roots = {item.relative_path for item in files}
-    roots.update(item.relative_path for item in directories)
-    suffixes = {Path(item.relative_path).suffix.casefold() for item in files}
-    return RepositoryCodePolicy(
-        roots=tuple(sorted(roots)),
-        include_globs=("**",),
-        ignore_globs=(),
-        suffixes=tuple(sorted(suffixes)),
-    )
-
-
-def captured_snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
-    """Add the canonical capture fixture required for analyzer-backed generations."""
-    snapshot = snapshot_for_records(records)
-    files = _capture_files(snapshot)
-    empty_entries = hashlib.sha256(canonical_json_bytes([])).hexdigest()
-    directories = (
-        DirectoryMembership("fixture-a", 0, empty_entries),
-        DirectoryMembership("fixture-b", 0, empty_entries),
-    )
-    contract = CodeCaptureContract(
-        policy=_capture_policy(files, directories),
-        limits=RepositoryCodeLimits(),
-        files=files,
-        directories=directories,
-        membership_sha256=_membership_digest(files, directories),
-    )
-    return replace(snapshot, code_capture=contract)
-
-
-def make_normalized_analysis_for_records(
-    records: dict[str, object], repository_scope=None
-) -> NormalizedAnalysis:
-    snapshot = snapshot_for_records(records)
-    scope = make_analysis_scope(snapshot)
-    run = replace(
-        make_run(snapshot),
-        declared_capabilities=(
-            Capability.CALLS,
-            Capability.DEFINITIONS,
-            Capability.DIAGNOSTICS,
-        ),
-        **(
-            {
-                "repository_id": repository_scope.repository_id,
-                "checkout_id": repository_scope.checkout_id,
-            }
-            if repository_scope is not None
-            else {}
-        ),
-    )
-    source = scope.expected_sources[0]
-    symbol_id = "claim:symbol"
-    relationship_id = "claim:relationship"
-    diagnostic_id = "diagnostic:fixture"
-    symbol_identity = SymbolIdentity("python/v1", "app:caller")
-    return NormalizedAnalysis(
-        run=run,
-        scopes=(scope,),
-        coverage=tuple(
-            Coverage(
-                scope_id=scope.scope_id,
-                source_id=expected.source_id,
-                capability=capability,
-                status=CoverageStatus.COMPLETE,
-                closed_world_eligible=True,
-                reason=None,
-            )
-            for expected in scope.expected_sources
-            for capability in run.declared_capabilities
-        ),
-        symbols=(
-            SymbolClaim(
-                claim_id=symbol_id,
-                run_id=run.run_id,
-                scope_id=scope.scope_id,
-                source_id=source.source_id,
-                capability=Capability.DEFINITIONS,
-                identity=symbol_identity,
-                display_name="caller",
-                symbol_kind="function",
-                role=SymbolRole.DEFINITION,
-                range=PositionRange(4, 10),
-                evidence_level=EvidenceLevel.SYNTAX,
-                ambiguity=False,
-            ),
-        ),
-        relationships=(
-            RelationshipClaim(
-                claim_id=relationship_id,
-                run_id=run.run_id,
-                scope_id=scope.scope_id,
-                source_id=source.source_id,
-                source_identity=symbol_identity,
-                relation=Relationship.CALLS,
-                capability=Capability.CALLS,
-                target_identity=None,
-                target_text="callee",
-                resolution=RelationshipResolution.UNRESOLVED,
-                range=PositionRange(18, 26),
-                evidence_level=EvidenceLevel.SYNTAX,
-                ambiguity=False,
-            ),
-        ),
-        diagnostics=(
-            Diagnostic(
-                diagnostic_id=diagnostic_id,
-                run_id=run.run_id,
-                scope_id=scope.scope_id,
-                source_id=source.source_id,
-                capability=Capability.DIAGNOSTICS,
-                severity=DiagnosticSeverity.WARNING,
-                code="fixture",
-                message="fixture diagnostic",
-                range=PositionRange(0, 3),
-                evidence_level=EvidenceLevel.SYNTAX,
-                related=(
-                    RelatedLocation(
-                        source_id=source.source_id,
-                        range=PositionRange(4, 10),
-                        message="related fixture",
-                    ),
-                ),
-            ),
-        ),
-        validity=(
-            Validity(
-                validity_id="validity:diagnostic",
-                subject_kind=SubjectKind.DIAGNOSTIC,
-                subject_id=diagnostic_id,
-                status=ValidityStatus.CURRENT,
-                stale_reason=None,
-            ),
-            Validity(
-                validity_id="validity:relationship",
-                subject_kind=SubjectKind.RELATIONSHIP,
-                subject_id=relationship_id,
-                status=ValidityStatus.CURRENT,
-                stale_reason=None,
-            ),
-            Validity(
-                validity_id="validity:symbol",
-                subject_kind=SubjectKind.SYMBOL,
-                subject_id=symbol_id,
-                status=ValidityStatus.CURRENT,
-                stale_reason=None,
-            ),
-        ),
-        receipt=None,
-    )
-
-
-def make_unminted_verified_subclass(records: dict[str, object]) -> VerifiedAnalysisBatch:
-    from code_intelligence import verify_native_analysis
-
-    verified = verify_native_analysis(
-        snapshot_for_records(records), make_normalized_analysis_for_records(records)
-    )
-
-    class UnmintedVerifiedAnalysisBatch(VerifiedAnalysisBatch):
-        pass
-
-    forged = object.__new__(UnmintedVerifiedAnalysisBatch)
-    for name in VerifiedAnalysisBatch.__dataclass_fields__:
-        object.__setattr__(forged, name, getattr(verified, name))
-    assert isinstance(forged, VerifiedAnalysisBatch)
-    assert type(forged) is not VerifiedAnalysisBatch
-    return forged
-
-
-def build_fixture_generation(
-    tmp_path: Path,
-    *,
-    generation_id: str,
-    graph_schema=None,
-):
-    from code_intelligence import verify_native_analysis
-    from evidence_graph import GraphSchema
+def build_fixture_generation(tmp_path: Path, *, generation_id: str, graph_schema=None):
+    """One fixture generation of the published schema, built through the builder."""
     from evidence_graph_builder import build_full_generation
     from generation_catalog import GenerationCatalog
 
     records = basic_graph_records()
-    options = {}
-    if graph_schema is not None:
-        options["graph_schema"] = graph_schema
-    if graph_schema is GraphSchema.V3:
-        from repository_scope import resolve_repository_scope
-
-        repository = tmp_path / "repository"
-        repository.mkdir(parents=True, exist_ok=True)
-        repository_scope = resolve_repository_scope(repository)
-        snapshot = captured_snapshot_for_records(records)
-        options["verified_analyses"] = (
-            verify_native_analysis(
-                snapshot,
-                make_normalized_analysis_for_records(records, repository_scope),
-            ),
-        )
-        options.update(
-            snapshot=snapshot,
-            repository_scope=repository_scope,
-            code_capture=snapshot.code_capture,
-        )
+    options = {} if graph_schema is None else {"graph_schema": graph_schema}
     return build_full_generation(
         GenerationCatalog(tmp_path / "state"),
         generation_id=generation_id,
@@ -989,25 +591,6 @@ def non_code_v2_generation(tmp_path: Path):
     result = _build_non_code_v2_generation(tmp_path, activate=True)
     assert result.activated is True
     return result
-
-
-def publish_v3_fixture(tmp_path: Path, generation_id: str = "v3"):
-    from evidence_graph import GraphSchema
-
-    return build_fixture_generation(
-        tmp_path, generation_id=generation_id, graph_schema=GraphSchema.V3
-    )
-
-
-def open_v3_fixture(tmp_path: Path):
-    from evidence_graph import EvidenceGraph, GraphSchema
-
-    result = publish_v3_fixture(tmp_path)
-    return EvidenceGraph(
-        result.generation_path / "evidence.sqlite3",
-        state_root=tmp_path / "state",
-        schema=GraphSchema.V3,
-    )
 
 
 @pytest.fixture

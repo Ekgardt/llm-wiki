@@ -63,6 +63,16 @@ def _script_steps() -> list[tuple[str, str, list[str], int]]:
             300,
         ),
         (
+            # "Archives keep 90 hot days" is a contract, and nothing ran the
+            # archiver, so `knowledge/daily/` grew without bound and every
+            # compile trigger hashed all of it. Research:
+            # docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+            "Step 3c2: archiving daily logs past the hot window...",
+            "daily_archive",
+            [sys.executable, str(script / "archive_daily.py"), "--commit"],
+            600,
+        ),
+        (
             "Step 3d: pruning superseded evidence-graph generations...",
             "generations",
             # Its own budget ends two minutes before this step is killed. See

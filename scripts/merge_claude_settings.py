@@ -32,6 +32,8 @@ RETIRED_ALLOW = frozenset(
 OUR_SCRIPT_MARKERS = (
     "integration_adapter.py",
     "session_start_context.py",
+    # Deleted on 2026-09-17; the names stay so a hook entry written by an older
+    # install is still recognised as ours and replaced by the adapter entry.
     "precompact_capture.py",
     "session_end_capture.py",
     "user_prompt_capture.py",

@@ -126,3 +126,77 @@ class TestReflectPage:
         page.write_text("# Test\n\nNo updates here.\n", encoding="utf-8")
         result = reflect_page(page, apply=False)
         assert "skipping" in result.lower()
+
+
+GOOD_REWRITE = (
+    "# Growing Page\n\nOne-sentence summary: the page after its updates were folded in.\n\n"
+    + " ".join(["The consolidated narrative keeps every fact the updates stated."] * 8)
+    + "\n"
+)
+PAGE = (
+    "---\ntype: pattern\n---\n\n# Growing Page\n\n"
+    "One-sentence summary: a page that gathers updates.\n\nOriginal content.\n\n"
+    "## Update (2026-01-15)\nFirst update.\n\n## Update (2026-02-20)\nSecond update.\n"
+)
+
+
+def _vault_page(tmp_path, monkeypatch, text: str, reply: str):
+    import reflection
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    page = notes / "growing-page.md"
+    page.write_text(text, encoding="utf-8")
+    written: dict = {}
+    monkeypatch.setattr(reflection, "ROOT", tmp_path)
+    monkeypatch.setattr(reflection, "KNOWLEDGE", notes)
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: reply)
+    monkeypatch.setattr(reflection, "mutate_knowledge", lambda _id, files, **_k: written.update(files))
+    return reflection, page, written
+
+
+class TestARewriteIsCheckedBeforeItIsWritten:
+    """`docs/research/2026-09-17-a-reflection-is-checked-before-it-is-written.md`."""
+
+    def test_a_refusal_leaves_the_page_as_it_was(self, tmp_path, monkeypatch):
+        reflection, page, written = _vault_page(tmp_path, monkeypatch, PAGE, "I'm sorry, I can't help with that.")
+
+        message = reflection.reflect_page(page, apply=True)
+
+        assert (written, "not written" in message) == ({}, True)
+
+    def test_a_rewrite_that_lost_the_summary_is_not_written(self, tmp_path, monkeypatch):
+        reply = GOOD_REWRITE.replace("One-sentence summary:", "Summary:")
+        reflection, page, written = _vault_page(tmp_path, monkeypatch, PAGE, reply)
+
+        reflection.reflect_page(page, apply=True)
+
+        assert written == {}
+
+    def test_a_good_rewrite_keeps_the_old_body_once(self, tmp_path, monkeypatch):
+        reflection, page, written = _vault_page(tmp_path, monkeypatch, PAGE, GOOD_REWRITE)
+
+        reflection.reflect_page(page, apply=True)
+
+        text = written[page].decode("utf-8")
+        assert (text.count("Original content."), text.count("## History (pre-reflection")) == (1, 1)
+
+    def test_a_decision_is_never_a_candidate_and_never_rewritten(self, tmp_path, monkeypatch):
+        decision = PAGE.replace("type: pattern", "type: decision")
+        reflection, page, written = _vault_page(tmp_path, monkeypatch, decision, GOOD_REWRITE)
+
+        message = reflection.reflect_page(page, apply=True)
+
+        assert (reflection.find_reflection_candidates(), written, "never rewritten" in message) == ([], {}, True)
+
+    def test_a_reflected_page_with_new_updates_is_a_candidate_again(self, tmp_path, monkeypatch):
+        reflected = (
+            GOOD_REWRITE.replace("# Growing Page", "---\ntype: pattern\n---\n\n# Growing Page")
+            + "\n## Update (2026-05-01)\nNew.\n\n## Update (2026-06-01)\nNewer.\n"
+            + "\n\n## History (pre-reflection 2026-03-01)\n<details>\n\n## Update (2026-01-15)\nOld.\n\n</details>\n"
+        )
+        reflection, _page, _written = _vault_page(tmp_path, monkeypatch, reflected, GOOD_REWRITE)
+
+        candidates = reflection.find_reflection_candidates()
+
+        assert [item["update_count"] for item in candidates] == [2]

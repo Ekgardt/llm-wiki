@@ -206,7 +206,7 @@ def test_edge_family_ablation_removes_disabled_family_before_fusion() -> None:
         seen.update(options)
         return [
             _expansion("helpful", edge_type="CALLS", content="target"),
-            _expansion("harmful", edge_type="CO_CHANGED_WITH", content="target"),
+            _expansion("harmful", edge_type="LINKS_TO", content="target"),
         ]
 
     result = retrieve(
@@ -214,12 +214,31 @@ def test_edge_family_ablation_removes_disabled_family_before_fusion() -> None:
         requested_profile="GRAPH",
         lexical_backend=lambda **_filters: [_hit("seed", "seed.md", 1.0)],
         graph_backend=graph,
-        graph_edge_families={"CO_CHANGED_WITH": False},
+        graph_edge_families={"LINKS_TO": False},
         rerank_enabled=False,
     )
 
-    assert "CO_CHANGED_WITH" not in seen["edge_types"]
+    assert "LINKS_TO" not in seen["edge_types"]
     assert {item.candidate_id for item in result.candidates} == {"seed", "helpful"}
+
+
+def test_every_profile_asks_only_for_edges_this_product_weighs() -> None:
+    """A profile that names an unweighed edge type reads as a broken backend.
+
+    `CO_CHANGED_WITH` left `GRAPH_EDGE_DECAY` with its island on 2026-09-17 and
+    stayed in the `IMPACT` profile, so every `IMPACT` retrieval raised
+    `KeyError` while building the decay map, was read as a backend failure, and
+    degraded to `BASE` without saying why. See
+    `docs/research/2026-09-18-a-profile-asks-only-for-edges-this-product-weighs.md`.
+    """
+    from retrieval import GRAPH_EDGE_DECAY, GRAPH_PROFILE_EDGE_TYPES
+
+    unweighed = {
+        profile: tuple(edge for edge in edges if edge not in GRAPH_EDGE_DECAY)
+        for profile, edges in GRAPH_PROFILE_EDGE_TYPES.items()
+    }
+
+    assert unweighed == dict.fromkeys(GRAPH_PROFILE_EDGE_TYPES, ())
 
 
 def test_graph_backend_failure_falls_back_to_text_with_stable_generation() -> None:

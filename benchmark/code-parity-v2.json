@@ -1,7 +1,7 @@
 {
   "version": "code-parity-v2",
   "date": "2026-09-11",
-  "repository": "/home/user/llm-wiki",
+  "repository": "<vault>",
   "notes": [
     "Every gold answer was established by hand from the source on 2026-08-28,",
     "by grep plus reading the cited lines — not by trusting either tool.",
@@ -598,11 +598,13 @@
       "question": "Which project modules does scripts/retrieval.py depend on?",
       "gold": {
         "citations": [
-          "scripts/retrieval.py:17 (from provenance import ... — the only module-level project import)",
+          "scripts/retrieval.py (import lane_score — a module-level project import)",
+          "scripts/retrieval.py (from provenance import ... — a module-level project import)",
           "function-local imports the static module graph may legitimately miss: reranker (:2126), search_memory (:2504), graph_neighbors (:2611), retrieval_telemetry (:2786)"
         ],
         "must": [
-          "provenance"
+          "provenance",
+          "lane_score"
         ],
         "must_not": []
       },

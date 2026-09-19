@@ -643,6 +643,7 @@ class _SemanticServer:
             "initialized": self._on_initialized,
             "workspace/didChangeConfiguration": self._on_ignored,
             "textDocument/didOpen": self._on_did_open,
+            "textDocument/didClose": self._on_did_close,
             "shutdown": self._on_shutdown,
             "exit": self._on_exit,
         }
@@ -712,6 +713,13 @@ class _SemanticServer:
         uri, version = opened
         self._register_document(uri, version)
         self._start_diagnostics(uri, version)
+        return _SEMANTIC_DONE
+
+    def _on_did_close(self, request: dict[str, Any]) -> str:
+        """A closed document is forgotten, so it may be opened again."""
+        uri = _request_uri(request)
+        if uri is not None:
+            self.documents.pop(uri, None)
         return _SEMANTIC_DONE
 
     def _register_document(self, uri: str, version: int) -> None:

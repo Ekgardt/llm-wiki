@@ -72,7 +72,7 @@ def test_a_dead_owners_marker_is_reclaimed_and_the_fence_taken(tmp_path, monkeyp
     try:
         assert second.epoch == lease.epoch + 1
         assert _owner_rows(candidate) == [("nightly", os.getpid())]
-        assert (state_root / MARKER).read_bytes() == str(os.getpid()).encode("ascii")
+        assert (state_root / MARKER).read_bytes() == ownership._marker_payload()
     finally:
         ownership.release_marker_owner(second, marker)
     assert not (state_root / MARKER).exists()
@@ -87,7 +87,7 @@ def test_a_live_owners_marker_refuses_by_name(tmp_path):
         with pytest.raises(ownership.OperationalOwnershipError) as error:
             ownership.acquire_scheduled_owner("nightly", state_root=state_root)
         assert error.value.code == "owner_busy"
-        assert (state_root / MARKER).read_bytes() == str(os.getpid()).encode("ascii")
+        assert (state_root / MARKER).read_bytes() == ownership._marker_payload()
     finally:
         ownership.release_marker_owner(lease, marker)
 
@@ -123,7 +123,7 @@ def test_an_ownerless_marker_of_a_dead_pid_is_removed(tmp_path, monkeypatch):
     lease, marker = ownership.acquire_scheduled_owner("nightly", state_root=state_root)
 
     try:
-        assert marker_path.read_bytes() == str(os.getpid()).encode("ascii")
+        assert marker_path.read_bytes() == ownership._marker_payload()
     finally:
         ownership.release_marker_owner(lease, marker)
 
@@ -299,5 +299,5 @@ def test_a_vault_without_a_coordinator_keeps_the_legacy_marker(tmp_path, monkeyp
 
     assert scheduled_nightly.main() == 0
 
-    assert seen == [str(os.getpid()).encode("ascii")]
+    assert seen == [scheduled_nightly.marker_payload()]
     assert not (state_root / MARKER).exists()

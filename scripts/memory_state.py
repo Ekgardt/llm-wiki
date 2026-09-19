@@ -5,12 +5,11 @@ Three-zone layout: vault holds code + knowledge + gitignored runtime dirs.
     <vault>/
       run/state.json     # compile hashes, dedupe, heartbeats
       run/compile.pid    # maybe_compile lock
-      run/queue/         # deferred LLM tasks
+      run/queue-v3.sqlite3   # deferred LLM tasks (run/queue/*.json: migration input only)
       logs/              # lint / nightly reports
-      cache/             # FTS5/vector/graph indexes
-                       # cache/cognee/ — optional semantic graph
+      cache/             # FTS5/vector/graph indexes (cache/cognee/ is retired)
 
-`cache/` (incl. `cache/cognee/`), `logs/`, `run/` are gitignored — they live inside the
+`cache/`, `logs/`, `run/` are gitignored — they live inside the
 vault for single-checkout portability but git never tracks their churn.
 Override the root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 
@@ -25,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -103,24 +103,42 @@ def _is_pid_alive(pid: int) -> bool:
     return process_liveness.pid_alive(pid)
 
 
+def _decoded_state(raw: bytes) -> dict[str, Any] | None:
+    """The state these bytes hold, or None: not UTF-8, not JSON, or not an object.
+
+    One definition of "readable" for the reader and the writer. See
+    `docs/research/2026-09-17-a-torn-state-file-is-recovered-whatever-its-bytes.md`.
+    """
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _keep_corrupt_copy(raw: bytes) -> None:
+    """Preserve the corrupt bytes for forensics; do not silently clobber."""
+    try:
+        bak = STATE_FILE.with_suffix(".json.corrupt")
+        bak.write_bytes(raw)
+        err_log = REPORTS_DIR / "hook-errors.log"
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with err_log.open("a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
+    except OSError:
+        pass
+
+
 def load_state() -> dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
         return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        # Preserve corrupt file for forensics; do not silently clobber.
-        try:
-            bak = STATE_FILE.with_suffix(".json.corrupt")
-            bak.write_bytes(STATE_FILE.read_bytes())
-            err_log = REPORTS_DIR / "hook-errors.log"
-            REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-            with err_log.open("a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
-        except OSError:
-            pass
+    raw = STATE_FILE.read_bytes()
+    state = _decoded_state(raw)
+    if state is None:
+        _keep_corrupt_copy(raw)
         return {}
+    return state
 
 
 # What a reader of `run/state.json` is willing to read. `doctor` refuses a state
@@ -181,6 +199,10 @@ def _sharing_violation(exc: PermissionError) -> bool:
     return sys.platform == "win32" and exc.errno == 13
 
 
+# Untranslated: what the payload says is what the lock file holds.
+_LOCK_OPEN_FLAGS = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_BINARY", 0)
+
+
 def _lock_already_held() -> bool:
     return sys.platform == "win32" and LOCK_FILE.exists()
 
@@ -192,14 +214,38 @@ def _contention(exc: PermissionError, observed_contention: bool) -> bool:
     return observed_contention
 
 
-def _claim_lock(owner_pid: str) -> int | None:
-    """The lock descriptor when it was ours to take, None while contended."""
+def _claim_lock(payload: bytes) -> int | None:
+    """The lock descriptor when it was ours to take, None while contended.
+
+    The descriptor is binary: a Windows text-mode descriptor would write the
+    payload's newlines as CRLF, `_release_state_lock` would never recognise its
+    own lock again, and the file would outlive every writer. Research:
+    docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md
+    """
     try:
-        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        fd = os.open(str(LOCK_FILE), _LOCK_OPEN_FLAGS)
     except FileExistsError:
         return None
-    os.write(fd, owner_pid.encode("utf-8"))
+    os.write(fd, payload)
     return fd
+
+
+def _own_process_identity() -> str:
+    """This process's start identity, or empty when the probe cannot settle it."""
+    try:
+        return process_liveness.process_start_identity(os.getpid()) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _lock_payload() -> bytes:
+    """Who holds the lock: the PID, and the identity that outlives PID reuse.
+
+    A PID alone cannot say whether its owner died and its number was handed to
+    another process. Research:
+    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_process_identity()}\n".encode()
 
 
 def _lock_age() -> float:
@@ -216,12 +262,48 @@ def _lock_bytes() -> bytes | None:
         return None
 
 
+def _lock_owner(payload: bytes | None) -> tuple[int, str] | None:
+    """(PID, start identity) the lock records; None when it records neither.
+
+    The identity line is absent in a lock written before this release, and the
+    answer for such a file is the PID probe, exactly as it was.
+    """
+    if not payload:
+        return None
+    return _owner_from_lines(payload.decode("utf-8", errors="replace").splitlines())
+
+
+def _owner_from_lines(lines: list[str]) -> tuple[int, str] | None:
+    if not lines:
+        return None
+    try:
+        pid = int(lines[0].strip())
+    except ValueError:
+        return None
+    return (pid, lines[1].strip() if len(lines) > 1 else "")
+
+
 def _owner_alive(payload: bytes | None) -> bool:
     """True when the recorded owner is a live process; corrupt reads say no."""
-    try:
-        return _is_pid_alive(int((payload or b"").decode("utf-8").strip()))
-    except ValueError:
+    owner = _lock_owner(payload)
+    if owner is None:
         return False
+    return process_liveness.owner_alive(*owner)
+
+
+def _named_owner_is_dead(payload: bytes | None) -> bool:
+    """A finished lock file that names a provably dead owner — no age needed.
+
+    A writer that died holding the lock used to stop every other writer for the
+    30 s staleness window, while their own wait is 10 s (audit Q-L6). A lock
+    ending in its newline is a finished write, so what it names can be judged.
+    """
+    if not payload or not payload.endswith(b"\n"):
+        return False
+    owner = _lock_owner(payload)
+    if owner is None or not owner[1]:
+        return False
+    return not process_liveness.owner_alive(*owner)
 
 
 # How long a stealer waits for another stealer to finish judging the same lock.
@@ -308,24 +390,36 @@ def _wait_for_slow_owner(deadline: float, poll: float) -> None:
 
 def _await_lock_turn(deadline: float, poll: float) -> None:
     """One turn of waiting: retire a dead lock, wait out a live one."""
+    payload = _lock_bytes()
+    if _named_owner_is_dead(payload):
+        retire_stale_lock(LOCK_FILE, payload)
+        return
+    _judge_by_age(payload, deadline, poll)
+
+
+def _judge_by_age(payload: bytes | None, deadline: float, poll: float) -> None:
+    """The rule for a lock that does not name its owner: wait, then judge by age."""
     if _lock_age() > _STALE_LOCK_SECONDS:
-        payload = _lock_bytes()
-        if _owner_alive(payload):
-            _wait_for_slow_owner(deadline, poll)
-            return
-        if payload is not None:
-            retire_stale_lock(LOCK_FILE, payload)
+        _retire_or_wait(payload, deadline, poll)
         return
     if time.time() > deadline:
         raise StateLockTimeout(f"Could not acquire state lock: {LOCK_FILE}")
     time.sleep(poll)
 
 
-def _acquire_state_lock(owner_pid: str, deadline: float, poll: float) -> int:
+def _retire_or_wait(payload: bytes | None, deadline: float, poll: float) -> None:
+    if _owner_alive(payload):
+        _wait_for_slow_owner(deadline, poll)
+        return
+    if payload is not None:
+        retire_stale_lock(LOCK_FILE, payload)
+
+
+def _acquire_state_lock(payload: bytes, deadline: float, poll: float) -> int:
     observed_contention = False
     while True:
         try:
-            fd = _claim_lock(owner_pid)
+            fd = _claim_lock(payload)
         except PermissionError as exc:
             if not _contention(exc, observed_contention):
                 raise
@@ -336,7 +430,52 @@ def _acquire_state_lock(owner_pid: str, deadline: float, poll: float) -> int:
         _await_lock_turn(deadline, poll)
 
 
-def _release_state_lock(fd: int, owner_pid: str) -> None:
+# Windows will not delete a file somebody else has open. Microsoft: "The
+# DeleteFile function fails if an application attempts to delete a file that has
+# other handles open for normal I/O ... (FILE_SHARE_DELETE must have been
+# specified when other handles were opened)", and Python's open() does not ask
+# for it. Every waiter polls this lock through `_lock_bytes`, so a holder's
+# unlink lands inside a reader's handle often enough to matter — and a release
+# that gives up leaves the lock naming an owner that is alive, which no
+# staleness rule ever retires. These are the three errors `lsp_process` already
+# retries for its lease. Research:
+# docs/research/2026-09-18-a-lock-is-released-even-while-somebody-is-reading-it.md
+_WINDOWS_SHARING_ERRORS = frozenset({5, 32, 33})
+
+# A reader holds the lock file for microseconds, so this is a margin of about a
+# million against the window it races, and still well inside the lock timeout.
+LOCK_RELEASE_SECONDS = 2.0
+
+
+def _reader_blocked_unlink(exc: OSError) -> bool:
+    """Whether a reader is merely holding the file open for an instant."""
+    return getattr(exc, "winerror", None) in _WINDOWS_SHARING_ERRORS
+
+
+def _try_unlink_lock_file() -> bool | None:
+    """True when the lock is gone, False on a real error, None to try again."""
+    try:
+        os.unlink(LOCK_FILE)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        return None if _reader_blocked_unlink(exc) else False
+    return True
+
+
+def _unlink_lock_file() -> bool:
+    """Remove our lock, waiting out the readers Windows lets block a delete."""
+    deadline = time.monotonic() + LOCK_RELEASE_SECONDS
+    while True:
+        outcome = _try_unlink_lock_file()
+        if outcome is not None:
+            return outcome
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.005)
+
+
+def _release_state_lock(fd: int, payload: bytes) -> None:
     """Close the descriptor and unlink only while the lock is still ours.
 
     A stale-lock thief may have deleted our lock and another process may hold a
@@ -346,11 +485,8 @@ def _release_state_lock(fd: int, owner_pid: str) -> None:
         os.close(fd)
     except OSError:
         pass
-    try:
-        if LOCK_FILE.read_text(encoding="utf-8").strip() == owner_pid:
-            LOCK_FILE.unlink()
-    except OSError:
-        pass
+    if _lock_bytes() == payload:
+        _unlink_lock_file()
 
 
 @contextmanager
@@ -362,12 +498,12 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
     the owner is alive but slow, we wait instead of killing its write.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    owner_pid = str(os.getpid())
-    fd = _acquire_state_lock(owner_pid, time.time() + timeout, poll)
+    payload = _lock_payload()
+    fd = _acquire_state_lock(payload, time.time() + timeout, poll)
     try:
         yield
     finally:
-        _release_state_lock(fd, owner_pid)
+        _release_state_lock(fd, payload)
 
 
 def update_state(
@@ -398,10 +534,10 @@ def _previous_state_file() -> Path:
 
 def _parsed_state(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raw = path.read_bytes()
+    except OSError:
         return None
-    return value if isinstance(value, dict) else None
+    return _decoded_state(raw)
 
 
 def _state_for_update() -> tuple[dict[str, Any], bool]:
@@ -433,6 +569,22 @@ def _keep_previous(readable: bool) -> None:
         os.replace(staged, _previous_state_file())
     except OSError:
         staged.unlink(missing_ok=True)
+
+
+# `knowledge/daily/` also holds a tracked `README.md`. It is not a daily log:
+# it has no date and is never compiled. Every reader of that directory asks
+# here, so the rule has one home and no reader can forget it.
+# Research: docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md
+DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
+
+
+def daily_logs(daily_dir: Path) -> list[Path]:
+    """The `YYYY-MM-DD.md` files of a daily directory, oldest first; none if it is absent."""
+    if not daily_dir.is_dir():
+        return []
+    return sorted(
+        path for path in daily_dir.glob("*.md") if DAILY_LOG_NAME.fullmatch(path.name) is not None
+    )
 
 
 def file_hash(path: Path) -> str:

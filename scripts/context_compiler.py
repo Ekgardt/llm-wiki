@@ -452,13 +452,6 @@ def _build_l1_item(parent: _Parent) -> CompiledItem:
     )
 
 
-def _resolve_evidence_chunk(parent: _Parent, chunk_id: str) -> RetrievalChunk | None:
-    for chunk in parent.chunks:
-        if chunk.id == chunk_id:
-            return chunk
-    return None
-
-
 def _build_l2_item(
     parent: _Parent,
     *,

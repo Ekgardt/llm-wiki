@@ -33,14 +33,14 @@ Two findings dominate everything below.
 
 Required by rule 3 to be established rather than assumed. The evidence:
 
-* Binary present and running: `/home/user/.local/bin/codebase-memory-mcp`,
+* Binary present and running: `<home>/.local/bin/codebase-memory-mcp`,
   with a resident `--cbm-daemon-internal` process (`ps aux`).
 * Registered for Claude sessions in `~/.claude.json:1472`; `claude mcp list`
   reports `codebase-memory-mcp: ✔ Connected`.
 * `--help` documents `codebase-memory-mcp cli [--json] <tool> [args]`,
   "Run one tool locally, then exit" — the same tools the MCP server exposes.
 * Driven for real: `cli --json list_projects '{}'` returns the project
-  `home-user-llm-wiki` → `/home/user/llm-wiki`, branch `work`. stdout is clean
+  `<derived-project-key>` → `<vault>`, branch `work`. stdout is clean
   JSON; the allocator warnings and the raw-JSON deprecation notice go to
   stderr, so `capture_output=True` separates them.
 
@@ -49,7 +49,7 @@ was needed and none was done.
 
 ## What was measured against
 
-* Repository `/home/user/llm-wiki`, branch `work`, `HEAD 0a81af8`.
+* Repository `<vault>`, branch `work`, `HEAD 0a81af8`.
 * `sha256(scripts/mcp_server.py)` = `0b6ab201…`,
   `sha256(scripts/code_graph.py)` = `3486db5c…`,
   `sha256(scripts/graph_query.py)` = `3c95d0b0…`. Re-hashed after the run and

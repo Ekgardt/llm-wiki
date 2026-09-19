@@ -813,22 +813,6 @@ def _combined_scheduler_state(file_state: str, service_states: Sequence[str]) ->
     return "conflict"
 
 
-def _systemd_read(
-    *,
-    unit_directory: Path,
-    definitions: Mapping[str, bytes],
-    desired: bytes,
-    runner: CommandRunner,
-    systemctl: str,
-) -> bytes | None:
-    combined = _systemd_projection_state(unit_directory, definitions, runner, systemctl)
-    if combined == "absent":
-        return None
-    if combined == "installed":
-        return desired
-    return b"conflict"
-
-
 def _systemd_projection_state(
     unit_directory: Path,
     definitions: Mapping[str, bytes],
@@ -1259,29 +1243,6 @@ def _launchd_job_state(runner: CommandRunner, launchctl: str, domain: str, label
     return "absent"
 
 
-def _launchd_read(
-    *,
-    launch_agents_directory: Path,
-    definitions: Mapping[str, bytes],
-    desired: bytes,
-    runner: CommandRunner,
-    launchctl: str,
-    domain: str,
-) -> bytes | None:
-    combined = _launchd_projection_state(
-        launch_agents_directory,
-        definitions,
-        runner,
-        launchctl,
-        domain,
-    )
-    if combined == "absent":
-        return None
-    if combined == "installed":
-        return desired
-    return b"conflict"
-
-
 def _launchd_projection_state(
     launch_agents_directory: Path,
     definitions: Mapping[str, bytes],
@@ -1675,25 +1636,30 @@ def windows_environment_resources(
     return [_environment_resource(name, value, read_value, write_value) for name, value in values]
 
 
+# The specification names everything the contract promises about the tasks. Version 1
+# did not name the time limits, so a machine registered with one-hour tasks compared
+# equal to the corrected contract and was never rewritten. Version 1 stays readable:
+# installed manifests record it, and uninstall and rollback have to take it back.
+# See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
+WINDOWS_TASK_SPEC_VERSION = 2
+# Above each pass's own worst case, which now counts the checkout update and
+# the whole provider order one model call may walk (about 3.2 h and 4.9 h).
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+WINDOWS_TASK_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+
+
 def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> bytes:
     value = {
         "root": str(Path(root).resolve()),
+        "spec": WINDOWS_TASK_SPEC_VERSION,
         "state_root": str(Path(state_root).resolve()),
-        "tasks": [
-            {"at": "03:00", "kind": "nightly", "name": "LLMWiki-Nightly"},
-            {
-                "at": "04:00",
-                "day": "Sunday",
-                "kind": "weekly",
-                "name": "LLMWiki-Weekly",
-            },
-        ],
+        "tasks": _expected_windows_tasks(),
         "uv_path": str(Path(uv_path).resolve()),
     }
     return canonical_json_bytes(value)
 
 
-def _expected_windows_tasks() -> list[dict[str, object]]:
+def _legacy_windows_tasks() -> list[dict[str, object]]:
     return [
         {"at": "03:00", "kind": "nightly", "name": "LLMWiki-Nightly"},
         {
@@ -1703,6 +1669,28 @@ def _expected_windows_tasks() -> list[dict[str, object]]:
             "name": "LLMWiki-Weekly",
         },
     ]
+
+
+def _expected_windows_tasks() -> list[dict[str, object]]:
+    return [
+        {**task, "limit_hours": WINDOWS_TASK_LIMIT_HOURS[str(task["kind"])]}
+        for task in _legacy_windows_tasks()
+    ]
+
+
+def _windows_spec_version(value: Mapping[str, object]) -> int:
+    """Which script contract a decoded specification was registered under."""
+    shapes = {
+        1: ({"root", "state_root", "tasks", "uv_path"}, _legacy_windows_tasks()),
+        2: ({"root", "spec", "state_root", "tasks", "uv_path"}, _expected_windows_tasks()),
+    }
+    version = value.get("spec", 1)
+    if type(version) is not int or version not in shapes:
+        raise InstallControlError("install_windows_task_spec_invalid")
+    keys, tasks = shapes[version]
+    if set(value) != keys or value.get("tasks") != tasks:
+        raise InstallControlError("install_windows_task_spec_invalid")
+    return int(version)
 
 
 def _require_windows_spec_path(value: object, expected: Path | None = None) -> Path:
@@ -1718,11 +1706,7 @@ def _decode_windows_task_spec(candidate: bytes, root: Path, state_root: Path) ->
     if len(candidate) > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_windows_task_spec_invalid")
     value = _strict_json_object(candidate)
-    if (
-        set(value) != {"root", "state_root", "tasks", "uv_path"}
-        or value.get("tasks") != _expected_windows_tasks()
-    ):
-        raise InstallControlError("install_windows_task_spec_invalid")
+    _windows_spec_version(value)
     _require_windows_spec_path(value.get("root"), root)
     _require_windows_spec_path(value.get("state_root"), state_root)
     _require_windows_spec_path(value.get("uv_path"))
@@ -1737,6 +1721,7 @@ def _windows_task_command(
     state_root: Path,
     uv_path: Path,
     mode: str | None,
+    spec_version: int = WINDOWS_TASK_SPEC_VERSION,
 ) -> tuple[str, ...]:
     command = (
         powershell,
@@ -1752,6 +1737,8 @@ def _windows_task_command(
         str(Path(state_root).resolve()),
         "-UvPath",
         str(Path(uv_path).resolve()),
+        "-SpecVersion",
+        str(spec_version),
     )
     if mode is None:
         return command
@@ -1772,6 +1759,7 @@ def _windows_task_command_from_spec(
         state_root=Path(str(spec["state_root"])),
         uv_path=Path(str(spec["uv_path"])),
         mode=mode,
+        spec_version=_windows_spec_version(spec),
     )
 
 
@@ -1789,26 +1777,6 @@ def _windows_task_state_value(output: bytes) -> str:
     }:
         raise InstallControlError("install_windows_task_state_invalid")
     return str(value["state"])
-
-
-def _read_windows_tasks(
-    *,
-    desired: bytes,
-    runner: CommandRunner,
-    command: tuple[str, ...],
-) -> bytes | None:
-    exit_code, output = runner((*command, "-StateJson"), None)
-    if exit_code != 0:
-        raise InstallControlError("install_windows_task_state_failed")
-    return _windows_task_snapshot(_windows_task_state_value(output), desired)
-
-
-def _windows_task_snapshot(state: str, desired: bytes) -> bytes | None:
-    if state == "absent":
-        return None
-    if state == "equivalent":
-        return desired
-    return b"conflict"
 
 
 def _write_windows_tasks(
@@ -1966,6 +1934,8 @@ def _validate_resource_sizes(resources: Sequence[ManagedResource]) -> None:
 
 
 def _write_preimage(install_root: Path, value: bytes) -> str:
+    """Binary: a preimage addressed by its own digest is stored byte for byte."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     digest = _sha256(value)
     relative = f"preimages/{digest}.bin"
     target = install_root / relative
@@ -1973,7 +1943,7 @@ def _write_preimage(install_root: Path, value: bytes) -> str:
         if target.read_bytes() != value:
             raise InstallControlError("install_preimage_conflict")
         return relative
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(target, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(value)
@@ -3463,11 +3433,14 @@ def _install_v2_under_lock(
     )
 
 
+def _transaction_settled(transaction: Mapping[str, object] | None) -> bool:
+    if transaction is None:
+        return True
+    return transaction.get("state") in {"committed", "reverted"}
+
+
 def _require_settled_transaction(transaction: Mapping[str, object] | None) -> None:
-    if transaction is not None and transaction.get("state") not in {
-        "committed",
-        "reverted",
-    }:
+    if not _transaction_settled(transaction):
         raise InstallControlError("install_transaction_blocks_new_work")
 
 
@@ -4525,6 +4498,48 @@ def unowned_install_paths(root: Path) -> list[dict[str, str]]:
     ]
 
 
+# Each agent keeps its own MCP registry, and the installers add `llm-wiki` to it outside
+# the ownership transaction: `~/.claude.json` is Claude Code's live state, rewritten while
+# it runs, so restoring a preimage would put a stale copy over newer state. They are
+# reported like the paths above, with the way to remove the entry, never rewritten here.
+# See docs/research/2026-09-17-an-uninstall-names-what-it-leaves.md.
+MAX_REGISTRATION_BYTES = 64 * 1024 * 1024
+
+
+def _agent_registrations(home: Path) -> list[tuple[str, Path, str, str]]:
+    from installer_config import GLOBAL_CONFIG_NAMES
+
+    opencode = _opencode_plugin_destination(home).parent.parent
+    return [
+        ("claude", home / ".claude.json", '"llm-wiki"', "claude mcp remove --scope user llm-wiki"),
+        (
+            "codex",
+            home / ".codex" / "config.toml",
+            "[mcp_servers.llm-wiki]",
+            "delete the [mcp_servers.llm-wiki] table",
+        ),
+        *(
+            ("opencode", opencode / name, '"llm-wiki"', 'delete "llm-wiki" under "mcp"')
+            for name in GLOBAL_CONFIG_NAMES
+        ),
+    ]
+
+
+def _file_mentions(path: Path, marker: str) -> bool:
+    if not path.is_file() or path.stat().st_size > MAX_REGISTRATION_BYTES:
+        return False
+    return marker in path.read_text(encoding="utf-8", errors="replace")
+
+
+def unowned_agent_registrations(home: Path) -> list[dict[str, str]]:
+    """Agent MCP entries the installers wrote and no uninstall takes back."""
+    return [
+        {"agent": agent, "path": str(path), "remove_with": remedy}
+        for agent, path, marker, remedy in _agent_registrations(Path(home))
+        if _file_mentions(path, marker)
+    ]
+
+
 def inspect_install_state(state_root: Path, root: Path | None = None) -> dict[str, object]:
     install_root = Path(state_root) / "run" / "install"
     manifest = "present" if (install_root / "manifest.json").is_file() else "absent"
@@ -4872,16 +4887,12 @@ def _selected_backend(requested: str) -> str:
     return select_scheduler_backend(sys.platform, requested, available)
 
 
-def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
-    root = args.root.resolve()
-    state_root = args.state_root.resolve()
-    uv_path = args.uv_path.resolve()
-    backend = _selected_backend(args.scheduler)
-    resources = build_install_resources(
+def _requested_resources(args: argparse.Namespace, backend: str) -> list[ManagedResource]:
+    return build_install_resources(
         backend=backend,
-        root=root,
-        state_root=state_root,
-        uv_path=uv_path,
+        root=args.root.resolve(),
+        state_root=args.state_root.resolve(),
+        uv_path=args.uv_path.resolve(),
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
@@ -4890,8 +4901,65 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         codex_hooks=args.codex_hooks,
         ownership_metadata=None,
     )
+
+
+def _record_is_requested(
+    requested: Mapping[str, ManagedResource], record: Mapping[str, object]
+) -> bool:
+    resource_id = record.get("id")
+    if not isinstance(resource_id, str) or resource_id not in requested:
+        return False
+    return _resource_identity_matches(record, requested[resource_id])
+
+
+def _settled_manifest(state_root: Path) -> dict[str, object] | None:
+    install_root = state_root / "run" / "install"
+    transaction = _optional_install_record(
+        install_root / "transaction.json", "install-transaction/"
+    )
+    if not _transaction_settled(transaction):
+        return None
+    return _optional_install_record(install_root / "manifest.json", "install-manifest/")
+
+
+def _outgrown_manifest(
+    state_root: Path, resources: Sequence[ManagedResource]
+) -> dict[str, object] | None:
+    """The active manifest, when it names something the new request no longer carries.
+
+    An update can only grow: `_active_resource` fails closed on a recorded resource the
+    request cannot supply. A request that dropped one, swapped the scheduler, or moved
+    the profile to another file is a replacement, not an update. An unsettled
+    transaction is left to the ordinary resume path.
+    See docs/research/2026-09-17-a-rerun-may-ask-for-fewer-things.md.
+    """
+    manifest = _settled_manifest(state_root)
+    if manifest is None:
+        return None
+    requested = _resources_by_id(resources)
+    records = _transaction_resources(manifest)
+    if all(_record_is_requested(requested, record) for record in records):
+        return None
+    return manifest
+
+
+def _replace_outgrown_install(args: argparse.Namespace, backend: str) -> bool:
+    state_root = args.state_root.resolve()
+    manifest = _outgrown_manifest(state_root, _requested_resources(args, backend))
+    if manifest is None:
+        return False
+    uninstall_resources(state_root=state_root, resources=_resources_from_record(args, manifest))
+    return True
+
+
+def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+    root = args.root.resolve()
+    backend = _selected_backend(args.scheduler)
+    replaced = _replace_outgrown_install(args, backend)
+    # Built after the old set is taken back: a resource records what it found on disk.
+    resources = _requested_resources(args, backend)
     manifest = install_resources(
-        state_root=state_root,
+        state_root=args.state_root.resolve(),
         vault_root=root,
         release=build_release_identity(root),
         scheduler_backend=backend,
@@ -4899,6 +4967,7 @@ def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
         control_version=2,
     )
     return {
+        "replaced": replaced,
         "scheduler_backend": backend,
         "status": "committed",
         "transaction_id": manifest["transaction_id"],
@@ -4941,10 +5010,25 @@ def _record_resource_ids(record: Mapping[str, object]) -> set[str]:
     return {str(resource["id"]) for resource in _transaction_resources(record)}
 
 
+def _recorded_profile(record: Mapping[str, object], fallback: Path | None) -> Path | None:
+    """The profile the record wrote to; the login shell may have changed since."""
+    for resource in _transaction_resources(record):
+        locator = resource.get("locator")
+        if resource.get("id") == "unix-profile" and isinstance(locator, str):
+            return Path(locator)
+    return fallback
+
+
 def _resources_from_existing_args(args: argparse.Namespace, command: str) -> list[ManagedResource]:
+    record = _existing_record(args.state_root.resolve(), command)
+    return _resources_from_record(args, record)
+
+
+def _resources_from_record(
+    args: argparse.Namespace, record: Mapping[str, object]
+) -> list[ManagedResource]:
     root = args.root.resolve()
     state_root = args.state_root.resolve()
-    record = _existing_record(state_root, command)
     _require_record_roots(record, root, state_root)
     identifiers = _record_resource_ids(record)
     return build_install_resources(
@@ -4953,7 +5037,7 @@ def _resources_from_existing_args(args: argparse.Namespace, command: str) -> lis
         state_root=state_root,
         uv_path=args.uv_path.resolve(),
         home=args.home.resolve(),
-        profile=args.profile,
+        profile=_recorded_profile(record, args.profile),
         powershell_path=args.powershell_path,
         retired_cursor_hooks="cursor-user-hooks" in identifiers,
         retired_antigravity_hooks="antigravity-user-hooks" in identifiers,
@@ -4977,11 +5061,19 @@ def _uninstall_from_args(args: argparse.Namespace) -> dict[str, object]:
         state_root=args.state_root.resolve(),
         resources=_resources_from_existing_args(args, "uninstall"),
     )
-    return {"state": result["state"], "status": "uninstalled"}
+    return {
+        "left_behind": unowned_agent_registrations(args.home.resolve()),
+        "state": result["state"],
+        "status": "uninstalled",
+    }
 
 
 def _status_from_args(args: argparse.Namespace) -> dict[str, object]:
-    return inspect_install_state(args.state_root, getattr(args, "root", None))
+    state = inspect_install_state(args.state_root, getattr(args, "root", None))
+    home = getattr(args, "home", None)
+    if home is None:
+        return state
+    return {**state, "agent_registrations": unowned_agent_registrations(home.resolve())}
 
 
 def _add_existing_arguments(parser: argparse.ArgumentParser) -> None:
@@ -4998,6 +5090,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     status = subparsers.add_parser("status")
     status.add_argument("--state-root", type=Path, required=True)
+    status.add_argument("--home", type=Path)
     install = subparsers.add_parser("install")
     install.add_argument("--root", type=Path, required=True)
     install.add_argument("--state-root", type=Path, required=True)

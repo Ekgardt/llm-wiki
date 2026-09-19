@@ -1,36 +1,66 @@
 # Code Navigation
 
-One-sentence summary: read-only Python navigation through pinned Pyright 1.1.411,
-owned by the MCP process, freshness-proven, and never claiming market superiority.
+One-sentence summary: read-only navigation through four pinned managed language
+servers, owned by the MCP process, freshness-proven, and never claiming market
+superiority.
 
 ## Trust and sandbox
 
 Code navigation runs only against **trusted local repositories**. This is
-**not an OS sandbox**. Pyright still runs with the current user's OS permissions
-and may read configured interpreters, external stubs, and library code; those
-inputs become fingerprinted provenance. Do not claim Pyright cannot write or read
-other user-accessible paths.
+**not an OS sandbox**. A managed server still runs with the current user's OS
+permissions and may read configured interpreters, external stubs, toolchains and
+library code; those inputs become fingerprinted provenance. Do not claim a managed
+server cannot write or read other user-accessible paths.
 
 ## Installation
 
-Pyright is installed by one explicit operator command into the approved managed
-root `cache/code-tools/pyright/1.1.411/`. It **never downloads during a query**:
+Each server is installed by one explicit operator command into its approved managed
+root, and a server **never downloads during a query**:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
+| profile | version | managed root |
+|---|---|---|
+| pyright | 1.1.411 | `cache/code-tools/pyright/1.1.411/` |
+| typescript | 6.0.0 (tsserver 5.9.3) | `cache/code-tools/typescript-language-server/6.0.0/` |
+| gopls | v0.23.0, built from pinned Go 1.27.1 | `cache/code-tools/gopls/v0.23.0/` |
+| rust-analyzer | 1.98.1, with its pinned Rust toolchain | `cache/code-tools/rust-analyzer/1.98.1/` |
+
 The installer verifies the pinned SHA-256 and npm integrity before publishing.
-No query, MCP call, doctor check, or profile discovery path downloads or updates
-Pyright. The qualified runtime uses Node 22; CI pins Node 22.23.1.
+No query, MCP call, doctor check, or profile discovery path downloads or updates a
+server. The qualified runtime uses Node 22; CI pins Node 22.23.1.
+
+What an install needs:
+
+- **Platforms.** Artifacts are pinned for linux x86_64 and arm64, macOS x86_64 and
+  arm64, and Windows x86_64. Any other platform is refused by name before a byte is
+  downloaded, instead of silently taking the linux/x86_64 pin.
+- **Offline.** Pyright and typescript install fully from local artifacts
+  (`--artifact`, `--runtime-artifact`); rust-analyzer too, with its four
+  `--component-artifact` toolchain parts. gopls is built from source at install time
+  and still reaches the Go module proxy, so it is **not** an offline install.
+- **Disk.** gopls peaks near 863 MB during its build and leaves about 324 MB after
+  pruning its caches; the rust-analyzer toolchain is bounded at 3 GiB decompressed.
+- **Receipts.** The Pyright install receipt is `pyright-install/v2` and digests the
+  bundles the launch shim loads, not only the 229-byte shim itself. An install
+  published before that schema is reported as predating it and degrades to structural
+  navigation until `scripts/install_pyright.py` is run again.
 
 ## Process ownership boundaries
 
-- **Windows Job Object** owns the assigned Pyright server tree.
-- **POSIX process group** covers the trusted, pinned Pyright server and
+- **Windows Job Object** owns the assigned server tree.
+- **POSIX process group** covers the trusted, pinned assigned server and its
   descendants only while they remain in that group.
+- A native server is launched from a sealed, digest-verified copy of itself inside
+  its owner's `run/lsp/<owner-nonce>/` scratch.
 - A hostile `setsid()` escape is **unsupported**. This path is qualified only for
-  pinned Pyright in trusted repositories and does not add an ancestry scan.
+  the pinned managed servers in trusted repositories and does not add an ancestry
+  scan.
 
 ## get_architecture modes
 
@@ -108,8 +138,12 @@ reindex. Research:
 
 - **`mode=coverage`, `path=<relative>`** — one generation's word about one
   file: `indexed` and `freshness` (`fresh`, `stale`, `missing_on_disk`,
-  `not_indexed`) come from the generation's own stored source row, the same
-  generation the node count comes from. Before this the manifest was read
+  `not_indexed`, `unreadable`) come from the generation's own stored source row, the same
+  generation the node count comes from. `path` must be a canonical
+  repository-relative path; the file on disk is hashed only through the
+  contained reader the precise modes use, and `unreadable` means that reader
+  refused it (outside the repository, a symlink, a device or FIFO, over
+  16 MiB). Before this the manifest was read
   relative to the repository, which only the vault has, so every foreign
   repository answered `indexed=false` beside a real node count. The `parse`
   block re-parses the stored bytes with the grammar the extractor used and
@@ -337,6 +371,29 @@ never removes `run/lsp`.
 The deterministic 100 KLOC qualification corpus and gates live under
 `benchmark/`. It executes 200 definition, 100 reference, 100 call, 50 mutation,
 20 recovery, and four ownership scenarios. Linux Python 3.10 additionally gates
-warm facade overhead at 20 ms p95, cold readiness at 60 seconds, and client RSS below
+warm facade overhead, cold readiness at 60 seconds, and client RSS below
 100 MiB. Correctness-only real-Pyright checks run on Windows, Linux, and macOS.
 **Market superiority remains unclaimed.**
+
+### The warm-overhead bound
+
+`warm_overhead_p95_ms` is the p95 of twenty paired differences: the same query
+answered through the facade and through Pyright directly, alternating
+`direct, facade, facade, direct`, each side averaged. It measures the cost of
+our own layer — the workspace-revision walk that lets a result claim it matches
+the tree it cites — and nothing else.
+
+That cost is judged against the run's own control measurement:
+
+    warm_overhead_p95_ms <= max(30 ms, 0.90 * direct_pyright_p95_ms)
+
+The facade may add 30 ms, or, once the machine is slow enough that Pyright's own
+p95 passes 33.3 ms, up to 90% of what Pyright itself took on the same queries in
+the same run — whichever is more generous. The 30 ms floor is the operator's
+2026-08-19 number and does not move, so nothing that passed before newly fails.
+
+A shared CI runner having a slow afternoon moves both sides of that comparison
+and cannot fail the gate on its own; our layer taking a larger share of the same
+work still fails it. `direct_pyright_p95_ms` must be a finite positive number,
+or the evidence is incomplete and the gate fails closed. See
+`docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md`.

@@ -92,19 +92,41 @@ def _manifest_bytes(launch: PackageLaunch) -> bytes:
 
 
 def _created_directories(root: Path, entry_relative: Path) -> tuple[Path, ...]:
-    """Make the tree writable-by-owner-only, returning it deepest first."""
+    """Make the tree writable-by-owner-only, returning it deepest first.
+
+    A failure part way through leaves directories nobody holds a handle on:
+    the caller's `try` only begins once there is a tree to hand it, so what is
+    made here is taken back here. Research:
+    `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`.
+    """
     made: list[Path] = [root]
     os.mkdir(root, PRIVATE_DIRECTORY_MODE)
+    try:
+        _make_nested(made, root, entry_relative)
+    except BaseException:
+        _remove_made(made)
+        raise
+    return tuple(reversed(made))
+
+
+def _make_nested(made: list[Path], root: Path, entry_relative: Path) -> None:
     current = root
     for part in entry_relative.parts[:-1]:
         current = current / part
         os.mkdir(current, PRIVATE_DIRECTORY_MODE)
         made.append(current)
-    return tuple(reversed(made))
+
+
+def _remove_made(made: list[Path]) -> None:
+    """Every removal is attempted, deepest first; a failure is left behind."""
+    for directory in reversed(made):
+        _removed_directory(directory)
 
 
 def _write_sealed_file(path: Path, payload: bytes) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, SEALED_FILE_MODE)
+    """Binary: a sealed file holds the payload's bytes, not Windows' idea of them."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, SEALED_FILE_MODE)
     try:
         os.write(descriptor, payload)
     finally:

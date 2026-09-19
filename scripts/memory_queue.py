@@ -1359,6 +1359,17 @@ def _distinct_source_identities(payload: object) -> dict[str, set[str]]:
     return found
 
 
+def _payload_identity_fields(payload_json: str) -> dict[str, set[str]] | None:
+    """The identity strings a stored payload names, or None when it cannot be read."""
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+    return {
+        key: set(values) for key, values in _source_identity_strings(payload).items()
+    }
+
+
 def _require_single_source_identity(found: dict[str, set[str]]) -> tuple[str, str]:
     """The one path and digest this payload names, or a refusal."""
     if len(found["paths"]) != 1 or len(found["digests"]) != 1:
@@ -1524,20 +1535,33 @@ def _require_queue_v2_tasks_schema(
         )
 
 
+def _still_held(source: sqlite3.Connection, table: str, where: str) -> bool:
+    """Whether any such row is inside its lease; a null expiry cannot say, so it is.
+
+    A fence row outlives the process that took it — the live v2 queue sweeps
+    those on every open — and refusing adoption for a leftover locks a vault out
+    for good. See `docs/research/
+    2026-09-18-an-expired-fence-is-not-an-obstacle-to-adoption.md`.
+    """
+    now = _timestamp(_utc_now())
+    rows = source.execute(
+        f"SELECT expires_at FROM {table} WHERE {where}"  # noqa: S608 - fixed names
+    ).fetchall()
+    return any(row["expires_at"] is None or str(row["expires_at"]) > now for row in rows)
+
+
 def _require_unambiguous_v2_owners(
     source: sqlite3.Connection, tables: set[str]
 ) -> None:
-    """v2 fences and owners predate the identity v3 needs to fence with."""
-    if "source_fences" in tables and source.execute(
-        "SELECT 1 FROM source_fences LIMIT 1"
-    ).fetchone() is not None:
+    """A v2 fence still held predates the identity v3 needs to fence with."""
+    if "source_fences" in tables and _still_held(source, "source_fences", "1=1"):
         raise _migration_error(
             "queue_v2_source_fence_ambiguous",
             "queue v2 source fences lack process-start identity",
         )
-    if "queue_ownership" in tables and source.execute(
-        "SELECT 1 FROM queue_ownership WHERE token IS NOT NULL LIMIT 1"
-    ).fetchone() is not None:
+    if "queue_ownership" in tables and _still_held(
+        source, "queue_ownership", "token IS NOT NULL"
+    ):
         raise _migration_error(
             "queue_v2_owner_ambiguous",
             "queue v2 ownership lacks canonical process identity",
@@ -1572,25 +1596,51 @@ def _already_ordered(task_id: str, visited: set[str], visiting: set[str]) -> boo
 
 
 def _parents_before_children(rows_by_id: dict[str, sqlite3.Row]) -> list:
-    """Redrive parents must be inserted before the tasks that name them."""
+    """Redrive parents must be inserted before the tasks that name them.
+
+    The walk carries its own stack: a redrive chain is as long as whatever the
+    pre-adoption queue accumulated, and Python's recursion limit is not a bound
+    this migration chose. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
     ordered_rows: list[sqlite3.Row] = []
     visited: set[str] = set()
     visiting: set[str] = set()
-
-    def visit_task(task_id: str) -> None:
-        if _already_ordered(task_id, visited, visiting):
-            return
-        visiting.add(task_id)
-        parent = rows_by_id[task_id]["redrive_of"]
-        if parent is not None:
-            visit_task(str(parent))
-        visiting.remove(task_id)
-        visited.add(task_id)
-        ordered_rows.append(rows_by_id[task_id])
-
     for task_id in sorted(rows_by_id):
-        visit_task(task_id)
+        _place_with_parents(task_id, rows_by_id, ordered_rows, visited, visiting)
     return ordered_rows
+
+
+def _place_with_parents(
+    task_id: str,
+    rows_by_id: dict[str, sqlite3.Row],
+    ordered_rows: list,
+    visited: set[str],
+    visiting: set[str],
+) -> None:
+    """Place this task after every parent it names, deepest parent first."""
+    chain = _redrive_chain(task_id, rows_by_id, visited, visiting)
+    for placed in reversed(chain):
+        visiting.discard(placed)
+        visited.add(placed)
+        ordered_rows.append(rows_by_id[placed])
+
+
+def _redrive_chain(
+    task_id: str,
+    rows_by_id: dict[str, sqlite3.Row],
+    visited: set[str],
+    visiting: set[str],
+) -> list[str]:
+    """This task and every unplaced parent above it, child first."""
+    chain: list[str] = []
+    current: str | None = task_id
+    while current is not None and not _already_ordered(current, visited, visiting):
+        visiting.add(current)
+        chain.append(current)
+        parent = rows_by_id[current]["redrive_of"]
+        current = None if parent is None else str(parent)
+    return chain
 
 
 def _ordered_queue_v2_tasks(source: sqlite3.Connection) -> tuple[list, dict[str, int]]:
@@ -2172,6 +2222,22 @@ def _queue_v3_report(database: sqlite3.Connection) -> dict[str, object]:
         "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
         "user_version": database.execute("PRAGMA user_version").fetchone()[0],
     }
+
+
+def require_queue_v3_openable(path: Path, *, state_root: Path) -> None:
+    """What every open of the adopted queue checks: place, contract, schema.
+
+    The whole-file check (`validate_queue_v3_database`) reads every retained row,
+    so it belongs where a file is certified — adoption, backup, a candidate —
+    and not on each hook's open. A bad payload is a fact about one task; the
+    transition that touches that task demotes it, which a veto on open prevents.
+    """
+    _require_inside_state_root(Path(path), Path(state_root))
+    with closing(_open_queue_v3_readonly(Path(path), Path(state_root))) as database:
+        if not _queue_v3_schema_complete(database):
+            raise _migration_error(
+                "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
+            )
 
 
 def validate_queue_v3_database(
@@ -2808,7 +2874,16 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return _as_utc(datetime.fromisoformat(value)) if value is not None else None
 
 
-def _is_secret_key(key: str) -> bool:
+def _is_secret_key(key: object) -> bool:
+    """Whether this payload key names a secret; a non-string key names none.
+
+    JSON turns the other basic key types into "1", "true" and "null", so none of
+    them can spell a secret, and refusing to walk such a payload would have been
+    an `AttributeError` out of `enqueue`. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(key, str):
+        return False
     normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
     return normalized in _SECRET_KEYS or normalized.endswith(
         ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
@@ -3309,9 +3384,15 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         raise PermissionError(f"could not apply owner-only permissions to {path}")
 
 
-def _windows_acl_lines(path: Path) -> list[str] | None:
-    """The access control entries icacls reports, or None when it refuses."""
-    from markdown_transaction import _acl_output_text, _run_acl_command
+def _windows_acl_lines(path: Path, identity: str) -> list[str] | None:
+    """The access control entries icacls reports, or None when it refuses.
+
+    Read under the code page in which `identity` is named: the wrong one drops
+    the letters of a name that is not ASCII, and an owner-only file then reads
+    as somebody else's. Research:
+    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
+    """
+    from markdown_transaction import _acl_lines_naming, _run_acl_command
 
     try:
         verified = _run_acl_command(["icacls", str(path)])
@@ -3319,11 +3400,7 @@ def _windows_acl_lines(path: Path) -> list[str] | None:
         return None
     if verified.returncode != 0:
         return None
-    return [
-        line.strip()
-        for line in _acl_output_text(verified.stdout).splitlines()
-        if ":(" in line
-    ]
+    return _acl_lines_naming(verified.stdout, identity)
 
 
 def _acl_owner_lines(acl_lines: list[str], folded: str) -> list[str]:
@@ -3342,10 +3419,11 @@ def _acl_is_owner_only(acl_lines: list[str], identity: str) -> bool:
 def _is_owner_only_windows(path: Path) -> bool:
     from markdown_transaction import _windows_acl_identity
 
-    acl_lines = _windows_acl_lines(path)
+    identity = _windows_acl_identity()
+    acl_lines = _windows_acl_lines(path, identity)
     if acl_lines is None:
         return False
-    return _acl_is_owner_only(acl_lines, _windows_acl_identity())
+    return _acl_is_owner_only(acl_lines, identity)
 
 
 def _is_owner_only_posix(path: Path) -> bool:
@@ -4416,6 +4494,16 @@ def _retry_after_from_text(value: str, now: datetime) -> float | None:
     return _bounded_retry_until(parsed, now)
 
 
+def _retry_after_seconds(
+    value: float | datetime | str | None, now: datetime
+) -> float | None:
+    """The wait a failure states, in seconds; None when it states none."""
+    for kind, read in _RETRY_AFTER_READERS:
+        if isinstance(value, kind):
+            return read(value, now)
+    return None
+
+
 def _validated_listed_states(states: tuple[str, ...] | None) -> tuple[str, ...]:
     """The states to list; every one of them has to be a real queue state."""
     listed = states or _STATES
@@ -4462,6 +4550,40 @@ def _require_adopted_retry_policy(
     )
     if offered != settled:
         _refuse_legacy_only_api("fail(retry_policy_override)")
+
+
+_ORDINARY_PURGEABLE_STATES = frozenset({"succeeded", "cancelled", "dead"})
+
+
+def _ordinary_purge_selection(include_dead: bool) -> str:
+    """Which finished rows an ordinary purge takes; one query for both readers.
+
+    Attempts-exhausted work is retained by default and leaves only when an
+    operator asks for it by name (`--include-dead`). A row demoted to
+    `dead / payload_hash_mismatch` is never taken here whatever the caller asks:
+    its payload no longer hashes to its record, so it cannot be exported, and
+    `quarantine-corrupt` is the route the product has for it. See
+    `docs/research/2026-09-17-the-adopted-queue-settles-its-own-attempts-and-can-let-the-dead-go.md`.
+    """
+    if not include_dead:
+        return "SELECT * FROM tasks WHERE state IN ('succeeded','cancelled') AND updated_at<?"
+    return (
+        "SELECT * FROM tasks WHERE (state IN ('succeeded','cancelled') "
+        "OR (state='dead' AND error_code IS NOT 'payload_hash_mismatch')) "
+        "AND updated_at<?"
+    )
+
+
+def _require_adopted_attempt_limit(max_attempts: int) -> None:
+    """An attempt limit belongs to the queue, so a caller's own number is refused.
+
+    `claim` used to take the caller's number while `fail` refused it and the
+    terminal test settled by the contract's: one option with two answers, and a
+    worker that could claim a task it could not then fail. See
+    `docs/research/2026-09-17-the-adopted-queue-settles-its-own-attempts-and-can-let-the-dead-go.md`.
+    """
+    if max_attempts != DEFAULTS.queue_max_attempts:
+        _refuse_legacy_only_api("claim(max_attempts_override)")
 
 
 def _attempt_histories(
@@ -4538,7 +4660,7 @@ def _apply_failure_state(
 ) -> None:
     """Move the task out of its lease, under the lease's own fence."""
     state, attempts = _failure_state(row, failure, attempt_limit)
-    available_at = _retry_available_at(state, attempts, now)
+    available_at = _retry_available_at(state, attempts, now, failure.retry_after)
     changed = database.execute(
         """UPDATE tasks SET state=?,attempts=?,error_code=?,
                blocked_capability=?,updated_at=?,available_at=?,
@@ -4563,15 +4685,25 @@ def _apply_failure_state(
 _RETRY_RANDOM = random.SystemRandom()
 
 
-def _retry_available_at(state: str, attempts: int, now: datetime) -> datetime:
+def _retry_available_at(
+    state: str,
+    attempts: int,
+    now: datetime,
+    retry_after: float | datetime | str | None = None,
+) -> datetime:
     """A task going back to ready waits a full-jitter backoff, as the legacy queue's do.
 
-    See `docs/research/2026-09-14-the-small-integrity-gaps.md`.
+    A wait the failure states — a provider's Retry-After — is a floor under the
+    backoff, so the task comes back at the later of the two. See
+    `docs/research/2026-09-14-the-small-integrity-gaps.md` and
+    `docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md`.
     """
     if state != "ready":
         return now
     ceiling = min(DEFAULTS.retry_cap_seconds, DEFAULTS.retry_base_seconds * (2 ** max(0, attempts - 1)))
-    return now + timedelta(seconds=_RETRY_RANDOM.uniform(0, ceiling))
+    stated = _retry_after_seconds(retry_after, now)
+    delay = max(_RETRY_RANDOM.uniform(0, ceiling), stated or 0.0)
+    return now + timedelta(seconds=delay)
 
 
 def _failure_is_terminal(
@@ -4593,6 +4725,7 @@ def _check_claim_arguments(
     _validate_retry_policy(
         max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
     )
+    _require_adopted_attempt_limit(max_attempts)
 
 
 def _retire_exhausted_history(
@@ -5067,12 +5200,32 @@ def _insert_adopted_source_fence(
 
 
 def _task_payload_text(row: sqlite3.Row) -> str:
-    """The task payload as text for substring source-reference checks.
+    """The task payload as text for the source-reference check.
 
-    Undecodable bytes are replaced, never dropped, so a corrupt blob cannot
-    hide the ASCII daily id or digest it still carries.
+    Undecodable bytes are replaced, never dropped: the replacement makes the
+    payload unreadable as JSON, and an unreadable payload counts as referencing
+    every fenced source, which is the conservative answer at both call sites.
     """
     return bytes(row["payload_blob"]).decode("utf-8", errors="replace")
+
+
+def _record_cancelled_attempt(
+    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+) -> None:
+    """The attempt_history row for a lease that an operator cancelled."""
+    database.execute(
+        """INSERT INTO attempt_history(
+               task_id,attempt,started_at,finished_at,outcome,error_code
+           ) VALUES (?,?,?,?,?,?)""",
+        (
+            row["id"],
+            row["attempts"],
+            row["attempt_started_at"] or _timestamp(now),
+            _timestamp(now),
+            "cancelled",
+            "cancelled",
+        ),
+    )
 
 
 def _lease_row_holds(
@@ -5096,9 +5249,22 @@ def _require_leased_row(
     return row
 
 
+# What the v3 `source_failures.error_code` CHECK stores: bytes, not characters.
+MAX_SOURCE_FAILURE_CODE_BYTES = 64
+
+
+def _within_stored_code_bytes(error_code: str) -> bool:
+    return 1 <= len(error_code.encode("utf-8")) <= MAX_SOURCE_FAILURE_CODE_BYTES
+
+
 def _valid_source_failure_fields(error_code: object, producer: object) -> bool:
-    """Whether a source failure's own fields are inside contract."""
-    if not isinstance(error_code, str) or not 1 <= len(error_code) <= 200:
+    """Whether a source failure's own fields are inside contract.
+
+    The bound is the one the schema enforces — 1 to 64 bytes of UTF-8 — and not
+    200 characters, which let a code through validation and broke the insert. See
+    `docs/research/2026-09-18-a-refusal-is-cheaper-than-a-crash.md`.
+    """
+    if not isinstance(error_code, str) or not _within_stored_code_bytes(error_code):
         return False
     if any(char in error_code for char in "\r\n"):
         return False
@@ -5123,6 +5289,24 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
     _require_redrivable(row)
     _require_lineage_budget(database, row)
     return row
+
+
+def _unblock_in(database: sqlite3.Connection, task_id: str, now: datetime) -> None:
+    """Put one blocked task back to ready: the operator says its capability is back.
+
+    A task blocked on `process_cleanup` had no way back but `cancel`, which loses
+    the work. See `docs/research/2026-09-17-a-failed-start-is-not-a-failed-cleanup.md`.
+    """
+    row = database.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(task_id)
+    if row["state"] != "blocked":
+        raise QueueOperationError("unblock_requires_blocked")
+    database.execute(
+        """UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL,
+               updated_at=?,available_at=? WHERE id=? AND state='blocked'""",
+        (_timestamp(now), _timestamp(now), task_id),
+    )
 
 
 def _require_redrivable(row: sqlite3.Row) -> None:
@@ -5536,51 +5720,6 @@ class MemoryQueue:
             created_at=_parse_timestamp(row["created_at"]),  # type: ignore[arg-type]
             last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
             prior_attempts=int(row["attempts"]),
-        )
-
-    def _claim_task(self, task_id: str, owner: str) -> QueueLease | None:
-        """Claim one known task for the legacy mark_attempt facade."""
-        now = _as_utc(self._clock())
-        with self._connect() as connection, begin_immediate(connection):
-            self._delete_stale_source_fences(connection)
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE id=? AND state='ready'", (task_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            try:
-                self._assert_payload_not_fenced(connection, str(row["payload_json"]))
-            except QueueOperationError:
-                return None
-            token = f"{self._rng.getrandbits(256):064x}"
-            expires = now + timedelta(seconds=DEFAULTS.queue_lease_seconds)
-            connection.execute(
-                """UPDATE tasks SET state='leased', attempts=attempts+1, lease_owner=?,
-                       lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
-                       attempt_started_at=?, updated_at=? WHERE id=?""",
-                (
-                    owner,
-                    token,
-                    _timestamp(expires),
-                    _timestamp(now),
-                    _timestamp(now),
-                    _timestamp(now),
-                    task_id,
-                ),
-            )
-        return QueueLease(
-            task_id,
-            row["kind"],
-            row["handler_version"],
-            json.loads(row["payload_json"]),
-            row["input_hash"],
-            owner,
-            token,
-            expires,
-            int(row["attempts"]) + 1,
-            _parse_timestamp(row["created_at"]),
-            _parse_timestamp(row["last_attempt_at"]),
-            int(row["attempts"]),
         )
 
     def _settle_published_expiry(
@@ -6041,10 +6180,7 @@ class MemoryQueue:
     def _retry_after_seconds(
         value: float | datetime | str | None, now: datetime
     ) -> float | None:
-        for kind, read in _RETRY_AFTER_READERS:
-            if isinstance(value, kind):
-                return read(value, now)
-        return None
+        return _retry_after_seconds(value, now)
 
     @staticmethod
     def _record_attempt(
@@ -6164,6 +6300,12 @@ class MemoryQueue:
                 (_timestamp(now), task_id),
             )
             return True
+
+    def unblock(self, task_id: str) -> None:
+        """A blocked task goes back to ready; any other state is refused."""
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            _unblock_in(connection, task_id, now)
 
     def redrive(
         self,
@@ -6333,7 +6475,21 @@ class MemoryQueue:
     def _payload_references_source(
         payload_json: str, daily_id: str, source_digest: str
     ) -> bool:
-        return daily_id in payload_json or source_digest in payload_json
+        """A reference is an identity field of the payload, not a date in its text.
+
+        `daily_id` is a date, and every timestamp this product writes starts with
+        one, so the substring test this replaces fenced the whole queue while a
+        day was being archived. See `docs/research/
+        2026-09-18-a-source-is-referenced-by-a-field-not-by-a-date-in-the-text.md`.
+        """
+        found = _payload_identity_fields(payload_json)
+        if found is None:
+            return True
+        return (
+            daily_id in found["daily_ids"]
+            or source_digest in found["digests"]
+            or _daily_logical_path(daily_id) in found["paths"]
+        )
 
     def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
         now = _as_utc(self._clock())
@@ -7514,6 +7670,31 @@ class _QueueV3CandidateReader:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def pending_capture_intents(
+        self, limit: int, older_than: str | None = None
+    ) -> list[dict[str, object]]:
+        """Intents still half-published, oldest first; read-only like the query above.
+
+        A publisher killed between the pending write and `mark_capture_intent_ready`
+        leaves one of these, and the ready-state query cannot see it. `older_than` is
+        an ISO stamp: rows touched more recently belong to a publisher that may still
+        be running. See
+        `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT intent_id,relative_path,intent_sha256,byte_size,updated_at
+                   FROM capture_intents
+                   WHERE publication_state='pending'
+                     AND (? IS NULL OR updated_at < ?)
+                   ORDER BY updated_at ASC, intent_id ASC
+                   LIMIT ?""",
+                (older_than, older_than, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def publish_capture_intent(
         self,
         *,
@@ -8056,6 +8237,15 @@ class _QueueV3CandidateReader:
         finally:
             self.release_task_fence(fence)
 
+    def _intent_coordinator(self):
+        """The coordinator that pairs with this queue: adopted, or the candidate."""
+        from markdown_transaction import MarkdownCoordinator
+
+        path = self.coordinator_path
+        if path is None:
+            path = self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+        return MarkdownCoordinator._from_v3_candidate(path, state_root=self.state_root)
+
     @contextmanager
     def _corrupt_intent_fence(
         self, task_id: str, *, owner: OwnerLease
@@ -8068,12 +8258,7 @@ class _QueueV3CandidateReader:
         if binding.intent_id is None:
             yield binding, None
             return
-        from markdown_transaction import MarkdownCoordinator
-
-        coordinator = MarkdownCoordinator._from_v3_candidate(
-            self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3",
-            state_root=self.state_root,
-        )
+        coordinator = self._intent_coordinator()
         fence = coordinator.acquire_intent_fence(
             binding.intent_id, mode="operator", owner=owner
         )
@@ -9292,9 +9477,14 @@ class _QueueV3CandidateReader:
         candidates: list,
         operation: sqlite3.Row,
         operation_id: str,
-        started: float,
     ) -> list[dict[str, object]]:
-        """As many lineage links as fit one bounded page inside its time slice."""
+        """As many lineage links as one bounded page holds.
+
+        The bounds are inputs — at most 1000 candidate rows and at most 1 MiB of
+        page bytes — so a page rebuilt after a rollback is byte-identical and
+        `_write_durable_file` recognises its own work. See `docs/research/
+        2026-09-18-a-page-that-is-rewritten-must-come-out-the-same.md`.
+        """
         links: list[dict[str, object]] = []
         for child in candidates[:1000]:
             candidate = {
@@ -9312,7 +9502,7 @@ class _QueueV3CandidateReader:
                     "links": [*links, candidate],
                 }
             )
-            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+            if len(prospective) > 1024 * 1024:
                 break
             links.append(candidate)
         return links
@@ -9409,16 +9599,13 @@ class _QueueV3CandidateReader:
         package: Path,
     ) -> None:
         """One bounded step of the resumable lineage export."""
-        started = time.monotonic()
         candidates = database.execute(
             """SELECT id,state,created_at,updated_at,input_hash
                FROM tasks WHERE redrive_of=? AND id>?
                ORDER BY id LIMIT 1001""",
             (task_id, operation["cursor_task_id"]),
         ).fetchall()
-        links = self._bounded_lineage_links(
-            candidates, operation, operation_id, started
-        )
+        links = self._bounded_lineage_links(candidates, operation, operation_id)
         if links:
             self._write_lineage_page(
                 database, operation, operation_id, package, links, candidates
@@ -9433,10 +9620,14 @@ class _QueueV3CandidateReader:
         candidates: list,
         operation: sqlite3.Row,
         operation_id: str,
-        started: float,
         now: datetime,
     ) -> tuple[list[dict[str, object]], str | None]:
-        """As many children as one bounded page holds, and what stopped it."""
+        """As many children as one bounded page holds, and what stopped it.
+
+        Bounded by its inputs, never by a clock, so the page a retry rebuilds is
+        the page already on disk. See `docs/research/
+        2026-09-18-a-page-that-is-rewritten-must-come-out-the-same.md`.
+        """
         children: list[dict[str, object]] = []
         for child in candidates[:1000]:
             blocker = self._corrupt_child_purge_blocker(database, child, now=now)
@@ -9455,7 +9646,7 @@ class _QueueV3CandidateReader:
                     "children": [*children, descriptor],
                 }
             )
-            if len(prospective) > 1024 * 1024 or time.monotonic() - started >= 5:
+            if len(prospective) > 1024 * 1024:
                 return children, None
             children.append(descriptor)
         return children, None
@@ -9684,7 +9875,6 @@ class _QueueV3CandidateReader:
     ) -> CorruptPurgeProgress:
         del owner
         _require_active(deadline, cancelled)
-        started = time.monotonic()
         with closing(self._connect()) as database, begin_immediate(database):
             operation, prior, early = self._purge_page_preconditions(
                 database, task_id, operation_id, task_fence
@@ -9698,7 +9888,6 @@ class _QueueV3CandidateReader:
                 operation=operation,
                 prior=prior,
                 package=package,
-                started=started,
             )
 
     def _purge_one_lineage_page(
@@ -9710,7 +9899,6 @@ class _QueueV3CandidateReader:
         operation: sqlite3.Row,
         prior: int,
         package: Path,
-        started: float,
     ) -> CorruptPurgeProgress:
         """One bounded page of children, inside the caller's transaction."""
         pages = int(operation["page_count"])
@@ -9725,7 +9913,7 @@ class _QueueV3CandidateReader:
             )
         now = _utc_now()
         children, blocker_code = self._bounded_purge_children(
-            database, candidates, operation, operation_id, started, now
+            database, candidates, operation, operation_id, now
         )
         if not children:
             return _purge_progress(
@@ -10931,13 +11119,7 @@ class _QueueV3CandidateReader:
     def _validate_capture_claim(
         owner: str, lease_seconds: int, max_attempts: int
     ) -> None:
-        if not owner:
-            raise ValueError("owner must be non-empty")
-        if lease_seconds <= 0:
-            raise ValueError("lease must be positive")
-        _validate_retry_policy(
-            max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
-        )
+        _check_claim_arguments(owner, lease_seconds, max_attempts)
 
     @staticmethod
     def _capture_claim_row(
@@ -11386,16 +11568,30 @@ class _QueueV3CandidateReader:
                 is None
             )
             if not mismatch:
-                changed = database.execute(
-                    """UPDATE tasks SET state='cancelled',error_code='cancelled',
-                           updated_at=?,lease_owner=NULL,lease_token=NULL,
-                           lease_expires_at=NULL,lease_heartbeat_at=NULL,
-                           attempt_started_at=NULL WHERE id=? AND state=?""",
-                    (_timestamp(now), task_id, row["state"]),
-                ).rowcount == 1
+                changed = self._cancel_row(database, row, now)
         if mismatch:
             self._raise_payload_mismatch()
         return changed
+
+    @staticmethod
+    def _cancel_row(
+        database: sqlite3.Connection, row: sqlite3.Row, now: datetime
+    ) -> bool:
+        """An attempt cancelled in flight is recorded, as the legacy queue records it."""
+        if row["state"] == "leased":
+            _record_cancelled_attempt(database, row, now)
+        return database.execute(
+            """UPDATE tasks SET state='cancelled',error_code='cancelled',
+                   updated_at=?,lease_owner=NULL,lease_token=NULL,
+                   lease_expires_at=NULL,lease_heartbeat_at=NULL,
+                   attempt_started_at=NULL WHERE id=? AND state=?""",
+            (_timestamp(now), row["id"], row["state"]),
+        ).rowcount == 1
+
+    def unblock(self, task_id: str) -> None:
+        """A blocked task goes back to ready; any other state is refused."""
+        with closing(self._connect()) as database, begin_immediate(database):
+            _unblock_in(database, task_id, _utc_now())
 
     def _insert_redriven_task(
         self,
@@ -11541,13 +11737,10 @@ class _QueueV3CandidateReader:
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
     ) -> PurgeReceipt:
-        # The adopted plan selects succeeded and cancelled, which is exactly
-        # what `include_dead=False` means; retiring dead work has no adopted
-        # implementation, so ask for it and be refused rather than obeyed in part.
-        if include_dead:
-            _refuse_legacy_only_api("purge(include_dead=True)")
         _require_active(deadline, cancelled)
-        plan = self._ordinary_purge_plan(terminal_before, export_path)
+        plan = self._ordinary_purge_plan(
+            terminal_before, export_path, include_dead=include_dead
+        )
         manifest_bytes = self._publish_ordinary_purge_export(
             plan, deadline=deadline, cancelled=cancelled
         )
@@ -11563,7 +11756,7 @@ class _QueueV3CandidateReader:
         return PurgeReceipt(len(plan.task_ids), plan.task_ids)
 
     def _ordinary_purge_plan(
-        self, terminal_before: datetime, export_path: Path
+        self, terminal_before: datetime, export_path: Path, *, include_dead: bool
     ) -> _OrdinaryPurgePlan:
         retention_cutoff = _utc_now() - timedelta(
             days=DEFAULTS.queue_result_retention_days
@@ -11574,17 +11767,31 @@ class _QueueV3CandidateReader:
             raise QueueOperationError("export_verification_failed")
         if export.exists():
             return self._load_ordinary_purge_plan(cutoff, export)
-        return self._new_ordinary_purge_plan(cutoff, export)
+        return self._new_ordinary_purge_plan(cutoff, export, include_dead)
+
+    def _demote_corrupt_finished_tasks(self, cutoff: str, include_dead: bool) -> None:
+        """Move corrupt finished rows out of the purge selection, and commit it.
+
+        One corrupt row used to refuse the whole plan, and nothing else can move
+        a finished row. Demoted to `dead / payload_hash_mismatch` it leaves the
+        selection and becomes something `quarantine-corrupt` accepts.
+        """
+        now = _utc_now()
+        with closing(self._connect()) as database, begin_immediate(database):
+            rows = database.execute(
+                _ordinary_purge_selection(include_dead), (cutoff,)
+            ).fetchall()
+            for row in rows:
+                self._require_valid_task_payload(database, row, now=now, parse=True)
 
     def _new_ordinary_purge_plan(
-        self, cutoff: str, export: Path
+        self, cutoff: str, export: Path, include_dead: bool
     ) -> _OrdinaryPurgePlan:
+        self._demote_corrupt_finished_tasks(cutoff, include_dead)
         with closing(self._connect()) as database:
             database.execute("BEGIN")
             rows = database.execute(
-                """SELECT * FROM tasks
-                   WHERE state IN ('succeeded','cancelled') AND updated_at<?
-                   ORDER BY created_at,id""",
+                f"{_ordinary_purge_selection(include_dead)} ORDER BY created_at,id",
                 (cutoff,),
             ).fetchall()
             records = tuple(
@@ -12318,9 +12525,15 @@ class _QueueV3CandidateReader:
 
     @staticmethod
     def _require_ordinary_purge_task(row: sqlite3.Row | None, cutoff: str) -> None:
+        """Still a finished row an ordinary purge may take, still older than the cutoff.
+
+        Which of those states this particular purge planned for is pinned by the
+        exported record, compared field for field a moment later, so this guard
+        names the states the operation can take at all and no narrower.
+        """
         if (
             row is None
-            or row["state"] not in {"succeeded", "cancelled"}
+            or row["state"] not in _ORDINARY_PURGEABLE_STATES
             or row["updated_at"] >= cutoff
         ):
             raise QueueOperationError("purge_selection_changed")
@@ -12613,18 +12826,6 @@ def _path_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
-def _legacy_write_allowed(state_root: Path) -> bool:
-    _run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if _path_present(marker):
-        _validate_migration_marker(marker)
-        if legacy_dir.exists():
-            _post_marker_legacy_conflict(state_root)
-        raise LegacyBackendDisabled("legacy_backend_disabled")
-    if _queue_owner_is_active(state_root, "migration"):
-        raise LegacyBackendDisabled("legacy_migration_quiesced")
-    return True
-
-
 def _open_queue_ownership_db(state_root: Path) -> sqlite3.Connection:
     run_dir, _legacy_dir, db_path, _marker = _migration_paths(state_root)
     # Legacy queue ownership lives in the pre-adoption database itself, and the
@@ -12778,7 +12979,7 @@ def _adopted_owner_reader(state_root: Path, role: str) -> Any | None:
     if role not in _ADOPTED_OWNER_ROLES or not _reliability_v3_records_present(state):
         return None
     queue_path = state / "run" / "queue-v3.sqlite3"
-    validate_queue_v3_database(queue_path, state_root=state)
+    require_queue_v3_openable(queue_path, state_root=state)
     return _QueueV3CandidateReader(
         queue_path,
         coordinator_path=state / "run" / "markdown-transactions-v3.sqlite3",
@@ -12887,7 +13088,9 @@ def _acquire_queue_owner(
     pid = os.getpid()
     expires_at = acquired_at + timedelta(seconds=ttl_seconds)
     values = (token, pid, _timestamp(acquired_at), _timestamp(expires_at))
-    with _open_queue_ownership_db(state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(state_root)
+    ) as connection, begin_immediate(connection):
         epoch = _take_queue_ownership(connection, role, busy_code, values)
     return QueueOwnerLease(
         Path(state_root).resolve(), role, token, pid, epoch, expires_at, ttl_seconds
@@ -12955,7 +13158,9 @@ def _heartbeat_queue_owner(
     if entry is not None:
         return _heartbeat_adopted_queue_owner(lease, entry)
     heartbeat_at = _as_utc(now or _utc_now())
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(
             connection, lease, heartbeat_at, heartbeat=True
         )
@@ -12966,7 +13171,9 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
     entry = _pop_adopted_owner(lease.token)
     if entry is not None:
         return _release_adopted_queue_owner(entry)
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         changed = connection.execute(
             """UPDATE queue_ownership
                SET token=NULL, pid=NULL, heartbeat_at=NULL, expires_at=NULL
@@ -12974,19 +13181,6 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
             (lease.role, lease.token, lease.epoch),
         ).rowcount
     return changed == 1
-
-
-def _queue_owner_is_active(state_root: Path, role: str) -> bool:
-    with _open_queue_ownership_db(state_root) as connection:
-        row = connection.execute(
-            "SELECT token, pid, expires_at FROM queue_ownership WHERE role=?", (role,)
-        ).fetchone()
-    if row is None or row["token"] is None:
-        return False
-    return (
-        isinstance(row["pid"], int)
-        and _pid_is_alive(row["pid"])
-    )
 
 
 def _marker_file_usable(marker: Path, metadata: os.stat_result) -> bool:
@@ -13249,9 +13443,36 @@ def _import_legacy_record(
                FROM tasks WHERE id=?""",
             (record["id"],),
         ).fetchone()
-        if stored is None or tuple(stored) != expected:
-            raise QueueOperationError("legacy_import_conflict")
+        _require_imported_record(stored, expected)
     return str(record["id"])
+
+
+# The columns of an imported task that never move again, by their position in
+# the select above: kind, payload_json, input_hash, created_at. The other six —
+# state, updated_at, available_at, attempts, last_attempt_at, error_code —
+# change the moment a worker claims the task.
+_LEGACY_IDENTITY_POSITIONS = (0, 1, 2, 4)
+
+
+def _legacy_identity(columns: Sequence[object]) -> tuple[object, ...]:
+    return tuple(columns[index] for index in _LEGACY_IDENTITY_POSITIONS)
+
+
+def _require_imported_record(
+    stored: sqlite3.Row | None, expected: tuple[object, ...]
+) -> None:
+    """This record's row, whether this run inserted it or a crashed one did.
+
+    A migration that died between the insert and the unlink imports the same
+    record again, and by then a worker may have leased it. Comparing what the
+    record owns — not what the queue has done since — is what makes the retry
+    idempotent instead of a permanent `legacy_import_conflict`. See
+    `docs/research/2026-09-18-an-import-that-already-happened-is-not-a-conflict.md`.
+    """
+    if stored is None:
+        raise QueueOperationError("legacy_import_conflict")
+    if _legacy_identity(tuple(stored)) != _legacy_identity(expected):
+        raise QueueOperationError("legacy_import_conflict")
 
 
 def _quarantine_legacy_record(
@@ -13303,67 +13524,11 @@ def _post_marker_legacy_conflict(state_root: Path) -> None:
         _release_queue_owner(owner)
 
 
-def _check_legacy_marker_race(root: Path) -> None:
-    """Refuse to keep using the legacy queue once migration has claimed it."""
-    marker = _migration_paths(root)[3]
-    if not _path_present(marker):
-        return
-    _validate_migration_marker(marker)
-    raise LegacyBackendDisabled("legacy_marker_race")
-
-
-def _legacy_queue_record(task_type: str, payload: dict[str, Any]) -> dict[str, object]:
-    """The contents of a legacy queue file for a newly enqueued task."""
-    task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    return {
-        "attempts": 0,
-        "enqueued_at": _timestamp(_utc_now()),
-        "id": task_id,
-        "last_attempt_at": None,
-        "payload": payload,
-        "type": task_type,
-    }
-
-
-def _confirm_legacy_write(
-    owner: QueueOwnerLease, root: Path, target: Path, queue_dir: Path
-) -> QueueOwnerLease:
-    """Prove the legacy backend is still ours; drop the written file if it is not."""
-    try:
-        renewed = _heartbeat_queue_owner(owner)
-        _check_legacy_marker_race(root)
-        return renewed
-    except Exception:
-        target.unlink(missing_ok=True)
-        fsync_directory(queue_dir)
-        raise
-
-
-def _legacy_enqueue_file(
-    task_type: str, payload: dict[str, Any], state_root: Path | None = None
-) -> str:
-    root = Path(state_root or _state_root()).resolve()
-    _legacy_write_allowed(root)
-    owner = _acquire_queue_owner(root, "legacy", "legacy_owner_busy")
-    try:
-        _legacy_write_allowed(root)
-        record = _legacy_queue_record(task_type, payload)
-        queue_dir = root / "run" / "queue"
-        queue_dir.mkdir(parents=True, exist_ok=True)
-        _harden_owner_only(queue_dir, 0o700)
-        target = queue_dir / f"{record['id']}.json"
-        owner = _heartbeat_queue_owner(owner)
-        _check_legacy_marker_race(root)
-        _write_durable_file(target, canonical_json_bytes(record))
-        owner = _confirm_legacy_write(owner, root, target, queue_dir)
-        return str(record["id"])
-    finally:
-        _release_queue_owner(owner)
-
-
 def _write_durable_file(path: Path, data: bytes) -> None:
+    """Binary: the bytes linked into place are the bytes a conflict compares."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
@@ -13435,7 +13600,9 @@ def _commit_migration_marker(
     lease: QueueOwnerLease, marker: Path, run_dir: Path
 ) -> QueueOwnerLease:
     now = _utc_now()
-    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+    with closing(
+        _open_queue_ownership_db(lease.state_root)
+    ) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(connection, lease, now, heartbeat=True)
         try:
             _write_durable_file(marker, canonical_json_bytes({"version": 2}))
@@ -13618,13 +13785,6 @@ def _ensure_sqlite_enabled() -> None:
         _post_marker_legacy_conflict(state_root)
 
 
-def _queue_dir() -> Path:
-    """Compatibility path: SQLite and results now live directly under run/."""
-    path = _state_root() / "run"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _vault_root() -> Path:
     """The vault this process belongs to, resolved the way writers resolve it."""
     return Path(
@@ -13649,7 +13809,12 @@ def _queue(
 
 
 def _v3_queue_for_cli() -> _QueueV3CandidateReader:
+    """The v3 queue the repair commands work on: adopted, else the candidate."""
+    from markdown_transaction import _reliability_v3_records_present
+
     state_root = _state_root()
+    if _reliability_v3_records_present(state_root):
+        return active_memory_queue(_vault_root(), state_root)
     return MemoryQueue._from_v3_candidate(
         state_root / "run" / "queue-v3.candidate.sqlite3",
         state_root=state_root,
@@ -13665,7 +13830,7 @@ def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReade
     require_reliability_v3_adopted(root=resolved_vault, state_root=state)
     queue_path = state / "run" / "queue-v3.sqlite3"
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
-    validate_queue_v3_database(queue_path, state_root=state)
+    require_queue_v3_openable(queue_path, state_root=state)
     return _QueueV3CandidateReader(
         queue_path, coordinator_path=coordinator_path
     )
@@ -13720,10 +13885,9 @@ def active_or_legacy_memory_queue(
 
 
 @contextmanager
-def _repair_owner_for_cli() -> Iterator[OwnerLease]:
-    from operational_ownership import OwnershipRegistry
-
-    registry = OwnershipRegistry(_state_root())
+def _repair_owner_for_cli(queue: _QueueV3CandidateReader) -> Iterator[OwnerLease]:
+    """A repair owner in the registry that pairs with the queue being repaired."""
+    registry = queue.ownership_registry()
     owner = registry.acquire("repair", scope=f"repair:cli:{os.getpid()}")
     try:
         yield owner
@@ -13892,42 +14056,6 @@ def _export_task_record(task: QueueTask) -> dict[str, object]:
     }
 
 
-def list_pending(max_age_days: int | None = None) -> list[dict[str, Any]]:
-    tasks = _queue().list_tasks(
-        states=("ready", "leased", "blocked", "dead"), max_age_days=max_age_days
-    )
-    return [_compat_task(task) for task in tasks]
-
-
-def _settle_legacy_attempt(queue, lease: QueueLease, task_id: str, success: bool) -> None:
-    """Publish or fail one legacy attempt under its own lease."""
-    if not success:
-        queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-        return
-    queue.publish_result(lease, operation_id=task_id, result=b"")
-    queue.acknowledge(lease)
-
-
-def mark_attempt(task_id: str, success: bool) -> None:
-    """Legacy attempt API retained for callers while storage is SQLite-backed."""
-    queue = _queue()
-    try:
-        task = queue.get(task_id)
-    except KeyError:
-        return
-    if task.state != "ready":
-        return
-    lease = queue._claim_task(task_id, f"legacy-{os.getpid()}")
-    if lease is None:
-        return
-    _settle_legacy_attempt(queue, lease, task_id, success)
-
-
-def recover_stale_leases(max_age_seconds: int = 600) -> int:
-    del max_age_seconds
-    return _queue().recover_expired_leases()
-
-
 def cancel(
     task_id: str,
     *,
@@ -13976,11 +14104,6 @@ def restore(
     )
 
 
-def retained_queue_state() -> bool:
-    """Return whether queue records or results block deletion of run/."""
-    return _queue().retains_run_directory()
-
-
 # A heartbeat thread may sit inside SQLite for `queue_busy_ms` (5 s); the
 # join bound is twice the heartbeat with a floor above that wait, and a
 # thread still alive past it is refused by name (audit OPS-18,
@@ -14007,6 +14130,8 @@ class _SourceFenceHeartbeat:
         self._fence = fence
         self._heartbeat_seconds = heartbeat_seconds
         self._lease_seconds = lease_seconds
+        # The fence row is already written; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self.error: Exception | None = None
@@ -14055,6 +14180,7 @@ class _SourceFenceHeartbeat:
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
             attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )
@@ -14084,6 +14210,8 @@ class _LeaseHeartbeat:
         self._lease = lease
         self._heartbeat_seconds = heartbeat_seconds
         self._lease_seconds = lease_seconds
+        # The lease is already claimed; its expiry is counted from here.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self.error: Exception | None = None
         self._thread = threading.Thread(
@@ -14111,6 +14239,7 @@ class _LeaseHeartbeat:
             interval=self._heartbeat_seconds,
             lease_seconds=self._lease_seconds,
             attempt_seconds=DEFAULTS.queue_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
             wait=lambda seconds: self._queue._heartbeat_wait(self._stop, seconds),  # noqa: SLF001
         )
@@ -14120,93 +14249,6 @@ class _LeaseHeartbeat:
 
     def _renew(self) -> None:
         self._lease = self._queue.heartbeat(self._lease, lease_seconds=self._lease_seconds)
-
-
-def drain_with(
-    processor: Callable[[dict], bool | DeferredResult], max_tasks: int = 10
-) -> dict[str, int]:
-    """Run handlers outside transactions and fence completion with a result marker."""
-    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
-    queue = _queue()
-    owner = f"compat-{os.getpid()}-{uuid.uuid4().hex}"
-    for _ in range(max_tasks):
-        lease = queue.claim(owner)
-        if lease is None:
-            break
-        _drain_one_lease(queue, processor, lease, counts)
-    return counts
-
-
-def _drain_one_lease(
-    queue: MemoryQueue,
-    processor: Callable[[dict], bool | DeferredResult],
-    lease: QueueLease,
-    counts: dict[str, int],
-) -> None:
-    """Adopt, run and settle one leased task."""
-    if _adopted_counts(queue, lease, counts):
-        return
-    outcome, heartbeat_lost = _run_compat_processor(queue, processor, lease)
-    if heartbeat_lost:
-        counts["failed"] += 1
-        return
-    _settle_compat_outcome(queue, lease, outcome, counts)
-
-
-def _run_compat_processor(
-    queue: MemoryQueue,
-    processor: Callable[[dict], bool | DeferredResult],
-    lease: QueueLease,
-) -> tuple[bool | DeferredResult, bool]:
-    """(what the processor returned, whether the lease heartbeat was lost)."""
-    heartbeat = _LeaseHeartbeat(queue, lease)
-    heartbeat.start()
-    try:
-        outcome: bool | DeferredResult = _compat_processor_outcome(processor, lease)
-    finally:
-        heartbeat.stop()
-    return outcome, heartbeat.error is not None
-
-
-def _compat_processor_outcome(
-    processor: Callable[[dict], bool | DeferredResult], lease: QueueLease
-) -> bool | DeferredResult:
-    """Run the handler; a raised exception is a plain failure here."""
-    try:
-        return processor(_compat_task(lease))
-    except Exception:  # noqa: BLE001 - a compat handler may raise anything
-        print("processor_exception", file=sys.stderr)
-        return False
-
-
-def _settle_compat_outcome(
-    queue: MemoryQueue,
-    lease: QueueLease,
-    outcome: bool | DeferredResult,
-    counts: dict[str, int],
-) -> None:
-    """Publish or fail the task, counting a lost fence as a failure."""
-    try:
-        _publish_compat_outcome(queue, lease, outcome, counts)
-    except (LeaseFenceError, ResultConflictError):
-        counts["failed"] += 1
-        if queue.get(lease.id).state == "dead":
-            counts["dead"] += 1
-
-
-def _publish_compat_outcome(
-    queue: MemoryQueue,
-    lease: QueueLease,
-    outcome: bool | DeferredResult,
-    counts: dict[str, int],
-) -> None:
-    if not outcome:
-        queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-        _count_terminal(counts, queue.get(lease.id))
-        return
-    result = outcome.data if isinstance(outcome, DeferredResult) else b""
-    queue.publish_result(lease, operation_id=lease.id, result=result)
-    _count_terminal(counts, queue.acknowledge(lease))
 
 
 def _run_processor_inline(
@@ -14264,7 +14306,15 @@ def _processor_result_frame(
 
 
 def _send_processor_frame(sender: Any, frame: bytes) -> None:
-    """Hand the frame over, but only once the parent says it is listening."""
+    """Hand the frame over, but only once the parent says it is listening.
+
+    `frame` is the finished result: the caller evaluates it before this runs, so
+    `R` means "the task is done and I have an answer", not "I am up". The parent
+    reads the child's descendants on this signal, and that ordering is the
+    reason the set it gets is the tree the task left running rather than an
+    empty one. See
+    `docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md`.
+    """
     sender.send_bytes(b"R")
     if not sender.poll(5) or sender.recv_bytes(1) != b"A":
         return
@@ -14712,16 +14762,35 @@ def _await_child_message(run: _ChildRun) -> None:
 
 
 def _stop_child_if_done_waiting(run: _ChildRun) -> None:
+    """A deadline decides whether to keep waiting, not whether to drop an answer.
+
+    Without the second look, a frame written between the poll's expiry and this
+    check became `worker_timeout` and the finished work was thrown away. See
+    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
+    """
     if run.lost():
         run.stop()
         raise QueueOperationError("lease_lost")
-    if run.remaining() <= 0:
-        run.stop()
-        raise TimeoutError
+    if _may_keep_waiting(run):
+        return
+    run.stop()
+    raise TimeoutError
+
+
+def _may_keep_waiting(run: _ChildRun) -> bool:
+    """Time left, or an answer already in the pipe; either ends this check."""
+    return run.remaining() > 0 or bool(run.receiver.poll(0))
 
 
 def _child_ready_handshake(run: _ChildRun) -> None:
-    """The child announces it is up, and only then do we track its tree."""
+    """The child says it has an answer, and only then do we track its tree.
+
+    `R` is sent after the processor has returned, not when the child starts, so
+    the tree recorded here is the one the finished task left behind — a provider
+    the processor shelled out to and did not wait for. Moving this earlier would
+    record an empty set and leave `_cleanup_confirmed` and `_await_cleanup`
+    verifying nothing.
+    """
     _await_child_message(run)
     try:
         ready = run.receiver.recv_bytes(1)
@@ -14753,21 +14822,27 @@ def _child_result_frame(run: _ChildRun) -> bytes:
         raise QueueOperationError("processor_result_malformed") from None
 
 
-def _require_child_exit(run: _ChildRun) -> None:
-    """Stop the child and give up when it outlives its deadline."""
+def _child_left_in_time(run: _ChildRun) -> bool:
+    """Whether the child exited within its deadline; a lingering one is stopped."""
     remaining = run.remaining()
-    if remaining <= 0:
-        run.stop()
-        raise TimeoutError
-    run.process.join(remaining)
-    if run.process.is_alive():
-        run.stop()
-        raise TimeoutError
+    if remaining > 0:
+        run.process.join(remaining)
+    if not run.process.is_alive():
+        return True
+    run.stop()
+    return False
 
 
-def _join_child(run: _ChildRun) -> None:
-    """Wait out the child's exit within the deadline, and check how it left."""
-    _require_child_exit(run)
+def _settle_child_exit(run: _ChildRun) -> None:
+    """Check how the child left, once its answer is already in hand.
+
+    A child that will not leave is a cleanup problem — `stop` kills its tree —
+    and no longer a reason to discard the frame it already sent. One that does
+    leave is still judged by its exit code. See
+    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
+    """
+    if not _child_left_in_time(run):
+        return
     if run.process.exitcode != 0:
         raise QueueOperationError("processor_child_failed")
 
@@ -14795,14 +14870,14 @@ def _run_processor_child(
         sender.close()
         _child_ready_handshake(run)
         frame = _child_result_frame(run)
-        _join_child(run)
+        _settle_child_exit(run)
         return _decode_processor_frame(frame)
     finally:
         receiver.close()
         if started:
-            _terminate_processor_child(
-                process, tracked_descendants=run.tracked_descendants
-            )
+            # Through `stop`, which knows that a tree never tracked — a child
+            # that died before its handshake — is discovered now, not unknown.
+            run.stop()
 
 
 _CLAIM_BUSY_RETRY_SECONDS = 0.05
@@ -14834,7 +14909,11 @@ def _claim_when_reachable(
         try:
             return queue.claim(owner, lease_seconds=lease_seconds, max_attempts=max_attempts)
         except sqlite3.OperationalError as error:
-            if not _is_busy_database(error) or monotonic() >= deadline:
+            # Only a busy database is "nothing to claim yet". A disk I/O error or
+            # a missing table is a failure the operator has to see, not an idle queue.
+            if not _is_busy_database(error):
+                raise
+            if monotonic() >= deadline:
                 return None
             time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
 
@@ -15296,6 +15375,24 @@ def _drive_worker(
             return
 
 
+def _require_policy_this_queue_takes(
+    queue: MemoryQueue | _QueueV3CandidateReader, policy: Mapping[str, int]
+) -> None:
+    """Refuse a retry policy the queue will not take, before any task is claimed.
+
+    The adopted queue settles its own attempts, so a worker told otherwise would
+    claim a task and only then find it cannot record the failure.
+    """
+    if isinstance(queue, MemoryQueue):
+        return
+    _require_adopted_attempt_limit(policy["max_attempts"])
+    _require_adopted_retry_policy(
+        policy["max_attempts"],
+        policy["retry_base_seconds"],
+        policy["retry_cap_seconds"],
+    )
+
+
 def run_worker(
     processor: Callable[[dict], bool | DeferredResult],
     *,
@@ -15342,6 +15439,7 @@ def run_worker(
         retry_base_seconds=retry_base_seconds,
         retry_cap_seconds=retry_cap_seconds,
     )
+    _require_policy_this_queue_takes(queue, policy)
     _drive_worker(
         queue,
         processor,
@@ -15374,20 +15472,6 @@ def _count_terminal(counts: dict[str, int], task: QueueTask) -> None:
     counts["failed"] += 1
     if task.state == "dead":
         counts["dead"] += 1
-
-
-def status() -> dict[str, Any]:
-    queue = _queue()
-    tasks = queue.list_tasks(states=("ready", "leased", "blocked", "dead"))
-    by_type: dict[str, int] = {}
-    for task in tasks:
-        by_type[task.kind] = by_type.get(task.kind, 0) + 1
-    return {
-        "pending_total": len(tasks),
-        "by_type": by_type,
-        "permanently_failed": sum(task.state == "dead" for task in tasks),
-        "queue_dir": str(queue.run_dir),
-    }
 
 
 def _operator_status() -> dict[str, object]:
@@ -15446,7 +15530,7 @@ def _valid_day(raw_day: object, now: datetime) -> str | None:
 
 def _daily_log_path(day: str) -> Path | None:
     """The daily log for this day, when it stays inside the daily directory."""
-    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    root = _vault_root()
     daily_dir = (root / "knowledge" / "daily").resolve()
     daily_path = (daily_dir / f"{day}.md").resolve()
     try:
@@ -15528,7 +15612,7 @@ def _manual_flush(task: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
 
 def _manual_compile() -> bool:
     """Run one compile pass in a child process."""
-    root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+    root = _vault_root()
     command = [
         sys.executable,
         str(root / "scripts" / "compile_memory.py"),
@@ -15647,6 +15731,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
             "work",
             "cancel",
             "redrive",
+            "unblock",
             "migrate",
             "purge",
             "restore",
@@ -15759,7 +15844,7 @@ def _cli_quarantine_corrupt(args, _parser) -> int:
     if not 1 <= len(args.reason.encode("utf-8")) <= 4096:
         raise ValueError("quarantine reason is invalid")
     queue = _v3_queue_for_cli()
-    with _repair_owner_for_cli() as owner:
+    with _repair_owner_for_cli(queue) as owner:
         progress = queue.quarantine_corrupt(task_id, reason=args.reason, owner=owner)
     print(
         json.dumps(
@@ -15780,7 +15865,7 @@ def _cli_quarantine_corrupt(args, _parser) -> int:
 def _cli_purge_corrupt(args, _parser) -> int:
     task_id = _require_cli_task_id(args)
     queue = _v3_queue_for_cli()
-    with _repair_owner_for_cli() as owner:
+    with _repair_owner_for_cli(queue) as owner:
         progress = queue.purge_quarantined(task_id, owner=owner)
     print(
         json.dumps(
@@ -15809,6 +15894,13 @@ def _cli_cancel(args, _parser) -> int:
     if changed:
         return 0
     return 1
+
+
+def _cli_unblock(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    _queue().unblock(task_id)
+    print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
+    return 0
 
 
 def _cli_redrive(args, _parser) -> int:
@@ -15872,6 +15964,7 @@ _CLI_COMMANDS = {
     "purge-corrupt": _cli_purge_corrupt,
     "cancel": _cli_cancel,
     "redrive": _cli_redrive,
+    "unblock": _cli_unblock,
     "purge": _cli_purge,
     "restore": _cli_restore,
 }

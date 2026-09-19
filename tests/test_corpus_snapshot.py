@@ -76,8 +76,7 @@ def test_notes_keep_full_paths_and_exclude_historical_and_internals(vault: Path)
     assert (
         first.record.logical_id != second.record.logical_id,
         first.content.startswith(b"---\n"),
-        snapshot.code_capture,
-    ) == (True, True, None)
+    ) == (True, True)
 
     historical = collect_corpus(vault, include_historical=True)
     assert "knowledge/notes/old.md" in {
@@ -208,9 +207,10 @@ def test_projects_daily_and_code_are_explicitly_bounded_by_policy(vault: Path):
         daily_paths=("knowledge/daily/allowed.md",),
         code_roots=("scripts",),
     )
+    # A build that names code roots is a code generation, and the 2026-09-12 decision keeps
+    # `knowledge/` out of it entirely; only what the policy names is collected. See
+    # `docs/research/2026-09-16-the-code-index-leaves-the-knowledge-alone.md`.
     assert {source.record.relative_path for source in selected.sources} == {
-        "knowledge/projects/demo/journal.md",
-        "knowledge/projects/demo/state.md",
         "knowledge/daily/allowed.md",
         "scripts/app.py",
     }
@@ -502,14 +502,16 @@ def test_heading_free_markdown_and_code_emit_one_unique_chunk_each(vault: Path):
     write(vault / "knowledge/notes/plain.md", "Plain Markdown content.\n")
     write(vault / "scripts/plain.py", "print('plain')\n")
 
-    snapshot = collect_corpus(vault, code_roots=("scripts/plain.py",))
-    chunks_by_source = _chunks_by_source(snapshot)
+    page = collect_corpus(vault)
+    code = collect_corpus(vault, code_roots=("scripts/plain.py",))
 
-    assert {path: len(chunks) for path, chunks in chunks_by_source.items()} == {
+    assert {path: len(chunks) for path, chunks in _chunks_by_source(page).items()} == {
         "knowledge/notes/plain.md": 1,
+    }
+    assert {path: len(chunks) for path, chunks in _chunks_by_source(code).items()} == {
         "scripts/plain.py": 1,
     }
-    assert len({chunk.id for chunk in snapshot.chunks}) == 2
+    assert len({chunk.id for chunk in (*page.chunks, *code.chunks)}) == 2
 
 
 def test_empty_atx_heading_has_deterministic_ancestry_and_exact_offsets(vault: Path):

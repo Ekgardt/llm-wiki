@@ -106,8 +106,8 @@ def _values(beliefs) -> list[str]:
 
 def _two_states(tmp_path: Path, *, first_validity=OPEN, second_validity=OPEN):
     """One subject told to be in one state, then in another, at two block times."""
-    early = "Session 5696e5d8 is working on fix-pip."
-    late = "Session 5696e5d8 is working on agenticos."
+    early = "Session 5696e5d8 is working on project-alpha."
+    late = "Session 5696e5d8 is working on project-beta."
     source = _source(("03:04:05", early), ("11:00:00", late))
     vault = _vault(tmp_path, source)
     first = _record(
@@ -119,7 +119,7 @@ def _two_states(tmp_path: Path, *, first_validity=OPEN, second_validity=OPEN):
             "03:04:05",
             early,
             claim_id="claim:first",
-            value="fix-pip",
+            value="project-alpha",
             validity=first_validity,
         ),
     )
@@ -132,7 +132,7 @@ def _two_states(tmp_path: Path, *, first_validity=OPEN, second_validity=OPEN):
             "11:00:00",
             late,
             claim_id="claim:second",
-            value="agenticos",
+            value="project-beta",
             validity=second_validity,
         ),
     )
@@ -142,8 +142,8 @@ def _two_states(tmp_path: Path, *, first_validity=OPEN, second_validity=OPEN):
 def test_as_of_returns_the_value_that_was_true_at_that_moment(tmp_path):
     """The question the ledger could not answer before: what was true as of DATE."""
     records = _two_states(tmp_path)
-    assert _values(as_of(records, valid_at="2026-01-02T06:00:00Z")) == ["fix-pip"]
-    assert _values(as_of(records, valid_at="2026-01-02T11:30:00Z")) == ["agenticos"]
+    assert _values(as_of(records, valid_at="2026-01-02T06:00:00Z")) == ["project-alpha"]
+    assert _values(as_of(records, valid_at="2026-01-02T11:30:00Z")) == ["project-beta"]
 
 
 def test_the_superseded_claim_carries_both_derived_ends(tmp_path):
@@ -160,8 +160,8 @@ def test_an_earlier_known_at_still_answers_with_what_was_known_then(tmp_path):
     records = _two_states(tmp_path)
     then = as_of(records, valid_at="2026-01-02T11:30:00Z", known_at="2026-01-02T09:00:00Z")
     now = as_of(records, valid_at="2026-01-02T11:30:00Z")
-    assert _values(then) == ["fix-pip"]
-    assert _values(now) == ["agenticos"]
+    assert _values(then) == ["project-alpha"]
+    assert _values(now) == ["project-beta"]
 
 
 def test_a_retroactive_correction_empties_the_belief_it_corrects(tmp_path):
@@ -171,7 +171,7 @@ def test_a_retroactive_correction_empties_the_belief_it_corrects(tmp_path):
         first_validity={"from": "2026-01-02T03:00:00Z", "to": None},
         second_validity={"from": "2026-01-02T03:00:00Z", "to": None},
     )
-    assert _values(as_of(records, valid_at="2026-01-02T06:00:00Z")) == ["agenticos"]
+    assert _values(as_of(records, valid_at="2026-01-02T06:00:00Z")) == ["project-beta"]
     corrected = history(records)[0]
     assert corrected.invalid_at == "2026-01-02T03:00:00Z"
 
@@ -216,8 +216,8 @@ def test_a_multi_valued_relation_is_never_invalidated_by_a_sibling(tmp_path):
 
 def test_conflicting_claims_observed_at_one_instant_refuse_by_name(tmp_path):
     """No order in the evidence means no winner, not a guessed winner."""
-    early = "Session 5696e5d8 is working on fix-pip."
-    late = "Session 5696e5d8 is working on agenticos."
+    early = "Session 5696e5d8 is working on project-alpha."
+    late = "Session 5696e5d8 is working on project-beta."
     source = _source(("03:04:05", f"{early}\n{late}"))
     vault = _vault(tmp_path, source)
     first = _record(
@@ -225,7 +225,7 @@ def test_conflicting_claims_observed_at_one_instant_refuse_by_name(tmp_path):
         source,
         "03:04:05",
         _extraction(
-            source, "03:04:05", early, claim_id="claim:a", value="fix-pip", validity=OPEN
+            source, "03:04:05", early, claim_id="claim:a", value="project-alpha", validity=OPEN
         ),
     )
     second = _record(
@@ -237,7 +237,7 @@ def test_conflicting_claims_observed_at_one_instant_refuse_by_name(tmp_path):
             "03:04:05",
             late,
             claim_id="claim:b",
-            value="agenticos",
+            value="project-beta",
             validity=OPEN,
         ),
     )

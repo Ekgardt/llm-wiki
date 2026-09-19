@@ -85,20 +85,20 @@ def _callers_answer() -> dict:
     }
     callers = [
         _caller_row(
-            "/home/user/llm-wiki/scripts/retrieval.py",
+            "/repo/llm-wiki/scripts/retrieval.py",
             2845,
             "scripts.retrieval._fused_candidates",
             _HASH,
         ),
         _caller_row(
-            "/home/user/llm-wiki/tests/test_retrieval.py",
+            "/repo/llm-wiki/tests/test_retrieval.py",
             141,
             "tests.test_retrieval.test_rrf_is_rank_only",
             _OTHER_HASH,
         ),
     ]
     return {
-        "directory": "/home/user/llm-wiki",
+        "directory": "/repo/llm-wiki",
         "mode": "callers",
         "architecture": {"callers": callers, **report},
         **report,
@@ -120,18 +120,18 @@ def _candidate_row(name: str, identifier: str, path: str, line: int) -> dict:
 def _dead_code_answer() -> dict:
     """The live fallback's `symbol_id` is readable, not a hash - it must stay."""
     return {
-        "directory": "/home/user/llm-wiki",
+        "directory": "/repo/llm-wiki",
         "candidates": [
             _candidate_row(
                 "_flush_started",
                 "scripts.integration_adapter::_flush_started",
-                "/home/user/llm-wiki/scripts/integration_adapter.py",
+                "/repo/llm-wiki/scripts/integration_adapter.py",
                 1845,
             ),
             _candidate_row(
                 "_search_backends",
                 _HASH,
-                "/home/user/llm-wiki/scripts/search_memory.py",
+                "/repo/llm-wiki/scripts/search_memory.py",
                 4831,
             ),
         ],
@@ -334,7 +334,7 @@ def test_an_answer_with_nothing_to_drop_is_returned_unchanged():
 def _summary_answer() -> dict:
     """`mode=summary`'s real shape: 97% of it is bare `code:node:` strings."""
     return {
-        "directory": "/home/user/llm-wiki",
+        "directory": "/repo/llm-wiki",
         "mode": "summary",
         "architecture": {
             "entry_points": [
@@ -342,7 +342,7 @@ def _summary_answer() -> dict:
                     "kind": "main",
                     "name": "main",
                     "node_id": _HASH,
-                    "file": "/home/user/llm-wiki/benchmark/build_flush_corpus.py",
+                    "file": "/repo/llm-wiki/benchmark/build_flush_corpus.py",
                     "line": 236,
                 }
             ],
@@ -494,13 +494,13 @@ def test_a_long_table_states_its_header_once_and_loses_nothing():
 def test_one_shared_path_prefix_is_stated_once_not_once_per_row():
     """Lossless: the prefix is still in the answer, exactly once."""
     rows = [
-        {"file": f"/home/user/llm-wiki-tasks/benchmark/module_{index}.py", "line": index}
+        {"file": f"/repo/llm-wiki-tasks/benchmark/module_{index}.py", "line": index}
         for index in range(12)
     ]
     shaped = answer_budget.shape_code_answer({"entry_points": list(rows)})
 
     assert shaped["entry_points_row_prefixes"] == {
-        "file": "/home/user/llm-wiki-tasks/benchmark/"
+        "file": "/repo/llm-wiki-tasks/benchmark/"
     }
     restored = [
         {**row, "file": shaped["entry_points_row_prefixes"]["file"] + row["file"]}

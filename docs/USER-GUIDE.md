@@ -69,8 +69,10 @@ verified network isolation.
 
 ### Option A: Local installer from an inspected checkout (recommended)
 
-Install `uv` from https://docs.astral.sh/uv/ first. The installer does not execute a
-mutable remote dependency bootstrap.
+Install `uv` from https://docs.astral.sh/uv/ first — version **0.12.3 exactly**, which is
+what `pyproject.toml` requires and what both installers and every CI job pin; any other
+version is refused with the upgrade command. The installer does not execute a mutable remote
+dependency bootstrap.
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
@@ -87,7 +89,10 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 
 Remote bootstrap accepts only a full 40-hex `LLM_WIKI_COMMIT`. It fetches that exact
 commit into a new `~/LLM-wiki`, verifies `HEAD`, repository identity, and required files,
-then executes the checked-out installer. Branches and tags are rejected. Existing
+then executes the checked-out installer. Branches and tags are rejected. The verified
+commit becomes the local `main` branch tracking `origin/main`, so the nightly fast-forward
+reaches this vault like a cloned one; `git -C ~/LLM-wiki checkout --detach` freezes it, and
+the nightly report then says `skipped (detached_head)`. Existing
 checkouts retain all remote settings unless `--protect-push` or `-ProtectPush` is explicit.
 The installer detects agents. It configures OpenCode, Codex, and Claude only when their
 configuration verifies.
@@ -106,10 +111,14 @@ knowledge, operational state, retired databases, legacy caches, tombstones, or
 compatibility markers. It reports Reliability V3 fresh, upgrade-required, partial,
 adopted, and conflict evidence in a closed JSON envelope.
 
-Mutating Reliability V3 adoption remains disabled until the v3 queue mutation and
-canonical ownership tasks are complete. Supplying the full offline apply gate currently
-fails closed with `reliability_v3_runtime_activation_incomplete`; do not treat that as a
-successful cutover and do not remove v2 state manually.
+The offline apply gate (`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`)
+performs the cutover on a fresh, upgrade-required, or partly adopted vault, and resumes an
+interrupted one. The installer runs it by itself only on a fresh vault, where no earlier
+queue exists that a running agent could be writing. On a vault that already holds the
+earlier queue, close every agent session and either rerun the installer with
+`--confirm-all-agents-stopped` (PowerShell `-ConfirmAllAgentsStopped`) or run the command
+above; the flag is your statement, not something the installer can check for you. Never
+remove v2 state by hand.
 
 ### Option B: Manual setup
 
@@ -213,25 +222,32 @@ the next nightly pass. Details:
 
 ## Read-only Python code navigation
 
-Precise Python navigation uses pinned **Pyright 1.1.411** through the existing
-`get_architecture` MCP tool. Install the managed package explicitly:
+Precise navigation uses four pinned managed language servers through the existing
+`get_architecture` MCP tool: **Pyright 1.1.411** for Python,
+**typescript-language-server 6.0.0** (tsserver 5.9.3) for TypeScript and
+JavaScript, **gopls v0.23.0** for Go and **rust-analyzer 1.98.1** for Rust. The file
+suffix chooses the server; a suffix none of them claims degrades to structural
+evidence. Install each managed package explicitly:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-No query, doctor check, or profile discovery path downloads or updates Pyright.
+No query, doctor check, or profile discovery path downloads or updates a server.
 The precise modes are `mode=definition`, `mode=references`,
 `mode=implementations`, `mode=type`, and `mode=diagnostics`; positioned
-`callers` and `callees` also use Pyright. Input lines are one-based and character
-values are zero-based UTF-8 byte offsets. Structural modes retain their existing
-10-second deadline; precise modes use one absolute 60-second deadline.
+`callers` and `callees` also use a managed server. Input lines are one-based and
+character values are zero-based UTF-8 byte offsets. Structural modes retain their
+existing 10-second deadline; precise modes use one absolute 60-second deadline.
 
 This feature supports **trusted local repositories** only. It is not an OS sandbox.
-Pyright runs with the current user's permissions and may read configured
-interpreters, external stubs, and libraries. Windows uses a Job Object for the
-assigned process tree. POSIX uses a process group while descendants remain in that
-group; hostile `setsid()` escape is unsupported.
+A managed server runs with the current user's permissions and may read configured
+interpreters, external stubs, toolchains, and libraries. Windows uses a Job Object
+for the assigned process tree. POSIX uses a process group while descendants remain in
+that group; hostile `setsid()` escape is unsupported.
 
 Every result binds pre/post workspace revisions and current source citations. One
 stale attempt is retried once. There is no semantic result cache, no query-time graph
@@ -299,6 +315,14 @@ NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   fetch any missing pinned model weights → compact retrieval telemetry →
   prune old reports → fast-forward the checkout
 
+The fast-forward brings new code in; it does not bring everything into force. Optional
+extras are never upgraded unattended (the `reranker` extra alone pins gigabytes), and owned
+resources — scheduler entries, agent hook blocks, shell profile lines — are written only by
+an explicit install. So when the update moves `uv.lock` the report names the extras you have
+installed, and when it changes what the installer renders it says `owned resources
+rerun_installer`. Resync an extra with `uv sync --locked --no-default-groups --inexact
+--extra <name>`, and re-render owned resources by running the installer again.
+
 SUNDAY 04:00 (scheduler)
   Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
 ```
@@ -310,6 +334,17 @@ signs in; it does not run under a logged-out account. Linux user-systemd timers 
 persistent catch-up after the user manager starts. The product does not claim
 wake-from-sleep or logged-out execution. Explicit cron fallback follows the host's
 cron and sleep policy.
+When a night is missed entirely, the next session start asks for it: the maintenance
+pass a session start already spawns runs that day's nightly once, claimed in
+`run/state.json` so two sessions cannot both run it.
+
+Two of the four backends can kill a pass that overruns: the systemd timer carries
+`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 3 hours nightly and 5 hours
+weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
+bounds only how long it waits after asking a job to stop — so there a hung pass ends when its
+maintenance lease is reclaimed, not on a clock. The scheduler's own log
+(`logs/scheduled-*.log`, `logs/cron-*.log`) is kept by the same retention as the maintenance
+reports: 30 days, 60 files, 32 MB per family.
 
 If the LLM is offline, work is queued
 in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
@@ -373,9 +408,12 @@ nightly pass refreshes every registered repository. See
 
 ```bash
 uv run python scripts/compile_memory.py              # compile changed daily logs
-uv run python scripts/compile_memory.py --all        # recompile everything
 uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
 ```
+
+There is no "recompile everything": a day whose compile was committed is never
+compiled again. `--all` is deprecated — still accepted, it prints one line
+saying it does nothing and will be removed.
 
 Compile runs automatically on MAJOR sessions after the hour cutoff, but you
 can trigger it manually anytime. The pipeline uses VERIFY-BEFORE-WRITE —
@@ -390,6 +428,14 @@ uv run python scripts/archive_stale.py --apply           # archive old pages by 
 uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode
 uv run python scripts/doctor.py                            # local health; --repair is explicit
 uv run --locked --no-sync python scripts/sync_memory.py --check --json  # read-only check
+```
+
+Per-project brief — the decisions, patterns and open threads of one project,
+written to `knowledge/projects/<slug>/context.md`:
+
+```bash
+uv run python scripts/build_context.py --slug my-project           # print it
+uv run python scripts/build_context.py --slug my-project --write   # write the page
 ```
 
 ### Bounded synchronization
@@ -495,11 +541,22 @@ uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
 ```
 
+Three one-shot repairs exist for states that defects fixed in September 2026 left
+behind. A vault installed since then never meets them; an older one may, and nothing
+else reclaims those bytes. Each prints what it found and changes nothing until
+`--apply`:
+
+```bash
+uv run --locked --no-sync python scripts/repair_refused_appends.py        # blocks a lost append race never wrote
+uv run --locked --no-sync python scripts/repair_refused_page_creation.py  # pages a refused compile never wrote
+uv run --locked --no-sync python scripts/repair_exhausted_queue_tasks.py  # tasks out of attempts that still look ready
+```
+
 Recovery rolls verified prepared/applying transactions forward and quarantines a
 target that matches neither its recorded before nor after hash. It never overwrites
 unknown bytes. Undo creates a new forward transaction and works only while every
 target still matches the original committed after-hash. Pruning removes expired
-transaction images; after the 30-day undo window, or after an explicit prune, that
+transaction images; after the 2-day undo window, or after an explicit prune, that
 undo history is gone. External editors may briefly observe a mixed tree while a
 multi-file transaction applies. CAS safety is guaranteed only for cooperating
 transaction-API writers; concurrent external edits are unsupported and detected
@@ -521,6 +578,14 @@ plaintext staging image is removed after Restic finishes. Backup refuses live or
 unknown owners, source races, invalid Reliability-v3 state, corrupt databases,
 overlapping repository/staging paths, partial Restic exit, or failed repository check.
 
+The image holds what Git does not: the knowledge, the runtime databases, every
+untracked file, and any tracked file you have modified since the last commit. A
+tracked file identical to `HEAD` is left out — a clone brings it back — and so are
+`cache/`, `logs/`, `run/` (staged separately), `.git/`, `.venv/`, and tool caches such
+as `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache` and `node_modules`. A
+vault that is not a git checkout, or a machine without `git`, is backed up whole.
+Recovery is therefore: clone the repository, install, restore, publish.
+
 Restore only to a pre-existing empty directory:
 
 ```bash
@@ -533,12 +598,27 @@ clears restored plaintext; success leaves validated `vault/` and `state/` direct
 for reviewed recovery. This command never overwrites or automatically publishes into
 an installed vault.
 
+Putting a restored image into an installed vault is a separate, explicit step:
+
+```bash
+uv run python scripts/private_vault_backup.py publish --image <restore-dir> --manifest-sha256 <64-hex-digest>
+```
+
+Publish validates the image again, then writes only files that are absent from the
+vault named by `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`. A destination that exists with
+different bytes refuses the whole publication before anything is written, and the
+refusal names the file by its place in the image (for example
+`vault/knowledge/notes/page.md`). Nothing is merged or overwritten, and there is no
+force flag. Symlinks and empty directories are not written; the receipt counts them as
+`unpublished_entries`.
+
 ### Queue migration and work
 
 ```bash
 uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py unblock <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
 uv run python scripts/memory_queue.py restore --export <path>
@@ -566,6 +646,8 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
+The weekly pass runs this archiver itself (step `daily_archive`), so the hot window
+holds without anyone typing the command; running it by hand does the same work.
 The archive moves, never deletes, eligible daily logs older than the 90-day hot
 window. A source remains flat if its compile receipt, terminal operations, queue
 preflight, exact evidence, or pins do not validate. Published BagIt bags are immutable
@@ -587,7 +669,7 @@ backfill remain disabled.
 
 `cache/` and `logs/` are disposable. Do not delete `run/` until `doctor` reports no
 nonterminal, conflicted, quarantined, or source failure transaction; no transaction
-inside the 30-day undo window; no retained queue task/result or legacy queue artifact;
+inside the 2-day undo window; no retained queue task/result or legacy queue artifact;
    and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
    retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never

@@ -14,6 +14,7 @@ from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
+import lane_score
 from provenance import authority_weight, curated_pages_first, source_type_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
@@ -192,15 +193,6 @@ def _optional_stage_fits(kind: str | None, deadline: float) -> bool:
     return observed <= window
 
 
-def _require_optional_stage_time(
-    deadline: float, cancelled: Callable[[], bool] | None
-) -> None:
-    if deadline - time.monotonic() <= 0:
-        raise OptionalStageTimeout("optional stage deadline reached")
-    if cancelled is not None and cancelled():
-        raise OptionalStageTimeout("optional stage deadline reached")
-
-
 def _optional_stage_admitted(
     kind: str | None, deadline: float, cancelled: Callable[[], bool] | None
 ) -> bool:
@@ -218,18 +210,39 @@ def _optional_stage_admitted(
     return _optional_stage_fits(kind, deadline)
 
 
+def _every_value_measures(_value: Any) -> bool:
+    """A stage that says nothing about itself is measured by every run it finishes."""
+    return True
+
+
+def _observe_completed_stage(
+    kind: str | None, started: float, value: Any, observes: Callable[[Any], bool]
+) -> None:
+    """Record what the run cost, unless its own result says it did not finish."""
+    if not observes(value):
+        return
+    _observe_optional_stage(kind, time.monotonic() - started)
+
+
 def _run_optional_bounded(
     operation: Callable[[], Any],
     *,
     deadline: float,
     cancelled: Callable[[], bool] | None,
     kind: str | None = None,
+    observes: Callable[[Any], bool] = _every_value_measures,
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers.
 
     The stage is always started; what varies is whether the caller waits for
     it. That split is the point: warming is never refused, only the spending of
     a budget that cannot buy a result.
+
+    `observes` reads the value the operation returned and says whether it is
+    evidence of a finished run. A stage that gives up on its own deadline
+    returns normally, and timing that run would teach the cost model a number
+    bounded by the budget rather than by the work. See
+    `docs/research/2026-09-17-an-abandoned-stage-is-not-a-measurement.md`.
     """
     # Decided before the worker starts, and deliberately so: this run is about
     # to record its own cost, and a fast one would otherwise overwrite the
@@ -240,7 +253,7 @@ def _run_optional_bounded(
         raise OptionalStageTimeout("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-    _start_optional_worker(operation, result, completed, slots, kind)
+    _start_optional_worker(operation, result, completed, slots, kind, observes)
     _require_admitted_optional_stage(admitted)
     _await_optional_stage(completed, deadline, cancelled)
     ok, value = result.get_nowait()
@@ -269,6 +282,7 @@ def _start_optional_worker(
     completed: threading.Event,
     slots: threading.BoundedSemaphore,
     kind: str | None = None,
+    observes: Callable[[Any], bool] = _every_value_measures,
 ) -> None:
     def run() -> None:
         started = time.monotonic()
@@ -278,8 +292,9 @@ def _start_optional_worker(
             result.put((False, exc))
         else:
             # Only a run that produced something is a cost observation. A fast
-            # failure is not evidence that the work is cheap.
-            _observe_optional_stage(kind, time.monotonic() - started)
+            # failure is not evidence that the work is cheap, and neither is a
+            # run the stage abandoned on its own deadline.
+            _observe_completed_stage(kind, started, value, observes)
             result.put((True, value))
         finally:
             completed.set()
@@ -360,7 +375,9 @@ GRAPH_EDGE_DECAY: dict[str, float] = {
     "CHECKPOINT_EVIDENCED_BY_EVENT": 0.65,
     "CHECKPOINT_HAS_BLOCKER": 0.75,
     "CHECKPOINT_RECORDED_DECISION": 0.75,
-    "CO_CHANGED_WITH": 0.45,
+    # `CO_CHANGED_WITH` was weighted here with no producer anywhere in the
+    # product; its island was removed on 2026-09-17 (audit 3, C3). See
+    # `docs/research/2026-09-17-graph-three-islands-nothing-sails-to.md`.
     "CONTAINS": 0.70,
     "DEFINES": 0.80,
     "EVIDENCED_BY": 0.70,
@@ -391,10 +408,13 @@ GRAPH_PROFILE_EDGE_TYPES: dict[str, tuple[str, ...]] = {
         "IMPORTS",
         "INHERITS",
     ),
+    # `CO_CHANGED_WITH` stood here too until its island was removed on
+    # 2026-09-17 (audit 3, C3). Every name in these tuples has to be a key of
+    # `GRAPH_EDGE_DECAY`, or the profile asks for a weight that is not there;
+    # `tests/test_graph_retrieval.py` holds that line.
     "IMPACT": (
         "CALLS",
         "CHECKPOINT_CHANGED_FILE",
-        "CO_CHANGED_WITH",
         "IMPORTS",
         "READS",
         "REFERENCES_SYMBOL",
@@ -1266,8 +1286,24 @@ def _standing_disposition(query: str | None) -> dict[str, float]:
         from retrieval_disposition import disposition
 
         return disposition(query)
-    except Exception:  # noqa: BLE001 - a missing history must not fail a search
+    except Exception as exc:  # noqa: BLE001 - named, never silent; the search still answers
+        _name_dropped("retrieval_disposition", exc)
         return {}
+
+
+def _name_dropped(kind: str, error: BaseException) -> None:
+    """A best-effort step that failed is recorded, not forgotten.
+
+    The bounded failure trail `mcp_server` already writes a dropped telemetry
+    event to, and doctor reads. Silence made "this ran and found nothing" look
+    exactly like "this raised on every call", which is how the key lookup of
+    2026-09-16 stayed broken for a day. See
+    `docs/research/2026-09-18-the-context-is-built-under-the-same-clock.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure(kind, describe_error(error), error=error)
 
 
 def _co_activation_table() -> dict[str, dict[str, float]]:
@@ -1275,7 +1311,8 @@ def _co_activation_table() -> dict[str, dict[str, float]]:
         from co_activation import load
 
         return load()
-    except Exception:  # noqa: BLE001 - a missing table must not fail a search
+    except Exception as exc:  # noqa: BLE001 - named, never silent; the search still answers
+        _name_dropped("co_activation", exc)
         return {}
 
 
@@ -1921,6 +1958,11 @@ def _run_graph_backend(
     directions = GRAPH_PROFILE_DIRECTIONS.get(requested, ("out",))
     edge_types = _profile_edge_types(requested, graph_edge_families)
     seeds = _graph_seeds(lexical_hits, dense_hits)
+    # Built before the call, not inside it: a profile naming an edge type this
+    # product no longer weighs is our own defect, and reading it as "the graph
+    # backend failed" hid one for a day. See
+    # `docs/research/2026-09-18-a-profile-asks-only-for-edges-this-product-weighs.md`.
+    edge_decay = {edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types}
     try:
         raw_hits = graph_backend(
             **filters,
@@ -1928,7 +1970,7 @@ def _run_graph_backend(
             max_hops=GRAPH_MAX_HOPS,
             directions=directions,
             edge_types=edge_types,
-            edge_decay={edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types},
+            edge_decay=edge_decay,
             per_seed_limit=per_seed_limit,
             global_limit=global_limit,
             deadline_monotonic=deadline_monotonic,
@@ -2149,7 +2191,22 @@ def _run_reranker(
         deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
+        observes=_rerank_scored,
     )
+
+
+def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the stage really scored, or returned the fused order it was given.
+
+    A rerank cut by its own deadline (and an unavailable or failed one) returns
+    normally with every document marked not applied. Timing such a run teaches
+    the admission model a cost bounded by the budget the stage was given, so a
+    warm reranker that needs longer than the share on offer would be admitted,
+    waited for and abandoned on every call.
+    """
+    if not reranked:
+        return False
+    return bool(reranked[0].get("reranker_applied"))
 
 
 def _reranked_candidates(
@@ -2754,10 +2811,15 @@ def _with_reported_trace(
 
 
 def _impression_candidate_id(item: Mapping[str, Any]) -> str:
-    identity = _first_present(item, ("chunk_id", "slug", "candidate_id"), None)
-    if identity is not None:
-        return str(identity)
-    return Path(str(item.get("path", ""))).stem
+    """The page that was shown, named the way every other event names a page.
+
+    One column, one identity: the vault-relative path. A generation-mode row
+    recorded its chunk hash here, which no reader of the column joins on, so
+    those impressions never reached the page's access count; a bare stem is not
+    an identity either, since two projects both hold a `state.md`. See
+    `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    """
+    return str(_first_present(item, ("path", "relative_path"), ""))
 
 
 def _record_impressions(
@@ -2774,8 +2836,8 @@ def _record_impressions(
         _emit_impressions(
             rows, query=query, corpus_generation=corpus_generation, source_tool=source_tool
         )
-    except Exception:  # noqa: BLE001 - telemetry is never load-bearing
-        pass
+    except Exception as exc:  # noqa: BLE001 - named, never silent; telemetry is not load-bearing
+        _name_dropped("retrieval_impression", exc)
 
 
 def _impression_event(
@@ -3010,22 +3072,59 @@ def _is_episodic(relative_path: str) -> bool:
     return str(relative_path).replace("\\", "/").startswith(_EPISODIC_ROOTS)
 
 
-def _repeat_unit(candidate: RetrievalCandidate) -> tuple:
-    """What a visible slot belongs to: an episode, or a page.
+def _evidence_ordered(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+) -> tuple[RetrievalCandidate, ...]:
+    """Turns of episodes ordered by one score over the lanes; pages keep the trust order.
 
-    Since 2026-09-08 the unit was the entry — the page and the heading the chunk
-    sits under — because a daily file holds every session of its day and by page
-    two sessions of one day took one slot between them. That is right for a file
-    of episodes and wrong for a compiled page, whose headings are sections of one
-    argument: measured 2026-09-13 on the installed vault, ten visible rows held
-    six pages, one workflow note taking ranks 3, 4 and 5, and the page that
-    should have been tenth was pushed to twelfth — which the selective-forgetting
-    stand reported as a page forgotten. Research:
-    `docs/research/2026-09-13-one-argument-one-slot.md`.
+    The score reads what each lane said, what it did not say, whose turn it is and the
+    cross-encoder where it ran (`lane_score`). It is applied to episodes only: it was fitted
+    on conversation turns, while a compiled page's place is decided by the trust table.
+    Measured 2026-09-16 on 189 LongMemEval questions, all evidence inside the reader's
+    twelve: 0.698 before, 0.815 after. Research:
+    `docs/research/2026-09-16-one-score-over-the-lanes.md`.
     """
-    if _is_episodic(candidate.relative_path):
-        return (candidate.relative_path, tuple(candidate.heading_path))
-    return (candidate.relative_path,)
+    places = _episodic_places(candidates)
+    if len(places) < 2:
+        return tuple(candidates)
+    ordered = sorted(
+        (candidates[index] for index in places),
+        key=lambda item: -lane_score.candidate_score(item, display_meta),
+    )
+    return tuple(_merged_places(candidates, places, ordered))
+
+
+def _visible_order(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    exact_query: str,
+) -> tuple[RetrievalCandidate, ...]:
+    """The order a caller sees: distinct pages, episodes by lane score, the named file first.
+
+    The promotion is the last step because the two before it know nothing of
+    it: page diversity put a named daily file behind every compiled page, and
+    the lane score then re-sorted it among the episodes, so a file asked for by
+    its date was no longer the answer and the mode no longer said `EXACT`.
+    Research: `docs/research/2026-09-17-a-named-file-stays-first.md`.
+    """
+    ordered = _evidence_ordered(_page_diverse(candidates), display_meta)
+    return _promote_exact_filename(ordered, exact_query)
+
+
+def _episodic_places(candidates: Sequence[RetrievalCandidate]) -> list[int]:
+    return [index for index, item in enumerate(candidates) if _is_episodic(item.relative_path)]
+
+
+def _merged_places(
+    candidates: Sequence[RetrievalCandidate],
+    places: Sequence[int],
+    ordered: Sequence[RetrievalCandidate],
+) -> list[RetrievalCandidate]:
+    merged = list(candidates)
+    for place, candidate in zip(places, ordered):
+        merged[place] = candidate
+    return merged
 
 
 def _place_by_page(
@@ -3034,7 +3133,26 @@ def _place_by_page(
     first: list[RetrievalCandidate],
     extras: list[RetrievalCandidate],
 ) -> None:
-    entry = _repeat_unit(candidate)
+    """A page's first chunk takes a slot; a chunk of an episode keeps its rank.
+
+    A compiled page's headings are sections of one argument, so its later chunks
+    follow the distinct pages: measured 2026-09-13 on the installed vault, ten
+    visible rows held six pages, one workflow note taking ranks 3, 4 and 5
+    (`docs/research/2026-09-13-one-argument-one-slot.md`).
+
+    An episode is not one argument. A conversation is cut into turns and its
+    turns hold different facts; giving a session one slot pushed every later
+    turn behind the first chunk of every other session. Measured 2026-09-15 on
+    189 LongMemEval questions, all evidence turns in the first twelve rows: 0.392
+    at one slot per session, 0.566 at two, 0.608 at three, 0.698 in relevance
+    order, which no concave per-session reward beat. A reader that needs every
+    fact is served by relevance order, not by diversity.
+    Research: `docs/research/2026-09-15-what-a-slot-should-reward.md`.
+    """
+    if _is_episodic(candidate.relative_path):
+        first.append(candidate)
+        return
+    entry = (candidate.relative_path,)
     if entry in seen:
         extras.append(candidate)
         return
@@ -3059,8 +3177,9 @@ def _page_diverse(
 ) -> tuple[RetrievalCandidate, ...]:
     """One chunk per page first, then every chunk that repeats a page.
 
-    This is the last word on the order, so it is where a page is stopped from
-    taking several visible slots. Nothing is dropped — the repeats follow the
+    This is the first step of `_visible_order`, and it is where a page is stopped
+    from taking several visible slots. Chunks of episodes are not repeats and keep
+    their rank (`_place_by_page`). Nothing is dropped — the repeats follow the
     first pass — so a caller that wanted every chunk of one page still receives
     them, in order. The remedies that compare candidates to each other (maximal
     marginal relevance, semantic deduplication) are not needed here: the
@@ -3289,9 +3408,10 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
         graph_enabled=progress.graph_enabled,
     )
     candidates, display_meta = _partial_candidates(progress, signals)
-    candidates = _promote_exact_filename(candidates, _exact_query(progress.analysis))
+    exact_query = _exact_query(progress.analysis)
+    candidates = _promote_exact_filename(candidates, exact_query)
     return RetrievalResult(
-        candidates=_capped(_page_diverse(candidates), progress.limit),
+        candidates=_capped(_visible_order(candidates, display_meta, exact_query), progress.limit),
         trace=_retrieval_trace(
             requested=progress.requested,
             effective=effective,
@@ -3402,7 +3522,7 @@ def _executed_plan(
     candidates = _promote_exact_filename(candidates, exact_query)
     progress.candidates = candidates
     _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(_page_diverse(candidates), progress.limit)
+    candidates = _capped(_visible_order(candidates, display_meta, exact_query), progress.limit)
 
     return RetrievalResult(
         candidates=candidates,
@@ -3713,7 +3833,9 @@ def _first_present(row: Mapping[str, Any], keys: tuple[str, ...], fallback: Any)
 
 
 def _legacy_candidate_id(row: Mapping[str, Any], path: str) -> str:
-    fallback = Path(path).stem or path
+    import search_memory
+
+    fallback = search_memory.legacy_candidate_id(path) or path
     return str(_first_present(row, ("candidate_id", "chunk_id", "slug"), fallback))
 
 

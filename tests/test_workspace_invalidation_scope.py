@@ -263,9 +263,15 @@ class _Captured:
         self.content = b""
 
 
+class _Policy:
+    def __init__(self, code_roots) -> None:
+        self.code_roots = tuple(code_roots)
+
+
 class _Snapshot:
-    def __init__(self, paths) -> None:
+    def __init__(self, paths, code_roots=()) -> None:
         self.sources = [_Captured(path) for path in paths]
+        self.policy = _Policy(code_roots)
 
 
 BOUNDARY_PATHS = (
@@ -295,8 +301,30 @@ def test_the_builder_and_the_extractor_agree_on_where_the_boundary_is():
     code = _extraction_paths(doctor._code_extraction_sources(snapshot))
     knowledge = _extraction_paths(doctor._knowledge_extraction_sources(snapshot))
     workspace = builder._workspace_source_ids(
-        {path: {"relative_path": path} for path in BOUNDARY_PATHS}
+        {path: {"relative_path": path} for path in BOUNDARY_PATHS}, ()
     )
 
     assert code == workspace
     assert not (knowledge & workspace)
+
+
+def test_a_repository_whose_knowledge_is_a_code_root_extracts_it_as_code():
+    """`knowledge/` is this vault's noun, not a fact about every repository.
+
+    Decision:
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    import doctor
+    import evidence_graph_builder as builder
+
+    roots = ("knowledge", "scripts")
+    snapshot = _Snapshot(BOUNDARY_PATHS, roots)
+    workspace = builder._workspace_source_ids(
+        {path: {"relative_path": path} for path in BOUNDARY_PATHS}, roots
+    )
+
+    assert (
+        _extraction_paths(doctor._code_extraction_sources(snapshot)),
+        _extraction_paths(doctor._knowledge_extraction_sources(snapshot)),
+        workspace,
+    ) == (set(BOUNDARY_PATHS), set(), set(BOUNDARY_PATHS))

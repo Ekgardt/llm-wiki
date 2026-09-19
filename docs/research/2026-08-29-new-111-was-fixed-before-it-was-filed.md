@@ -1,7 +1,7 @@
 # NEW-111 was fixed sixty-seven minutes after it was recorded
 
 **Filed:** 2026-08-29. **Measurements taken:** 2026-08-28 22:40 – 2026-08-29
-00:20 UTC on `/home/user/llm-wiki`, HEAD `25e2e73`.
+00:20 UTC on `<vault>`, HEAD `25e2e73`.
 **Kind:** verification of an open audit item. **No product code was changed.**
 
 One-sentence summary: `EvidenceGraph.open_active_for_repository` no longer fails
@@ -75,7 +75,7 @@ worst case matches the registry's «через ~4 с».
 ## The consequence the registry cared about
 
 One real code question through `mcp_server._execute_tool_call`
-(`get_architecture`, `mode=summary`, directory `/home/user/llm-wiki`):
+(`get_architecture`, `mode=summary`, directory `<vault>`):
 
 ```
 arm=current  elapsed=5.31 s

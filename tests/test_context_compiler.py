@@ -1051,18 +1051,3 @@ def test_build_advisory_passes_logical_path_to_hash_qualified_l1_reader(
             },
         )
     ]
-
-
-def test_contextual_retrieval_legacy_cache_path_is_hash_suffixed():
-    """Task 15: legacy contextual cache path embeds source hash."""
-    import contextual_retrieval
-
-    plain = contextual_retrieval.legacy_context_cache_path("auth")
-    assert plain.name == "auth.ctx"
-
-    hashed = contextual_retrieval.legacy_context_cache_path(
-        "auth", source_sha256="a" * 64
-    )
-    assert hashed.name.startswith("auth.")
-    assert hashed.name.endswith(".ctx")
-    assert hashed.name != "auth.ctx"

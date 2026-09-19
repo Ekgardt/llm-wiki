@@ -5,11 +5,10 @@ Fires at session end from any cwd. Appends a minimal marker entry to
 metadata. This lets cross-project sessions leave breadcrumbs in the
 shared daily log.
 
-Companion to the project-level `session_end_capture.py` hook, which spawns
-`flush_memory.py` (heavy, LLM-driven, transcript-based) when cwd = vault.
-To avoid duplicate work and noisy logs, this user-level hook **skips**
-when the current directory is inside the vault — the project-level hook
-already handles that case with richer content.
+Companion to the adapter's own session-end capture, which publishes the durable
+capture intent the worker classifies. To avoid duplicate work and noisy logs, this
+user-level hook **skips** when the current directory is inside the vault — the
+vault's own capture already handles that case with richer content.
 
 Contract (hard requirements, mirrors session_start_project_state.py):
     * Must exit 0 on ANY error. Breaking a session-end is worse than a
@@ -39,6 +38,7 @@ import os
 import re
 import sys
 import traceback
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -50,7 +50,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
-from daily_log_append import locked_append  # noqa: E402
+from daily_log_append import append_deadline, locked_append  # noqa: E402
 from event_envelope import canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -222,8 +222,16 @@ def _is_user_home(project_dir: Path) -> bool:
 def _append_entry(
     daily_path: Path, entry: str, operation_id: str | None = None
 ) -> None:
-    """Append entry to daily log via canonical locked writer."""
-    locked_append(daily_path, entry, operation_id=operation_id)
+    """Append entry to daily log via canonical locked writer, inside the hook's budget."""
+    # Read at the call, as the two breadcrumb hooks do: the budget is the shared module's.
+    from daily_log_append import LIFECYCLE_APPEND_BUDGET_SECONDS
+
+    locked_append(
+        daily_path,
+        entry,
+        operation_id=operation_id,
+        deadline=append_deadline(LIFECYCLE_APPEND_BUDGET_SECONDS),
+    )
 
 
 def _vault_paths() -> tuple[Path, Path] | None:
@@ -276,14 +284,15 @@ def _session_operation_id(payload: dict) -> str | None:
     return f"session-end:{source_event_id}"
 
 
-def _tag_session() -> None:
+def _tag_session() -> bool:
+    """True when an entry was appended; False for every skip."""
     paths = _vault_paths()
     if paths is None:
-        return
+        return False
     vault, daily_dir = paths
     project_dir = _eligible_project(vault)
     if project_dir is None:
-        return
+        return False
     payload = _read_payload()
     now = datetime.now()
     slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
@@ -293,13 +302,28 @@ def _tag_session() -> None:
         _session_entry(payload, slug, project_dir, now),
         operation_id=_session_operation_id(payload),
     )
+    return True
+
+
+def _report(written: bool) -> None:
+    """Say on stdout whether a line was written; the exit code stays 0 either way.
+
+    A skip (no vault root, a session inside the vault, a session started in `$HOME`)
+    used to be indistinguishable from a write, so `codex_memory daily-log` printed
+    "Daily log tagged" for a day nothing was tagged in. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    with suppress(OSError, ValueError):
+        print(json.dumps({"daily_log_written": written}, ensure_ascii=False))
 
 
 def main() -> int:
+    written = False
     try:
-        _tag_session()
+        written = _tag_session()
     except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
+    _report(written)
     return 0
 
 

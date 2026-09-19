@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import (  # noqa: E402
     REPORTS_DIR,
     StateLockTimeout,
+    atomic_write,
     load_state,
     update_state,
 )
@@ -98,12 +102,26 @@ def is_contention(error: BaseException) -> bool:
 DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
 
 
+class DurableWorkExhausted(RuntimeError):
+    """The task behind a durable capture spent its last attempt and is now dead.
+
+    Nothing retries a dead task: it waits for an operator's `redrive`. That is a
+    loss to show, not work that is merely late. See
+    `docs/research/2026-09-17-an-absent-provider-is-waited-for-and-a-spent-task-is-a-loss.md`.
+    """
+
+
 def _outcome_of(error: BaseException | None, kind: str = "") -> str:
+    if isinstance(error, DurableWorkExhausted):
+        return "lost"
+    return "deferred" if _is_retried_work(error, kind) else "lost"
+
+
+def _is_retried_work(error: BaseException | None, kind: str) -> bool:
+    """Durable work a later worker takes up, or a writer race the next event repeats."""
     if kind in DURABLE_WORK_KINDS:
-        return "deferred"
-    if error is not None and is_contention(error):
-        return "deferred"
-    return "lost"
+        return True
+    return error is not None and is_contention(error)
 
 
 def _safe_reason(reason: str) -> str:
@@ -151,16 +169,185 @@ def _existing_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
 
-def _append_failure_line(record: dict[str, str]) -> None:
-    """Append to the trail and trim it back under the cap, best effort."""
-    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+# Where an append is a seek and then a write (the Windows C runtime), two
+# writers that seek to the same end overwrite each other, so there the write is
+# made under a one-byte lock. The byte is far past the trail's cap and not byte
+# 0: a Windows lock is mandatory, and a lock on real bytes would fail a reader
+# while a line is being added. The wait is short and bounded because this runs
+# inside hooks with budgets of a few seconds. Research:
+# `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+TRAIL_LOCK_OFFSET = 1 << 30
+TRAIL_LOCK_ATTEMPTS = 20
+TRAIL_LOCK_PAUSE_SECONDS = 0.025
+
+
+def _append_locking():
+    """The byte-range locking module where append is not atomic, else None."""
+    if os.name != "nt":
+        return None
+    import msvcrt
+
+    return msvcrt
+
+
+def _lock_trail(descriptor: int, locking, pause) -> bool:
+    """Take the trail's lock byte, or say within a bounded wait that it is held."""
+    for _ in range(TRAIL_LOCK_ATTEMPTS):
+        os.lseek(descriptor, TRAIL_LOCK_OFFSET, os.SEEK_SET)
+        try:
+            locking.locking(descriptor, locking.LK_NBLCK, 1)
+        except OSError:
+            pause(TRAIL_LOCK_PAUSE_SECONDS)
+            continue
+        return True
+    return False
+
+
+def _unlock_trail(descriptor: int, locking) -> None:
+    # Closing the descriptor releases the byte too, so a failed unlock is not a
+    # failed write and must not turn one line into two.
+    with suppress(OSError):
+        os.lseek(descriptor, TRAIL_LOCK_OFFSET, os.SEEK_SET)
+        locking.locking(descriptor, locking.LK_UNLCK, 1)
+
+
+def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -> bool:
+    """One append-mode write, serialized where the system does not do it itself.
+
+    The descriptor is in append mode, so the write lands at the end wherever the
+    lock left the file pointer. False means the lock was never free: nothing was
+    written, and nothing of anyone else's was overwritten.
+    """
+    if locking is None:
+        os.write(descriptor, data)
+        return True
+    if not _lock_trail(descriptor, locking, pause):
+        return False
     try:
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        lines = _existing_lines(FAILURE_LOG) + [line]
-        kept = _trimmed_tail(lines, MAX_FAILURE_LOG_BYTES)
-        FAILURE_LOG.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        os.write(descriptor, data)
+    finally:
+        _unlock_trail(descriptor, locking)
+    return True
+
+
+# A trim reads every line and replaces the whole file, so it must not cross an
+# append: the replaced inode carries the appended line away with it. The lock
+# lives on a sidecar file, as `run/state.json`'s does, because a lock taken on
+# the trail itself is a lock on a file the trim is about to rename away.
+# Research: `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
+TRAIL_LOCK_SUFFIX = ".lock"
+
+
+def _trail_lock_path() -> Path:
+    """Read from `FAILURE_LOG` at the call: the trail's path is a module setting."""
+    return FAILURE_LOG.with_name(FAILURE_LOG.name + TRAIL_LOCK_SUFFIX)
+
+
+def _hold_trail_lock(descriptor: int) -> None:
+    """One non-blocking exclusive OS lock attempt on the sidecar's first byte."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _await_trail_lock(descriptor: int, pause) -> bool:
+    """True once the sidecar lock is ours; False when the bounded wait ran out."""
+    for _ in range(TRAIL_LOCK_ATTEMPTS):
+        try:
+            _hold_trail_lock(descriptor)
+        except OSError:
+            pause(TRAIL_LOCK_PAUSE_SECONDS)
+            continue
+        return True
+    return False
+
+
+def _open_trail_lock() -> int | None:
+    path = _trail_lock_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        return os.open(path, flags, 0o600)
     except OSError:
-        pass
+        return None
+
+
+@contextmanager
+def trail_lock(pause=time.sleep):
+    """Exclusive access to the trail file; yields whether the lock was taken.
+
+    Closing the descriptor releases the lock on both systems, so nothing is left
+    held by a process that died holding it.
+    """
+    descriptor = _open_trail_lock()
+    if descriptor is None:
+        yield False
+        return
+    try:
+        yield _await_trail_lock(descriptor, pause)
+    finally:
+        with suppress(OSError):
+            os.close(descriptor)
+
+
+def _write_failure_line(line: str) -> bool:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+    try:
+        FAILURE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(FAILURE_LOG, flags, 0o600)
+    except OSError:
+        return False
+    try:
+        return _write_trail_line(descriptor, line.encode("utf-8"), _append_locking())
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _append_failure_line(record: dict[str, str]) -> bool:
+    """Add one line with a single append-mode write; True when it was written.
+
+    Reading the trail, adding a line and writing the whole file back lost a line
+    whenever two hooks failed together, which is when hooks fail. See
+    `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
+
+    The trail's own lock is taken around the open and the write, so the file this
+    line is appended to is not one a trim has already replaced. A line is never
+    lost to that lock: when the bounded wait runs out the line is written anyway.
+    """
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    with trail_lock():
+        return _write_failure_line(line)
+
+
+def _trim_under_lock() -> None:
+    if FAILURE_LOG.stat().st_size <= MAX_FAILURE_LOG_BYTES:
+        return
+    kept = _trimmed_tail(_existing_lines(FAILURE_LOG), MAX_FAILURE_LOG_BYTES * 3 // 4)
+    atomic_write(FAILURE_LOG, "\n".join(kept) + "\n")
+
+
+def _trim_failure_log() -> None:
+    """Cut an overgrown trail to three quarters of its cap, in one step.
+
+    Only ever under the trail's lock: reading every line and writing the file back
+    would otherwise erase an append that landed in between. A trim that cannot take
+    the lock leaves the trail alone and the next recorded failure trims instead —
+    the cut is below the cap, so it is owed once per quarter-cap of failures.
+    """
+    try:
+        with trail_lock() as held:
+            if held:
+                _trim_under_lock()
+    except OSError:
+        return
 
 
 def _bump_counter(state: dict, record: dict[str, str]) -> None:
@@ -201,17 +388,30 @@ def record_capture_failure(
     deferred by a writer race; without it, a failure is a loss.
     """
     record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
+    written: list[bool] = []
+
+    def _under_the_state_lock(state: dict) -> None:
+        written.append(_trail_written(record, trim=True))
+        _bump_counter(state, record)
+
     try:
-        _append_failure_line(record)
-    except Exception:  # noqa: BLE001 - the counter still records the loss
+        update_state(_under_the_state_lock, lock_timeout=STATE_LOCK_TIMEOUT)
+    except Exception:  # noqa: BLE001 - the trail below still records the loss
         pass
+    if not any(written):
+        # No lock, no trim: an append alone cannot erase anyone else's line.
+        _trail_written(record, trim=False)
+
+
+def _trail_written(record: dict[str, str], *, trim: bool) -> bool:
+    """Write the trail, whatever it raises: the counter still records the loss."""
     try:
-        update_state(
-            lambda state: _bump_counter(state, record),
-            lock_timeout=STATE_LOCK_TIMEOUT,
-        )
-    except Exception:  # noqa: BLE001
-        pass
+        written = _append_failure_line(record)
+        if trim:
+            _trim_failure_log()
+    except Exception:  # noqa: BLE001 - diagnostics never break a hook
+        return False
+    return written
 
 
 def _counter_entries(state: dict) -> dict[str, dict]:

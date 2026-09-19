@@ -26,6 +26,7 @@ try:
 except ImportError:  # pragma: no cover - Windows has no fcntl module
     _fcntl = None
 
+from corpus_snapshot import always_pruned_directory_name
 from lsp_profiles import navigable_suffixes, profile_configuration_names
 from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
@@ -55,7 +56,6 @@ MAX_REVISION_FILES = 100_000
 MAX_REVISION_BYTES = 2 * 1024 * 1024 * 1024
 MAX_GIT_STATUS_BYTES = 16 * 1024 * 1024
 GIT_STATUS_TIMEOUT_SECONDS = 5.0
-_MAX_GIT_HEAD_BYTES = 65
 _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -935,27 +935,6 @@ def _git_output(
         run, command, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
 
-def _git_status(
-    root: Path,
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bytes:
-    return _git_output(
-        root,
-        [
-            "status",
-            "--porcelain=v2",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-        ],
-        maximum_bytes=MAX_GIT_STATUS_BYTES,
-        label="Git status",
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-
 
 def _git_state_head_identity(output: bytes) -> bytes:
     """The single HEAD identity git's status reported, or a refusal."""
@@ -1044,32 +1023,6 @@ def _git_state_with_private_index(
         executable=os.fspath(git_executable),
     )
     return _parse_git_state_output(output, allow_missing_head=allow_missing_head)
-
-
-def _git_head(
-    root: Path,
-    *,
-    allow_missing: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> str | None:
-    try:
-        output = _git_output(
-            root,
-            ["rev-parse", "--verify", "HEAD^{commit}"],
-            maximum_bytes=_MAX_GIT_HEAD_BYTES,
-            label="Git HEAD",
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    except subprocess.CalledProcessError:
-        if allow_missing:
-            return None
-        raise
-    value = output.strip()
-    if _GIT_COMMIT_RE.fullmatch(value) is None:
-        raise ValueError("Git HEAD returned an invalid commit identity")
-    return value.decode("ascii")
 
 
 def _status_records(output: bytes) -> list[bytes]:
@@ -1201,14 +1154,50 @@ def _entry_status_agrees(entry: RevisionEntry, status: str | None) -> bool:
 _KIND_STATUS_AGREEMENT: dict[str, Callable[[str | None], bool]] = {
     "source": lambda status: status is None,
     "configuration": lambda status: status != "deleted",
+    # Git deleted it from the index and the worktree file is still there; the
+    # entry carries that file's digest, and git has to keep saying the same.
+    "index-deleted": lambda status: status == "deleted",
 }
 
 
+def _inside_pruned_directory(normalized: str) -> bool:
+    """Whether a directory the corpus walk prunes holds this path."""
+    return any(
+        always_pruned_directory_name(part)
+        for part in PurePosixPath(normalized).parts[:-1]
+    )
+
+
+def _status_path_contributes(root: Path, normalized: str) -> bool:
+    """Whether a compute would record this status path as an entry of its own.
+
+    A compute drops a status path that is not a regular file -- a nested
+    untracked repository git reports as one directory, a symlink outside a
+    relevant place. Asking the same question here keeps a path git will report
+    for ever from making every verification answer "changed". See
+    `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    if _inside_pruned_directory(normalized):
+        return False
+    path = root / PurePosixPath(normalized)
+    try:
+        return _status_entry_stat(path, normalized) is not None
+    except FileNotFoundError:
+        return True
+    except PermissionError:
+        return True
+
+
 def _status_paths_all_expected(
-    current_status: Mapping[str, str], entries: Mapping[str, RevisionEntry]
+    current_status: Mapping[str, str],
+    entries: Mapping[str, RevisionEntry],
+    root: Path,
 ) -> bool:
-    """Whether every path git reports as changed is one the revision recorded."""
-    return all(path in entries for path in current_status)
+    """Whether every path git reports as changed is one the revision could record."""
+    return all(
+        path in entries or not _status_path_contributes(root, path)
+        for path in current_status
+    )
 
 
 def _git_state_matches_revision(
@@ -1216,12 +1205,13 @@ def _git_state_matches_revision(
     git_state: bytes,
     expected: WorkspaceRevision,
     entries: dict[str, RevisionEntry],
+    root: Path,
 ) -> bool:
     if current_head != expected.git_head:
         return False
     current_status = _normalized_status(git_state)
     if current_status is None or not _status_paths_all_expected(
-        current_status, entries
+        current_status, entries, root
     ):
         return False
     return all(
@@ -1276,15 +1266,47 @@ def _directory_snapshot_for(scan: _RelevantScan, current: Path) -> _DirectorySna
     return snapshot
 
 
-def _refuse_unsafe_entry(
-    entry: os.DirEntry, info: os.stat_result, relevant_name: bool
-) -> None:
-    """A link or reparse point where it matters stops the walk outright."""
+def _is_linked_directory(entry: os.DirEntry, info: os.stat_result) -> bool:
+    if stat.S_ISDIR(info.st_mode):
+        return True
     try:
-        linked_directory = entry.is_dir(follow_symlinks=True)
+        return entry.is_dir(follow_symlinks=True)
     except OSError:
-        linked_directory = False
-    if relevant_name or linked_directory or stat.S_ISDIR(info.st_mode):
+        return False
+
+
+def _link_stays_inside(entry: os.DirEntry, resolved_root: Path) -> bool:
+    """Whether the link's strictly resolved target lies inside the checkout."""
+    try:
+        target = Path(entry.path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return target.is_relative_to(resolved_root)
+
+
+def _directory_link_leaves(
+    entry: os.DirEntry, info: os.stat_result, resolved_root: Path
+) -> bool:
+    """A linked directory whose target is outside the checkout, or unknowable."""
+    if not _is_linked_directory(entry, info):
+        return False
+    return not _link_stays_inside(entry, resolved_root)
+
+
+def _refuse_unsafe_entry(
+    entry: os.DirEntry,
+    info: os.stat_result,
+    relevant_name: bool,
+    resolved_root: Path,
+) -> None:
+    """A link or reparse point where it matters stops the walk outright.
+
+    A directory link that stays inside the checkout is passed by instead: the
+    walk never follows it and hashes its target at the real path, and every
+    Linux virtual environment holds one (`lib64 -> lib`). See
+    `docs/research/2026-09-17-a-directory-link-inside-the-checkout-is-passed-by.md`.
+    """
+    if relevant_name or _directory_link_leaves(entry, info, resolved_root):
         raise PermissionError(
             "workspace revision relevant path is a symlink or reparse directory"
         )
@@ -1313,7 +1335,7 @@ def _scanned_entry(scan: _RelevantScan, entry: os.DirEntry) -> _ScannedEntry:
     unsafe = entry.is_symlink() or _is_reparse(info)
     relevant_name = _is_relevant_path(relative)
     if unsafe:
-        _refuse_unsafe_entry(entry, info, relevant_name)
+        _refuse_unsafe_entry(entry, info, relevant_name, scan.resolved_root)
     relevant = not unsafe and stat.S_ISREG(info.st_mode) and relevant_name
     _count_scanned_entry(scan, relevant=relevant)
     return _ScannedEntry(entry, path, relative, info, unsafe, relevant)
@@ -1415,8 +1437,14 @@ def _prepare_file(
 
 
 def _collect_subdirectory(item: _ScannedEntry, directories: list[Path]) -> None:
-    """A subdirectory joins the walk unless it is the git marker itself."""
-    if item.entry.name != ".git":
+    """A subdirectory joins the walk unless the corpus walk prunes it too.
+
+    `.git` is pruned by that same rule, being hidden; so are `.venv` (about
+    10 800 ignored files on this checkout, all of them hashed and all of them
+    counted against the entry ceiling) and `__pycache__`. See
+    `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    if not always_pruned_directory_name(item.entry.name):
         directories.append(item.path)
 
 
@@ -1673,6 +1701,34 @@ _REQUIRED_FCNTL_NAMES = (
     "F_SEAL_SHRINK",
     "F_SEAL_WRITE",
 )
+# Linux gives the file seals the same numbers on every architecture
+# (`include/uapi/linux/fcntl.h`: `F_LINUX_SPECIFIC_BASE` is 1024, `F_ADD_SEALS`
+# is +9 and `F_GET_SEALS` +10; the seal bits are 0x0001 to 0x0008). CPython
+# publishes them only when it was built against headers that declared them, and
+# the interpreter `uv run` uses does not -- which turned this whole path off and
+# skipped about 45 tests in silence. The seals are applied and then read back,
+# so a wrong number cannot publish an unsealed index. See
+# `docs/research/2026-09-18-a-cloned-checkout-keeps-the-private-read.md`.
+_LINUX_SEAL_CONSTANTS = MappingProxyType(
+    {
+        "F_ADD_SEALS": 1033,
+        "F_GET_SEALS": 1034,
+        "F_SEAL_SEAL": 0x0001,
+        "F_SEAL_SHRINK": 0x0002,
+        "F_SEAL_GROW": 0x0004,
+        "F_SEAL_WRITE": 0x0008,
+    }
+)
+
+
+def _seal_constant(name: str) -> int | None:
+    """One file-seal number, from `fcntl` when it has it, else from the ABI."""
+    value = getattr(_fcntl, name, None) if _fcntl is not None else None
+    if isinstance(value, int):
+        return value
+    if not sys.platform.startswith("linux"):
+        return None
+    return _LINUX_SEAL_CONSTANTS.get(name)
 
 
 def _has_all_attributes(module: object, names: Iterable[str]) -> bool:
@@ -1686,7 +1742,7 @@ def _private_index_runtime_available() -> bool:
         return False
     if _fcntl is None:
         return False
-    return _has_all_attributes(_fcntl, _REQUIRED_FCNTL_NAMES)
+    return all(_seal_constant(name) is not None for name in _REQUIRED_FCNTL_NAMES)
 
 
 def _private_index_platform_supported() -> bool:
@@ -2084,6 +2140,20 @@ _ALLOWED_PRIVATE_CONFIG_KEYS = MappingProxyType(
     }
 )
 
+# What `git clone` writes besides `[core]`, and what editors add beside it.
+# These sections say where a branch pushes and pulls; none of their settings
+# changes what git reads of the working tree, so any key is tolerated except the
+# two that can make a read fetch objects. Refusing the sections outright turned
+# the private read off for every cloned repository -- after it had already
+# hashed the index. See
+# `docs/research/2026-09-18-a-cloned-checkout-keeps-the-private-read.md`.
+_INERT_PRIVATE_CONFIG_SECTIONS = MappingProxyType(
+    {
+        "remote": frozenset({"promisor", "partialclonefilter"}),
+        "branch": frozenset(),
+    }
+)
+
 # The keys a private repository config must set for the private read to stand.
 _REQUIRED_PRIVATE_CONFIG_KEYS = frozenset(
     {"core.bare", "core.filemode", "core.repositoryformatversion"}
@@ -2145,7 +2215,21 @@ def _allowed_private_config_pair(
     pair = _config_key_value(line)
     if pair is None:
         return None
-    if pair[0] not in _ALLOWED_PRIVATE_CONFIG_KEYS[section]:
+    return _pair_this_section_may_carry(section, pair)
+
+
+def _pair_this_section_may_carry(
+    section: str, pair: tuple[str, str]
+) -> tuple[str, str] | None:
+    """`pair` when `section` is allowed to carry its key, else None."""
+    if section in _INERT_PRIVATE_CONFIG_SECTIONS:
+        return _inert_section_pair(section, pair)
+    return pair if pair[0] in _ALLOWED_PRIVATE_CONFIG_KEYS[section] else None
+
+
+def _inert_section_pair(section: str, pair: tuple[str, str]) -> tuple[str, str] | None:
+    """A setting in a section that cannot change what git reads, or a refusal."""
+    if pair[0] in _INERT_PRIVATE_CONFIG_SECTIONS[section]:
         return None
     return pair
 
@@ -2166,9 +2250,20 @@ def _private_config_setting_allowed(
 
 
 def _config_section_header(line: str) -> str | None:
-    """The section this line opens, if it opens one the private read allows."""
-    match = re.fullmatch(r"\[(core|extensions|user)\]", line, flags=re.IGNORECASE)
-    return None if match is None else match.group(1).lower()
+    """The section this line opens, if it opens one the private read allows.
+
+    A subsection (`[remote "origin"]`) opens the same section as its bare form:
+    what may be set there is decided by the key table, not by the name of the
+    remote or branch.
+    """
+    match = re.fullmatch(
+        r"\[(core|extensions|user)\]|\[(remote|branch) \"[^\"\\\\]*\"\]",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return (match.group(1) or match.group(2)).lower()
 
 
 def _private_config_lines_allowed(text: str, hash_name: str, seen: set[str]) -> bool:
@@ -2207,14 +2302,35 @@ def _safe_private_git_config(content: bytes, *, hash_name: str) -> bool:
     return _REQUIRED_PRIVATE_CONFIG_KEYS <= seen
 
 
-def _ignored_config_setting_allowed(line: str, in_user_section: bool) -> bool:
+# The only sections an external git config may open, and the keys each may set.
+# `[user]` names the author of a commit. `[safe]` decides only whether git agrees
+# to work in a repository at all, never what it reads of the working tree, its
+# ignore rules, its attributes or its index — and every GitHub-hosted Linux
+# runner ships an `/etc/gitconfig` holding `[safe]` / `directory = *`, so
+# refusing that section turned the private read off for the whole machine.
+# Research: docs/research/2026-09-18-a-system-config-that-only-says-where-git-may-work.md
+_INERT_EXTERNAL_CONFIG_SECTIONS = MappingProxyType(
+    {
+        "user": frozenset({"email", "name"}),
+        "safe": frozenset({"directory", "barerepository"}),
+    }
+)
+
+
+def _external_config_section(line: str) -> str | None:
+    """The section this line opens, when it opens one an external config may open."""
+    match = re.fullmatch(r"\[(user|safe)\]", line, flags=re.IGNORECASE)
+    return None if match is None else match.group(1).lower()
+
+
+def _ignored_config_setting_allowed(line: str, section: str | None) -> bool:
     """Whether this line of an external config is one the read can ignore."""
-    if line.startswith("[") or not in_user_section:
+    if line.startswith("[") or section is None:
         return False
     pair = _config_key_value(line)
     if pair is None:
         return False
-    return pair[0] in {"email", "name"}
+    return pair[0] in _INERT_EXTERNAL_CONFIG_SECTIONS[section]
 
 
 def _blank_or_comment(line: str) -> bool:
@@ -2224,26 +2340,24 @@ def _blank_or_comment(line: str) -> bool:
 
 def _ignored_config_lines_allowed(text: str) -> bool:
     """Whether every line of an external config is one the read can ignore."""
-    in_user_section = False
+    section: str | None = None
     for raw_line in text.splitlines():
-        in_user_section, verdict = _ignored_config_line_step(
-            raw_line.strip(), in_user_section
-        )
+        section, verdict = _ignored_config_line_step(raw_line.strip(), section)
         if verdict is False:
             return False
     return True
 
 
 def _ignored_config_line_step(
-    line: str, in_user_section: bool
-) -> tuple[bool, bool | None]:
-    """Whether we are in `[user]` after this line, and False only on refusal."""
+    line: str, section: str | None
+) -> tuple[str | None, bool | None]:
+    """The section open after this line, and False only when the line is refused."""
     if _blank_or_comment(line):
-        return in_user_section, None
-    if re.fullmatch(r"\[user\]", line, flags=re.IGNORECASE) is not None:
-        return True, None
-    allowed = _ignored_config_setting_allowed(line, in_user_section)
-    return in_user_section, allowed or False
+        return section, None
+    opened = _external_config_section(line)
+    if opened is not None:
+        return opened, None
+    return section, _ignored_config_setting_allowed(line, section) or False
 
 
 def _safe_ignored_git_config(content: bytes) -> bool:
@@ -3177,20 +3291,38 @@ def _private_index_fence_ns(hashes: Mapping[str, _VerificationHash]) -> int:
     return max(time.time_ns(), newest + 1_000_000_000)
 
 
+def _seal_numbers() -> dict[str, int] | None:
+    """Every seal number this machine can give, or None when one is missing."""
+    if _fcntl is None:
+        return None
+    numbers = {name: _seal_constant(name) for name in _REQUIRED_FCNTL_NAMES}
+    if any(value is None for value in numbers.values()):
+        return None
+    return numbers
+
+
+def _applied_seals(descriptor: int, numbers: dict[str, int], required: int) -> int | None:
+    """The seals the kernel reports after the request, or None when it refused."""
+    try:
+        _fcntl.fcntl(descriptor, numbers["F_ADD_SEALS"], required)
+        return _fcntl.fcntl(descriptor, numbers["F_GET_SEALS"])
+    except OSError:
+        return None
+
+
 def _seal_private_index(descriptor: int) -> bool:
     """Whether the descriptor could be sealed against every further change."""
-    if _fcntl is None:
+    numbers = _seal_numbers()
+    if numbers is None:
         return False
     required = (
-        _fcntl.F_SEAL_WRITE
-        | _fcntl.F_SEAL_GROW
-        | _fcntl.F_SEAL_SHRINK
-        | _fcntl.F_SEAL_SEAL
+        numbers["F_SEAL_WRITE"]
+        | numbers["F_SEAL_GROW"]
+        | numbers["F_SEAL_SHRINK"]
+        | numbers["F_SEAL_SEAL"]
     )
-    try:
-        _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, required)
-        applied = _fcntl.fcntl(descriptor, _fcntl.F_GET_SEALS)
-    except OSError:
+    applied = _applied_seals(descriptor, numbers, required)
+    if applied is None:
         return False
     return applied & required == required
 
@@ -3656,12 +3788,11 @@ def _require_inside_checkout(path: Path, resolved_root: Path) -> None:
 
 
 def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
-    """Record one path git reported as changed."""
+    """Record one path git reported as changed, as the disk says it is."""
     normalized = _normalized_path(raw)
-    path = build.root / PurePosixPath(normalized)
-    if status == "deleted":
-        build.add(raw, "deleted", None)
+    if _inside_pruned_directory(normalized):
         return
+    path = build.root / PurePosixPath(normalized)
     try:
         info = _status_entry_stat(path, normalized)
     except FileNotFoundError:
@@ -3670,7 +3801,19 @@ def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
     if info is None:
         return
     _require_inside_checkout(path, build.resolved_root)
-    build.add(raw, status, path)
+    build.add(raw, _present_status_kind(status), path)
+
+
+def _present_status_kind(status: str) -> str:
+    """The kind for a path git reported this way whose file is on the disk.
+
+    `git rm --cached` of a file `.gitignore` also names leaves git reporting a
+    deletion for a file that is still there. Recording that as `deleted` made an
+    entry with a digest and a size, which this module's own validator rejects;
+    it is a file the checkout still holds, and its content is hashed like any
+    other. See `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
+    """
+    return "index-deleted" if status == "deleted" else status
 
 
 def _initial_git_state(
@@ -3884,7 +4027,7 @@ def verify_workspace_revision_unchanged(
 
 # The entry kinds a stored workspace revision may name.
 _REVISION_ENTRY_KINDS = frozenset(
-    {"source", "configuration", "modified", "untracked", "deleted"}
+    {"source", "configuration", "modified", "untracked", "deleted", "index-deleted"}
 )
 
 
@@ -4314,10 +4457,13 @@ def _revision_state_matches(
     expected: WorkspaceRevision,
     entries: Mapping[str, RevisionEntry],
     private_state: _PrivateGitState | None,
+    root: Path,
 ) -> bool:
     """Whether git agrees; a private-path failure restarts instead of raising."""
     try:
-        return _git_state_matches_revision(current_head, git_state, expected, entries)
+        return _git_state_matches_revision(
+            current_head, git_state, expected, entries, root
+        )
     except _RevisionStopped:
         raise
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
@@ -4651,7 +4797,7 @@ def _verified_against_git(
             root, expected, private_state, deadline=deadline, cancelled=cancelled
         )
         if not _revision_state_matches(
-            current_head, git_state, expected, entries, private_state
+            current_head, git_state, expected, entries, private_state, root
         ):
             return False
     elif expected.git_head is not None:

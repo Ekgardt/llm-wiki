@@ -96,5 +96,5 @@ def test_with_the_password_the_documented_api_is_called_authenticated(server, mo
         True,
         "the answer",
         [("GET", "/global/health"), ("POST", "/session"), ("POST", "/session/ses_1/message"), ("DELETE", "/session/ses_1")],
-        "be brief",
+        f"be brief\n\n{llm_client.TASK_FRAME}",
     )

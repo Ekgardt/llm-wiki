@@ -37,8 +37,6 @@ ADAPTER_IDS = (
     "exact-numpy",
     "sqlite-vec",
     "usearch",
-    "lancedb-flat",
-    "lancedb-ann",
 )
 CRASH_POINTS = (
     "before_fsync",
@@ -329,8 +327,6 @@ _ADAPTER_MODULES = {
     "exact-numpy": ("numpy",),
     "sqlite-vec": ("sqlite_vec",),
     "usearch": ("usearch", "usearch.index"),
-    "lancedb-flat": ("lancedb",),
-    "lancedb-ann": ("lancedb",),
 }
 
 
@@ -491,8 +487,6 @@ def _metric_provenance(
 
 
 def _filter_implementation(adapter: object) -> str:
-    if isinstance(adapter, str) and adapter.startswith("lancedb"):
-        return "lancedb-prefilter"
     if adapter == "exact-numpy":
         return "numpy-mask"
     return "postfilter"
@@ -707,7 +701,7 @@ def _unavailable_cell(
             "reasons": [reason],
         },
         "index": {
-            "requested": "ann" if adapter_id == "lancedb-ann" else "optional",
+            "requested": "optional",
             "status": "unavailable",
             "type": None,
             "verified_by": None,
@@ -734,8 +728,6 @@ def _flat_cell_runner(adapter_id: str):
 
 
 def _run_optional_cell(adapter_id: str, **cell_arguments: Any) -> dict[str, Any]:
-    if adapter_id.startswith("lancedb"):
-        return _run_lancedb_cell(**cell_arguments, ann=adapter_id.endswith("ann"))
     return _flat_cell_runner(adapter_id)(**cell_arguments)
 
 
@@ -996,79 +988,6 @@ def _run_usearch_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any
     return cell
 
 
-def _lancedb_table(db: Any, corpus: ScaleCorpus, active: set[int]) -> Any:
-    import pyarrow as pa
-
-    rows = {
-        "id": list(corpus.chunk_ids),
-        "vector": [vector.tolist() for vector in corpus.vectors],
-        "selected": [index in active for index in range(len(corpus.chunk_ids))],
-    }
-    return db.create_table("chunks", pa.table(rows))
-
-
-def _create_lancedb_index(table: Any, partitions: int) -> None:
-    try:
-        from lancedb.index import IvfPq
-    except ImportError:
-        # LanceDB 0.20 supports only the legacy index builder.
-        table.create_index(index_type="IVF_PQ", metric="cosine", num_partitions=partitions)
-        return
-    table.create_index("vector", config=IvfPq(distance_type="cosine", num_partitions=partitions))
-
-
-def _index_descriptor_type(table: Any, descriptor: Any) -> tuple[Any, Any, Any]:
-    """(name, stats, index type) of one LanceDB index descriptor."""
-    candidate_name = getattr(descriptor, "name", None)
-    candidate_stats = table.index_stats(candidate_name) if candidate_name is not None else None
-    candidate_type = getattr(descriptor, "index_type", None)
-    if candidate_type is None and candidate_stats is not None:
-        candidate_type = getattr(candidate_stats, "index_type", None)
-    return candidate_name, candidate_stats, candidate_type
-
-
-def _ann_index_descriptor(table: Any, indices: list) -> tuple[Any, Any, Any] | None:
-    for descriptor in indices:
-        name, stats, index_type = _index_descriptor_type(table, descriptor)
-        normalized = str(index_type or "").upper()
-        if any(token in normalized for token in ("IVF", "HNSW")):
-            return name, stats, index_type
-    return None
-
-
-def _ann_index_found(found: tuple[Any, Any, Any] | None) -> bool:
-    if found is None:
-        return False
-    return found[0] is not None and found[1] is not None
-
-
-def _require_complete_ann_index(stats: Any, corpus_size: int) -> None:
-    indexed_rows = getattr(stats, "num_indexed_rows", None)
-    unindexed_rows = getattr(stats, "num_unindexed_rows", None)
-    if indexed_rows != corpus_size or unindexed_rows not in {0, None}:
-        raise RuntimeError(
-            f"incomplete LanceDB ANN index: indexed={indexed_rows!r}, "
-            f"unindexed={unindexed_rows!r}"
-        )
-
-
-def _verified_ann_metadata(table: Any, corpus_size: int) -> dict[str, Any]:
-    indices = list(table.list_indices())
-    if not indices:
-        raise RuntimeError("LanceDB reported no vector index after creation")
-    found = _ann_index_descriptor(table, indices)
-    if not _ann_index_found(found):
-        raise RuntimeError("LanceDB reported no verifiable ANN vector index")
-    _require_complete_ann_index(found[1], corpus_size)
-    return {
-        "requested": "ann",
-        "status": "ann",
-        "type": str(found[2]),
-        "verified_by": "list_indices/index_stats indexed rows",
-        "reason": None,
-    }
-
-
 def _flat_index_metadata(ann: bool) -> dict[str, Any]:
     return {
         "requested": "ann" if ann else "flat",
@@ -1079,99 +998,8 @@ def _flat_index_metadata(ann: bool) -> dict[str, Any]:
     }
 
 
-def _lancedb_index_metadata(table: Any, corpus_size: int, ann: bool) -> dict[str, Any]:
-    if not ann:
-        return _flat_index_metadata(False)
-    partitions = max(1, min(16, corpus_size // 4 or 1))
-    _create_lancedb_index(table, partitions)
-    return _verified_ann_metadata(table, corpus_size)
-
-
-def _lancedb_hits(table: Any, q: Any, k: int) -> list:
-    import numpy as np
-
-    return (
-        table.search(np.asarray(q, dtype=np.float32))
-        .where("selected = true", prefilter=True)
-        .limit(k)
-        .to_list()
-    )
-
-
-def _lancedb_cold_pass(table: Any, queries: Any, k: int) -> tuple[list[float], list[tuple[str, ...]]]:
-    cold: list[float] = []
-    retrieved: list[tuple[str, ...]] = []
-    for q in queries:
-        t0 = time.perf_counter()
-        hits = _lancedb_hits(table, q, k)
-        cold.append((time.perf_counter() - t0) * 1000.0)
-        retrieved.append(tuple(str(h.get("id")) for h in hits))
-    return cold, retrieved
-
-
-def _lancedb_warm_pass(table: Any, queries: Any, k: int) -> list[float]:
-    warm: list[float] = []
-    for q in queries:
-        for _ in range(3):
-            t0 = time.perf_counter()
-            _lancedb_hits(table, q, k)
-            warm.append((time.perf_counter() - t0) * 1000.0)
-    return warm
-
-
 def _directory_bytes(path: str) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
-
-
-def _lancedb_measured_cell(
-    table: Any,
-    tmp: str,
-    corpus: ScaleCorpus,
-    queries: Any,
-    k: int,
-    mask: Any,
-    selectivity: float,
-    ann: bool,
-    build_ms: float,
-    index_metadata: dict[str, Any],
-) -> dict[str, Any]:
-    truth = _truth_for_queries(corpus, queries, k, mask)
-    cold, retrieved = _lancedb_cold_pass(table, queries, k)
-    warm = _lancedb_warm_pass(table, queries, k)
-    recall10, recall50 = _recall_pair(retrieved, truth)
-    metrics = _ann_metrics(
-        warm=warm,
-        build_ms=build_ms,
-        disk_bytes=int(_directory_bytes(tmp)),
-        recall10=recall10,
-        recall50=recall50,
-    )
-    adapter = "lancedb-ann" if ann else "lancedb-flat"
-    return _adapter_cell(adapter, corpus, selectivity, metrics, cold, warm, index_metadata)
-
-
-def _run_lancedb_cell(*, corpus, queries, k, mask, selectivity, ann: bool) -> dict[str, Any]:
-    import lancedb
-
-    active = set(_masked_ids(corpus, mask))
-    build_started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="scale-lance-") as tmp:
-        table = _lancedb_table(lancedb.connect(tmp), corpus, active)
-        try:
-            index_metadata = _lancedb_index_metadata(table, len(corpus.chunk_ids), ann)
-        except Exception as exc:
-            return _unavailable_cell(
-                "lancedb-ann",
-                corpus=corpus,
-                mask=mask,
-                selectivity=selectivity,
-                status="skipped",
-                reason=f"ann_index_unavailable:{type(exc).__name__}: {exc}",
-            )
-        build_ms = (time.perf_counter() - build_started) * 1000.0
-        return _lancedb_measured_cell(
-            table, tmp, corpus, queries, k, mask, selectivity, ann, build_ms, index_metadata
-        )
 
 
 def _sqlite_vec_connection(corpus: ScaleCorpus) -> Any:
@@ -1608,7 +1436,7 @@ def run_smoke(
     _require_positive_int("dimensions", dimensions)
     _require_positive_int("queries", queries)
     chosen_adapters = tuple(
-        adapters or ("exact-numpy", "sqlite-vec", "usearch", "lancedb-flat", "lancedb-ann")
+        adapters or ("exact-numpy", "sqlite-vec", "usearch")
     )
     corpus = generate_corpus(n_chunks=corpus_size, dimensions=dimensions, seed=seed)
     query_vectors = corpus.vectors[: min(queries, corpus_size)]

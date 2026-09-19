@@ -7,7 +7,7 @@ allowed-tools: Read Glob Grep LS Bash(uv run python scripts/lookup_mode.py *) Ba
 title: "Knowledge Lookup"
 timestamp: 2026-07-03T05:41:37
 ---
-Answer `$ARGUMENTS` using a local retrieval strategy chosen by vault size. Direct reading is strong at small scale; SQLite FTS5 BM25 handles larger lexical search; optional vectors/LanceDB, graph neighbors, and reranking add semantic recall at scale.
+Answer `$ARGUMENTS` using a local retrieval strategy chosen by vault size. Direct reading is strong at small scale; SQLite FTS5 BM25 handles larger lexical search; optional local vectors, graph neighbors, and reranking add semantic recall at scale.
 
 ## Step 0 — Pick the tier
 
@@ -23,7 +23,7 @@ This prints the recommended tier based on the curated wiki page count:
 |---|---|---|
 | **DIRECT** | < 50 pages | Read `knowledge/index.md` + target pages. Skip search — the LLM's own navigation is faster and cheaper. |
 | **BASE** | 50–300 pages | Wiki-first, then use `search_memory.py` for local SQLite FTS5 BM25 when navigation is ambiguous. |
-| **HYBRID** | > 300 pages | Use `search_memory.py --semantic` for BM25 + optional vectors/LanceDB + graph + reranker, then read top results. |
+| **HYBRID** | > 300 pages | Use `search_memory.py --semantic` for BM25 + optional vectors + graph + reranker, then read top results. |
 
 The helper also warns if the search index is stale.
 

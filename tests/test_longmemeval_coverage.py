@@ -155,7 +155,24 @@ def test_a_wrong_answer_is_named_by_whether_the_evidence_was_in_hand():
     ]
 
     assert coverage.failure_split(rows) == {
+        "judged": 3,
         "wrong": 2,
         "evidence_in_hand": 1,
         "evidence_missing": 1,
+    }
+
+
+def test_an_unjudged_run_says_so_instead_of_reporting_no_wrong_answers():
+    """`lme500.report.json` of 2026-09-17 read `wrong: 0` over 199 wrong answers.
+
+    The report is written before the judge pass, so every verdict was absent.
+    Zero wrong and zero judged has to look like silence, not like a clean run.
+    """
+    rows = [{"coverage": _entry(True)}, {"coverage": _entry(False, 0.0)}]
+
+    assert coverage.failure_split(rows) == {
+        "judged": 0,
+        "wrong": 0,
+        "evidence_in_hand": 0,
+        "evidence_missing": 0,
     }

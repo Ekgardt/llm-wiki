@@ -67,7 +67,6 @@ BACKLOG_DRAIN_SECONDS = 120.0
 
 MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
-CAPTURE_EXCERPT_SIDE_BYTES = MAX_CAPTURE_EVIDENCE_BYTES // 2
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
@@ -75,11 +74,15 @@ EVENTS = frozenset(
 )
 
 
-def build_session_start_context() -> Sequence[Any]:
-    """Build structured context without loading SessionStart on unrelated commands."""
+def build_session_start_context(slug: str | None = None) -> Sequence[Any]:
+    """Build structured context without loading SessionStart on unrelated commands.
+
+    The slug is this session's own project, so its advisory and guard rails are not
+    the ones of whichever session wrote the last heartbeat.
+    """
     from session_start_context import build_context_items
 
-    return build_context_items()
+    return build_context_items(slug)
 
 
 OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
@@ -109,8 +112,6 @@ DELEGATES = frozenset(
     {
         "session_start_context.py",
         "session_start_project_state.py",
-        "precompact_capture.py",
-        "session_end_capture.py",
         "session_end_project_tag.py",
         "user_prompt_capture.py",
         "post_tool_capture.py",
@@ -118,6 +119,11 @@ DELEGATES = frozenset(
         "feedback_capture.py",
     }
 )
+# The two thin wrappers that used to spawn the detached flush. They were deleted on
+# 2026-09-17 — the adapter captures these events itself — and this map outlives them
+# as a compatibility guard: an older `settings.json` that still passes one of these
+# flags is ignored here instead of failing on a delegate that no longer exists. See
+# `docs/research/2026-09-17-the-two-hook-wrappers-nothing-calls-are-retired.md`.
 CAPTURE_DELEGATES = {
     "pre_compact": "precompact_capture.py",
     "session_end": "session_end_capture.py",
@@ -339,7 +345,16 @@ def _transcript_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _user_prompt_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
-    return {"prompt": _string(raw.get("prompt"))}
+    """The prompt, and the transcript the host named with it.
+
+    The path is what the twentieth-prompt capture reads; without it that capture
+    had nothing to read and counted an empty session. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
+    return {
+        "prompt": _string(raw.get("prompt")),
+        "transcript_path": _first_string(raw.get("transcript_path"), raw.get("transcriptPath")),
+    }
 
 
 def _event_payload(source: str, event: str, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -518,7 +533,7 @@ def _tool_capture_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_capture_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {"prompt": payload["prompt"]}
+    return {"prompt": payload["prompt"], "transcript_path": payload.get("transcript_path")}
 
 
 def _lifecycle_capture_fields(event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1456,8 +1471,12 @@ def _claims_match(queue: Sequence[Mapping[str, object]], owner: str) -> bool:
     return all(item.get("claim_owner") == owner for item in queue)
 
 
+MAX_CHECKPOINT_REDUCERS = 128
+
+
 def _trim_reducers(reducers: dict[str, object]) -> None:
-    if len(reducers) > 128:
+    """Back to the bound, oldest first: one commit can add more than one reducer."""
+    while len(reducers) > MAX_CHECKPOINT_REDUCERS:
         reducers.pop(next(iter(reducers)))
 
 
@@ -1703,7 +1722,7 @@ def drain_pending_backlog(budget_seconds: float = BACKLOG_DRAIN_SECONDS) -> dict
 def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> int:
     """One project's backlog, isolated: its failure is not the pass's failure.
 
-    Measured 2026-08-30: a single unrecoverable reservation in `fix-pip` raised
+    Measured 2026-08-30: a single unrecoverable reservation in one project raised
     out of the drain and stopped every other project behind it, and the orphan
     sweep after it never ran at all. A recovery pass that one bad row can halt
     is not a recovery pass.
@@ -2168,7 +2187,10 @@ def _restrict_file_permissions(path: Path) -> None:
                 str(path),
                 "/inheritance:r",
                 "/grant:r",
-                f"{username}:(R,W)",
+                # D: read and write do not include delete, and the transient file
+                # is deleted once it has been read. See
+                # `docs/research/2026-09-17-a-transient-transcript-can-be-deleted-on-windows.md`.
+                f"{username}:(R,W,D)",
             ],
             capture_output=True,
             check=False,
@@ -2237,11 +2259,30 @@ def _run_maintenance_command(script: str, argument: str) -> None:
 def _run_session_start_maintenance() -> int:
     _run_maintenance_command("integration_adapter.py", "--capture-worker")
     _run_maintenance_command("memory_queue.py", "work")
+    _catch_up_missed_nightly()
     try:
         spawn_compile_if_idle()
     except Exception:  # noqa: BLE001
         pass
     return 0
+
+
+def _catch_up_missed_nightly() -> None:
+    """Ask for the nightly when the scheduler's run did not happen today.
+
+    This pass is detached, so the claim and the spawn cost the hook nothing. The
+    schedulers catch up where they can — a systemd timer with `Persistent=true`, a
+    LaunchAgent at wake, a Windows task with `-StartWhenAvailable` after sign-in — but
+    a machine signed out at 03:00 and the explicit cron fallback never do, and until
+    now no shipped hook reached this code at all. See
+    `docs/research/2026-09-17-a-missed-nightly-is-caught-up-and-codex-keeps-its-stop.md`.
+    """
+    try:
+        from session_start_context import maybe_spawn_nightly_catchup
+
+        maybe_spawn_nightly_catchup()
+    except Exception:  # noqa: BLE001 - maintenance is best effort, like its neighbours
+        pass
 
 
 def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> Sequence[Any]:
@@ -2422,7 +2463,7 @@ def _ingest_session_start(
     )
     result["maintenance_scheduled"] = maintenance_pid is not None
     result["context"] = _append_context(
-        build_session_start_context(),
+        build_session_start_context(slug),
         _recover_project_handoff(slug, project_dir),
         trailing_newline=True,
         code_graph=_code_graph_reminder(project_dir),
@@ -2490,21 +2531,19 @@ def _validated_capture_transcript_path(value: object) -> Path:
     path = Path(text).resolve(strict=True)
     if path.suffix.casefold() not in {".jsonl", ".json", ".txt", ".log"}:
         raise PermissionError("capture transcript extension is not allowed")
-    roots = (
-        Path.home() / ".claude" / "projects",
-        Path.home() / ".codex" / "sessions",
-        Path(STATE_ROOT) / "cache" / "transient-transcripts",
-    )
+    from host_transcripts import host_transcript_roots
+
+    roots = (*host_transcript_roots(), Path(STATE_ROOT) / "cache" / "transient-transcripts")
     if not any(_capture_path_is_beneath(path, root) for root in roots):
         raise PermissionError("capture transcript path is not allowed")
     return path
 
 
-def _read_transcript_edge(descriptor: int, offset: int) -> bytes:
+def _read_transcript_edge(descriptor: int, offset: int, side: int) -> bytes:
     """One bounded side of an open transcript."""
-    os.lseek(descriptor, offset, os.SEEK_SET)
+    os.lseek(descriptor, max(offset, 0), os.SEEK_SET)
     chunks: list[bytes] = []
-    remaining = CAPTURE_EXCERPT_SIDE_BYTES
+    remaining = side
     while remaining > 0:
         chunk = os.read(descriptor, min(remaining, 64 * 1024))
         if not chunk:
@@ -2521,16 +2560,14 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
         raise ValueError("capture transcript changed while it was read")
 
 
-def _read_transcript_edges(path: Path) -> tuple[bytes, bytes, int]:
+def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
     """Head and tail of a transcript too large to hold whole."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
-        head = _read_transcript_edge(descriptor, 0)
-        tail = _read_transcript_edge(
-            descriptor, before.st_size - CAPTURE_EXCERPT_SIDE_BYTES
-        )
+        head = _read_transcript_edge(descriptor, 0, side)
+        tail = _read_transcript_edge(descriptor, before.st_size - side, side)
         _require_stable_transcript(before, os.fstat(descriptor))
     finally:
         os.close(descriptor)
@@ -2538,10 +2575,10 @@ def _read_transcript_edges(path: Path) -> tuple[bytes, bytes, int]:
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
-    return (
-        f"\n\n_({dropped} bytes of this transcript were not captured; "
-        "the durable record keeps the beginning and the end.)_\n\n"
-    )
+    """One JSONL line of its own, so the record's renderer keeps it."""
+    from session_evidence import capture_gap_line
+
+    return f"\n{capture_gap_line(dropped)}\n"
 
 
 def _whole_lines_head(head: bytes) -> bytes:
@@ -2558,20 +2595,28 @@ def _whole_lines_tail(tail: bytes) -> bytes:
     return tail[tail.find(b"\n") + 1 :] or tail
 
 
-def _capture_excerpt_text(path: Path) -> str:
+def _capture_excerpt_text(path: Path, limit: int) -> str:
     """A bounded excerpt that says, in the evidence itself, what it dropped."""
-    raw_head, raw_tail, size = _read_transcript_edges(path)
+    raw_head, raw_tail, size = _read_transcript_edges(path, limit // 2)
     head = _whole_lines_head(raw_head)
     tail = _whole_lines_tail(raw_tail)
     dropped = size - len(head) - len(tail)
     return (
-        head.decode("utf-8", errors="ignore")
-        + _capture_excerpt_marker(dropped)
-        + tail.decode("utf-8", errors="ignore")
+        _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
     )
 
 
-def _capture_transcript_text(path: Path) -> str:
+def _evidence_text(data: bytes) -> str:
+    """Evidence is kept around a byte that does not decode, and shows that it was there.
+
+    A short transcript used to be decoded strictly and a long one with `ignore`: one
+    stray byte lost the short session whole. See
+    `docs/research/2026-09-17-four-small-capture-corrections.md`.
+    """
+    return data.decode("utf-8", errors="replace")
+
+
+def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES) -> str:
     """The whole transcript, or a bounded excerpt of it, never nothing.
 
     A `pre_compact` hook fires because the conversation got long, so refusing
@@ -2584,19 +2629,20 @@ def _capture_transcript_text(path: Path) -> str:
     truncation note. Head and tail rather than either alone: the same choice
     already recorded for nightly consolidation, because a long session puts its
     decisions early and its outcome late.
+
+    `limit` is the bound this read keeps to; it is lowered when the text grew too
+    much inside its JSON record (`_fitting_capture_record`).
     """
-    from bounded_io import read_stable_utf8
+    from bounded_io import read_stable_bytes
 
-    if path.stat().st_size > MAX_CAPTURE_EVIDENCE_BYTES:
-        return _capture_excerpt_text(path)
-    return read_stable_utf8(
-        path,
-        MAX_CAPTURE_EVIDENCE_BYTES,
-        label="capture transcript",
-    )
+    if path.stat().st_size > limit:
+        return _capture_excerpt_text(path, limit)
+    return _evidence_text(read_stable_bytes(path, limit, label="capture transcript"))
 
 
-def _capture_path_evidence(value: object) -> str | None:
+def _capture_path_evidence(
+    value: object, limit: int = MAX_CAPTURE_EVIDENCE_BYTES
+) -> str | None:
     """The transcript's text, or None when there is no transcript to read.
 
     `_transcript_present` already handles a vanished transcript on the
@@ -2618,19 +2664,23 @@ def _capture_path_evidence(value: object) -> str | None:
         path = _validated_capture_transcript_path(value)
     except FileNotFoundError:
         return None
-    redacted = redact_secrets(_capture_transcript_text(path))
+    redacted = redact_secrets(_capture_transcript_text(path, limit))
     if not redacted:
         return None
     return redacted
 
 
-def _capture_evidence_text(envelope: EventEnvelope, payload: Mapping[str, Any]) -> str | None:
+def _capture_evidence_text(
+    envelope: EventEnvelope,
+    payload: Mapping[str, Any],
+    limit: int = MAX_CAPTURE_EVIDENCE_BYTES,
+) -> str | None:
     inline = envelope.payload.get("transcript_text")
     if isinstance(inline, str):
         if not inline:
             return None
         return inline
-    return _capture_path_evidence(payload.get("transcript_path"))
+    return _capture_path_evidence(payload.get("transcript_path"), limit)
 
 
 def _capture_nullable_text(value: object, label: str) -> str | None:
@@ -2639,6 +2689,19 @@ def _capture_nullable_text(value: object, label: str) -> str | None:
     if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
         raise ValueError(f"{label} is invalid")
     return value
+
+
+def _capture_occurred_at(envelope: EventEnvelope) -> str | None:
+    """When the session ended, as the envelope recorded it.
+
+    The worker files the session record and the daily entry by this, so a queue
+    drained the next morning does not file yesterday's sessions under today. See
+    `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
+    """
+    occurred = getattr(envelope, "occurred_at", None)
+    if not isinstance(occurred, datetime):
+        return None
+    return occurred.isoformat()
 
 
 def _capture_source_record(
@@ -2651,7 +2714,7 @@ def _capture_source_record(
     return {
         "source_occurrence_id": envelope.event_id,
         "source_event_id": envelope.source_event_id or envelope.event_id,
-        "occurred_at": None,
+        "occurred_at": _capture_occurred_at(envelope),
         "host": envelope.agent or "unknown",
         "event": envelope.event_type,
         "session": _capture_nullable_text(envelope.session, "capture session"),
@@ -2667,7 +2730,7 @@ def _capture_source_record(
     }
 
 
-def _capture_intent_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
+def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
     from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
     evidence = source["evidence"]
@@ -2691,10 +2754,41 @@ def _capture_intent_record(source: Mapping[str, object]) -> tuple[dict[str, obje
         "chunk_sha256": chunk_digest,
     }
     validate_schema(record, SCRIPTS_DIR / "schemas" / "capture-intent-v1.json")
-    encoded = canonical_json_bytes(record)
-    if len(encoded) > MAX_CAPTURE_INTENT_BYTES:
-        raise ValueError("capture intent exceeds its byte limit")
-    return record, encoded
+    return record, canonical_json_bytes(record)
+
+
+CAPTURE_FIT_ATTEMPTS = 4
+
+
+def _smaller_evidence_limit(limit: int, encoded_size: int) -> int:
+    """The bound scaled by the growth just measured, less a tenth."""
+    return int(limit * MAX_CAPTURE_INTENT_BYTES / encoded_size * 0.9)
+
+
+def _fitting_capture_record(
+    envelope: EventEnvelope,
+    payload: Mapping[str, Any],
+    slug: str | None,
+    trigger: str | None,
+) -> tuple[dict[str, object], bytes] | None:
+    """The record and its bytes, with evidence cut until the encoded record fits.
+
+    Quotes, backslashes and line breaks double inside a JSON string, so a bound on
+    the raw text never bounded the record. See
+    `docs/research/2026-09-17-the-evidence-fits-its-record-and-says-what-it-dropped.md`.
+    """
+    limit = MAX_CAPTURE_EVIDENCE_BYTES
+    for _ in range(CAPTURE_FIT_ATTEMPTS):
+        text = _capture_evidence_text(envelope, payload, limit)
+        if text is None:
+            return None
+        record, encoded = _encoded_capture_record(
+            _capture_source_record(envelope, slug, trigger, text)
+        )
+        if len(encoded) <= MAX_CAPTURE_INTENT_BYTES:
+            return record, encoded
+        limit = _smaller_evidence_limit(limit, len(encoded))
+    raise ValueError("capture intent exceeds its byte limit")
 
 
 def _capture_relative_paths(intent_id: str) -> tuple[str, str]:
@@ -2835,11 +2929,10 @@ def _publish_durable_capture_intent(
     from memory_queue import active_memory_queue
     from reliable_memory import sha256_bytes
 
-    text = _capture_evidence_text(envelope, payload)
-    if text is None:
+    fitted = _fitting_capture_record(envelope, payload, slug, trigger)
+    if fitted is None:
         return None
-    source = _capture_source_record(envelope, slug, trigger, text)
-    record, encoded = _capture_intent_record(source)
+    record, encoded = fitted
     intent_id = str(record["intent_id"])
     intent_sha256 = sha256_bytes(encoded)
     pending_relative, ready_relative = _capture_relative_paths(intent_id)
@@ -2877,13 +2970,31 @@ def publish_capture_intent_from_payload(
     which is what "no user action required" has to mean on the failure path too.
     """
     try:
-        envelope = normalize_event(source, event_type, dict(payload))
-        canonical = _canonical_capture_payload(envelope)
-        slug, _project_dir = _project_context(envelope)
-        trigger = _fallback_trigger(event_type, canonical)
-        return _publish_durable_capture_intent(envelope, canonical, slug, trigger)
+        return _publish_intent_from_payload(source, event_type, payload)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _publish_intent_from_payload(
+    source: str, event_type: str, payload: Mapping[str, Any]
+) -> str | None:
+    envelope = normalize_event(source, event_type, dict(payload))
+    canonical = _canonical_capture_payload(envelope)
+    slug, _project_dir = _project_context(envelope)
+    trigger = _fallback_trigger(event_type, canonical)
+    return _publish_durable_capture_intent(envelope, canonical, slug, trigger)
+
+
+def capture_running_session(source: str, payload: Mapping[str, Any]) -> str | None:
+    """Capture a session that is still running: publish its intent, wake the worker.
+
+    The same record a compaction leaves, without the project checkpoint a real
+    compaction writes. It raises, so the mode that runs it records the reason. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
+    intent_id = _publish_intent_from_payload(source, "pre_compact", payload)
+    _wake_capture_worker({}, intent_id)
+    return intent_id
 
 
 def _record_capture_intent(result: dict[str, Any], intent_id: str | None) -> None:
@@ -2979,11 +3090,43 @@ def _session_end_trigger(trigger: str | None, payload: Mapping[str, Any]) -> Any
     return payload.get("reason")
 
 
+def _decoded_delegate_report(stdout: object) -> dict[str, Any]:
+    try:
+        reported = json.loads(str(stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return reported if isinstance(reported, dict) else {}
+
+
+def _reported_daily_log(stdout: object) -> bool | None:
+    """The delegate's own answer, or None when it did not give one."""
+    written = _decoded_delegate_report(stdout).get("daily_log_written")
+    if isinstance(written, bool):
+        return written
+    return None
+
+
+def _delegate_wrote_daily_log(tagged: object) -> bool:
+    """What the tag delegate says it did, or its exit code when it says nothing.
+
+    The delegate exits 0 whether it wrote a line or skipped the work (a session
+    inside the vault, a session started in `$HOME`, no vault root), so the exit code
+    alone reported tags that never happened. A delegate from an older install prints
+    nothing and keeps the old reading. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    exited_cleanly = getattr(tagged, "returncode", 0) == 0
+    reported = _reported_daily_log(getattr(tagged, "stdout", ""))
+    if reported is None:
+        return exited_cleanly
+    return exited_cleanly and reported
+
+
 def _tag_session_end(
     payload: Mapping[str, Any], project_dir: Path | None, result: dict[str, Any]
 ) -> None:
     tagged = _run_delegate("session_end_project_tag.py", payload, project_dir=project_dir)
-    result["daily_log_written"] = getattr(tagged, "returncode", 0) == 0
+    result["daily_log_written"] = _delegate_wrote_daily_log(tagged)
     result["returncode"] = getattr(tagged, "returncode", 0)
 
 
@@ -3100,7 +3243,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-type")
     parser.add_argument("--maintenance", action="store_true")
     parser.add_argument("--capture-worker", action="store_true")
+    parser.add_argument("--running-capture", metavar="PAYLOAD_JSON")
     return parser
+
+
+def _run_running_capture(args: argparse.Namespace) -> int:
+    """The detached half of the twentieth-prompt capture; the payload rides in argv."""
+    if not args.source:
+        raise ValueError("invalid integration event")
+    payload = json.loads(args.running_capture)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid integration event")
+    capture_running_session(args.source, payload)
+    return 0
 
 
 def _run_active_capture_worker_once() -> int:
@@ -3225,11 +3380,34 @@ def _dispatch_cli_event(
     return _legacy_output(args.source, envelope.event_type, result)
 
 
+# Set by `memory_state.spawn_detached` and by every provider call
+# (`llm_client`): the process under this variable is the memory system itself.
+REENTRY_MARKER = "CLAUDE_INVOKED_BY"
+
+
+def _is_memory_automation() -> bool:
+    """True inside a process the memory system started.
+
+    A host event raised by one of our own calls is our own traffic: capturing it
+    would classify the memory system's prompt as a session, and on a host whose
+    machine-managed settings register these hooks it would do so on every call.
+    The two retired delegates had this guard; the adapter that replaced them did
+    not. The worker and maintenance modes are not host events and never reach
+    here. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    return bool(os.environ.get(REENTRY_MARKER, "").strip())
+
+
+def _require_named_event(args: argparse.Namespace) -> None:
+    if not args.source or not args.event:
+        raise ValueError("invalid integration event")
+
+
 def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
-    if not args.source:
-        raise ValueError("invalid integration event")
-    if not args.event:
-        raise ValueError("invalid integration event")
+    _require_named_event(args)
+    if _is_memory_automation():
+        return None
     raw = _apply_checkpoint_arg(_read_hook_input(), args.checkpoint_type)
     envelope = normalize_occurrence_event(args.source, args.event, raw)
     return _dispatch_cli_event(args, envelope)
@@ -3246,9 +3424,23 @@ def _failed_operation(args: argparse.Namespace | None) -> str:
     """
     if args is None:
         return "unparsed"
-    modes = (("capture_worker", "capture_worker"), ("maintenance", "maintenance"))
-    named = [label for flag, label in modes if getattr(args, flag, False)]
+    named = [flag for flag in CLI_MODES if getattr(args, flag, False)]
     return next(iter(named), getattr(args, "event", None) or "unknown")
+
+
+# The invocations that carry no `--event`, in the order `main` tries them.
+CLI_MODES = ("maintenance", "capture_worker", "running_capture")
+
+
+def _cli_mode(args: argparse.Namespace):
+    """The runner of the mode this invocation asked for, or None for a host event."""
+    runners = {
+        "maintenance": lambda _args: _run_session_start_maintenance(),
+        "capture_worker": lambda _args: _run_active_capture_worker_once(),
+        "running_capture": _run_running_capture,
+    }
+    named = [runners[flag] for flag in CLI_MODES if getattr(args, flag, False)]
+    return next(iter(named), None)
 
 
 def _skip_reason(error: BaseException) -> str:
@@ -3305,10 +3497,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args: argparse.Namespace | None = None
     try:
         args = _parser().parse_args(argv)
-        if args.maintenance:
-            return _run_session_start_maintenance()
-        if args.capture_worker:
-            return _run_active_capture_worker_once()
+        mode = _cli_mode(args)
+        if mode is not None:
+            return mode(args)
         output = _run_cli_event(args)
     except (Exception, SystemExit) as error:  # noqa: BLE001
         _record_cli_capture_failure(args, error)

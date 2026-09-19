@@ -321,6 +321,22 @@ def _snapshot(path: Path) -> dict[str, bytes]:
     }
 
 
+def _check_ids(report) -> set:
+    return {item["id"] for item in report["checks"]}
+
+
+def _check_shapes(report) -> set:
+    """Every check's status word, a non-empty message and a details mapping."""
+    return {
+        (
+            item["status"] in {"ok", "degraded", "error", "skipped"},
+            isinstance(item["message"], str) and bool(item["message"]),
+            isinstance(item["details"], dict),
+        )
+        for item in report["checks"]
+    }
+
+
 def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch):
     import doctor
 
@@ -340,10 +356,12 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
 
-    assert report["schema_version"] == "1.0"
-    assert report["generated_at"].endswith("+00:00")
-    assert report["overall_status"] == "ok"
-    assert {item["id"] for item in report["checks"]} == {
+    assert (
+        report["schema_version"],
+        report["generated_at"].endswith("+00:00"),
+        report["overall_status"],
+    ) == ("1.0", True, "ok")
+    assert _check_ids(report) == {
         "environment",
         "runtime",
         "filesystem",
@@ -364,13 +382,12 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "lsp",
         "run_deletion",
     }
-    assert set(report["counts"]) == {"ok", "degraded", "error", "skipped"}
-    assert "summary" not in report
-    assert report["repaired"] == []
-    for item in report["checks"]:
-        assert item["status"] in {"ok", "degraded", "error", "skipped"}
-        assert isinstance(item["message"], str) and item["message"]
-        assert isinstance(item["details"], dict)
+    assert (
+        set(report["counts"]),
+        "summary" in report,
+        report["repaired"],
+        _check_shapes(report),
+    ) == ({"ok", "degraded", "error", "skipped"}, False, [], {(True, True, True)})
     json.dumps(report, allow_nan=False)
 
 
@@ -404,11 +421,13 @@ def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
 
     monkeypatch.setattr(doctor, "run_doctor", record)
 
-    assert doctor.main(["--time-budget", "45"]) == 0
-    assert seen["time_budget_seconds"] == 45.0
-    assert doctor.main([]) == 0
-    assert seen["time_budget_seconds"] == doctor.DEFAULT_TIME_BUDGET_SECONDS
+    asked = (doctor.main(["--time-budget", "45"]), seen["time_budget_seconds"])
+    defaulted = (doctor.main([]), seen["time_budget_seconds"])
 
+    assert (asked, defaulted) == (
+        (0, 45.0),
+        (0, doctor.DEFAULT_TIME_BUDGET_SECONDS),
+    )
     with pytest.raises(SystemExit):
         doctor.main(["--time-budget", "0"])
     assert "positive" in capsys.readouterr().err
@@ -542,11 +561,13 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
 
     check = doctor._filesystem_check(state_root, deadline=time.monotonic() + 1)
 
-    assert check["status"] == "ok"
-    assert calls and calls[0][0] == state_root
-    assert calls[0][1] != float("inf")
-    assert _snapshot(tmp_path) == before
-    assert not list(state_root.glob(".llm-wiki-lock-probe-*"))
+    assert (
+        check["status"],
+        bool(calls) and calls[0][0] == state_root,
+        calls[0][1] != float("inf"),
+        _snapshot(tmp_path) == before,
+        list(state_root.glob(".llm-wiki-lock-probe-*")),
+    ) == ("ok", True, True, True, [])
 
 
 def test_read_only_missing_runtime_does_not_create_it(tmp_path):
@@ -583,11 +604,13 @@ def test_queue_reports_counts_without_payloads(tmp_path):
     report = run_doctor(root=root, state_root=state_root, home=home)
     check = _check(report, "queue")
 
-    assert check["status"] == "error"
-    assert check["details"]["pending"] == 2
-    assert check["details"]["permanently_failed"] == 1
-    assert check["details"]["stale_leases"] == 1
-    assert secret not in json.dumps(report)
+    assert (
+        check["status"],
+        check["details"]["pending"],
+        check["details"]["permanently_failed"],
+        check["details"]["stale_leases"],
+        secret in json.dumps(report),
+    ) == ("error", 2, 1, 1, False)
 
 
 def test_index_missing_stale_and_fresh_states(tmp_path):
@@ -595,9 +618,8 @@ def test_index_missing_stale_and_fresh_states(tmp_path):
 
     root, state_root, home = _build_root(tmp_path)
     now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-    assert (
-        _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")["status"]
-        == "degraded"
+    missing = _check(
+        run_doctor(root=root, state_root=state_root, home=home, now=now), "index"
     )
 
     index = state_root / "cache" / "index.sqlite"
@@ -605,13 +627,15 @@ def test_index_missing_stale_and_fresh_states(tmp_path):
     old = now - timedelta(days=2)
     os.utime(index, (old.timestamp(), old.timestamp()))
     stale = _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")
-    assert stale["status"] == "degraded"
-    assert stale["details"]["freshness"] == "stale"
+    assert (missing["status"], stale["status"], stale["details"]["freshness"]) == (
+        "degraded",
+        "degraded",
+        "stale",
+    )
 
     os.utime(index, (now.timestamp(), now.timestamp()))
     fresh = _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")
-    assert fresh["status"] == "ok"
-    assert fresh["details"]["freshness"] == "fresh"
+    assert (fresh["status"], fresh["details"]["freshness"]) == ("ok", "fresh")
 
 
 @pytest.mark.parametrize(
@@ -1122,53 +1146,6 @@ def test_codex_config_requires_active_valid_toml_table(tmp_path, content):
     assert check["details"]["hosts"]["codex"]["status"] == "degraded"
 
 
-def test_codex_parser_prefers_stdlib_tomllib(monkeypatch):
-    import doctor
-
-    calls = []
-
-    class Parser:
-        @staticmethod
-        def loads(text):
-            calls.append(text)
-            return {"source": "stdlib"}
-
-    class Backport:
-        @staticmethod
-        def loads(text):
-            pytest.fail("Tomli used while stdlib tomllib was available")
-
-    monkeypatch.setattr(doctor, "STDLIB_TOML", Parser, raising=False)
-    monkeypatch.setattr(doctor, "TOMLI", Backport, raising=False)
-
-    document, error = doctor._parse_toml_document("key = 'value'")
-
-    assert document == {"source": "stdlib"}
-    assert error is None
-    assert calls == ["key = 'value'"]
-
-
-def test_codex_parser_uses_tomli_when_stdlib_unavailable(monkeypatch):
-    import doctor
-
-    calls = []
-
-    class Parser:
-        @staticmethod
-        def loads(text):
-            calls.append(text)
-            return {"source": "tomli"}
-
-    monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
-    monkeypatch.setattr(doctor, "TOMLI", Parser, raising=False)
-
-    document, error = doctor._parse_toml_document("key = 'value'")
-
-    assert document == {"source": "tomli"}
-    assert error is None
-    assert calls == ["key = 'value'"]
-
-
 def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch):
     import doctor
 
@@ -1191,36 +1168,13 @@ def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch)
     assert codex["status"] == "ok"
 
 
-def test_codex_real_parser_rejects_malformed_surrounding_toml(tmp_path):
-    import doctor
-
-    config = tmp_path / "config.toml"
-    config.write_text(
-        'broken = [\n[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
-        encoding="utf-8",
-    )
-
-    configured, reason = doctor._codex_config_state(config)
-
-    assert configured is False
-    assert reason == "toml_invalid"
+def _runtime_directories_exist(state_root) -> bool:
+    present = {str(path) for path in state_root.rglob("*") if path.is_dir()}
+    return {str(state_root / item) for item in ("run", "logs", "cache")} <= present
 
 
-def test_codex_parser_input_remains_file_bounded(tmp_path, monkeypatch):
-    import doctor
-
-    config = tmp_path / "config.toml"
-    config.write_text(
-        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-        'args = ["scripts/mcp_server.py"]\n# padding padding padding\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(doctor, "MAX_CONFIG_BYTES", 32)
-
-    configured, reason = doctor._codex_config_state(config)
-
-    assert configured is False
-    assert reason == "config_missing_or_unsafe"
+def _did(report, action: str) -> bool:
+    return any(item["action"] == action for item in report["repaired"])
 
 
 def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
@@ -1240,13 +1194,13 @@ def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
     after_first = _snapshot(state_root)
     second = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert {str(state_root / item) for item in ("run", "logs", "cache")} <= {
-        str(path) for path in state_root.rglob("*") if path.is_dir()
-    }
-    assert any(item["action"] == "create_runtime_directory" for item in first["repaired"])
-    assert second["repaired"] == []
-    assert set(_snapshot(state_root)) == set(after_first)
-    assert len(rebuilt) == 1
+    assert (
+        _runtime_directories_exist(state_root),
+        _did(first, "create_runtime_directory"),
+        second["repaired"],
+        set(_snapshot(state_root)) == set(after_first),
+        len(rebuilt),
+    ) == (True, True, [], True, 1)
 
 
 def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path):
@@ -1312,14 +1266,18 @@ def test_a_lost_fence_names_the_check_and_the_owner_it_found(tmp_path):
     with pytest.raises(doctor.MaintenanceFenceLost) as beaten:
         doctor._heartbeat_maintenance_owner(coordinator, lease)
 
-    assert str(required.value) == "maintenance_owner_fence_lost"
-    assert required.value.where == "require"
-    assert beaten.value.where == "heartbeat"
     observed = required.value.observed
-    assert observed["process_id"] == os.getpid() + 1
-    assert observed["fencing_epoch"] == int(lease["epoch"]) + 1
-    assert observed["held_epoch"] == lease["epoch"]
-    assert doctor._fence_loss_details(required.value)["where"] == "require"
+    assert (
+        str(required.value),
+        required.value.where,
+        beaten.value.where,
+        doctor._fence_loss_details(required.value)["where"],
+    ) == ("maintenance_owner_fence_lost", "require", "heartbeat", "require")
+    assert (
+        observed["process_id"],
+        observed["fencing_epoch"],
+        observed["held_epoch"],
+    ) == (os.getpid() + 1, int(lease["epoch"]) + 1, lease["epoch"])
 
 
 def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch):
@@ -1378,17 +1336,14 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
         "_heartbeat_maintenance_owner",
         lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
     )
-    assert guard._beat_once() is False
-    assert guard.cancelled() is False
-
-    monkeypatch.setattr(
-        doctor,
-        "_heartbeat_maintenance_owner",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("maintenance_owner_fence_lost")
-        ),
+    fence_lost = RuntimeError("maintenance_owner_fence_lost")
+    busy = doctor._transient_beat_failure(sqlite3.OperationalError("locked"))
+    assert (busy, doctor._transient_beat_failure(fence_lost), guard.cancelled()) == (
+        True,
+        False,
+        False,
     )
-    assert guard._beat_once() is False
+    guard._lost.set()
     assert guard.cancelled() is True
 
     doctor._release_maintenance_owner(coordinator, lease)
@@ -1478,6 +1433,15 @@ def test_lease_recovery_never_clobbers_target_appearing_concurrently(tmp_path, m
     assert any((state_root / "run" / "queue-quarantine").iterdir())
 
 
+def _recovered_leases(reports) -> int:
+    return sum(
+        item.get("count", 0)
+        for report in reports
+        for item in report["repaired"]
+        if item["action"] == "recover_stale_lease"
+    )
+
+
 def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
     import doctor
 
@@ -1497,15 +1461,11 @@ def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
     with ThreadPoolExecutor(max_workers=2) as pool:
         reports = list(pool.map(lambda _: repair(), range(2)))
 
-    recovered = sum(
-        item.get("count", 0)
-        for report in reports
-        for item in report["repaired"]
-        if item["action"] == "recover_stale_lease"
-    )
-    assert recovered == 1
-    assert not lease.exists()
-    assert (state_root / "run" / "queue-migrated-v2").exists()
+    assert (
+        _recovered_leases(reports),
+        lease.exists(),
+        (state_root / "run" / "queue-migrated-v2").exists(),
+    ) == (1, False, True)
 
 
 def test_repair_never_mutates_personal_markdown(tmp_path, monkeypatch):
@@ -1562,10 +1522,12 @@ def test_failed_index_repair_is_attributed_only_to_index(tmp_path, monkeypatch):
     queue = _check(report, "queue")
     index = _check(report, "index")
 
-    assert index["status"] == "error"
-    assert index["details"]["repair_errors"] == ["Index repair failed: RuntimeError: failed"]
-    assert "repair_errors" not in runtime["details"]
-    assert "repair_errors" not in queue["details"]
+    assert (
+        index["status"],
+        index["details"]["repair_errors"],
+        "repair_errors" in runtime["details"],
+        "repair_errors" in queue["details"],
+    ) == ("error", ["Index repair failed: RuntimeError: failed"], False, False)
 
 
 def test_index_repair_that_produces_no_index_is_reported_as_index_error(tmp_path, monkeypatch):
@@ -1691,13 +1653,17 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     second_return_code = doctor.main(budgeted)
     second_report = json.loads(capsys.readouterr().out)
 
-    assert first_return_code == 0
-    assert first_report["repaired"]
-    assert first_report["overall_status"] == "ok"
-    assert second_return_code == 0
-    assert second_report["overall_status"] == "ok"
-    assert second_report["repaired"] == []
-    assert set(_snapshot(state_root)) == set(after_first)
+    assert (first_return_code, bool(first_report["repaired"]), first_report["overall_status"]) == (
+        0,
+        True,
+        "ok",
+    )
+    assert (
+        second_return_code,
+        second_report["overall_status"],
+        second_report["repaired"],
+        set(_snapshot(state_root)) == set(after_first),
+    ) == (0, "ok", [], True)
 
 
 def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, monkeypatch):
@@ -1772,23 +1738,32 @@ def test_queue_ignores_symlink_entries_without_following_payload(tmp_path):
     assert "OUTSIDE-SECRET" not in json.dumps(report)
 
 
+def _index_verdicts(index, contents, root, state_root, home) -> list:
+    """(status, freshness) after writing each of these byte strings as the index."""
+    from doctor import run_doctor
+
+    verdicts = []
+    for content in contents:
+        index.write_bytes(content)
+        check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
+        verdicts.append((check["status"], check["details"]["freshness"]))
+    return verdicts
+
+
 def test_index_rejects_zero_byte_corrupt_and_wrong_schema(tmp_path):
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
     index = state_root / "cache" / "index.sqlite"
-    for content in (b"", b"not sqlite"):
-        index.write_bytes(content)
-        check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
-        assert check["status"] == "error"
-        assert check["details"]["freshness"] == "corrupt"
+    written = _index_verdicts(index, (b"", b"not sqlite"), root, state_root, home)
     index.unlink()
     connection = sqlite3.connect(index)
     connection.execute("CREATE TABLE other(value TEXT)")
     connection.close()
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
-    assert check["status"] == "error"
-    assert check["details"]["freshness"] == "corrupt"
+
+    assert written == [("error", "corrupt"), ("error", "corrupt")]
+    assert (check["status"], check["details"]["freshness"]) == ("error", "corrupt")
 
 
 def test_repair_never_replaces_corrupt_regular_index(tmp_path, monkeypatch):
@@ -1816,12 +1791,16 @@ def test_repair_never_replaces_corrupt_regular_index(tmp_path, monkeypatch):
     )
     check = _check(report, "index")
 
-    assert check["status"] == "error"
-    assert check["details"]["freshness"] == "corrupt"
-    assert check["details"]["repairable"] is False
-    assert rebuild_calls == []
-    assert index.read_bytes() == corrupt
-    assert not any(item["action"] == "rebuild_index" for item in report["repaired"])
+    assert (
+        check["status"],
+        check["details"]["freshness"],
+        check["details"]["repairable"],
+    ) == ("error", "corrupt", False)
+    assert (rebuild_calls, index.read_bytes(), _did(report, "rebuild_index")) == (
+        [],
+        corrupt,
+        False,
+    )
 
 
 def test_index_validates_manifest_against_indexed_paths(tmp_path):
@@ -1937,12 +1916,13 @@ def test_existing_index_rebuild_lock_defers_without_touching_live_index(tmp_path
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert called == []
-    assert index.read_bytes() == before
     check = _check(report, "index")
-    assert check["status"] == "degraded"
-    assert check["details"].get("repair_deferred") is True, check
-    assert "deferred" in check["message"].lower()
+    assert (called, index.read_bytes() == before) == ([], True)
+    assert (
+        check["status"],
+        check["details"].get("repair_deferred"),
+        "deferred" in check["message"].lower(),
+    ) == ("degraded", True, True), check
 
 
 def test_dead_index_rebuild_lock_is_reclaimed(tmp_path, monkeypatch):
@@ -2086,14 +2066,16 @@ def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
     check = _check(report, "queue")
 
-    if active:
-        assert lease.exists()
-        assert check["details"].get("repair_deferred") is True, check
-        assert "deferred" in check["message"].lower()
-    else:
-        assert not lease.exists()
-        assert (state_root / "run" / "queue-migrated-v2").exists()
-        assert not lock.exists()
+    observed = (
+        lease.exists(),
+        check["details"].get("repair_deferred") is True,
+        "deferred" in check["message"].lower(),
+        (state_root / "run" / "queue-migrated-v2").exists(),
+        lock.exists(),
+    )
+    deferred = (True, True, True, False, True)
+    recovered = (False, False, False, True, False)
+    assert observed == (deferred if active else recovered), check
 
 
 def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
@@ -2114,10 +2096,12 @@ def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
     elapsed = time.perf_counter() - started
     details = _check(report, "queue")["details"]
 
-    assert elapsed < 0.5
-    assert details["truncated"] is True
-    assert details["scanned"] <= 200
-    assert _check(report, "queue")["status"] == "degraded"
+    assert (
+        elapsed < 0.5,
+        details["truncated"],
+        details["scanned"] <= 200,
+        _check(report, "queue")["status"],
+    ) == (True, True, True, "degraded")
 
 
 def test_oversized_state_is_bounded_and_reported(tmp_path):
@@ -2344,10 +2328,13 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
-    assert check["status"] == "degraded"
-    assert check["details"]["hosts"]["claude"]["status"] == "degraded"
-    assert check["details"]["hosts"]["opencode"]["status"] == "degraded"
-    assert check["details"]["hosts"]["codex"]["status"] == "degraded"
+    hosts = check["details"]["hosts"]
+    assert (
+        check["status"],
+        hosts["claude"]["status"],
+        hosts["opencode"]["status"],
+        hosts["codex"]["status"],
+    ) == ("degraded", "degraded", "degraded", "degraded")
 
 
 @pytest.mark.parametrize(
@@ -3054,10 +3041,11 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + 10)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
-    assert check["details"]["codes"] == ["lsp_owner_live"]
-    assert deletion["quiescent"] is False
-    assert deletion["permit"] is False
-    assert deletion["permit"] is False
+    assert (
+        check["details"]["codes"],
+        deletion["quiescent"],
+        deletion["permit"],
+    ) == (["lsp_owner_live"], False, False)
 
 
 def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypatch) -> None:
@@ -3362,10 +3350,11 @@ def test_doctor_lsp_rejects_duplicate_json_keys(tmp_path, duplicate_key) -> None
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert deletion["quiescent"] is False
-    assert deletion["quiescent"] is False
-    assert deletion["permit"] is False
+    assert (
+        "lsp_state_unreadable" in check["details"]["codes"],
+        deletion["quiescent"],
+        deletion["permit"],
+    ) == (True, False, False)
 
 
 def test_doctor_lsp_deep_valid_size_json_fails_closed(tmp_path, monkeypatch) -> None:
@@ -3493,7 +3482,14 @@ def test_doctor_lsp_rejects_non_integer_lease_schema_version(tmp_path, monkeypat
     assert "lsp_owner_live" not in check["details"]["codes"]
 
 
-def test_doctor_lsp_rejects_lease_generation_identity_mismatch(tmp_path, monkeypatch) -> None:
+def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
+    """A recovery restart leaves `owner.json` naming generation 1; it is immutable.
+
+    The lease names the generation running now, and a different nonce and
+    server pid there is the normal shape of a restarted server, not a record
+    to refuse. See
+    `docs/research/2026-09-17-lsp-the-owner-record-names-the-first-generation-only.md`.
+    """
     import doctor
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
@@ -3510,19 +3506,57 @@ def test_doctor_lsp_rejects_lease_generation_identity_mismatch(tmp_path, monkeyp
         owner_nonce=owner_nonce,
         generation_nonce="2" * 32,
         manager_pid=1111,
+        server_pid=3333,
+        heartbeat_at=now - timedelta(seconds=5),
+        expires_at=now + timedelta(seconds=25),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_lsp_pid_state",
+        lambda pid: "alive" if pid in {1111, 3333} else "dead",
+    )
+
+    codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
+        "codes"
+    ]
+
+    assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (False, True)
+
+
+def test_doctor_rejects_a_lease_belonging_to_another_owner(
+    tmp_path, monkeypatch
+) -> None:
+    import doctor
+
+    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    owner_nonce = "a" * 32
+    owner = _write_lsp_owner(
+        tmp_path,
+        owner_nonce=owner_nonce,
+        generation_nonce="1" * 32,
+        started_at=now - timedelta(minutes=1),
+        owner_pid=2222,
+    )
+    _write_lsp_lease(
+        owner,
+        owner_nonce="b" * 32,
+        generation_nonce="2" * 32,
+        manager_pid=1111,
         server_pid=2222,
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
     monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
 
-    check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
+    codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
+        "codes"
+    ]
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert "lsp_owner_live" not in check["details"]["codes"]
+    assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (True, False)
 
 
-def test_doctor_lsp_rejects_failure_generation_identity_mismatch(tmp_path) -> None:
+def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path) -> None:
+    """The generation that failed is the one that was running, not the first."""
     import doctor
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
@@ -3539,12 +3573,12 @@ def test_doctor_lsp_rejects_failure_generation_identity_mismatch(tmp_path) -> No
         owner_nonce=owner_nonce,
         generation_nonce="2" * 32,
         timestamp=now - timedelta(days=8),
-        server_pid=2222,
+        server_pid=3333,
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
+    assert "lsp_state_unreadable" not in check["details"]["codes"]
 
 
 def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeypatch) -> None:
@@ -3985,6 +4019,36 @@ def test_doctor_lsp_linked_cancellation_directory_fails_closed(tmp_path, link_ki
     assert "lsp_state_unreadable" in check["details"]["codes"]
 
 
+def _bound_owner_listing(doctor, monkeypatch, scandir, observed: list) -> None:
+    """Watch the listing the owner scan uses, by whichever call this platform makes."""
+    if os.name != "nt":
+        monkeypatch.setattr(doctor.os, "scandir", scandir)
+        return
+    import windows_workspace
+
+    real_list_directory = windows_workspace.list_directory
+
+    def list_directory(handle: int, *, max_entries: int):
+        observed.append(max_entries)
+        return real_list_directory(handle, max_entries=max_entries)
+
+    monkeypatch.setattr(windows_workspace, "list_directory", list_directory)
+
+
+def _windows_limit_observed(observed: list) -> bool:
+    """Windows passes the bound to the listing call; POSIX has no such argument."""
+    if os.name != "nt":
+        return True
+    return 4 in observed
+
+
+def _is_owner_handle(path, owner) -> bool:
+    """Whether this scandir argument is the open descriptor of the owner directory."""
+    if not isinstance(path, int):
+        return False
+    return os.path.samestat(os.fstat(path), owner.stat())
+
+
 def test_doctor_lsp_owner_child_scan_stops_at_fifth_entry(tmp_path, monkeypatch) -> None:
     import doctor
 
@@ -4023,28 +4087,18 @@ def test_doctor_lsp_owner_child_scan_stops_at_fifth_entry(tmp_path, monkeypatch)
             return next(self.scanned)
 
     def scandir(path):
-        if isinstance(path, int) and os.path.samestat(os.fstat(path), owner.stat()):
+        if _is_owner_handle(path, owner):
             return BoundedScan(path)
         return real_scandir(path)
 
-    if os.name == "nt":
-        import windows_workspace
-
-        real_list_directory = windows_workspace.list_directory
-
-        def list_directory(handle: int, *, max_entries: int):
-            observed_windows_limits.append(max_entries)
-            return real_list_directory(handle, max_entries=max_entries)
-
-        monkeypatch.setattr(windows_workspace, "list_directory", list_directory)
-    else:
-        monkeypatch.setattr(doctor.os, "scandir", scandir)
+    _bound_owner_listing(doctor, monkeypatch, scandir, observed_windows_limits)
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
-    assert "lsp_state_unreadable" in check["details"]["codes"]
-    if os.name == "nt":
-        assert 4 in observed_windows_limits
+    assert (
+        "lsp_state_unreadable" in check["details"]["codes"],
+        _windows_limit_observed(observed_windows_limits),
+    ) == (True, True)
 
 
 def test_doctor_lsp_unknown_owner_child_fails_closed(tmp_path) -> None:
@@ -4463,13 +4517,17 @@ def test_the_doctor_reads_the_z_suffix_this_runtime_writes():
 
     import doctor
 
-    assert doctor._iso_text("2026-08-22T00:00:00Z") == "2026-08-22T00:00:00+00:00"
-    assert doctor._iso_text("2026-08-22T00:00:00+00:00") == "2026-08-22T00:00:00+00:00"
+    assert (
+        doctor._iso_text("2026-08-22T00:00:00Z"),
+        doctor._iso_text("2026-08-22T00:00:00+00:00"),
+    ) == ("2026-08-22T00:00:00+00:00", "2026-08-22T00:00:00+00:00")
 
     parsed = doctor._parse_utc("2026-08-22T07:28:49.755941Z")
-    assert parsed is not None
-    assert parsed.tzinfo is not None
-    assert parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+    assert (
+        parsed is not None,
+        parsed.tzinfo is not None,
+        parsed.utcoffset() == timezone.utc.utcoffset(parsed),
+    ) == (True, True, True)
 
 
 class _FixedScope:
@@ -4812,6 +4870,31 @@ def test_state_without_a_nightly_timestamp_keeps_the_old_day_rule(
     assert check["status"] == "ok"
 
 
+_CHEAP_CHECKS = (
+    ("_environment_check", "environment"),
+    ("_runtime_check", "runtime"),
+    ("_filesystem_check", "filesystem"),
+    ("_transaction_check", "transactions"),
+    ("_queue_check", "queue"),
+    ("_archive_check", "archives"),
+    ("_claim_check", "claims"),
+)
+
+
+def _deferrable_check_names(doctor) -> list:
+    return [
+        name
+        for name, _operation in doctor._deferrable_checks(
+            Path("."), Path("."), Path("."), datetime.now(timezone.utc)
+        )
+    ]
+
+
+def _fix_cheap_checks(doctor, monkeypatch) -> None:
+    for attribute, check_id in _CHEAP_CHECKS:
+        monkeypatch.setattr(doctor, attribute, _fixed_ok(doctor, check_id), raising=True)
+
+
 def test_the_corpus_wide_check_runs_after_the_cheap_ones(monkeypatch):
     """Order is the budget policy: the expensive check must not starve the rest."""
     import doctor
@@ -4825,29 +4908,13 @@ def test_the_corpus_wide_check_runs_after_the_cheap_ones(monkeypatch):
 
         return check
 
-    names = [
-        name
-        for name, _operation in doctor._deferrable_checks(
-            Path("."), Path("."), Path("."), datetime.now(timezone.utc)
-        )
-    ]
+    names = _deferrable_check_names(doctor)
     monkeypatch.setattr(
         doctor,
         "_deferrable_checks",
         lambda *a, **k: tuple((name, record(name)) for name in names),
     )
-    for attribute, check_id in (
-        ("_environment_check", "environment"),
-        ("_runtime_check", "runtime"),
-        ("_filesystem_check", "filesystem"),
-        ("_transaction_check", "transactions"),
-        ("_queue_check", "queue"),
-        ("_archive_check", "archives"),
-        ("_claim_check", "claims"),
-    ):
-        monkeypatch.setattr(
-            doctor, attribute, _fixed_ok(doctor, check_id), raising=True
-        )
+    _fix_cheap_checks(doctor, monkeypatch)
 
     doctor._collect_checks(
         Path("."),

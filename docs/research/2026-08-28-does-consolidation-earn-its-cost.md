@@ -16,7 +16,7 @@ pipeline, does our consolidation move that number?**
 ## Which consolidation is on the answer path
 
 The roadmap names `reflection.py`. Traced through the code graph
-(`home-user-llm-wiki`, `trace_path` on `consolidate_day`, and callers of both
+(`<derived-project-key>`, `trace_path` on `consolidate_day`, and callers of both
 modules), this vault has two things called consolidation and they are not the
 same:
 

@@ -77,16 +77,20 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LOCAL SEARCH + INTELLIGENCE                                        │
 │  validated immutable generation: FTS + Evidence Graph + evidence     │
-│  optional generation vectors; legacy FTS/vector/Lance compatibility  │
+│  optional generation vectors; legacy FTS/vector compatibility        │
 │  retrieval planner + context compiler + grounded QA                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-## Read-only Python navigation
+## Read-only precise navigation
 
-The implemented Python slice keeps structural discovery in the existing Evidence
-Graph and adds an owned, Python 3.10-compatible LSP path through pinned Pyright
-1.1.411. The existing `get_architecture` tool routes precise modes through one lazy
+The implemented slice keeps structural discovery in the existing Evidence
+Graph and adds an owned, Python 3.10-compatible LSP path through four pinned managed
+language servers: Pyright 1.1.411 for Python, `typescript-language-server` 6.0.0
+(tsserver 5.9.3) for TypeScript and JavaScript, gopls v0.23.0 for Go and
+rust-analyzer 1.98.1 for Rust. A query is routed to one of them by file suffix, and a
+suffix none claims falls back to Pyright and then to structural evidence. The
+existing `get_architecture` tool routes precise modes through one lazy
 repository-scoped session. The facade validates input bytes, synchronizes documents,
 normalizes provider facts, merges explicit structural fallback, and proves the
 workspace revision again before publishing a result.
@@ -97,12 +101,14 @@ into an active generation. Small exact results use the
 deterministic navigation renderer; broad architecture and impact synthesis continue
 to use the Context Compiler.
 
-Pyright installation is an explicit operator action into
-`cache/code-tools/pyright/1.1.411/`. Process scratch is bounded under
-`run/lsp/<owner-nonce>/` and protected by the existing `run/` deletion contract.
-Windows owns the assigned server tree with a Job Object. POSIX owns the pinned server
-and descendants with a process group only while they remain in that group; hostile
-`setsid()` escape is unsupported. The runtime therefore supports trusted local
+Installing a server is an explicit operator action, one command per profile
+(`scripts/install_pyright.py`, or `scripts/install_language_server.py --profile
+<name>`), into `cache/code-tools/<profile>/<version>/`. Process scratch is bounded
+under `run/lsp/<owner-nonce>/`, holds the sealed digest-verified copy of a native
+server launched from it, and is protected by the existing `run/` deletion contract.
+Windows owns the assigned server tree with a Job Object. POSIX owns the assigned
+managed server and its descendants with a process group only while they remain in
+that group; hostile `setsid()` escape is unsupported. The runtime therefore supports trusted local
 repositories and does not claim to be an OS sandbox.
 
 The deterministic 100 KLOC fixture qualifies correctness, freshness, recovery,
@@ -156,8 +162,8 @@ valid and lint covers them equally.
 ## Unified evidence retrieval architecture
 
 Markdown, Git, and append-only project journals are authoritative. The generation
-catalog, Evidence Graph, FTS, vectors, L0/L1/L2 tiers, contextual artifacts,
-telemetry, and model caches are derived runtime state. A derived record may guide
+catalog, Evidence Graph, FTS, vectors, the L1 tier cache, telemetry, and model
+caches are derived runtime state. A derived record may guide
 retrieval, but it cannot override its captured source bytes.
 
 `cache/evidence-graph/catalog.sqlite3` is the single active pointer. A generation
@@ -188,7 +194,8 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
-2. **Vector (weight=1.0)**: LanceDB HNSW compatibility backend (embedded, no daemon, Apache-2.0).
+2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
+   `intfloat/multilingual-e5-small` embedding as the semantic tier (embedded, no daemon).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
 
@@ -202,7 +209,7 @@ allowed until raw EN/RU/ZH quality, latency, RAM, license, regression, and Paret
 evidence passes the selection contract. **Evidence pending.**
 
 **Why no PostgreSQL?** PostgreSQL requires a daemon, which violates Axiom #1.
-SQLite + optional LanceDB preserves a local, zero-daemon deployment shape. This is
+SQLite plus the optional in-process vectors preserves a local, zero-daemon deployment shape. This is
 not a measured quality-equivalence claim against PostgreSQL or another service.
 
 ### Context and token contract
@@ -305,7 +312,7 @@ of claim ledgers.
 The system performs no automatic Git staging, commit, branch, or remote operation.
 It adds no cloud service, remote queue/cache, or persistent daemon. Runtime databases
 coordinate local work only. Operational defaults are 10-second transaction and
-5-second queue busy timeouts; 30-day transaction/undo retention; 90-day archive hot
+5-second queue busy timeouts; 2-day transaction/undo retention; 90-day archive hot
 retention; 30/10-second project lease/heartbeat; 30-second checkpoint debounce and
 20-event fallback; 120/40-second queue lease/heartbeat; 8 attempts with 30/3600-second
 retry base/cap; and worker limits of 20 tasks, 600 seconds, and 2 idle seconds.
@@ -314,7 +321,7 @@ no environment variables.
 
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
-- **LanceDB hybrid vectors** (`--extra hybrid`): HNSW vector search, embedded, zero-daemon.
+- **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
 - **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;

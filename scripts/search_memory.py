@@ -81,7 +81,12 @@ MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
 )
-GENERATION_SEARCH_SCHEMA_VERSION = "corpus-search/v1"
+# v2 adds one indexed column, `keys`: the nightly fact keys of the turn, matched beside its
+# text under one BM25 and never returned to a reader. A v1 artifact has no such column and
+# stays readable. See `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+GENERATION_SEARCH_SCHEMA_VERSION = "corpus-search/v2"
+LEGACY_SEARCH_SCHEMA_VERSION = "corpus-search/v1"
+GENERATION_KEYS_COLUMN = "keys"
 GENERATION_TOKENIZER = "porter unicode61"
 GENERATION_TOKENIZER_VERSION = "sqlite-fts5/porter-unicode61/v1"
 GENERATION_TOKENIZER_CONFIG_SHA256 = hashlib.sha256(
@@ -363,6 +368,7 @@ _GENERATION_FTS_DDL = """
                 language UNINDEXED,
                 title,
                 content,
+                keys,
                 tokenize = 'porter unicode61'
             );
             """
@@ -384,12 +390,8 @@ def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
     """The exact stored row for one chunk.
 
     The builder writes these and the validator rebuilds them from the
-    authoritative sources to compare, so this shape is stated once.
-    """
-    """The exact stored row for one chunk.
-
-    The builder writes these and the validator rebuilds them from the
-    authoritative sources to compare; two copies of this shape would drift.
+    authoritative sources to compare, so this shape is stated once: two copies
+    of it would drift.
     """
     title = (
         chunk.heading_ancestry[-1]
@@ -422,12 +424,20 @@ def _generation_chunk_row(chunk: object, order: int) -> tuple[object, ...]:
     )
 
 
+def _keys_of(chunk: object, keys: Mapping[str, str] | None) -> str:
+    """The fact keys the nightly pass wrote for this chunk's turn, or nothing."""
+    if not keys:
+        return ""
+    return keys.get(chunk.span_sha256, "")
+
+
 def _write_generation_fts(
     database: sqlite3.Connection,
     snapshot: CorpusSnapshot,
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    keys: Mapping[str, str] | None = None,
 ) -> None:
     """Schema, metadata and every chunk, verified before the caller publishes."""
     database.execute("PRAGMA journal_mode=DELETE")
@@ -441,10 +451,10 @@ def _write_generation_fts(
     def rows():
         for order, chunk in enumerate(snapshot.chunks):
             _check_generation_stop(deadline, cancelled)
-            yield _generation_chunk_row(chunk, order)
+            yield (*_generation_chunk_row(chunk, order), _keys_of(chunk, keys))
 
     database.executemany(
-        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(22)) + ")",
+        "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(23)) + ")",
         rows(),
     )
     database.commit()
@@ -486,6 +496,7 @@ def _built_fts_artifact(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    keys: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Write the artifact under a temporary name, then publish it atomically."""
     state = {"stopped": False, "complete": False}
@@ -498,7 +509,7 @@ def _built_fts_artifact(
         with closing(sqlite3.connect(temporary)) as database:
             database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
             _write_generation_fts(
-                database, snapshot, deadline=deadline, cancelled=cancelled
+                database, snapshot, deadline=deadline, cancelled=cancelled, keys=keys
             )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
@@ -528,8 +539,14 @@ def build_generation_fts(
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    keys: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+    """Build one immutable generation-local FTS5 artifact from captured chunks.
+
+    `keys` carries the nightly fact keys per turn span; they are indexed beside the chunk
+    and never returned to a reader. Research:
+    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
     _require_buildable_snapshot(snapshot, deadline, cancelled)
     directory = _generation_directory(generation_directory)
     destination = directory / GENERATION_FTS_ARTIFACT
@@ -543,6 +560,7 @@ def build_generation_fts(
         temporary,
         deadline=deadline,
         cancelled=cancelled,
+        keys=keys,
     )
 
 
@@ -576,10 +594,6 @@ def _require_absent_artifacts(destinations: list[Path]) -> None:
             raise FileExistsError(destination)
 
 
-def _chunk_texts(snapshot: CorpusSnapshot) -> list[str]:
-    return [chunk.text for chunk in snapshot.chunks]
-
-
 def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
     import numpy as np
 
@@ -587,19 +601,6 @@ def _require_embedded_shape(matrix, rows: int, dimensions: int) -> None:
         raise ValueError("embedder returned a matrix with incompatible shape")
     if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
         raise ValueError("embedder returned a non-finite numeric matrix")
-
-
-def _embedded_matrix(
-    snapshot: CorpusSnapshot, embedder: object, dimensions: int
-) -> object:
-    """The embedder's output, refused unless it is finite and the right shape."""
-    import numpy as np
-
-    matrix = np.asarray(
-        _call_generation_embedder(embedder, _chunk_texts(snapshot))
-    )
-    _require_embedded_shape(matrix, len(snapshot.chunks), dimensions)
-    return np.ascontiguousarray(matrix, dtype=np.float32)
 
 
 # Texts per embedding call, with a stop check before each: `encode` cannot be
@@ -1783,9 +1784,13 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
-    """Create the lock exclusively and write the claim, or report it is taken."""
+    """Create the lock exclusively and write the claim, or report it is taken.
+
+    Binary: a Windows text-mode descriptor rewrites the claim's newlines.
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        descriptor = os.open(str(lock_file), flags, 0o600)
     except FileExistsError:
         return False
     except PermissionError as error:
@@ -3059,29 +3064,51 @@ _FTS_CHUNK_SELECT = (
 )
 
 
-def _valid_table_shapes(connection: sqlite3.Connection) -> bool:
+def _indexed_columns(version: str | None) -> tuple[str, ...] | None:
+    """The indexed columns an artifact of this version declares, or None for an unknown one."""
+    if version == GENERATION_SEARCH_SCHEMA_VERSION:
+        return ("title", "content", GENERATION_KEYS_COLUMN)
+    if version == LEGACY_SEARCH_SCHEMA_VERSION:
+        return ("title", "content")
+    return None
+
+
+def _declared_version(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        "SELECT value FROM generation_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    if not row:
+        return None
+    return str(row[0])
+
+
+def _expected_chunk_columns(indexed: tuple[str, ...]) -> tuple[str, ...]:
+    return (*GENERATION_FTS_COLUMNS[:-2], *indexed)
+
+
+def _valid_table_shapes(connection: sqlite3.Connection, indexed: tuple[str, ...]) -> bool:
     metadata_schema = tuple(
         (row[1], row[2].upper(), row[3], row[5])
         for row in connection.execute("PRAGMA table_info(generation_metadata)")
     )
     chunk_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(chunks)"))
-    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == GENERATION_FTS_COLUMNS
+    return metadata_schema == _FTS_METADATA_SCHEMA and chunk_columns == _expected_chunk_columns(indexed)
 
 
 def _valid_fts_schema(connection: sqlite3.Connection) -> bool:
-    """Integrity, table shapes, and the exact FTS5 declaration."""
+    """Integrity, table shapes, and the exact FTS5 declaration of the artifact's own version."""
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         return False
-    if not _valid_table_shapes(connection):
+    indexed = _indexed_columns(_declared_version(connection))
+    if indexed is None or not _valid_table_shapes(connection, indexed):
         return False
-    return _valid_fts_declaration(connection)
+    return _valid_fts_declaration(connection, indexed)
 
 
-def _expected_fts_arguments() -> list[str]:
+def _expected_fts_arguments(indexed: tuple[str, ...]) -> list[str]:
     return [
         *(f"{column} unindexed" for column in GENERATION_FTS_COLUMNS[:-2]),
-        "title",
-        "content",
+        *indexed,
         "tokenize = 'porter unicode61'",
     ]
 
@@ -3107,8 +3134,8 @@ def _declared_fts_arguments(connection: sqlite3.Connection) -> list[str] | None:
     ]
 
 
-def _valid_fts_declaration(connection: sqlite3.Connection) -> bool:
-    return _declared_fts_arguments(connection) == _expected_fts_arguments()
+def _valid_fts_declaration(connection: sqlite3.Connection, indexed: tuple[str, ...]) -> bool:
+    return _declared_fts_arguments(connection) == _expected_fts_arguments(indexed)
 
 
 def _valid_metadata_rows(rows: list[tuple[object, object]]) -> bool:
@@ -3135,8 +3162,9 @@ def _generation_metadata(connection: sqlite3.Connection) -> dict[str, str] | Non
 def _metadata_matches_manifest(
     metadata: Mapping[str, str], manifest: Mapping[str, object]
 ) -> bool:
+    if _indexed_columns(metadata.get("schema_version")) is None:
+        return False
     expected = {
-        "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
         "collector_version": manifest.get("collector_version"),
         "extractor_version": manifest.get("extractor_version"),
         "tokenizer_version": GENERATION_TOKENIZER_VERSION,
@@ -3692,7 +3720,7 @@ def apply_hard_filters(
     authority: str | None = None,
     **_ignored: object,
 ) -> list[dict]:
-    """Single hard-filter contract shared by lexical / NumPy / Lance paths."""
+    """Single hard-filter contract shared by the lexical and NumPy paths."""
     return [
         row
         for row in rows
@@ -3794,6 +3822,13 @@ def _generation_matched_rows(
     values: Sequence[object],
     limit: int,
 ) -> list[sqlite3.Row]:
+    """One BM25 over a chunk's title, text and — in a v2 artifact — its fact keys.
+
+    Key expansion, the shape LongMemEval measured as the good one: a turn is found under
+    the facts it states as well as under its text, and what the reader gets is still the
+    turn. The keys are a column of this table, so they are ranked on the same scale as the
+    text. Research: `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+    """
     return connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
@@ -4406,6 +4441,28 @@ def _clipped_summary(summary: object) -> str:
     return summary[:120]
 
 
+# The one directory whose file names are identities: pages live flat there, as
+# `<slug>.md`, and the legacy telemetry is keyed by that slug.
+_FLAT_NOTES_ROOT = "knowledge/notes"
+
+
+def legacy_candidate_id(path: object) -> str:
+    """What names a legacy candidate: the slug of a flat note, else the path without its suffix.
+
+    A stem is an identity only where names are unique. Every
+    `knowledge/projects/<slug>/state.md` has the stem `state`, and fusion adds
+    ranks per identifier, so two projects' state pages became one candidate and
+    the second vanished. Research:
+    `docs/research/2026-09-17-two-pages-with-one-file-name-are-two-candidates.md`.
+    """
+    page = Path(str(path or "").replace("\\", "/"))
+    if not page.name:
+        return ""
+    if page.parent.as_posix() == _FLAT_NOTES_ROOT:
+        return page.stem
+    return page.with_suffix("").as_posix()
+
+
 def _legacy_hit(
     path: object,
     title: object,
@@ -4422,7 +4479,7 @@ def _legacy_hit(
         "bm25_score": score,
         "project": project,
         "timestamp": timestamp,
-        "candidate_id": Path(path).stem,
+        "candidate_id": legacy_candidate_id(path),
         "generation": "legacy",
     }
 
@@ -4464,7 +4521,6 @@ def _legacy_hit_rows(
 class _PageRead(NamedTuple):
     """What one Markdown page says about itself, read once."""
 
-    stem: str
     relative_path: str
     raw: bytes
     content: str
@@ -4489,7 +4545,6 @@ def _read_page(page: Path, label: str) -> _PageRead | None:
         return None
     title, summary = _extract_title_and_summary(content, page.stem)
     return _PageRead(
-        stem=page.stem,
         relative_path=relative_path,
         raw=raw,
         content=content,
@@ -4524,7 +4579,7 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "bm25_score": bm25_score,
         "project": read.project,
         "timestamp": read.timestamp,
-        "candidate_id": read.stem,
+        "candidate_id": legacy_candidate_id(read.relative_path),
         "source_sha256": hashlib.sha256(read.raw).hexdigest(),
         "byte_start": 0,
         "byte_end": len(read.raw),
@@ -4854,7 +4909,7 @@ def _direct_markdown_hits(
 def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
     row = dict(item)
     row["vector_score"] = row.get("vector_score", row.get(score_key))
-    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
+    row.setdefault("candidate_id", legacy_candidate_id(row.get("path")))
     row["generation"] = "legacy"
     return row
 
@@ -5058,7 +5113,7 @@ def _vector_hit(
         "score": score,
         "project": row_project,
         "timestamp": vectors_data["timestamps"][index],
-        "candidate_id": Path(path).stem,
+        "candidate_id": legacy_candidate_id(path),
     }
 
 

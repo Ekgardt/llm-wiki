@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -14,7 +15,9 @@ import path_coverage  # noqa: E402
 
 def test_freshness_names_all_four_states(tmp_path: Path) -> None:
     (tmp_path / "present.py").write_text("x = 1\n", encoding="utf-8")
-    current = path_coverage._current_sha(tmp_path, "present.py")
+    deadline = time.monotonic() + 10
+    scope = path_coverage.contained_scope(tmp_path, deadline)
+    current = path_coverage._current_sha(scope, "present.py", deadline)
     assert path_coverage._freshness(current, current) == "fresh"
     assert path_coverage._freshness("0" * 64, current) == "stale"
     assert path_coverage._freshness(None, current) == "not_indexed"
@@ -33,7 +36,9 @@ def test_an_overflowing_node_count_is_marked_inexact() -> None:
     }
 
 
-def test_a_stored_source_and_its_parse_are_answered_from_the_generation() -> None:
+def test_a_stored_source_and_its_parse_are_answered_from_the_generation(
+    tmp_path: Path,
+) -> None:
     """Issue #24, B1: no manifest lookup — the source row is the answer."""
 
     class _Graph:
@@ -48,7 +53,9 @@ def test_a_stored_source_and_its_parse_are_answered_from_the_generation() -> Non
         def find_nodes(self, **_kwargs):
             return [{}]
 
-    answer = path_coverage._coverage_answer(_Graph(), Path("/nonexistent"), "a.py", 0.0)
+    answer = path_coverage._coverage_answer(
+        _Graph(), tmp_path, "a.py", time.monotonic() + 10
+    )
     expected = {"indexed": True, "freshness": "missing_on_disk", "nodes": 1}
     assert {key: answer[key] for key in expected} == expected
     assert answer["parse"]["status"] == "ok"

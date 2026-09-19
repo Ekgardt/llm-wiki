@@ -477,6 +477,16 @@ class TestYAMLSafety:
 # ---------------------------------------------------------------------------
 
 
+def _legacy_path_violations(search_dir: str, pattern: str) -> list:
+    """Hits of a forbidden path in active code, comments and docstrings aside."""
+    return [
+        hit
+        for py in (ROOT / search_dir).glob("*.py")
+        for hit in _pattern_hits(py, pattern)
+        if not _tolerated_hit(hit)
+    ]
+
+
 class TestNoLegacyPaths:
     """Active code must not reference forbidden root directories."""
 
@@ -493,12 +503,7 @@ class TestNoLegacyPaths:
     def test_no_legacy_path_in_active_code(self, pattern, search_dir):
         """Check that forbidden paths don't appear in active code logic
         (comments and docstrings are tolerated for historical context)."""
-        violations = [
-            hit
-            for py in (ROOT / search_dir).glob("*.py")
-            for hit in _pattern_hits(py, pattern)
-            if not _tolerated_hit(hit)
-        ]
+        violations = _legacy_path_violations(search_dir, pattern)
         assert not violations, (
             f"Legacy path '{pattern}' found in active code: {violations[:3]}. "
             "Update to current three-zone paths."
@@ -569,20 +574,25 @@ class TestSingleDailyWritePath:
 # ---------------------------------------------------------------------------
 
 
+def _is_git_command_constant(node) -> bool:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return False
+    return bool(re.search(r"^\s*git(?:\.exe)?(?:\s|$)", node.value, re.IGNORECASE))
+
+
+def _git_command_constants(source: str) -> list[str]:
+    """Every string literal in the source that reads as a `git` command line."""
+    tree = ast.parse(source)
+    return [node.value for node in ast.walk(tree) if _is_git_command_constant(node)]
+
+
 class TestMarkdownTransactionBoundary:
     """The writer boundary must stay deterministic and fail closed."""
 
     def test_transaction_module_has_no_git_subprocess_or_command(self):
         source = (SCRIPTS / "markdown_transaction.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        git_commands = [
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and re.search(r"^\s*git(?:\.exe)?(?:\s|$)", node.value, re.IGNORECASE)
-        ]
-        assert git_commands == []
+
+        assert _git_command_constants(source) == []
 
     def test_external_work_fails_closed_while_writer_gate_is_held(self, tmp_path):
         from markdown_transaction import MarkdownCoordinator
@@ -612,37 +622,3 @@ class TestMarkdownTransactionBoundary:
         )
 
         assert record.operations[0].path == "knowledge/guardrails.md"
-
-
-# ---------------------------------------------------------------------------
-# INVARIANT 12: Compile snapshot excludes superseded pages
-# ---------------------------------------------------------------------------
-
-
-class TestCompileSnapshotExcludesSuperseded:
-    """existing_knowledge_snapshot must not feed superseded/archived pages."""
-
-    def test_snapshot_skips_superseded(self, tmp_path, monkeypatch):
-        """Pages with status: superseded must not appear in snapshot."""
-        import compile_memory
-
-        knowledge = tmp_path / "knowledge" / "notes"
-        knowledge.mkdir(parents=True)
-        monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
-        monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
-
-        # Create an active page
-        (knowledge / "active.md").write_text(
-            "---\ntype: pattern\n---\n\n# Active\n", encoding="utf-8"
-        )
-        # Create a superseded page
-        (knowledge / "old.md").write_text(
-            "---\ntype: pattern\nstatus: superseded\n---\n\n# Old\n", encoding="utf-8"
-        )
-
-        snapshot = compile_memory.existing_knowledge_snapshot()
-        # Should contain "active" but NOT "old"
-        assert "active" in snapshot.lower(), f"Active page missing from snapshot: {snapshot}"
-        assert "old" not in snapshot.lower(), (
-            f"Superseded page 'old' should be excluded from snapshot: {snapshot}"
-        )

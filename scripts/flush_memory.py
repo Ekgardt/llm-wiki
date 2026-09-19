@@ -106,11 +106,17 @@ def _tier_token(first_line_raw: str) -> str:
 
 
 def _legacy_ok(stripped: str) -> bool:
-    """The old protocol: a bare FLUSH_OK, alone or on a line of its own."""
-    norm = stripped.strip(" .\n\t*`").upper()
-    if norm in {sentinel.upper() for sentinel in LEGACY_SENTINELS}:
+    """The old protocol: a bare FLUSH_OK, alone or on a line of its own.
+
+    Both comparisons read the same upper-cased set. The per-line one used to test an
+    upper-cased line against the mixed-case sentinels, so `(no durable content)` on a
+    line of its own never matched. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    sentinels = {sentinel.upper() for sentinel in LEGACY_SENTINELS}
+    if stripped.strip(" .\n\t*`").upper() in sentinels:
         return True
-    return any(line.strip().upper() in LEGACY_SENTINELS for line in stripped.splitlines())
+    return any(line.strip().upper() in sentinels for line in stripped.splitlines())
 
 
 def _untiered_response(stripped: str) -> tuple[str, str]:
@@ -162,12 +168,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def _transcript_prefixes() -> list[Path]:
-    home = Path.home()
-    return [
-        home / ".claude" / "projects",
-        home / ".codex" / "sessions",
-        STATE_ROOT / "cache" / "transient-transcripts",
-    ]
+    from host_transcripts import host_transcript_roots
+
+    return [*host_transcript_roots(), STATE_ROOT / "cache" / "transient-transcripts"]
 
 
 def _is_beneath(path: Path, root: Path) -> bool:
@@ -659,7 +662,10 @@ def _readable_evidence(evidence: object) -> str:
 
 
 def _bounded_classifier_evidence(evidence: str) -> str:
-    """The tail the classifier reads; the durable record still keeps every byte.
+    """The tail the classifier reads; the durable record keeps all the evidence it was given.
+
+    Not "complete": the evidence of a very long session is itself a head and a
+    tail, and says so in a `capture_gap` line.
 
     Measured 2026-08-28 on the 13 live capture intents: the unbounded prompt
     reached a median of 723 288 characters per session — the 60 000-character
@@ -672,7 +678,7 @@ def _bounded_classifier_evidence(evidence: str) -> str:
     dropped = len(evidence) - MAX_TRANSCRIPT_CHARS
     return (
         f"[…{dropped} characters of earlier evidence omitted for "
-        f"classification; the stored record is complete]"
+        f"classification; the stored record keeps them]"
         + evidence[-MAX_TRANSCRIPT_CHARS:]
     )
 
@@ -779,6 +785,9 @@ class _CaptureKeepAlive:
         self._task_fence = task_fence
         self._intent_fence = intent_fence
         self._owner = owner
+        # Every claim above is already held, so the expiry is counted from here
+        # and not from the moment the thread below first gets to run.
+        self._held_since = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
 
@@ -803,6 +812,7 @@ class _CaptureKeepAlive:
             interval=CAPTURE_KEEPALIVE_SECONDS,
             lease_seconds=INTENT_FENCE_SECONDS,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=self._held_since,
             stop=self._stop,
         )
 
@@ -811,6 +821,19 @@ class _CaptureKeepAlive:
         self._lease = self._queue.heartbeat(self._lease)
         self._queue.heartbeat_task_fence(self._task_fence, self._owner)
         self._coordinator.heartbeat_intent_fence(self._intent_fence, self._owner)
+
+
+class CaptureProviderUnavailable(RuntimeError):
+    """The provider did not answer: the capture waits for it, it has not failed.
+
+    See `docs/research/2026-09-17-an-absent-provider-is-waited-for-and-a-spent-task-is-a-loss.md`.
+    """
+
+
+# How long a capture waits for a provider that did not answer. Eight attempts an
+# hour apart span most of a working day; with no stated wait they were spent in
+# about an hour, which is shorter than one subscription usage window.
+PROVIDER_RETRY_SECONDS = 3600
 
 
 def _call_capture_classifier(
@@ -824,7 +847,7 @@ def _call_capture_classifier(
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
     if (result.available, result.failure_class) != (True, None):
-        raise RuntimeError("capture provider call did not succeed")
+        raise CaptureProviderUnavailable("capture provider call did not succeed")
     tier, body = _parse_capture_wire_output(result.text)
     return result, tier, body
 
@@ -875,11 +898,31 @@ def _capture_daily_block(
     return redact_secrets(f"{header}{metadata}{body}\n")
 
 
+def _dated_capture_block(
+    record: Mapping[str, object], tier: str, body: str, chosen_at: datetime
+) -> str:
+    """The block, followed by the dates it mentions resolved against its own day.
+
+    The live path never passed through `append_daily`, where that step lived, so no
+    queued entry had its dates resolved. See
+    `docs/research/2026-09-17-a-queued-entry-resolves-its-dates-too.md`.
+    """
+    block = _capture_daily_block(record, tier, body, chosen_at)
+    return _dated_block(chosen_at.strftime("%Y-%m-%d"), block)
+
+
+# `False` is the form every decision stored before 2026-09-17 recorded; it is only
+# ever rebuilt to recognise one of those.
+_CAPTURE_BLOCK_BUILDERS = {True: _dated_capture_block, False: _capture_daily_block}
+
+
 def _capture_operation_plan(
     record: Mapping[str, object],
     tier: str,
     body: str,
     chosen_at: datetime | None,
+    *,
+    dated: bool = True,
 ) -> list[dict[str, object]]:
     from reliable_memory import sha256_bytes
 
@@ -888,7 +931,8 @@ def _capture_operation_plan(
     if chosen_at is None:
         raise ValueError("durable capture decision requires a chosen time")
     chosen = _require_capture_time(chosen_at)
-    block = _capture_daily_block(record, tier, body, chosen)
+    build_block = _CAPTURE_BLOCK_BUILDERS[dated]
+    block = build_block(record, tier, body, chosen)
     path = f"knowledge/daily/{chosen.strftime('%Y-%m-%d')}.md"
     return [
         {
@@ -921,10 +965,13 @@ def _require_capture_decision_semantics(
     expected = (tier, _capture_tier_outcome(tier))
     if actual != expected:
         raise RuntimeError("capture decision outcome is invalid")
-    plan = _capture_operation_plan(
-        intent, tier, body, _capture_decision_time(decision)
-    )
-    if decision["operation_plan"] != plan:
+    chosen_at = _capture_decision_time(decision)
+    # A decision stored before the dates were resolved is still a valid decision.
+    plans = [
+        _capture_operation_plan(intent, tier, body, chosen_at, dated=dated)
+        for dated in (True, False)
+    ]
+    if decision["operation_plan"] not in plans:
         raise RuntimeError("capture decision operation plan is invalid")
 
 
@@ -1362,7 +1409,7 @@ def _keep_session_record(
     evidence = record.get("evidence")
     if not isinstance(evidence, Sequence):
         return
-    captured_at = _capture_time_text(now)
+    captured_at = _session_time(record, now).isoformat()
     write_session_evidence(
         ROOT,
         intent_fields(record, captured_at),
@@ -1377,6 +1424,47 @@ def _capture_time_text(now: Callable[[], datetime]) -> str:
         return _require_capture_time(now()).isoformat()
     except Exception:  # noqa: BLE001
         return datetime.now(timezone.utc).isoformat()
+
+
+# How far from now an intent's own timestamp may sit and still be believed. Beyond
+# this it is a broken clock rather than a late session, and filing by it would
+# scatter entries across arbitrary days. See
+# `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
+MAX_BACKDATED_CAPTURE_DAYS = 30
+
+
+def _believable_session_time(occurred: datetime, moment: datetime) -> datetime | None:
+    if abs((moment - occurred).days) > MAX_BACKDATED_CAPTURE_DAYS:
+        return None
+    return occurred.astimezone()
+
+
+def _intent_time(record: Mapping[str, object]) -> datetime | None:
+    """The moment the session itself ended, when the intent carries one."""
+    raw = record.get("occurred_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        occurred = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if occurred.tzinfo is None:
+        return None
+    return occurred
+
+
+def _session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> datetime:
+    """The session's own time when it has a believable one, else the worker's clock.
+
+    Both the session record's day and the daily entry's day come from here, so a
+    backlog drained the next morning files each session under the day it happened and
+    a retry after midnight chooses the same day as the first attempt.
+    """
+    moment = _require_capture_time(now())
+    occurred = _intent_time(record)
+    if occurred is None:
+        return moment
+    return _believable_session_time(occurred, moment) or moment
 
 
 def _keep_transcript_record(args: argparse.Namespace) -> None:
@@ -1427,7 +1515,7 @@ def process_new_capture(
             result, tier, body = _call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
-            chosen_at = _require_capture_time(now())
+            chosen_at = _session_time(record, now)
         resolved = _publish_capture_decision(
             queue,
             coordinator,
@@ -1500,14 +1588,48 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
     worker's job is to drain the queue, and a sweeper that cannot run must never
     be the reason the queue is not drained.
     """
-    from capture_adoption import adopt_orphaned_capture_intents
+    from capture_adoption import (
+        adopt_orphaned_capture_intents,
+        complete_pending_capture_intents,
+    )
 
+    for sweep in (complete_pending_capture_intents, adopt_orphaned_capture_intents):
+        _swept_intents(sweep, queue, coordinator)
+
+
+def _swept_intents(sweep, queue: object, coordinator: object) -> None:
+    """One recovery pass, best effort: a sweeper that fails never stops the drain.
+
+    Two passes run here. One finishes a publication that stopped half way — a
+    `pending` row whose publisher died before it marked the intent ready — and the
+    other gives a task to an intent that was published and never dispatched. See
+    `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+    """
     try:
-        adopt_orphaned_capture_intents(
-            queue, coordinator, state_root=Path(STATE_ROOT)
-        )
-    except Exception:  # noqa: BLE001 - recovery must not break the worker
+        result = sweep(queue, coordinator, state_root=Path(STATE_ROOT))
+    except Exception as error:  # noqa: BLE001 - recovery must not break the worker
+        _count_dropped_capture("capture_adoption", error, None)
         return
+    _record_adoption_skips(result.get("skipped") or [])
+
+
+def _record_adoption_skips(skipped: Sequence[Mapping[str, object]]) -> None:
+    """An intent the pass could not adopt is a standing loss: say so, once per pass.
+
+    The result used to be thrown away, so an intent that could never be adopted was
+    re-read on every pass and named nowhere. See
+    `docs/research/2026-09-17-the-adoption-pass-says-what-it-skipped-and-looks-past-it.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+
+    standing = [skip for skip in skipped if not skip.get("retried")]
+    if not standing:
+        return
+    first = standing[0]
+    record_capture_failure(
+        "capture_adoption",
+        f"{len(standing)} intent(s) not adopted; first {first.get('intent_id')}: {first.get('reason')}",
+    )
 
 
 def run_capture_worker_once(
@@ -1554,8 +1676,6 @@ def _process_or_fail(
     worker, the CLI boundary swallowed it with exit 0, and the task sat leased
     until its TTL expired — three silent attempts before anyone could see why.
     """
-    from memory_queue import QueueFailure
-
     try:
         return process_capture_lease(
             queue,
@@ -1564,13 +1684,33 @@ def _process_or_fail(
             owner=owner,
             process_missing=process_missing,
         )
-    except Exception:
-        # retry_after=0, not the drain loop's 60: this worker runs once per
-        # lifecycle event, so there is no hot loop to damp, and the crash
-        # recovery choreography re-claims immediately.
+    except Exception as error:
         with contextlib.suppress(Exception):
-            queue.fail(lease, QueueFailure("processor_failed", retry_after=0))
+            queue.fail(lease, _capture_queue_failure(error))
+        _raise_if_attempts_spent(lease, error)
         raise
+
+
+def _capture_queue_failure(error: BaseException) -> object:
+    """What the queue is told: an absent provider states its wait, the rest do not.
+
+    The backoff is the queue's own. A stated wait of zero said nothing, whatever
+    the comment that used to stand here claimed.
+    """
+    from memory_queue import QueueFailure
+
+    if isinstance(error, CaptureProviderUnavailable):
+        return QueueFailure("provider_unavailable", retry_after=PROVIDER_RETRY_SECONDS)
+    return QueueFailure("processor_failed")
+
+
+def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:
+    """The last attempt's failure is a loss, and is raised as one so it is recorded as one."""
+    from capture_diagnostics import DurableWorkExhausted
+    from reliable_memory import DEFAULTS
+
+    if int(getattr(lease, "attempt", 0)) >= DEFAULTS.queue_max_attempts:
+        raise DurableWorkExhausted("capture task spent its last attempt") from error
 
 
 def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:

@@ -34,12 +34,10 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
 
 import corpus_snapshot
 import evidence_graph
 import generation_catalog
-from code_intelligence import VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
 from repository_scope import RepositoryScope, same_repository_record
 
@@ -112,14 +110,6 @@ KILL_POINTS: tuple[str, ...] = (
     "before_activation",
     "after_activation",
 )
-KillPoint = Literal[
-    "before_directory_create",
-    "during_extraction",
-    "after_database_commit",
-    "after_validation",
-    "before_activation",
-    "after_activation",
-]
 
 _DEFAULT_POLICY: Mapping[str, object] = {
     "daily_paths": (),
@@ -237,7 +227,6 @@ def _require_build_types(
     graph_schema: object,
     repository_scope: object,
     snapshot: object,
-    code_capture: object,
 ) -> None:
     _require_type(
         catalog,
@@ -257,21 +246,6 @@ def _require_build_types(
         corpus_snapshot.CorpusSnapshot,
         "snapshot must be a CorpusSnapshot or None",
     )
-    _require_optional_type(
-        code_capture,
-        corpus_snapshot.CodeCaptureContract,
-        "code_capture must be a CodeCaptureContract or None",
-    )
-
-
-def _require_capture_agreement(snapshot: object, code_capture: object) -> None:
-    if code_capture is None:
-        return
-    from code_workspace import code_capture_as_dict, validate_code_capture
-
-    validate_code_capture(code_capture_as_dict(code_capture))
-    if snapshot is not None and snapshot.code_capture != code_capture:
-        raise ValueError("code_capture must be the exact supplied CorpusSnapshot contract")
 
 
 def _require_publication_root(
@@ -283,74 +257,21 @@ def _require_publication_root(
         raise ValueError("complete generation activation requires publication_root")
 
 
-def _require_v3_inputs(
-    graph_schema: object,
-    snapshot: object,
-    repository_scope: object,
-    code_capture: object,
-) -> None:
-    if graph_schema is not evidence_graph.GraphSchema.V3:
-        return
-    if snapshot is None or repository_scope is None or code_capture is None:
-        raise ValueError(
-            "evidence-graph/v3 requires a CorpusSnapshot, repository scope, and code_capture"
-        )
-
-
-def _require_complete_generation_inputs(
-    graph_schema: object,
-    snapshot: object,
-    repository_scope: object,
-    code_capture: object,
-    activate: bool,
-    publication_root: object,
-) -> None:
-    _require_publication_root(snapshot, activate, publication_root)
-    _require_v3_inputs(graph_schema, snapshot, repository_scope, code_capture)
-
-
 def _validated_build_inputs(
     *,
     catalog: object,
     graph_schema: object,
     repository_scope: RepositoryScope | None,
     snapshot: object,
-    code_capture: object,
     activate: bool,
     publication_root: object,
 ) -> RepositoryScope | None:
     """Check every argument once, and hand back the scope the build will use."""
-    _require_build_types(catalog, graph_schema, repository_scope, snapshot, code_capture)
-    _require_capture_agreement(snapshot, code_capture)
-    _require_complete_generation_inputs(
-        graph_schema, snapshot, repository_scope, code_capture, activate, publication_root
-    )
+    _require_build_types(catalog, graph_schema, repository_scope, snapshot)
+    _require_publication_root(snapshot, activate, publication_root)
     if repository_scope is None:
         return None
     return RepositoryScope.from_dict(repository_scope.as_dict())
-
-
-def _require_capture_membership(
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
-    sources_list: list[Mapping[str, object]],
-) -> None:
-    if code_capture is None:
-        return
-    capture_membership = sorted(
-        (item.source_id, item.relative_path, item.sha256, item.stat.size)
-        for item in code_capture.files
-    )
-    source_membership = sorted(
-        (
-            str(source["source_id"]),
-            str(source["relative_path"]),
-            str(source["sha256"]),
-            int(source["size"]),
-        )
-        for source in sources_list
-    )
-    if capture_membership != source_membership:
-        raise ValueError("code_capture files must match builder source membership")
 
 
 def _snapshot_source_rows(snapshot: corpus_snapshot.CorpusSnapshot) -> list[dict]:
@@ -435,60 +356,6 @@ def _generation_source_manifest(
     return source_manifest, source_manifest_bytes, source_manifest_sha256
 
 
-def _require_analysis_batch(
-    batch: object,
-    count: int,
-    source_manifest_sha256: str,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    _require_analysis_identity(batch, count)
-    if batch.source_manifest_sha256 != source_manifest_sha256:
-        raise ValueError("verified analysis source manifest must match generation manifest")
-    _require_analysis_scope(batch, graph_schema, repository_scope)
-
-
-def _require_analysis_identity(batch: object, count: int) -> None:
-    if count >= evidence_graph.MAX_VALIDATION_ROWS:
-        raise ValueError("verified analysis row ceiling exceeded")
-    if type(batch) is not VerifiedAnalysisBatch:
-        raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
-
-
-def _require_analysis_scope(
-    batch: VerifiedAnalysisBatch,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-) -> None:
-    if graph_schema is not evidence_graph.GraphSchema.V3:
-        return
-    observed = (batch.analysis.run.repository_id, batch.analysis.run.checkout_id)
-    if observed != (repository_scope.repository_id, repository_scope.checkout_id):
-        raise ValueError("verified analysis repository or checkout does not match publication")
-
-
-def _validated_analysis_batches(
-    verified_analyses: Iterable[VerifiedAnalysisBatch],
-    *,
-    source_manifest_sha256: str,
-    graph_schema: object,
-    repository_scope: RepositoryScope | None,
-    code_capture: object,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[VerifiedAnalysisBatch]:
-    validated: list[VerifiedAnalysisBatch] = []
-    for batch in verified_analyses:
-        _check_stop(deadline, cancelled)
-        _require_analysis_batch(
-            batch, len(validated), source_manifest_sha256, graph_schema, repository_scope
-        )
-        validated.append(batch)
-    if validated and code_capture is None:
-        raise ValueError("verified analyses require code_capture")
-    return validated
-
-
 def _materialized_graph_records(
     *,
     nodes: Iterable[Mapping[str, object]],
@@ -569,12 +436,9 @@ def _build_manifest(
     tokenizer_config_sha256: str = DEFAULT_TOKENIZER_CONFIG_SHA256,
     search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
     code_roots: tuple[str, ...] = (),
     vectors: Mapping[str, object] | None = None,
 ) -> Mapping[str, object]:
-    if graph_schema is evidence_graph.GraphSchema.V3 and code_capture is None:
-        raise ValueError("evidence-graph/v3 manifests require code_capture")
     manifest = {
         "generation_id": generation_id,
         "schema_version": schema_version,
@@ -600,7 +464,7 @@ def _build_manifest(
     }
     manifest.update(
         _optional_manifest_fields(
-            parent_generation_id, repository_scope, code_capture, code_roots
+            parent_generation_id, repository_scope, code_roots
         )
     )
     manifest.update(_vector_manifest_fields(vectors))
@@ -691,7 +555,6 @@ def _code_roots_field(code_roots: tuple[str, ...]) -> dict[str, object]:
 def _optional_manifest_fields(
     parent_generation_id: str | None,
     repository_scope: RepositoryScope | None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
     code_roots: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The fields a manifest carries only when the build actually has them."""
@@ -700,19 +563,8 @@ def _optional_manifest_fields(
         fields["parent_generation_id"] = parent_generation_id
     if repository_scope:
         fields["repository_scope"] = repository_scope.as_dict()
-    fields.update(_code_capture_field(code_capture))
     fields.update(_code_roots_field(code_roots))
     return fields
-
-
-def _code_capture_field(
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
-) -> dict[str, object]:
-    if code_capture is None:
-        return {}
-    from code_workspace import code_capture_as_dict
-
-    return {"code_capture": code_capture_as_dict(code_capture)}
 
 
 def _invalid_deadline(deadline: float | None) -> bool:
@@ -892,7 +744,6 @@ def build_full_generation(
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
     graph_schema: evidence_graph.GraphSchema = evidence_graph.GraphSchema.V2,
-    verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
     generation_id: str,
     parent_generation_id: str | None = None,
     policy: Mapping[str, object] | None = None,
@@ -909,7 +760,6 @@ def build_full_generation(
     snapshot: corpus_snapshot.CorpusSnapshot | None = None,
     publication_root: Path | None = None,
     coordinator: object | None = None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
 ) -> BuildResult:
     """Atomically build one full Evidence Graph generation.
 
@@ -930,7 +780,6 @@ def build_full_generation(
         graph_schema=graph_schema,
         repository_scope=repository_scope,
         snapshot=snapshot,
-        code_capture=code_capture,
         activate=activate,
         publication_root=publication_root,
     )
@@ -947,7 +796,6 @@ def build_full_generation(
     source_bytes_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
-    _require_capture_membership(code_capture, sources_list)
     _require_snapshot_agreement(
         snapshot,
         sources_list,
@@ -967,15 +815,6 @@ def build_full_generation(
         )
     )
     _check_stop(deadline, cancelled)
-    verified_analysis_list = _validated_analysis_batches(
-        verified_analyses,
-        source_manifest_sha256=source_manifest_sha256,
-        graph_schema=graph_schema,
-        repository_scope=repository_scope,
-        code_capture=code_capture,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
     records = _materialized_graph_records(
         nodes=nodes,
         occurrences=occurrences,
@@ -1003,10 +842,6 @@ def build_full_generation(
             sources_list=sources_list,
             source_bytes_snapshot=source_bytes_snapshot,
             records=records,
-            verified_analysis_list=verified_analysis_list,
-            generation_id=generation_id,
-            expected_active=expected_active,
-            repository_scope=repository_scope,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -1014,10 +849,14 @@ def build_full_generation(
         fsync_file(database_path)
         fsync_directory(generation_path)
         search_artifact = _generation_search_artifact(
-            snapshot, generation_path, deadline=deadline, cancelled=cancelled
+            snapshot,
+            generation_path,
+            deadline=deadline,
+            cancelled=cancelled,
+            state_root=catalog.state_root,
         )
         vectors = _generation_vector_artifacts(
-            snapshot,
+            _vector_snapshot(snapshot, policy),
             generation_path,
             deadline=deadline,
             cancelled=cancelled,
@@ -1041,7 +880,6 @@ def build_full_generation(
             repository_scope=repository_scope,
             graph_schema=graph_schema,
             snapshot=snapshot,
-            code_capture=code_capture,
             code_roots=_policy_code_roots(policy),
             deadline=deadline,
             cancelled=cancelled,
@@ -1103,12 +941,6 @@ def _kill_if(kill_point: str | None, name: str) -> None:
         raise KillPointError(kill_point)
 
 
-def _v3_only(value: object, graph_schema: evidence_graph.GraphSchema) -> object:
-    if graph_schema is evidence_graph.GraphSchema.V3:
-        return value
-    return None
-
-
 def _write_generation_database(
     database_path: Path,
     *,
@@ -1116,10 +948,6 @@ def _write_generation_database(
     sources_list: list[Mapping[str, object]],
     source_bytes_snapshot: Mapping[str, bytes],
     records: Mapping[str, list[Mapping[str, object]]],
-    verified_analysis_list: list[VerifiedAnalysisBatch],
-    generation_id: str,
-    expected_active: str | None,
-    repository_scope: RepositoryScope | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> None:
@@ -1134,10 +962,6 @@ def _write_generation_database(
         evidence=records["evidence"],
         observations=records["observations"],
         dependencies=records["dependencies"],
-        verified_analyses=verified_analysis_list,
-        publication_generation_id=_v3_only(generation_id, graph_schema),
-        publication_expected_active=_v3_only(expected_active, graph_schema),
-        repository_scope=_v3_only(repository_scope, graph_schema),
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -1149,14 +973,32 @@ def _generation_search_artifact(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    state_root: Path | None = None,
 ):
     if snapshot is None:
         return None
     import search_memory
 
     return search_memory.build_generation_fts(
-        snapshot, generation_path, deadline=deadline, cancelled=cancelled
+        snapshot,
+        generation_path,
+        deadline=deadline,
+        cancelled=cancelled,
+        keys=_nightly_keys(state_root),
     )
+
+
+def _nightly_keys(state_root: Path | None) -> dict[str, str]:
+    """The fact keys the nightly pass extracted, or none when it never ran.
+
+    They are indexed beside the chunk and never read back to a reader. Research:
+    `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    """
+    if state_root is None:
+        return {}
+    import fact_keys
+
+    return fact_keys.keys_by_span(fact_keys.store_path(state_root))
 
 
 def _vector_reuse_source(
@@ -1216,6 +1058,22 @@ def _manifest_versions(snapshot: corpus_snapshot.CorpusSnapshot | None):
     )
 
 
+def _vector_snapshot(
+    snapshot: corpus_snapshot.CorpusSnapshot | None, policy: Mapping[str, object] | None
+) -> corpus_snapshot.CorpusSnapshot | None:
+    """The corpus to encode, or nothing when this generation's vectors are never read.
+
+    A code generation is registered and never activated, and the dense leg opens the active
+    generation only, so its vectors were written and forgotten: 23 of the 27 minutes of the
+    vault's code build on 2026-09-15. The manifest then says `vector_state: absent`, which
+    the catalog and every reader already understand. Research:
+    `docs/research/2026-09-16-a-code-generation-needs-no-vectors.md`.
+    """
+    if _policy_code_roots(policy):
+        return None
+    return snapshot
+
+
 def _policy_code_roots(policy: Mapping[str, object] | None) -> tuple[str, ...]:
     """The code roots the corpus policy named, or none for a memory-only corpus."""
     if not policy:
@@ -1242,7 +1100,6 @@ def _write_generation_manifests(
     repository_scope: RepositoryScope | None,
     graph_schema: evidence_graph.GraphSchema,
     snapshot: corpus_snapshot.CorpusSnapshot | None,
-    code_capture: corpus_snapshot.CodeCaptureContract | None,
     code_roots: tuple[str, ...],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
@@ -1286,7 +1143,6 @@ def _write_generation_manifests(
         tokenizer_config_sha256=tokenizer_config_sha256,
         search_artifact=search_artifact,
         incremental_manifest_bytes=incremental_manifest_bytes,
-        code_capture=code_capture,
         code_roots=code_roots,
         vectors=vectors,
     )
@@ -1960,7 +1816,8 @@ def build_incremental_generation(
         cancelled=cancelled,
     )
     delta = _incremental_delta(
-        current, parent_entries, parent_manifest, reuse_config, config_matches
+        current, parent_entries, parent_manifest, reuse_config, config_matches,
+        _policy_code_roots(policy),
     )
     runner = _IncrementalExtractor(
         extractor,
@@ -2171,11 +2028,17 @@ def _workspace_surface_moved(
     return current_source.get("language") != parent_source.get("language")
 
 
-def _workspace_source_ids(sources: Mapping[str, Mapping[str, object]]) -> set[str]:
+def _workspace_source_ids(
+    sources: Mapping[str, Mapping[str, object]], code_roots: tuple[str, ...]
+) -> set[str]:
+    """Every source outside the memory walk; a code root named `knowledge` is code.
+
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
     return {
         source_id
         for source_id, source in sources.items()
-        if not str(source["relative_path"]).startswith("knowledge/")
+        if not corpus_snapshot.is_memory_path(str(source["relative_path"]), code_roots)
     }
 
 
@@ -2187,6 +2050,7 @@ def _workspace_membership_changed(
     changed: set[str],
     added: set[str],
     deleted: set[str],
+    code_roots: tuple[str, ...],
 ) -> bool:
     """Whether the workspace surface itself moved, not only its file contents."""
     parent_workspace_manifest = str(
@@ -2194,8 +2058,8 @@ def _workspace_membership_changed(
     )
     if parent_workspace_manifest != reuse_config.workspace_manifest_sha256:
         return True
-    current_workspace_ids = _workspace_source_ids(current)
-    previous_workspace_ids = _workspace_source_ids(parent_sources)
+    current_workspace_ids = _workspace_source_ids(current, code_roots)
+    previous_workspace_ids = _workspace_source_ids(parent_sources, code_roots)
     if added & current_workspace_ids or deleted & previous_workspace_ids:
         return True
     workspace_ids = current_workspace_ids | previous_workspace_ids
@@ -2222,6 +2086,7 @@ def _incremental_delta(
     parent_manifest: Mapping[str, object] | None,
     reuse_config: IncrementalReuseConfig,
     config_matches: bool,
+    code_roots: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """What changed since the parent, and therefore what has to be rebuilt."""
     current_ids = set(current)
@@ -2234,11 +2099,12 @@ def _incremental_delta(
         if _source_differs(current[source_id], parent_entries[source_id])
     }
     membership_changed = config_matches and _workspace_membership_changed(
-        parent_manifest, reuse_config, current, parent_entries, changed, added, deleted
+        parent_manifest, reuse_config, current, parent_entries,
+        changed, added, deleted, code_roots,
     )
     rebuild = _initial_rebuild(config_matches, current_ids, added, changed)
     if membership_changed:
-        rebuild.update(_workspace_source_ids(current))
+        rebuild.update(_workspace_source_ids(current, code_roots))
     return {
         "added": added,
         "deleted": deleted,
@@ -2248,13 +2114,14 @@ def _incremental_delta(
         "membership_changed": membership_changed,
         "parent_entries": parent_entries,
         "current_ids": current_ids,
-        "universes": _universe_ids(current, parent_entries),
+        "universes": _universe_ids(current, parent_entries, code_roots),
     }
 
 
 def _universe_ids(
     current: Mapping[str, Mapping[str, object]],
     parent_entries: Mapping[str, Mapping[str, object]],
+    code_roots: tuple[str, ...] = (),
 ) -> tuple[set[str], set[str]]:
     """The two extraction universes, each naming every id that has been in it.
 
@@ -2262,8 +2129,8 @@ def _universe_ids(
     parent entry, and a source moved across the boundary belongs to both until
     the move has been accounted for.
     """
-    current_workspace = _workspace_source_ids(current)
-    parent_workspace = _workspace_source_ids(parent_entries)
+    current_workspace = _workspace_source_ids(current, code_roots)
+    parent_workspace = _workspace_source_ids(parent_entries, code_roots)
     return (
         current_workspace | parent_workspace,
         (set(current) - current_workspace) | (set(parent_entries) - parent_workspace),

@@ -121,13 +121,20 @@ def _meta(scope, generation_id: str, symbols: int) -> dict[str, str]:
 
 def _handler_names(graph, routes: list[dict], deadline: float) -> dict[str, dict]:
     """The function that declares each route, by route node id."""
+    from code_graph import _in_node_chunks
+
     if not routes:
         return {}
-    edges = graph.edges(
-        edge_types=("EXPOSES",),
-        target_node_ids=[str(route["node_id"]) for route in routes],
-        max_rows=MAX_HINT_ROUTES,
-        deadline=deadline,
+    # Audit 3, A7: the reader refuses more than 512 ids in one call, and a
+    # repository with more routes than that used to get no hint file at all.
+    edges = _in_node_chunks(
+        [str(route["node_id"]) for route in routes],
+        lambda ids: graph.edges(
+            edge_types=("EXPOSES",),
+            target_node_ids=ids,
+            max_rows=MAX_HINT_ROUTES,
+            deadline=deadline,
+        ),
     )
     return {str(edge["target_node_id"]): edge for edge in edges}
 
@@ -191,11 +198,16 @@ def write_hints(
 
 
 def export_hints(catalog, scope, state_root: Path, *, deadline: float | None = None) -> dict:
-    """Project the newest generation of `scope` into its hint file."""
+    """Project the newest code generation of `scope` into its hint file.
+
+    The code generation, never the active pointer: on the vault the pointer names
+    the memory generation of the same checkout, which holds no symbols. See
+    `docs/research/2026-09-17-a-hint-table-is-made-from-the-code-generation.md`.
+    """
     from evidence_graph import EvidenceGraph
 
     bound = deadline if deadline is not None else time.monotonic() + EXPORT_BUDGET_SECONDS
-    graph = EvidenceGraph.open_active_for_repository(catalog, scope, deadline=bound)
+    graph = EvidenceGraph.open_code_for_repository(catalog, scope, deadline=bound)
     if graph is None:
         return {"status": "skipped", "reason": "no_generation"}
     try:

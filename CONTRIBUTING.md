@@ -20,6 +20,9 @@ This is a personal memory system that grew into something others might find usef
 
 ## How to develop
 
+Development needs `uv` **0.12.3 exactly** (`[tool.uv] required-version`), the version both
+installers and every CI job pin.
+
 ```bash
 git clone git@github.com:Ekgardt/llm-wiki.git
 cd llm-wiki
@@ -117,6 +120,27 @@ uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --co
 Linux Python 3.10 additionally runs the fixed 100 KLOC qualification gate with
 `--qualification --require-gates`. Navigation changes must keep Windows, Linux, and
 macOS process-ownership claims platform-qualified.
+
+### Where CI job timeouts come from
+
+Every job is named `timing::<class>::<name>`, and each class has a ceiling in
+`scripts/ci_timing_report.py`: focused 15 min, clean/installer 20 min, full suite 45 min
+(60 on Windows). A job's `timeout-minutes` must match its class. The `pytest-full` jobs
+upload their JUnit timings, and that script compiles them into the evidence a ceiling
+rests on:
+
+```bash
+gh run view <run-id> --json jobs > run.json        # and download the pytest-timings artifacts
+uv run --locked --no-sync python scripts/ci_timing_report.py \
+  --run-json run.json --junit-root <artifact-dir> --head-sha <sha> --output evidence.json
+```
+
+### The whole installer runs in CI
+
+`install-end-to-end` runs `install.sh` (with the bash macOS ships) and `install.ps1`
+against a temporary HOME, a temporary state root and `MEMORY_LLM_PROVIDER=fake`, then asks
+the installed vault whether session capture is enabled. An installer change that only the
+unit tests cover is not covered.
 
 ## Release checklist (mandatory — do not skip)
 

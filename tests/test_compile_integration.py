@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from functools import partial
+from operator import attrgetter
 from pathlib import Path
 
 import pytest
@@ -106,15 +108,6 @@ class TestCompileWithFakeProvider:
         from llm_client import call_llm
         result = call_llm("test prompt", "system", 100)
         assert result == test_response
-
-    def test_call_llm_json_adds_constraint(self, monkeypatch):
-        """call_llm_json adds JSON constraint instruction to system prompt."""
-        monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-        monkeypatch.setenv("MEMORY_LLM_FAKE_RESPONSE", '{"ok": true}')
-
-        from llm_client import call_llm_json
-        result = call_llm_json("test", "my system", 100)
-        assert result == '{"ok": true}'
 
     def test_legacy_critique_entry_point_is_removed(self):
         import compile_memory
@@ -241,10 +234,10 @@ def test_a_daily_that_does_not_fit_leaves_a_trace(tmp_path, monkeypatch) -> None
 
 def test_compile_only_reads_canonical_daily_logs() -> None:
     """The directory ships a README, and it is not a day."""
-    import compile_memory
+    import memory_state
 
-    assert compile_memory.DAILY_LOG_NAME.fullmatch("2026-08-21.md") is not None
-    assert compile_memory.DAILY_LOG_NAME.fullmatch("README.md") is None
+    assert memory_state.DAILY_LOG_NAME.fullmatch("2026-08-21.md") is not None
+    assert memory_state.DAILY_LOG_NAME.fullmatch("README.md") is None
 
 def _daily_bytes(entries: int, filler: int) -> bytes:
     body = [b"# Daily Session Memory - 2026-08-21\n"]
@@ -267,28 +260,41 @@ def test_a_day_inside_the_budget_is_one_part_covering_the_whole_file() -> None:
     assert parts[0].part_key == "knowledge/daily/2026-08-21.md"
 
 
+def _starts_an_entry(content: bytes, start: int) -> bool:
+    """Every split lands where one captured entry ends and the next begins."""
+    return content[start:].startswith(b"<!-- llm-wiki-operation:")
+
+
+def _is_a_real_span(content: bytes, part) -> bool:
+    return (content[part.byte_start : part.byte_end], part.logical_path) == (
+        part.content,
+        "knowledge/daily/2026-08-21.md",
+    )
+
+
 def test_a_long_day_splits_at_entry_boundaries_and_covers_every_byte() -> None:
     """Every part has to be a real span of the file, and together all of it."""
     import compile_memory
 
     content = _daily_bytes(60, 2048)
-    assert len(content) > compile_memory.MAX_DAILY_PART_BYTES
+    parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
+    starts = list(map(attrgetter("byte_start"), parts))
+    ends = list(map(attrgetter("byte_end"), parts))
 
+    assert len(content) > compile_memory.MAX_DAILY_PART_BYTES
+    assert (len(parts) > 1, starts[0]) == (True, 0)
+    assert ends == [*starts[1:], len(content)]
+    assert all(map(partial(_starts_an_entry, content), starts[1:]))
+
+
+def test_the_parts_of_a_long_day_are_real_spans_with_distinct_keys() -> None:
+    import compile_memory
+
+    content = _daily_bytes(60, 2048)
     parts = compile_memory._daily_parts("knowledge/daily/2026-08-21.md", content)
 
-    assert len(parts) > 1
-    assert parts[0].byte_start == 0
-    assert parts[-1].byte_end == len(content)
-    for earlier, later in zip(parts, parts[1:], strict=False):
-        assert earlier.byte_end == later.byte_start
-    for part in parts:
-        assert content[part.byte_start : part.byte_end] == part.content
-        assert part.logical_path == "knowledge/daily/2026-08-21.md"
-        # Every split lands where one captured entry ends and the next begins.
-        assert part.byte_start == 0 or content[part.byte_start :].startswith(
-            b"<!-- llm-wiki-operation:"
-        )
-    assert len({part.part_key for part in parts}) == len(parts)
+    assert all(map(partial(_is_a_real_span, content), parts))
+    assert len(set(map(attrgetter("part_key"), parts))) == len(parts)
 
 
 def test_a_part_that_already_committed_is_not_offered_again() -> None:

@@ -24,7 +24,9 @@ once no writer has touched it for a day. A registration that has never been
 activated is either an abandoned publication or one in flight; one whose tree no
 writer has touched for a day is abandoned and removed through
 `discard_unactivated`, and a younger one is left pending. See
-`docs/research/2026-09-14-an-abandoned-publication-is-collected.md`.
+`docs/research/2026-09-14-an-abandoned-publication-is-collected.md`. A code
+generation is never activated by design and is never abandoned: see
+`docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
 
 Research: `docs/research/2026-08-29-how-many-superseded-generations-to-keep.md`.
 
@@ -131,6 +133,32 @@ def _interrupted_discards(
     return ((registered - on_disk) & activated) - set(retained)
 
 
+def _memory_publications(catalog: GenerationCatalog) -> set[str]:
+    """Registrations whose readable manifest holds no code.
+
+    A code generation is only ever registered, never activated: code answers find
+    it through `GenerationCatalog.code_generation_for_repository`, not the
+    pointer. Its lifecycle belongs to the collector that knows its readers
+    (`repository_retention`, the vault's checkout included since 2026-09-17), so
+    it is never an abandoned publication, and neither is a registration whose
+    manifest cannot be read. "Holds code" is the catalog's one predicate, so a
+    generation built before the manifest named its roots is still a code one. See
+    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md` and
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    return {
+        identifier
+        for identifier, _registered_at, manifest in catalog.registered_manifests()
+        if not catalog.holds_code(identifier, manifest)
+    }
+
+
+def _abandoned_publications(catalog: GenerationCatalog, never_activated: set[str]) -> set[str]:
+    """Never-activated memory publications no writer has touched for a day."""
+    memory = _memory_publications(catalog) & never_activated
+    return {name for name in memory if untouched_for(catalog.generations_path / name, ABANDONED_AFTER_SECONDS)}
+
+
 def plan_prune(
     catalog: GenerationCatalog, *, retained_ancestors: int = RETAINED_ANCESTOR_GENERATIONS
 ) -> PrunePlan:
@@ -142,7 +170,7 @@ def plan_prune(
     interrupted = _interrupted_discards(retained, registered, on_disk, activated)
     candidates = _prune_candidates(retained, registered, on_disk)
     never_activated = candidates - activated
-    abandoned = {name for name in never_activated if untouched_for(catalog.generations_path / name, ABANDONED_AFTER_SECONDS)}
+    abandoned = _abandoned_publications(catalog, never_activated)
     return PrunePlan(
         retained,
         tuple(sorted((candidates & activated) | interrupted)),

@@ -72,6 +72,19 @@ def _ensure_scripts_on_path() -> None:
         sys.path.insert(0, scripts)
 
 
+def _task_limit(kind: str) -> str:
+    """The execution-time limit the product registers for a task of `kind`.
+
+    Read from the contract rather than written out again: the stub below spelled
+    `PT3H`/`PT5H` and went on saying so after the passes' bounds moved to 4 h and
+    6 h, so it offered the script a task the script rightly called stale.
+    """
+    _ensure_scripts_on_path()
+    import install_control
+
+    return f"PT{install_control.WINDOWS_TASK_LIMIT_HOURS[kind]}H"
+
+
 def _unmet_substrings(checks) -> list[tuple[int, str, bool]]:
     """(index, needle, should_be_present) for every check the text does not meet."""
     return [
@@ -1527,7 +1540,7 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# General memory\n",
+        lambda slug=None: "# General memory\n",
     )
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
     envelope = integration_adapter.normalize_event(
@@ -1573,7 +1586,7 @@ def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
     monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
-    monkeypatch.setattr(integration_adapter, "build_session_start_context", lambda: "")
+    monkeypatch.setattr(integration_adapter, "build_session_start_context", lambda slug=None: "")
     envelope = integration_adapter.normalize_event(
         "opencode",
         "session_start",
@@ -1669,7 +1682,7 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# General memory\n",
+        lambda slug=None: "# General memory\n",
     )
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
     monkeypatch.setattr(
@@ -1715,7 +1728,7 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(monkey
     monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
     monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
     monkeypatch.setattr(
-        integration_adapter, "build_session_start_context", lambda: "# General memory\n"
+        integration_adapter, "build_session_start_context", lambda slug=None: "# General memory\n"
     )
     envelope = integration_adapter.normalize_event(
         "opencode", "session_start", {"directory": str(project_dir)}
@@ -4307,7 +4320,7 @@ def test_install_scripts_generate_context(tmp_path):
                 ),
                 (".claude/.mcp.json", install_sh, False),
                 ("Existing ~/.claude.json found without llm-wiki", sh_claude, True),
-                ("grep -q '\"llm-wiki\"'", sh_claude, True),
+                ('claude_mcp_state "$CLAUDE_MCP" "$VAULT_ROOT"', sh_claude, True),
                 ("scripts/installer_config.py", sh_opencode, True),
                 ("opencode", sh_opencode, True),
                 ('--root "$VAULT_ROOT"', sh_opencode, True),
@@ -4545,7 +4558,9 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        foreach ($name in @('New-LLMWikiScheduledAction', 'Test-LLMWikiScheduledTasks')) {{
+        foreach ($name in @(
+            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec', 'Test-LLMWikiScheduledTasks'
+        )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
                 $node.Name -eq $name
@@ -4568,8 +4583,11 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
                 -UvPath {ps_literal(uv_path)} `
                 -RunnerPath {ps_literal(runner)} `
                 -PowerShellPath 'pwsh.exe'
+            $limit = if ($kind -eq 'nightly') {{ {ps_literal(_task_limit("nightly"))} }} else {{ {ps_literal(_task_limit("weekly"))} }}
             [pscustomobject]@{{
                 State = 'Ready'
+                Description = 'LLM-wiki task [llm-wiki-task-spec:2]'
+                Settings = [pscustomobject]@{{ ExecutionTimeLimit = $limit }}
                 Actions = @($action)
                 Triggers = @([pscustomobject]@{{
                     StartBoundary = '2026-08-15T03:00:00'

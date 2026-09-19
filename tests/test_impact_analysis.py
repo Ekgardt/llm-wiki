@@ -13,9 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from impact_analysis import (  # noqa: E402
     ImpactLimits,
+    _textual_symbols,
     analyze_impact,
     collect_git_changes,
-    extract_symbols_from_file,
     find_stale_wiki_pages,
     format_for_advisory,
 )
@@ -764,29 +764,20 @@ def test_note_capture_rejects_parent_identity_swap(tmp_path, monkeypatch):
 
 
 class TestExtractSymbols:
-    """Test symbol extraction from source files."""
+    """The names the low-confidence textual fallback reads out of changed bytes."""
 
-    def test_extract_from_python(self, tmp_path):
-        f = tmp_path / "test.py"
-        f.write_text("def hello():\n    pass\nclass World:\n    pass\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
-        assert "hello" in symbols
-        assert "World" in symbols
+    def test_extract_from_python(self):
+        symbols = _textual_symbols(b"def hello():\n    pass\nclass World:\n    pass\n")
+        assert ("hello" in symbols, "World" in symbols) == (True, True)
 
-    def test_extract_from_javascript(self, tmp_path):
-        f = tmp_path / "app.js"
-        f.write_text("function greet() {}\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
-        assert "greet" in symbols
+    def test_extract_from_javascript(self):
+        assert "greet" in _textual_symbols(b"function greet() {}\n")
 
-    def test_extract_from_nonexistent(self, tmp_path):
-        symbols = extract_symbols_from_file(tmp_path / "nope.py")
-        assert symbols == []
+    def test_extract_from_empty_content(self):
+        assert _textual_symbols(None) == []
 
-    def test_extract_deduplicates(self, tmp_path):
-        f = tmp_path / "dup.py"
-        f.write_text("def foo():\n    foo()\n    foo()\n", encoding="utf-8")
-        symbols = extract_symbols_from_file(f)
+    def test_extract_deduplicates(self):
+        symbols = _textual_symbols(b"def foo():\n    foo()\n    foo()\n")
         assert symbols.count("foo") == 1
 
 
@@ -874,38 +865,29 @@ class TestFindStaleWikiPages:
         assert len(results) == 0
 
 
+def _proven_page(index: int) -> dict:
+    return {"path": f"knowledge/notes/page-{index}.md", "via": "REFERENCES_SYMBOL"}
+
+
 class TestFormatForAdvisory:
-    """Test advisory formatting for SessionStart."""
+    """The SessionStart advisory prints the pages the graph proved, nothing else."""
 
-    def test_empty_stale_returns_empty(self):
-        result = format_for_advisory({"stale_pages": [], "summary": "nothing"})
+    def test_nothing_proven_returns_empty(self):
+        result = format_for_advisory({"affected": {"pages": [], "decisions": []}, "summary": "nothing"})
         assert result == ""
-
-    def test_formats_pages(self):
-        impact = {
-            "summary": "3 files, 5 symbols, 2 stale pages.",
-            "stale_pages": [
-                {"slug": "page-a", "confidence": "high", "reason": "mentions 3 symbols", "matched_symbols": ["a", "b", "c"]},
-                {"slug": "page-b", "confidence": "medium", "reason": "mentions 1 symbol", "matched_symbols": ["d"]},
-            ],
-        }
-        result = format_for_advisory(impact)
-        assert "Code-Knowledge Impact" in result
-        assert "page-a" in result
-        assert "page-b" in result
 
     def test_limits_to_max_pages(self):
         impact = {
             "summary": "many changes",
-            "stale_pages": [
-                {"slug": f"page-{i}", "confidence": "medium", "reason": "test", "matched_symbols": ["x"]}
-                for i in range(10)
-            ],
+            "affected": {"decisions": [], "pages": [_proven_page(i) for i in range(10)]},
         }
         result = format_for_advisory(impact, max_pages=3)
-        assert "page-0" in result
-        assert "page-2" in result
-        assert "7 more" in result
+        assert ("page-0" in result, "page-2" in result, "page-3" in result, "7 more" in result) == (
+            True,
+            True,
+            False,
+            True,
+        )
 
 
 def _autocrlf_checkout(root: Path) -> Path:

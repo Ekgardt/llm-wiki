@@ -337,12 +337,19 @@ def _finish_timed_out_process(
         return _drain_retained_pipes(process, _append_cleanup_error(cleanup_error, "retained_pipes"))
 
 
-def _popen_options(kwargs: dict) -> dict:
-    """Popen options with captured streams and the child in its own group/session."""
-    options = dict(kwargs)
+def _piped_streams(options: dict, stdin_text: object) -> None:
+    """Which of the child's streams this call wants as pipes."""
     if options.pop("capture_output", False):
         options["stdout"] = subprocess.PIPE
         options["stderr"] = subprocess.PIPE
+    if stdin_text is not None:
+        options["stdin"] = subprocess.PIPE
+
+
+def _popen_options(kwargs: dict, stdin_text: object = None) -> dict:
+    """Popen options with captured streams and the child in its own group/session."""
+    options = dict(kwargs)
+    _piped_streams(options, stdin_text)
     if os.name == "nt":
         options["creationflags"] = int(options.get("creationflags", 0)) | WINDOWS_NEW_PROCESS_GROUP
         return options
@@ -362,11 +369,18 @@ def _kill_process_tree(process: subprocess.Popen[str]) -> str | None:
 
 
 def _run_process_tree(
-    command: list[str], *, timeout: float, **kwargs: object
+    command: list[str], *, timeout: float, input: object = None, **kwargs: object
 ) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(command, **_popen_options(dict(kwargs)))
+    """Run a command whose whole tree is ended when the deadline passes.
+
+    `input` is written to the child's stdin and answers the same need as
+    `subprocess.run(input=...)`: a caller with a long prompt keeps it in a pipe
+    instead of a file on disk. It is the llm_client's CLI providers that need
+    both at once — a prompt through stdin and a tree that dies with its wrapper.
+    """
+    process = subprocess.Popen(command, **_popen_options(dict(kwargs), input))
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
         raise ProcessTreeTimeout(command, exc.timeout, cleanup_error=cleanup_error) from exc

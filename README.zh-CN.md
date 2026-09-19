@@ -121,7 +121,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) 必须是 0.12.3 —— 两个安装脚本都会拒绝其他版本
 - 一个你已在使用的 AI 智能体（Claude Code、OpenCode 或 Codex）
 
 ### 从源码安装
@@ -149,6 +149,8 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 仅当 `LLM_WIKI_COMMIT` 是精确的 40 位十六进制 commit OID 时，才支持远程 bootstrap。
 请只从可信位置传入安装程序并设置该值；bootstrap 会获取精确 commit，验证 `HEAD`、
 仓库身份和必需文件，然后只执行 checkout 中的安装程序。分支名和标签名会被拒绝。
+经过验证的 commit 会成为跟踪 `origin/main` 的本地 `main` 分支，因此夜间 fast-forward
+更新会像对待克隆的仓库一样到达该 vault；`git -C ~/LLM-wiki checkout --detach` 会将其冻结在当前 commit。
 
 本地安装程序会同步锁定的 production baseline，运行有界 production smoke，创建 runtime
 目录并接入受支持的智能体。完整回归套件仍是独立的 development 与 release gate。已有
@@ -167,7 +169,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 安装该确切提交：
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### 共享 HTTP 传输（可选）
@@ -199,8 +202,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
 partial、adopted 或 conflicting 状态，并且不会创建 `run/`。提供 offline apply 参数
 （`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`）时，该命令会在全新或
-静止的 vault 上执行 v3 切换；安装程序会自动运行它，因为切换前会话捕获会被拒绝
-（issue #17）。该命令绝不会删除 `run/`、knowledge、retired
+静止的 vault 上执行 v3 切换；在全新 vault 上安装程序会自动运行它，因为切换前会话捕获会被拒绝
+（issue #17）。对于已经持有旧队列的 vault，只有当你亲自告诉安装程序没有 agent 正在运行时
+（`--confirm-all-agents-stopped`，PowerShell 为 `-ConfirmAllAgentsStopped`）才会切换；
+否则安装程序只会给出命令，不动队列。该命令绝不会删除 `run/`、knowledge、retired
 databases、legacy caches 或 compatibility markers。
 
 可选 extras 以 additive 方式安装，并保留操作员已选择的包：
@@ -276,7 +281,7 @@ RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
 
 `cache/evidence-graph/catalog.sqlite3` 在 `cache/evidence-graph/generations/<generation-id>/` 中选择一个不可变的 active generation。候选 generation 只有在 manifest、source membership、artifact 哈希、数据库完整性和 evidence span 全部验证后才会注册。激活通过 compare-and-swap 更新指针。激活前构建失败或中断时，先前 generation 仍保持 active；active generation 损坏时，会跳过它并使用最新的已验证历史 generation。恢复时可注册完整的 orphan generation，但不会自动激活。
 
-删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建。在 installed-vault migration evidence 足以证明安全之前，必须保留 legacy `cache/index.sqlite`、`cache/vectors.npy` 和 `cache/vectors_meta.json`。如果无法打开已验证 generation，retrieval 会回退到这些 legacy 路径或 lexical/live extraction，并明确报告 fallback。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
+删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建。在 installed-vault migration evidence 足以证明安全之前，必须保留 legacy `cache/index.sqlite`、`cache/vectors.npy` 和 `cache/vectors_meta.json`。如果无法打开已验证 generation，retrieval 会回退到这些 legacy 路径或 lexical/live extraction，并明确报告 fallback。fallback 答案会给出原因：仓库没有 generation 时为 `no_generation`，有 generation 但无法打开时为 `generation_unreadable:<ExceptionClass>`。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
 
 Model matrix 固定候选 revision，并要求 EN/RU/ZH quality、resource、license 和 Pareto gates 全部通过后才选择 defaults。目前没有选定新的 embedding model 或 reranker：**evidence pending**。现有可选 vector 兼容路径仍使用固定的 legacy model。Token count 标记为 `reported`、`tokenizer`、`estimated`、`mixed` 或 `unknown`；货币成本另行标记为 `reported`、`estimated` 或 `unknown`。UTF-8 byte 估算只用于保守规划，并非独立于 tokenizer 的保证。
 
@@ -308,7 +313,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
+队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析；每周任务会自动运行该归档器，上面的命令只是它的手动形式。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ---
 
@@ -326,12 +331,18 @@ BM25 门禁（112 条生成查询和 60 条冻结查询）已于 2026-09-10 随�
 
 本地 stdio MCP 服务器提供 **12 个 task-shaped 工具**，包括 `doctor`，并统一使用 response envelope 和 health/context resources。`find_dead_code(directory)` 返回保守候选项，`get_architecture(directory)` 返回入口点、路由、基于 canonical symbol ID 的热点和社区。文件系统分析要求显式提供存在的非根目录，且绝不回退到进程 CWD。
 
-精确 Python 模式 `definition`、`references`、`implementations`、`type`、
-`diagnostics` 以及带位置的 `callers`/`callees` 使用固定的
-**Pyright 1.1.411**。请显式安装；查询期间不会下载或更新：
+精确模式 `definition`、`references`、`implementations`、`type`、
+`diagnostics` 以及带位置的 `callers`/`callees` 使用四个固定的受管语言服务器：
+**Pyright 1.1.411**（Python）、**typescript-language-server 6.0.0**（配 tsserver
+5.9.3，用于 TypeScript/JavaScript）、**gopls v0.23.0**（Go，安装时由固定的 Go
+1.27.1 工具链编译）和 **rust-analyzer 1.98.1**（Rust，附带其固定的 Rust 工具链）。
+请逐个显式安装；查询期间不会下载或更新：
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 该路径仅支持**受信任的本地仓库**，且**不是 OS sandbox**。位置、deadline、

@@ -177,19 +177,36 @@ def _require_owned_by_caller(root: Path) -> bool:
     return True
 
 
-def _git_text(root: Path, *arguments: str) -> str:
-    """One bounded, non-interactive Git read inside `root`. Never writes."""
+def _git_completed(root: Path, arguments: tuple[str, ...], timeout: float):
+    """The finished Git process, or a named refusal when it outlived its bound.
+
+    `subprocess.TimeoutExpired` is not a `TimeoutError`, so no caller's deferral
+    caught it and one slow checkout ended the whole pass. See
+    `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
     from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
 
-    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        shell=False,
-        env=sanitized_git_environment(),
-        timeout=GIT_TIMEOUT_SECONDS,
-        check=False,
-    )
+    try:
+        return subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            shell=False,
+            env=sanitized_git_environment(),
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise _refuse(
+            "repository_git_probe_timed_out",
+            f"git {arguments[0]} did not finish in {timeout} seconds",
+            directory=str(root),
+        ) from error
+
+
+def _git_text(root: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """One bounded, non-interactive Git read inside `root`. Never writes."""
+    completed = _git_completed(root, arguments, timeout)
     if completed.returncode != 0:
         raise _refuse(
             "repository_git_probe_failed",
@@ -269,13 +286,18 @@ def _is_the_vault(root: Path, state_root: Path) -> bool:
     return root in {Path(ROOT).resolve(), state_root}
 
 
-def _require_not_the_memory_tree(root: Path, requested: Iterable[str]) -> None:
-    """`knowledge/` belongs to the memory generation; a code index refuses it by name.
+def _require_not_the_memory_tree(
+    root: Path, requested: Iterable[str], memory_owner: bool
+) -> None:
+    """The vault's `knowledge/` belongs to its memory generation; a code index refuses it.
 
     Refused rather than pruned: asking for the memory tree in a code index is a
     mistake worth naming, and silence about a dropped root is what NEW-67 was.
+    Only this vault's, though: `knowledge/` is this vault's noun, and another
+    repository's directory of that name is one of its code roots. See
+    `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
     """
-    if MEMORY_ROOT not in set(requested):
+    if not memory_owner or MEMORY_ROOT not in set(requested):
         return
     raise _refuse(
         "repository_root_is_the_memory_tree",
@@ -519,7 +541,7 @@ def selected_code_roots(
     `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
     """
     if requested is not None:
-        _require_not_the_memory_tree(root, requested)
+        _require_not_the_memory_tree(root, requested, memory_owner)
         return _requested_code_roots(root, requested)
     discovered = _discovered_code_roots(root)
     if not memory_owner:
@@ -533,7 +555,11 @@ def selected_code_roots(
 
 
 def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
-    from corpus_snapshot import collect_corpus
+    """The captured corpus, or a named refusal: a checkout being written is one too.
+
+    See `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    """
+    from corpus_snapshot import CorpusChanged, collect_corpus
 
     try:
         return collect_corpus(
@@ -548,6 +574,13 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
         )
     except TimeoutError:
         raise
+    except CorpusChanged as error:
+        raise _refuse(
+            "repository_changed_during_capture",
+            f"the repository was being written while it was read; try again: {error}",
+            directory=str(root),
+            roots=list(roots),
+        ) from error
     except (OSError, ValueError) as error:
         raise _refuse(
             "repository_exceeds_corpus_bounds",
@@ -563,15 +596,15 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
 
 
 def _newest_generation_for(catalog, scope, deadline: float | None):
-    """The newest generation already registered for this repository, or None."""
-    from generation_catalog import _manifest_belongs_to
+    """The newest code generation already registered for this repository, or None.
 
-    for identifier, _registered_at, manifest in catalog.registered_manifests(
-        deadline=deadline
-    ):
-        if _manifest_belongs_to(manifest, scope):
-            return identifier, manifest
-    return None, None
+    The vault's checkout also carries memory generations of the same scope, and
+    the newest of those holds no code roots: a refresh that read it rebuilt with
+    none and was refused, night after night. Detection, refresh and a build's
+    parent read the same generation code answers read. See
+    `docs/research/2026-09-15-a-code-generation-is-not-abandoned.md`.
+    """
+    return catalog.code_generation_for_repository(scope, deadline=deadline)
 
 
 def _reuse_config(snapshot, workspace_sha256: str):
@@ -741,7 +774,9 @@ def _exported_hints(catalog, scope, state_root: Path | None, deadline: float | N
 # --------------------------------------------------------------------------
 
 
-def _repository_row(identifier: str, registered_at: str, manifest: Mapping) -> dict:
+def _repository_row(
+    identifier: str, registered_at: str, manifest: Mapping, holds_code: bool = False
+) -> dict:
     """One generation, flattened. `code_roots` is filled in later; see `_covered`.
 
     The generation manifest deliberately does not carry the snapshot policy --
@@ -760,6 +795,7 @@ def _repository_row(identifier: str, registered_at: str, manifest: Mapping) -> d
         "graph_schema_version": manifest.get("graph_schema_version"),
         "vector_state": manifest.get("vector_state"),
         "manifest": manifest,
+        "holds_code": holds_code,
         "generations": 1,
     }
 
@@ -776,7 +812,15 @@ def _covered(catalog, row: dict) -> list[str] | None:
 
 
 def _merge_repository_rows(rows: Iterable[dict]) -> list[dict]:
-    """One row per checkout, newest generation winning, older ones only counted."""
+    """One row per checkout: its newest code generation, else its newest one.
+
+    A checkout carries two kinds of generation since 2026-09-12, and the rows
+    arrive newest first, so "the first row wins" made the vault's row -- and
+    with it whether a worktree of the vault is followed -- depend on which kind
+    happened to be registered last. Every consumer of a row asks a code
+    question: which roots it covered, what to follow a worktree with. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
     merged: dict[object, dict] = {}
     for row in rows:
         key = (row["repository_id"], row["checkout_id"])
@@ -785,7 +829,17 @@ def _merge_repository_rows(rows: Iterable[dict]) -> list[dict]:
             merged[key] = row
             continue
         existing["generations"] += 1
+        _prefer_code_head(merged, key, row)
     return list(merged.values())
+
+
+def _prefer_code_head(merged: dict[object, dict], key: object, row: dict) -> None:
+    """Let a code generation head the checkout's row, whatever was registered last."""
+    head = merged[key]
+    if head["holds_code"] or not row["holds_code"]:
+        return
+    row["generations"] = head["generations"]
+    merged[key] = row
 
 
 def _active_generation_id(catalog, deadline: float | None) -> str | None:
@@ -814,7 +868,12 @@ def list_repositories(
     manifests = catalog.registered_manifests(deadline=deadline)
     active_id = _active_generation_id(catalog, deadline)
     rows = _merge_repository_rows(
-        _repository_row(identifier, registered_at, manifest)
+        _repository_row(
+            identifier,
+            registered_at,
+            manifest,
+            catalog.holds_code(identifier, manifest),
+        )
         for identifier, registered_at, manifest in manifests
     )
     return _listing(catalog, rows, active_id)
@@ -846,11 +905,23 @@ def _artifact_digest(manifest: Mapping, name: str) -> str | None:
     return None
 
 
+def _source_manifest_bytes(path: Path, generation_id: str) -> bytes:
+    """A registration whose tree is gone is a named refusal, not the end of the pass."""
+    try:
+        return path.read_bytes()
+    except OSError as error:
+        raise _refuse(
+            "repository_index_unreadable",
+            "the recorded source manifest cannot be read; re-index",
+            generation_id=generation_id,
+        ) from error
+
+
 def _verified_source_manifest(catalog, generation_id: str, manifest: Mapping) -> dict:
     """Read `source-manifest.json` only after its bytes match the manifest digest."""
     path = Path(catalog.generations_path) / generation_id / "source-manifest.json"
     expected = _artifact_digest(manifest, "source-manifest.json")
-    raw = path.read_bytes()
+    raw = _source_manifest_bytes(path, generation_id)
     if expected is None or hashlib.sha256(raw).hexdigest() != expected:
         raise _refuse(
             "repository_index_unreadable",
@@ -997,6 +1068,7 @@ def _refresh_answer(admission: Admission, generation_id, status: str, staleness)
         "generation_id": generation_id,
         "stale": staleness["stale"],
         "reason": staleness["reason"],
+        "commit_moved": staleness["commit_moved"],
     }
 
 
@@ -1014,7 +1086,12 @@ def _staleness(catalog, admission: Admission, generation_id, manifest, deadline)
     # the checkout's current one (the identity guard in tests watches this).
     commit_moved = recorded_scope.get("git_commit") != admission.scope.git_commit
     if report["stale"]:
-        return {"stale": True, "reason": "sources_changed", "counts": report["counts"]}
+        return {
+            "stale": True,
+            "reason": "sources_changed",
+            "counts": report["counts"],
+            "commit_moved": commit_moved,
+        }
     return {"stale": False, "reason": "unchanged", "commit_moved": commit_moved}
 
 
@@ -1099,8 +1176,15 @@ def run_fenced(
     # from, tolerates a busy database, and releases the owner on exit.
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
     bound = _bounded_deadline(deadline)
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
-        return work(bound, _either_cancelled(beat.cancelled, cancelled))
+    # The heartbeat checks the owner on entry and releases it on exit; both say
+    # `MaintenanceFenceLost` when the lease was taken, and the exit's replaces
+    # the cancelled build's `TimeoutError`. That is a refused fence, not a crash:
+    # `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
+    try:
+        with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=bound) as beat:  # noqa: SLF001
+            return work(bound, _either_cancelled(beat.cancelled, cancelled))
+    except doctor.MaintenanceFenceLost:
+        return {FENCE_REFUSED: True, "status": "refresh_owned_elsewhere", "reason": "fence_lost"}
 
 
 def _refused_staleness(outcome: dict, staleness) -> dict:
@@ -1162,12 +1246,27 @@ def refresh_repository(
 
 
 def _current_hints(catalog, scope, root: Path, generation_id: str, deadline) -> dict:
+    """The hint table of this generation, exported again when it names another commit.
+
+    The meta block is also the answer to "was this generation confirmed against
+    the checkout as it stands now?", which is why the commit has to match: after
+    a commit that changed no source, nothing else says the index is current, and
+    every new process spawned a refresh that found nothing. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
     from code_hints import hints_path, read_meta
 
     meta = read_meta(hints_path(root, scope.checkout_id))
-    if meta is not None and meta.get("generation_id") == generation_id:
+    if meta is not None and _hints_confirm(meta, scope, generation_id):
         return {"status": "current", "generation_id": generation_id}
     return _exported_hints(catalog, scope, root, deadline)
+
+
+def _hints_confirm(meta: Mapping, scope, generation_id: str) -> bool:
+    return (meta.get("generation_id"), meta.get("git_commit")) == (
+        generation_id,
+        str(scope.git_commit or ""),
+    )
 
 
 def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict:
@@ -1200,10 +1299,21 @@ def _vault_checkout(state_root: Path | None) -> Path:
 
 
 def _indexed_already(directory: Path, state_root: Path | None, deadline: float) -> bool:
-    detected = detect_repository_changes(
-        directory, state_root=state_root, deadline=deadline
+    """Whether this checkout already has a code generation registered.
+
+    One catalog lookup. Asking `detect_repository_changes` captured the whole
+    checkout a second time every night -- and a third when it was stale -- to
+    learn something the catalog answers without reading a file. See
+    `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    admission = admit_repository(directory, state_root=state_root, deadline=deadline)
+    catalog = _open_catalog(state_root_path(state_root), read_only=True)
+    if catalog is None:
+        return False
+    generation_id, _manifest = _newest_generation_for(
+        catalog, admission.scope, deadline
     )
-    return detected.get("status") != "not_indexed"
+    return generation_id is not None
 
 
 def _adopted_vault(state_root: Path | None, deadline: float) -> dict:

@@ -384,11 +384,28 @@ class _HookFamily(NamedTuple):
 
 
 CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
-# The provider and model chosen at install time, persisted wherever the code
-# runs unattended: the hooks' env block and the scheduler units. Issue #22: an
-# install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
-# auto-detect OpenCode and compile on a different account.
-PROVIDER_ENV_KEYS = ("MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
+# Everything that shapes a provider call at install time, persisted wherever the
+# code runs unattended: the hooks' env block and the scheduler units. Issue #22:
+# an install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
+# auto-detect OpenCode and compile on a different account. Persisting the
+# provider alone had the same shape of fault: an install made with
+# `OLLAMA_NO_CLOUD=1` and a loopback endpoint left every scheduled run without
+# the local-only requirement, on the default endpoint and the default model. See
+# `docs/research/2026-09-18-the-installed-choice-of-provider-travels-whole.md`.
+#
+# `MEMORY_LLM_API_KEY` and `OPENAI_API_KEY` are deliberately absent: a secret
+# written into a unit file or a settings file is a secret on disk and in every
+# backup of the vault. An unattended run that needs one reads it from the
+# operator's own environment.
+PROVIDER_ENV_KEYS = (
+    "MEMORY_LLM_PROVIDER",
+    "MEMORY_CLAUDE_MODEL",
+    "MEMORY_CODEX_MODEL",
+    "MEMORY_CODEX_REASONING",
+    "MEMORY_LLM_MODEL",
+    "MEMORY_LLM_BASE_URL",
+    "OLLAMA_NO_CLOUD",
+)
 
 
 # The test provider is never persisted: it exists so a suite can run without

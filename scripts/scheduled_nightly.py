@@ -28,11 +28,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
+import process_liveness  # noqa: E402
 from doctor import (  # noqa: E402
     DEFAULT_GENERATION_SOURCE_LIMIT,
     run_generation_maintenance,
 )
-from maintenance_helpers import prune_maintenance_output  # noqa: E402
+from maintenance_helpers import prune_maintenance_output, trim_scheduler_logs  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
 from memory_state import (  # noqa: E402
@@ -226,6 +227,19 @@ def _queue_step() -> _Step:
 EPISODE_BUDGET_SECONDS = 180
 
 
+def provider_margin_seconds() -> int:
+    """What a step must leave after its child's budget for one model call.
+
+    The child stops starting work at its budget with one call possibly in
+    flight, and one call is not one provider: in auto mode it walks the whole
+    order. The flat 120 s covered the interpreter and one provider only.
+    Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+    """
+    from llm_client import worst_case_call_seconds
+
+    return STEP_START_MARGIN_SECONDS + worst_case_call_seconds()
+
+
 def _episode_step() -> _Step:
     """Consolidate every day still pending before compile reads the daily log.
 
@@ -241,7 +255,7 @@ def _episode_step() -> _Step:
         "episodes",
         _script("episode_consolidation.py")
         + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
-        EPISODE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
+        EPISODE_BUDGET_SECONDS + provider_margin_seconds(),
     )
 
 
@@ -260,11 +274,13 @@ def _fact_keys_step() -> _Step:
     One provider call per twenty-five turns, in this window where nobody is
     waiting; a turn is keyed once. See `fact_keys`.
     """
+    from fact_keys import DEFAULT_BUDGET_SECONDS
+
     return _Step(
         "Step 2a: keying new user turns...",
         "fact_keys",
         _script("fact_keys.py"),
-        660,
+        int(DEFAULT_BUDGET_SECONDS) + provider_margin_seconds(),
     )
 
 
@@ -278,7 +294,7 @@ def _checkpoint_step() -> _Step:
     blocks every sequence behind it for that project.
 
     Measured on this vault on 2026-09-07: `llm-wiki` 2214 lost a precondition
-    during the benchmark runs and 2215 sat reserved behind it, `no-hands` 830
+    during the benchmark runs and 2215 sat reserved behind it, `another-project` 830
     likewise. Six hundred hook failures accumulated over a day, one per
     session end, and clearing it took a person running a repair script by
     hand — which is the thing this pass exists to stop needing.
@@ -495,17 +511,32 @@ HEALTH_REPORT_BUDGET_SECONDS = 60
 COMPILE_IDLE_WAIT_SECONDS = 30
 
 
-def worst_case_seconds() -> float:
-    """The longest a pass can run by its own bounds: every step's timeout and every wait.
+# The two tail tasks are bounded by work rather than by wall time: the telemetry
+# compaction deletes at most `retrieval_telemetry.DEFAULT_MAX_DELETE` rows under
+# a 5 s busy timeout, and the retention pass looks at at most
+# `maintenance_helpers.REPORT_RETENTION_FILES` reports. This is what the pass
+# allows them together; outliving it is caught at the next step boundary.
+MAINTENANCE_TAIL_BUDGET_SECONDS = 120
 
-    The Windows scheduler's limit must sit above it. See
-    `docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md`.
+
+def worst_case_seconds() -> float:
+    """The longest a pass can run by its own bounds, as configured right now.
+
+    Every step's timeout (with the margin a provider call really needs), every
+    wait as the environment sets it, the generation and health budgets, the
+    checkout update by its own timeouts, and the tail allowance. The pass stops
+    itself at this bound, and a scheduler's limit sits above it. See
+    `docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md` and
+    `docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md`.
     """
+    from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
+
     steps = [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()]
     steps += [_compile_step(), _fact_keys_step(), *_post_compile_steps()]
-    waits = COMPILE_IDLE_WAIT_SECONDS + COMPILE_WAIT_SECONDS
+    waits = COMPILE_IDLE_WAIT_SECONDS + _compile_wait_seconds()
     budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
-    return float(sum(step.timeout for step in steps) + waits + budgets)
+    tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
+    return float(sum(step.timeout for step in steps) + waits + budgets + tail)
 
 
 def _write_health_report(log) -> None:
@@ -544,12 +575,26 @@ def _update_code(log) -> None:
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
         log(f"  update: {outcome['detail']}")
+    _log_update_aftermath(log, outcome)
+
+
+def _log_update_aftermath(log, outcome: dict) -> None:
+    """What the update brought in but did not bring into force.
+
+    See `docs/research/2026-09-17-an-update-says-what-it-did-not-bring-into-force.md`.
+    """
+    if outcome.get("status") != "updated":
+        return
+    extras = ", ".join(outcome.get("extras") or ()) or "none"
+    log(f"  update: dependencies {outcome.get('dependencies')}; extras not upgraded: {extras}")
+    log(f"  update: owned resources {outcome.get('resources')}")
 
 
 def _prune_reports(log) -> None:
     """Retention over every maintenance report family and its artifacts."""
     log("Step 4: pruning maintenance reports and artifacts...")
     log(f"  pruned {prune_maintenance_output()} old file(s)")
+    log(f"  trimmed {trim_scheduler_logs()} byte(s) from the scheduler logs")
 
 
 def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
@@ -571,9 +616,53 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         # is unknown, and the steps that read its output wait for the next
         # pass. Counting it as a failure turned a slow healthy night red (#21).
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
+        log("  a service manager that owns this pass (systemd) stops that compile when the pass exits")
+        _remember_deferred_compile(log)
         return failures
-    failures += _report_compile_outcome(log, before, started_before)
+    failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
     return failures + _post_compile_pass(run_step, log)
+
+
+DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
+
+
+def _remember_deferred_compile(log) -> None:
+    """Keep the deferred compile's start stamp, so the next pass can miss it.
+
+    Under systemd the unit ends here and the compile ends with it; the loss used
+    to be invisible, because the next pass compares against its own start stamp.
+    Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+    """
+    started = _last_compile_started()
+    if started is None:
+        return
+    try:
+        update_state(lambda state: state.__setitem__(DEFERRED_COMPILE_KEY, started))
+    except Exception as exc:  # noqa: BLE001 - a note about a loss is never a failure
+        log(f"  deferred compile not recorded: {describe_error(exc)}")
+
+
+def _report_deferred_loss(log) -> int:
+    """Report a compile a previous pass deferred that never recorded an outcome."""
+    state = _safe_state()
+    deferred = state.get(DEFERRED_COMPILE_KEY)
+    if not deferred:
+        return 0
+    lost = str(deferred) == str(state.get("last_compile_started_at") or "") and (
+        state.get("last_compile_status") == "running"
+    )
+    _forget_deferred_compile(log)
+    if not lost:
+        return 0
+    log(f"  compile: FAILED — a compile deferred at {deferred} never finished")
+    return 1
+
+
+def _forget_deferred_compile(log) -> None:
+    try:
+        update_state(lambda state: state.pop(DEFERRED_COMPILE_KEY, None))
+    except Exception as exc:  # noqa: BLE001 - as above
+        log(f"  deferred compile not cleared: {describe_error(exc)}")
 
 
 def _report_compile_outcome(log, before: str | None, started_before: str | None = None) -> int:
@@ -608,9 +697,25 @@ def _require_fence(fence: threading.Event | None) -> None:
         raise OperationalOwnershipError("owner_fence_lost")
 
 
-def _fenced_step_runner(fence: threading.Event | None):
+class PassBoundExceeded(RuntimeError):
+    """The pass has outlived the worst case it computes for itself."""
+
+
+def _require_within_bound(deadline: float | None) -> None:
+    """A pass that has outlived its own bound stops at the next boundary.
+
+    Windows Task Scheduler is the only scheduler that limits the pass from
+    outside; launchd and cron limit nothing, so this is the bound there.
+    Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+    """
+    if deadline is not None and time.monotonic() >= deadline:
+        raise PassBoundExceeded("the pass outlived its own worst case")
+
+
+def _fenced_step_runner(fence: threading.Event | None, deadline: float | None = None):
     def run_step(command, log, name, *, timeout):
         _require_fence(fence)
+        _require_within_bound(deadline)
         return _run_step(command, log, name, timeout=timeout)
 
     return run_step
@@ -630,12 +735,13 @@ def _run_nightly_body(
 ) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     _require_nightly_owner(ownership)
-    run_step = _fenced_step_runner(fence)
+    deadline = time.monotonic() + worst_case_seconds()
+    run_step = _fenced_step_runner(fence, deadline)
 
     failures = 1
     terminal_error = None
     try:
-        failures = _nightly_pass(today, run_step, ownership, fence)
+        failures = _nightly_pass(today, run_step, ownership, fence, deadline)
         return 1 if failures else 0
     except Exception as exc:
         terminal_error = f"{type(exc).__name__}: {exc}"
@@ -644,12 +750,19 @@ def _run_nightly_body(
         _record_result_quietly(today, failures, _terminal_error(terminal_error, fence))
 
 
-def _nightly_pass(today: str, run_step, ownership: OwnerLease | None, fence) -> int:
+def _nightly_pass(
+    today: str,
+    run_step,
+    ownership: OwnerLease | None,
+    fence,
+    deadline: float | None = None,
+) -> int:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     log = _nightly_logger(REPORTS_DIR / f"nightly-{today}.md")
     log(f"=== Nightly consolidation pass — {today} ===")
     failures = _nightly_steps(run_step, log, ownership)
     _require_fence(fence)
+    _require_within_bound(deadline)
     _prune_reports(log)
     _update_code(log)
     log(f"=== Nightly pass complete (failures={failures}) ===")
@@ -678,16 +791,51 @@ def run_nightly(
 
 
 def _write_marker(marker: Path) -> bool:
-    """Create the marker exclusively and stamp it with this PID."""
+    """Create the marker exclusively and stamp it with this process.
+
+    The descriptor is binary so that Windows writes the payload's newlines as
+    they are. Research:
+    docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md
+    """
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        descriptor = os.open(str(marker), flags)
     except FileExistsError:
         return False
     try:
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
+        os.write(descriptor, marker_payload())
     finally:
         os.close(descriptor)
     return True
+
+
+def marker_payload() -> bytes:
+    """The PID, and the identity that tells this process from the next one to
+    carry its number.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_identity()}\n".encode("ascii", errors="replace")
+
+
+def _own_identity() -> str:
+    """This process's start identity, empty when the probe cannot settle it."""
+    try:
+        return process_liveness.process_start_identity(os.getpid()) or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _marker_owner(payload: bytes) -> tuple[int, str] | None:
+    """(PID, identity) a marker records; one written before this release has none."""
+    lines = payload.decode("utf-8", errors="replace").strip().splitlines()
+    if not lines:
+        return None
+    try:
+        pid = int(lines[0].strip())
+    except ValueError:
+        return None
+    return (pid, lines[1].strip() if len(lines) > 1 else "")
 
 
 def _abandoned_marker_bytes(marker: Path) -> bytes | None:
@@ -697,14 +845,14 @@ def _abandoned_marker_bytes(marker: Path) -> bytes | None:
     2026-09-10); this legacy marker serves only vaults without a V3
     coordinator, where the registry's reclaim is unavailable.
     """
-    from memory_state import _is_pid_alive
-
     try:
         payload = marker.read_bytes()
-        old_pid = int(payload.decode("utf-8").strip())
-    except (OSError, ValueError):
+    except OSError:
         return None
-    return None if _is_pid_alive(old_pid) else payload
+    owner = _marker_owner(payload)
+    if owner is None or process_liveness.owner_alive(*owner):
+        return None
+    return payload
 
 
 def _steal_marker(marker: Path) -> bool:
@@ -725,8 +873,9 @@ def _acquire_legacy_maintenance_marker() -> Path | None:
 
 
 def _release_legacy_maintenance_marker(marker: Path) -> None:
+    """Remove the marker only while it is still the one this process wrote."""
     try:
-        if marker.read_text(encoding="utf-8").strip() == str(os.getpid()):
+        if _marker_owner(marker.read_bytes()) == (os.getpid(), _own_identity()):
             marker.unlink()
     except OSError:
         pass

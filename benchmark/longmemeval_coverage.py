@@ -105,6 +105,27 @@ def coverage(question: Mapping[str, object], rows: Sequence[Mapping[str, object]
     }
 
 
+def evidence_in_text(question: Mapping[str, object], text: str) -> dict:
+    """How many of the dataset's evidence turns appear in one block of text.
+
+    Written for the prompt the reader actually received. Defined for every
+    question type, including the one whose gold is a rubric, because the turns
+    are labelled by the dataset (`has_answer`) and not derived from the gold
+    string. Asking instead whether the gold string is in the prompt measures the
+    shape of the gold: it is absent by construction when the gold was computed
+    ("6 days.") or written by the dataset's authors as a description of a good
+    answer. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    turns = evidence_turns(question)
+    seen = _covered_turns(turns, [normalized(text)])
+    return {
+        "turns_labelled": len(turns),
+        "turns_in_text": seen,
+        "turn_recall": _share(seen, len(turns)),
+        "all_turns": bool(turns) and seen == len(turns),
+    }
+
+
 def coverage_at_depths(
     question: Mapping[str, object],
     rows: Sequence[Mapping[str, object]],
@@ -167,15 +188,63 @@ def aggregate(rows: Sequence[Mapping[str, object]]) -> dict:
     return {depth: _by_type(pairs) for depth, pairs in sorted(_depth_entries(rows).items())}
 
 
+def _number(row: Mapping[str, object], key: str) -> int:
+    value = row.get(key)
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def compile_evidence(rows: Sequence[Mapping[str, object]]) -> dict:
+    """What the compiler could place of the evidence chunks it asked for.
+
+    A different stage from the coverage above, which measures what search
+    returned, and from the report's prompt-evidence figures, which measure what
+    the reader saw. All three were read as "coverage" by whoever quoted them,
+    and on the recorded run of 2026-09-17 they read 0.912, 1.0 and 0.508 —
+    three numbers for one word, at three points of the pipeline. Each is named
+    for its stage now. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    requested = sum(_number(row, "evidence_requested") for row in rows)
+    missed = sum(_number(row, "evidence_missed") for row in rows)
+    return {
+        "chunks_requested": requested,
+        "chunks_missed": missed,
+        "chunks_placed_share": _share(requested - missed, requested),
+    }
+
+
 def failure_split(rows: Sequence[Mapping[str, object]]) -> dict:
     """Wrong answers with every evidence turn in hand, and wrong answers without.
 
     The first is the reader's failure and the second retrieval's, which is what
     decides whether the next change belongs in search or in answer composition.
+
+    `judged` leads, because without it a run written before its judge pass reads
+    `{"wrong": 0}` — which is what `lme500.report.json` said on 2026-09-17 about
+    a run with 199 wrong answers. Zero wrong and zero judged is silence, and it
+    has to look like silence.
     """
-    wrong = [row for row in rows if row.get("judge_correct") is False]
-    in_hand = sum(1 for row in wrong if _all_turns_seen(row))
-    return {"wrong": len(wrong), "evidence_in_hand": in_hand, "evidence_missing": len(wrong) - in_hand}
+    wrong = _wrong_answers(rows)
+    in_hand = _with_evidence(wrong)
+    return {
+        "judged": _judged_count(rows),
+        "wrong": len(wrong),
+        "evidence_in_hand": in_hand,
+        "evidence_missing": len(wrong) - in_hand,
+    }
+
+
+def _wrong_answers(rows: Sequence[Mapping[str, object]]) -> list:
+    return [row for row in rows if row.get("judge_correct") is False]
+
+
+def _judged_count(rows: Sequence[Mapping[str, object]]) -> int:
+    return sum(1 for row in rows if isinstance(row.get("judge_correct"), bool))
+
+
+def _with_evidence(rows: Sequence[Mapping[str, object]]) -> int:
+    return sum(1 for row in rows if _all_turns_seen(row))
 
 
 def _all_turns_seen(row: Mapping[str, object]) -> bool:

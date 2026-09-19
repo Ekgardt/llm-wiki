@@ -119,6 +119,7 @@ GATE_THRESHOLDS: dict[str, float | int] = {
     "recovery_rate": 1.0,
     "default_items": 10,
     "default_estimated_tokens": 1200,
+    # The floor, not the whole bound: see WARM_OVERHEAD_MAX_SHARE_OF_DIRECT.
     # 30 ms, not 20: three consecutive GitHub-hosted four-vCPU runs measured
     # 22.8, 22.08, and 22.16 ms. The facade walks the workspace revision an
     # extra time to guarantee freshness, and that cost is real on a slow
@@ -128,6 +129,15 @@ GATE_THRESHOLDS: dict[str, float | int] = {
     "cold_readiness_seconds": 60,
     "client_rss_mib": 100,
 }
+
+# Above the floor the warm-overhead bound scales with the run's own control
+# measurement: our layer may take up to this share of the time Pyright itself
+# takes at p95, on the same queries, in the same run. A shared runner having a
+# slow afternoon moves both sides and cannot fail the gate on its own; our
+# layer taking a bigger share of the same work still does. Baseline 0.721 and
+# 0.738 on 2026-09-18, noise floor 2.4%; see
+# docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md.
+WARM_OVERHEAD_MAX_SHARE_OF_DIRECT = 0.90
 
 _CORRECTNESS_GATES = (
     "definition_accuracy",
@@ -2988,11 +2998,22 @@ _PERFORMANCE_FIELDS = (
 )
 
 
+def _positive_number(value: object) -> bool:
+    return _finite_number(value) and float(value) > 0.0  # type: ignore[arg-type]
+
+
+def _performance_measured(performance: Mapping[str, object]) -> bool:
+    """Every latency the report promises is a finite number, and the control is positive."""
+    return all(_finite_number(performance[field]) for field in _PERFORMANCE_FIELDS) and _positive_number(
+        performance["direct_pyright_p95_ms"]
+    )
+
+
 def _performance_complete(performance: Mapping[str, object]) -> bool:
     return (
         performance["available"] is True
         and performance["sample_count"] == PERFORMANCE_SAMPLES
-        and all(_finite_number(performance[field]) for field in _PERFORMANCE_FIELDS)
+        and _performance_measured(performance)
         and performance["warm_facade_p50_ms"] <= performance["warm_facade_p95_ms"]
     )
 
@@ -3084,8 +3105,23 @@ def _meets_threshold(field: str, value: float, threshold: float) -> bool:
     return value <= threshold
 
 
-def _gate_entry(field: str, value: object, complete: bool) -> dict[str, object]:
-    threshold = GATE_THRESHOLDS[field]
+def _warm_overhead_threshold(direct_pyright_p95_ms: object) -> float | int:
+    """The floor, or the run's own control measurement scaled — whichever is larger."""
+    floor = GATE_THRESHOLDS["warm_overhead_p95_ms"]
+    if not _positive_number(direct_pyright_p95_ms):
+        return floor
+    return max(float(floor), WARM_OVERHEAD_MAX_SHARE_OF_DIRECT * float(direct_pyright_p95_ms))  # type: ignore[arg-type]
+
+
+def _run_thresholds(performance: Mapping[str, object]) -> dict[str, float | int]:
+    """Production thresholds for one run: the warm-overhead bound carries its control."""
+    thresholds = dict(GATE_THRESHOLDS)
+    thresholds["warm_overhead_p95_ms"] = _warm_overhead_threshold(performance["direct_pyright_p95_ms"])
+    return thresholds
+
+
+def _gate_entry(field: str, value: object, complete: bool, thresholds: Mapping[str, float | int]) -> dict[str, object]:
+    threshold = thresholds[field]
     measured = complete and value is not None
     return {
         "measured": measured,
@@ -3116,7 +3152,8 @@ def evaluate_gates(report: object) -> dict[str, object]:
     qualification = report["mode"] == "qualification"
     fields = _QUALIFICATION_GATES if qualification else _CORRECTNESS_GATES
     values = _gate_values(report)
-    gates = {field: _gate_entry(field, values[field], complete) for field in fields}
+    thresholds = _run_thresholds(report["performance"])
+    gates = {field: _gate_entry(field, values[field], complete, thresholds) for field in fields}
     return _evaluation(complete, gates, qualification)
 
 

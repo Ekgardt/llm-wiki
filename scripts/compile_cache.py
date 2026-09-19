@@ -166,11 +166,6 @@ class CompileActionDescriptor:
         return bool(calls) and all(call.model is not None and call.model.strip() for call in calls)
 
 
-# Short compatibility names for callers that treat descriptors as tuple records.
-SourceTuple = SourceDescriptor
-CallDescriptor = CompileCallDescriptor
-
-
 def _nonblank_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 

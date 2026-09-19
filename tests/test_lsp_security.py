@@ -1376,9 +1376,7 @@ def test_redaction_bounds_every_stage_before_contractions_and_output(
         + "/secret.py "
         + "tail" * 20_000
     )
-    started = time.perf_counter()
     result = redact_lsp_text(value, repository=scope)
-    elapsed = time.perf_counter() - started
 
     assert result.startswith("TOKEN=<redacted> https://<redacted>@example.test/private ")
     assert "<repository>" in result
@@ -1386,9 +1384,13 @@ def test_redaction_bounds_every_stage_before_contractions_and_output(
     assert observed
     assert observed[0] == ("_normalize_log_text", len(value))
     assert ("_redact_assignments", len(value)) in observed
+    # What "bounded" means here is the size each stage is handed, which is what
+    # this line measures. A stopwatch stood beside it (`elapsed < 1.0`); on a
+    # machine running several suites at once the same unchanged code took
+    # 1.15 s to 1.35 s, so it failed for load and not for an unbounded stage.
+    # See `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`.
     assert max(length for _name, length in observed) <= ceiling
     assert len(result) <= 1024
-    assert elapsed < 1.0
 
 
 def test_redaction_normalizes_complete_bounded_input_before_url_scanning() -> None:

@@ -78,9 +78,7 @@
             "enum": [
               "exact-numpy",
               "sqlite-vec",
-              "usearch",
-              "lancedb-flat",
-              "lancedb-ann"
+              "usearch"
             ]
           },
           "corpus_size": {"type": "integer", "minimum": 1},
@@ -302,7 +300,7 @@
         "selected_corpus_size": {"type": "integer", "minimum": 1},
         "application": {"const": "query_time"},
         "equivalent_predicate": {"const": "selected = true"},
-        "implementation": {"type": "string", "enum": ["numpy-mask", "postfilter", "lancedb-prefilter"]}
+        "implementation": {"type": "string", "enum": ["numpy-mask", "postfilter"]}
       }
     },
     "index_status": {

@@ -250,7 +250,9 @@ def _drive_access_tracking(d: _Drive) -> None:
             event_kind="page_read",
             query=None,
             retrieval_mode="direct",
-            candidate_id="page",
+            # One column, one identity: the page's vault-relative path. See
+            # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+            candidate_id="knowledge/notes/page.md",
             rank=None,
             generation="legacy",
             source_tool="writer-test",
@@ -413,7 +415,9 @@ def _drive_reflection(d: _Drive) -> None:
         encoding="utf-8",
     )
     monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: f"# Page\n\n{secret}")
+    # A rewrite shorter than a page is refused since 2026-09-17, so the fake is page-sized.
+    rewrite = f"# Page\n\n{secret}\n\n" + "The merged narrative keeps every stated fact. " * 8
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: rewrite)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     d.function(page, apply=True)
 
@@ -440,14 +444,7 @@ def _drive_session_start_project_state(d: _Drive) -> None:
 
 def _drive_tool_breadcrumb_append(d: _Drive) -> None:
     d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
-    d.function(
-        {
-            "slug": "demo",
-            "sessionId": "s1",
-            "tool": "bash",
-            "target": d.secret,
-        }
-    )
+    d.function({"slug": "demo", "sessionId": "s1", "tool": "bash", "target": d.secret})
 
 
 def _drive_user_prompt_capture(d: _Drive) -> None:
@@ -499,12 +496,16 @@ def _assert_no_git(command, *args, **kwargs):
 
 def _assert_boundary_use(entrypoint: str, module_name: str, calls: list, secret: str) -> None:
     assert calls, f"{entrypoint} did not delegate to the mutation boundary"
-    if entrypoint in TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS:
-        assert all(call_kwargs.get("preconditions") for _, call_kwargs in calls), (
-            f"{entrypoint} did not bind its source snapshot"
-        )
+    _assert_snapshot_bound(entrypoint, calls)
     if module_name not in _SECRET_BEARING_WRITERS:
         assert secret not in repr(calls), f"{entrypoint} leaked a secret before prepare"
+
+
+def _assert_snapshot_bound(entrypoint: str, calls: list) -> None:
+    if entrypoint not in TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS:
+        return
+    unbound = [kwargs for _, kwargs in calls if not kwargs.get("preconditions")]
+    assert unbound == [], f"{entrypoint} did not bind its source snapshot"
 
 
 @pytest.mark.parametrize("entrypoint", sorted(TASK14_BEHAVIORAL_ENTRYPOINTS))
@@ -995,6 +996,29 @@ def test_concurrent_daily_and_project_jsonl_appends_never_interleave(tmp_path, m
         assert jsonl_text.count(f'{{"id":{index}}}\n') == 1
 
 
+_EXECUTOR_CLASSES = {
+    "thread": concurrent.futures.ThreadPoolExecutor,
+    "process": concurrent.futures.ProcessPoolExecutor,
+}
+
+
+def _same_operation_outcomes(executor_type: str, workers: int, arguments: tuple) -> list:
+    executor_class = _EXECUTOR_CLASSES[executor_type]
+    with executor_class(max_workers=_bounded_workers(workers)) as executor:
+        futures = [
+            executor.submit(_same_operation_worker, *arguments) for _ in range(workers)
+        ]
+        return [future.result(timeout=LONG_TIMEOUT) for future in futures]
+
+
+def _operation_transaction_count(coordinator, operation_id: str) -> int:
+    with coordinator._connect() as database:
+        return database.execute(
+            'SELECT COUNT(*) FROM "transaction" WHERE operation_id = ? OR operation_id LIKE ?',
+            (operation_id, f"{operation_id}:cas:%"),
+        ).fetchone()[0]
+
+
 @pytest.mark.parametrize("api", ["append", "mutation"])
 @pytest.mark.parametrize("executor_type", ["thread", "process"])
 def test_concurrent_identical_operation_id_converges_once(
@@ -1009,37 +1033,15 @@ def test_concurrent_identical_operation_id_converges_once(
     operation_id = f"same-{api}"
     content = b"same\n"
     workers = 10
-    executor_class = (
-        concurrent.futures.ThreadPoolExecutor
-        if executor_type == "thread"
-        else concurrent.futures.ProcessPoolExecutor
-    )
-    with executor_class(max_workers=_bounded_workers(workers)) as executor:
-        futures = [
-            executor.submit(
-                _same_operation_worker,
-                api,
-                str(target),
-                operation_id,
-                content,
-                str(vault),
-                str(state),
-            )
-            for _ in range(workers)
-        ]
-        assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * workers
+    arguments = (api, str(target), operation_id, content, str(vault), str(state))
+    outcomes = _same_operation_outcomes(executor_type, workers, arguments)
+    assert outcomes == ["committed"] * workers
 
     assert target.read_bytes() == content
     coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
     record = coordinator._record_for_operation_id(operation_id)
-    assert record is not None
-    assert record.state == "committed"
-    with coordinator._connect() as database:
-        transaction_count = database.execute(
-            'SELECT COUNT(*) FROM "transaction" WHERE operation_id = ? OR operation_id LIKE ?',
-            (operation_id, f"{operation_id}:cas:%"),
-        ).fetchone()[0]
-    assert transaction_count == 1
+    assert getattr(record, "state", None) == "committed"
+    assert _operation_transaction_count(coordinator, operation_id) == 1
 
 
 def test_concurrent_identical_append_converges_once_during_distinct_event_churn(
@@ -1209,7 +1211,7 @@ def _conflict_reflection(vault, monkeypatch):
         "## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\nMerged")
+    monkeypatch.setattr("llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\n" + "Merged narrative keeps every stated fact. " * 8)
 
     def invoke():
         return module.reflect_page(source, apply=True)
@@ -1259,6 +1261,68 @@ def test_read_transform_write_conflict_preserves_user_bytes(tmp_path, monkeypatc
     _assert_destination_absent(destination)
 
 
+def _write_concept(path: Path, title: str, summary: str) -> None:
+    path.write_text(
+        f"---\ntype: concept\n---\n# {title}\n\nOne-sentence summary: {summary}\n",
+        encoding="utf-8",
+    )
+
+
+def _race_adds_a_page(notes: Path) -> None:
+    _write_concept(notes / "added.md", "Added", "added summary")
+
+
+def _race_deletes_a_page(notes: Path) -> None:
+    (notes / "victim.md").unlink()
+
+
+def _race_changes_a_page(notes: Path) -> None:
+    _write_concept(notes / "primary.md", "Primary", "fresh summary")
+
+
+# race -> (what happens under the writer, texts the index must name, texts it must not)
+_TREE_RACES = {
+    "add": (_race_adds_a_page, ("[[knowledge/notes/added]]", "added summary"), ()),
+    "delete": (_race_deletes_a_page, (), ("victim", "delete me")),
+    "change": (_race_changes_a_page, ("fresh summary",), ("old summary",)),
+}
+
+
+def _mutate_after_one_race(original_mutate, inject, notes: Path):
+    pending = [inject]
+
+    def racing_mutate(operation_id, changes, **kwargs):
+        if pending:
+            pending.pop()(notes)
+        return original_mutate(operation_id, changes, **kwargs)
+
+    return racing_mutate
+
+
+def _texts_found(index: str, texts: tuple) -> list:
+    return [text for text in texts if text in index]
+
+
+def _rebuild_index_operation_ids(coordinator) -> list:
+    with coordinator._connect() as database:
+        rows = database.execute(
+            'SELECT operation_id FROM "transaction" '
+            'WHERE operation_id LIKE "rebuild-index:%" ORDER BY created_at'
+        ).fetchall()
+    return [row["operation_id"] for row in rows]
+
+
+def _drift_deletes_the_index(index_path: Path) -> None:
+    index_path.unlink()
+
+
+def _drift_corrupts_the_index(index_path: Path) -> None:
+    index_path.write_bytes(b"corrupt index\n")
+
+
+_INDEX_DRIFTS = {"delete": _drift_deletes_the_index, "modify": _drift_corrupts_the_index}
+
+
 @pytest.mark.parametrize("race", ["add", "delete", "change"])
 def test_rebuild_index_retries_tree_race_with_fresh_snapshot(tmp_path, monkeypatch, race):
     import markdown_transaction
@@ -1268,53 +1332,20 @@ def test_rebuild_index_retries_tree_race_with_fresh_snapshot(tmp_path, monkeypat
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     notes = vault / "knowledge" / "notes"
-    primary = notes / "primary.md"
-    primary.write_text(
-        "---\ntype: concept\n---\n# Primary\n\nOne-sentence summary: old summary\n",
-        encoding="utf-8",
-    )
-    victim = notes / "victim.md"
+    inject, present, absent = _TREE_RACES[race]
+    _write_concept(notes / "primary.md", "Primary", "old summary")
     if race == "delete":
-        victim.write_text(
-            "---\ntype: concept\n---\n# Victim\n\nOne-sentence summary: delete me\n",
-            encoding="utf-8",
-        )
+        _write_concept(notes / "victim.md", "Victim", "delete me")
     monkeypatch.setattr(rebuild_memory_index, "ROOT", vault)
     monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
-    original_mutate = markdown_transaction.mutate_knowledge
-    injected = False
-
-    def racing_mutate(operation_id, changes, **kwargs):
-        nonlocal injected
-        if not injected:
-            injected = True
-            if race == "add":
-                (notes / "added.md").write_text(
-                    "---\ntype: concept\n---\n# Added\n\nOne-sentence summary: added summary\n",
-                    encoding="utf-8",
-                )
-            elif race == "delete":
-                victim.unlink()
-            else:
-                primary.write_text(
-                    "---\ntype: concept\n---\n# Primary\n\nOne-sentence summary: fresh summary\n",
-                    encoding="utf-8",
-                )
-        return original_mutate(operation_id, changes, **kwargs)
+    racing_mutate = _mutate_after_one_race(markdown_transaction.mutate_knowledge, inject, notes)
 
     monkeypatch.setattr(rebuild_memory_index, "mutate_knowledge", racing_mutate)
     assert rebuild_memory_index.main() == 0
 
     index = rebuild_memory_index.out.read_text(encoding="utf-8")
-    if race == "add":
-        assert "[[knowledge/notes/added]]" in index
-        assert "added summary" in index
-    elif race == "delete":
-        assert "victim" not in index
-        assert "delete me" not in index
-    else:
-        assert "fresh summary" in index
-        assert "old summary" not in index
+    assert _texts_found(index, present) == list(present)
+    assert _texts_found(index, absent) == []
 
 
 @pytest.mark.parametrize("drift", ["delete", "modify"])
@@ -1336,21 +1367,13 @@ def test_rebuild_index_repairs_committed_index_drift_with_new_transaction(
     monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
     assert rebuild_memory_index.main() == 0
     expected = rebuild_memory_index.out.read_bytes()
-    if drift == "delete":
-        rebuild_memory_index.out.unlink()
-    else:
-        rebuild_memory_index.out.write_bytes(b"corrupt index\n")
+    _INDEX_DRIFTS[drift](rebuild_memory_index.out)
 
     assert rebuild_memory_index.main() == 0
     assert rebuild_memory_index.out.read_bytes() == expected
     coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
-    with coordinator._connect() as database:
-        rows = database.execute(
-            'SELECT operation_id FROM "transaction" '
-            'WHERE operation_id LIKE "rebuild-index:%" ORDER BY created_at'
-        ).fetchall()
-    assert len(rows) == 2
-    assert rows[0]["operation_id"] != rows[1]["operation_id"]
+    operation_ids = _rebuild_index_operation_ids(coordinator)
+    assert (len(operation_ids), len(set(operation_ids))) == (2, 2)
 
 
 def test_append_retries_a_cas_conflict_without_overwriting_winner(tmp_path, monkeypatch):

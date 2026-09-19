@@ -89,9 +89,10 @@ def test_the_repositorys_own_allowlist_is_read(tmp_path: Path) -> None:
     import rebuild_memory_index
 
     repository = Path(__file__).resolve().parent.parent
-    published = rebuild_memory_index._published_notes(repository)
+    candidates = ["knowledge/notes/README.md", "knowledge/notes/private-page.md"]
+    named, hidden = rebuild_memory_index.published_paths(repository, candidates)
 
-    assert published == {"knowledge/notes/README.md"}
+    assert (named, hidden) == (["knowledge/notes/README.md"], 1)
 
 
 PUBLIC_GITIGNORE = """

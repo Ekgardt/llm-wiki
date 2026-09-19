@@ -1,6 +1,6 @@
 {
   "version": "code-parity-v1",
-  "directory": "/home/user/llm-wiki",
+  "directory": "<vault>",
   "budget_seconds": 60.0,
   "tasks": [
     {
@@ -263,7 +263,7 @@
         "grade": "wrong",
         "seconds": 3.18,
         "tokens": 107,
-        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+        "answer_excerpt": "{\"directory\": \"<vault>\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"<vault>\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
       },
       "llm_wiki_best": {
         "status": "answered",
@@ -298,7 +298,7 @@
         "grade": "wrong",
         "seconds": 3.264,
         "tokens": 107,
-        "answer_excerpt": "{\"directory\": \"/home/user/llm-wiki\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"/home/user/llm-wiki\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
+        "answer_excerpt": "{\"directory\": \"<vault>\", \"mode\": \"dependencies\", \"architecture\": {\"dependencies\": [], \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"source_scope\": \"checkout\", \"source_root\": \"<vault>\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}, \"source_generation\": \"generation-18cfd903a7a4e112-3ce112cb\", \"graph_complete\": false, \"unresolved_count\": 76044, \"fallback\": false}"
       },
       "llm_wiki_best": {
         "status": "answered",

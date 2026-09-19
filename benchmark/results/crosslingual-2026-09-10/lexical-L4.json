@@ -112,7 +112,7 @@
     "resource_unavailable": "unavailable measurements use JSON null plus measurement_status",
     "retrieval_order": "BM25-only lexical ablation; dense models not invoked",
     "segmentation_runtime": {
-      "cache_path": "/home/user/.claude/jobs/80be9db9/tmp/bench-cache/jieba/jieba-0.42.1.cache",
+      "cache_path": "<tmp>/bench-cache/jieba/jieba-0.42.1.cache",
       "dictionary_sha256": "7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8",
       "provenance": "pinned-installed",
       "quality_evidence": true,

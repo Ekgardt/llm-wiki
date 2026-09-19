@@ -121,7 +121,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 - Python 3.10+
 - git
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
 - An AI agent you already use (Claude Code, OpenCode, or Codex)
 
 ### Source install
@@ -150,6 +150,9 @@ The installer also supports remote bootstrap only when `LLM_WIKI_COMMIT` is an e
 40-hex commit OID. Pipe the installer from a trusted location while setting that value;
 the bootstrap fetches that exact commit, verifies `HEAD`, repository identity, and required
 files, then executes only the checked-out installer. Branch and tag names are rejected.
+The verified commit becomes the local `main` branch tracking `origin/main`, so the nightly
+fast-forward update reaches this vault like a cloned one; `git -C ~/LLM-wiki checkout --detach`
+freezes it at the current commit.
 
 The local installer syncs the locked production baseline, runs a bounded production smoke,
 creates runtime directories, and wires supported agents. The full regression suite remains
@@ -169,7 +172,8 @@ uv run python scripts/release_manifest.py v4.0.0 --markdown
 Install that exact commit:
 
 ```bash
-LLM_WIKI_COMMIT=$(git rev-parse v4.0.0^{commit}) bash ./install.sh
+git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+bash ./install.sh
 ```
 
 ### Shared HTTP transport (optional)
@@ -204,9 +208,13 @@ The repair command is read-only by default and reports fresh, upgrade-required,
 partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
 With the offline apply flags (`--apply --adopt-ownership-v3
 --confirm-all-agents-stopped`) it performs the v3 cutover on a fresh or quiescent
-vault; the installer runs it, because session capture is refused until adoption
-has happened (issue #17). It never deletes `run/`, knowledge, retired databases,
-legacy caches, or compatibility markers.
+vault; the installer runs it on a fresh vault, because session capture is refused
+until adoption has happened (issue #17). A vault that already holds the earlier
+queue is adopted only when you tell the installer yourself that no agent is
+running (`--confirm-all-agents-stopped`, PowerShell `-ConfirmAllAgentsStopped`);
+otherwise the installer names the command and leaves the queue alone. It never
+deletes `run/`, knowledge, retired databases, legacy caches, or compatibility
+markers.
 
 Optional extras are additive and preserve packages already selected by the operator:
 
@@ -282,7 +290,7 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 `cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
 
-Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
+Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. A fallback answer names its reason: `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
 
 The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. No new embedding model or reranker is selected yet: **evidence pending**. Existing optional vector compatibility still uses its pinned legacy model. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
 
@@ -314,7 +322,7 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
+Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution; the weekly pass runs that archiver, so the command above is the manual form of scheduled work. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
 
 ---
 
@@ -335,12 +343,18 @@ Run retrieval-v2: `uv run python benchmark/run_benchmark.py`
 
 The local stdio MCP server exposes **12 task-shaped tools**, including `doctor`, with one response envelope and health/context resources. `find_dead_code(directory)` returns conservative candidates, while `get_architecture(directory)` reports entry points, routes, canonical-symbol hotspots, and communities. Filesystem analysis requires an explicit existing non-root directory and never falls back to the process CWD.
 
-Precise Python modes `definition`, `references`, `implementations`, `type`,
-`diagnostics`, and positioned `callers`/`callees` use pinned **Pyright 1.1.411**.
-Install it explicitly; queries never download or update it:
+Precise modes `definition`, `references`, `implementations`, `type`,
+`diagnostics`, and positioned `callers`/`callees` use four pinned managed language
+servers — **Pyright 1.1.411** (Python), **typescript-language-server 6.0.0** with
+tsserver 5.9.3 (TypeScript/JavaScript), **gopls v0.23.0** (Go, built from the pinned
+Go 1.27.1 toolchain) and **rust-analyzer 1.98.1** (Rust, with its pinned Rust
+toolchain). Install each explicitly; queries never download or update them:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile typescript --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile gopls --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
 This path supports **trusted local repositories** only and is **not an OS sandbox**.

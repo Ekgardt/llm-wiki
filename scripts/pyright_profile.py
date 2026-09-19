@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import json
 import math
+import ntpath
 import os
 import re
 import shutil
@@ -14,7 +15,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 
 try:
@@ -39,6 +40,15 @@ PYRIGHT_PACKAGE_INTEGRITY = (
 )
 QUALIFIED_NODE_MAJOR = 22
 PYRIGHT_SERVER_RELATIVE = Path("package/langserver.index.js")
+
+# `langserver.index.js` is a 229-byte shim whose whole body is a `require` of
+# `./dist/pyright-langserver`; the megabytes the process executes are the
+# bundles directly under `package/dist`. Digesting only the shim let a
+# truncated or edited bundle pass as the pinned install (audit 3, B20).
+# Research: `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+PYRIGHT_EXECUTED_TREE_RELATIVE = Path("package/dist")
+MAX_EXECUTED_TREE_FILES = 64
+MAX_EXECUTED_TREE_BYTES = 32 * 1024 * 1024
 
 
 def _freeze_pyright_profile_value(value: object) -> object:
@@ -93,7 +103,7 @@ PYRIGHT_INITIALIZATION_OPTIONS = _freeze_pyright_profile_value(
     {"files": {"exclude": []}}
 )
 
-PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v1"
+PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v2"
 PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(
     canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
 )
@@ -117,6 +127,11 @@ MAX_NODE_VERSION_BYTES = 128
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
 NODE_PROBE_CLEANUP_SECONDS = 0.5
 _MAX_NODE_PROBE_OWNERS = 8
+# How long one `node --version` answer stands for the executable it was taken
+# from. A version-manager shim can change what it runs without changing itself,
+# so the answer is not kept for the life of the process.
+NODE_PROBE_CACHE_SECONDS = 300.0
+_MAX_NODE_PROBE_CACHE = 8
 
 _NODE_ENV_ALLOWLIST = frozenset(
     {
@@ -148,6 +163,7 @@ _NODE_PROBE_ERRORS = (
 _MANIFEST_KEYS = frozenset(
     {
         "configuration_sha256",
+        "executed_tree_sha256",
         "initialization_options_sha256",
         "package_integrity",
         "package_sha256",
@@ -158,6 +174,10 @@ _MANIFEST_KEYS = frozenset(
         "version",
     }
 )
+# The nine-key receipt every installed vault carries today. It cannot be
+# upgraded in place -- the digest would attest whatever is on disk rather than
+# the pinned bytes -- so it is named and the operator reinstalls.
+_MANIFEST_KEYS_BEFORE_TREE_DIGEST = _MANIFEST_KEYS - {"executed_tree_sha256"}
 
 
 class _SubprocessFacade:
@@ -174,6 +194,12 @@ _NODE_PROBE_OWNERS_LOCK = threading.Lock()
 _NODE_PROBE_DRAIN_LOCK = threading.Lock()
 _NODE_PROBE_OWNERS: set[object] = set()
 _PENDING_NODE_PROBE_CLEANUPS: dict[object, object] = {}
+_NODE_PROBE_CACHE_LOCK = threading.Lock()
+# executable identity -> (expiry, (node, version, major)). Successful probes
+# only; bounded by `_MAX_NODE_PROBE_CACHE`, cleared whole when it is reached.
+_NODE_PROBE_CACHE: dict[
+    tuple[object, ...], tuple[float, tuple[Path | None, str | None, int | None]]
+] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,19 +238,49 @@ class _ManifestValidationError(ValueError):
         self.code = code
 
 
-def build_pyright_install_manifest(*, server_sha256: str) -> dict[str, str]:
+def _require_hex_digest(value: object, label: str) -> str:
+    if not isinstance(value, str) or _HEX_SHA256.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def executed_tree_digest(entries: object) -> str:
+    """One digest over the files a launch executes, independent of their order.
+
+    `entries` are `(relative posix path, file sha256)` pairs. The fold is over
+    sorted `"<path>\\0<digest>\\n"` lines, so the installer can build it from the
+    member digests it already takes while streaming the verified archive and
+    discovery can rebuild the same value from the unpacked tree.
+    """
+    lines = sorted(
+        f"{_require_path_text(path)}\0{_require_hex_digest(digest, path)}\n"
+        for path, digest in entries
+    )
+    return sha256_bytes("".join(lines).encode("utf-8"))
+
+
+def _require_path_text(path: object) -> str:
+    if not isinstance(path, str) or not path:
+        raise ValueError("executed tree entry needs a relative path")
+    return path
+
+
+def build_pyright_install_manifest(
+    *, server_sha256: str, executed_tree_sha256: str
+) -> dict[str, str]:
     """Build the closed canonical receipt value used by the explicit installer."""
-    if not isinstance(server_sha256, str) or _HEX_SHA256.fullmatch(server_sha256) is None:
-        raise ValueError("server_sha256 must be a lowercase SHA-256 digest")
     return {
         "configuration_sha256": PYRIGHT_CONFIGURATION_SHA256,
+        "executed_tree_sha256": _require_hex_digest(
+            executed_tree_sha256, "executed_tree_sha256"
+        ),
         "initialization_options_sha256": PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
         "package_integrity": PYRIGHT_PACKAGE_INTEGRITY,
         "package_sha256": PYRIGHT_PACKAGE_SHA256,
         "package_url": PYRIGHT_PACKAGE_URL,
         "schema_version": PYRIGHT_INSTALL_MANIFEST_SCHEMA,
         "server_relative_path": PYRIGHT_SERVER_RELATIVE.as_posix(),
-        "server_sha256": server_sha256,
+        "server_sha256": _require_hex_digest(server_sha256, "server_sha256"),
         "version": PYRIGHT_VERSION,
     }
 
@@ -241,19 +297,39 @@ _MANIFEST_CHECKS = (
 )
 
 
+_MANIFEST_DIGEST_FIELDS = ("executed_tree_sha256", "server_sha256")
+
+
+def _manifest_digests_are_hex(value: dict) -> bool:
+    return all(
+        _HEX_SHA256.fullmatch(value[field]) is not None
+        for field in _MANIFEST_DIGEST_FIELDS
+    )
+
+
 def _manifest_shape_is_valid(value: object) -> bool:
     if not isinstance(value, dict) or set(value) != _MANIFEST_KEYS:
         return False
     if any(not isinstance(item, str) for item in value.values()):
         return False
-    return _HEX_SHA256.fullmatch(value["server_sha256"]) is not None
+    return _manifest_digests_are_hex(value)
+
+
+def _require_tree_digest_era(value: object) -> None:
+    """A receipt from before the executed-tree digest is named, not guessed at."""
+    if isinstance(value, dict) and set(value) == _MANIFEST_KEYS_BEFORE_TREE_DIGEST:
+        raise _ManifestValidationError("pyright_manifest_predates_tree_digest")
 
 
 def validate_pyright_install_manifest(value: object) -> dict[str, str]:
     """Validate the install receipt's closed pinned domain."""
+    _require_tree_digest_era(value)
     if not _manifest_shape_is_valid(value):
         raise _ManifestValidationError("pyright_manifest_malformed")
-    expected = build_pyright_install_manifest(server_sha256=value["server_sha256"])
+    expected = build_pyright_install_manifest(
+        server_sha256=value["server_sha256"],
+        executed_tree_sha256=value["executed_tree_sha256"],
+    )
     for field, code in _MANIFEST_CHECKS:
         if value[field] != expected[field]:
             raise _ManifestValidationError(code)
@@ -985,6 +1061,105 @@ def _executable_digest_codes(receipt_server_sha256: object, executable_sha256: s
     return {"pyright_executable_digest_mismatch"}
 
 
+_EXECUTED_TREE_READ_CODES = (
+    (FileNotFoundError, "pyright_executed_tree_missing"),
+    (PermissionError, "pyright_executed_tree_unsafe"),
+    (ValueError, "pyright_executed_tree_oversized"),
+    (OSError, "pyright_executed_tree_unreadable"),
+)
+_EXECUTED_TREE_MISMATCH = "pyright_executed_tree_digest_mismatch"
+
+
+def _executed_tree_read_code(error: Exception) -> str:
+    for kind, code in _EXECUTED_TREE_READ_CODES:
+        if isinstance(error, kind):
+            return code
+    raise error
+
+
+def _executed_tree_names(directory: Path) -> list[str]:
+    """The regular files directly under `package/dist`, bounded and sorted.
+
+    A directory that is not there at all is an empty bundle set, not a read
+    failure: the receipt of a real install names bundles, so the digest then
+    mismatches and says so, which is the more useful of the two verdicts.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(
+                entry.name for entry in entries if entry.is_file(follow_symlinks=False)
+            )
+    except FileNotFoundError:
+        return []
+    if len(names) > MAX_EXECUTED_TREE_FILES:
+        raise ValueError("executed tree holds more files than the bound allows")
+    return names
+
+
+def _executed_tree_entry(
+    directory: Path, name: str, budget: list[int], deadline: float | None
+) -> tuple[str, str]:
+    _check_deadline(deadline)
+    content = read_stable_bytes(
+        directory / name, budget[0], label="Pyright executed tree"
+    )
+    budget[0] -= len(content)
+    return (
+        (PYRIGHT_EXECUTED_TREE_RELATIVE / name).as_posix(),
+        sha256_bytes(content),
+    )
+
+
+def _measured_executed_tree(
+    server: Path, server_sha256: str, deadline: float | None
+) -> tuple[str | None, str | None]:
+    """The digest of the shim and the bundles it loads, or a degradation code.
+
+    `server` is `<root>/package/langserver.index.js`, so the bundles are two
+    levels up and then down `PYRIGHT_EXECUTED_TREE_RELATIVE`.
+    """
+    directory = server.parent.parent / PYRIGHT_EXECUTED_TREE_RELATIVE
+    budget = [MAX_EXECUTED_TREE_BYTES]
+    entries = [(PYRIGHT_SERVER_RELATIVE.as_posix(), server_sha256)]
+    try:
+        for name in _executed_tree_names(directory):
+            entries.append(_executed_tree_entry(directory, name, budget, deadline))
+    except TimeoutError:
+        raise
+    except (OSError, ValueError) as exc:
+        return None, _executed_tree_read_code(exc)
+    _check_deadline(deadline)
+    return executed_tree_digest(entries), None
+
+
+def _executed_tree_codes(
+    server: Path,
+    receipt_tree_sha256: object,
+    executable_sha256: str | None,
+    deadline: float | None,
+) -> set[str]:
+    """Re-check the code a launch executes, not only the file that loads it.
+
+    Bounded by `MAX_EXECUTED_TREE_FILES`, `MAX_EXECUTED_TREE_BYTES` and the
+    caller's deadline. Measured at 12--25 ms on the pinned artifact; the whole
+    package tree is 1.3--4.2 s, which is why only the bundles are covered.
+    Research: `docs/research/2026-09-17-inst-the-receipt-names-the-code-that-runs.md`.
+    """
+    receipt = _hex_digest_or_none(receipt_tree_sha256)
+    if receipt is None or executable_sha256 is None:
+        return set()
+    measured, code = _measured_executed_tree(server, executable_sha256, deadline)
+    if code is not None:
+        return {code}
+    return _tree_digest_verdict(measured, receipt)
+
+
+def _tree_digest_verdict(measured: str | None, receipt: str) -> set[str]:
+    if measured == receipt:
+        return set()
+    return {_EXECUTED_TREE_MISMATCH}
+
+
 def _managed_manifest(
     server: Path,
     executable_sha256: str | None,
@@ -1000,6 +1175,9 @@ def _managed_manifest(
     codes |= _canonical_form_codes(value, raw)
     codes |= _manifest_validation_codes(value)
     codes |= _executable_digest_codes(value.get("server_sha256"), executable_sha256)
+    codes |= _executed_tree_codes(
+        server, value.get("executed_tree_sha256"), executable_sha256, deadline
+    )
     return _hex_digest_or_none(value.get("package_sha256")), codes
 
 
@@ -1388,18 +1566,80 @@ def _run_probe(tree: object, owner: object, probe_deadline: float, hard_cleanup_
     return run
 
 
+def _node_probe_key(node: Path | None) -> tuple[object, ...] | None:
+    """What a probe answer is true of: this executable, unchanged."""
+    if node is None:
+        return None
+    try:
+        info = os.stat(node)
+    except OSError:
+        return None
+    return (str(node), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _cached_node_probe(
+    key: tuple[object, ...] | None,
+) -> tuple[Path | None, str | None, int | None, set[str]] | None:
+    """A recent answer for this exact executable, if there is one."""
+    if key is None:
+        return None
+    with _NODE_PROBE_CACHE_LOCK:
+        entry = _NODE_PROBE_CACHE.get(key)
+    if entry is None or entry[0] <= time.monotonic():
+        return None
+    node, version, major = entry[1]
+    return node, version, major, set()
+
+
+def _remember_node_probe(
+    key: tuple[object, ...] | None,
+    result: tuple[Path | None, str | None, int | None, set[str]],
+) -> None:
+    """Keep a successful probe. A failed one is never kept: it may be the load."""
+    if key is None or result[3]:
+        return
+    with _NODE_PROBE_CACHE_LOCK:
+        if len(_NODE_PROBE_CACHE) >= _MAX_NODE_PROBE_CACHE:
+            _NODE_PROBE_CACHE.clear()
+        _NODE_PROBE_CACHE[key] = (
+            time.monotonic() + NODE_PROBE_CACHE_SECONDS,
+            result[:3],
+        )
+
+
 def _probe_node(
     deadline: float | None,
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
-    """Probe Node within its deadline plus one fixed tree-cleanup allowance."""
+    """Probe Node within its deadline plus one fixed tree-cleanup allowance.
+
+    Every `manager.get()` reaches here, and spawning a process per navigation
+    query is a cost the answer does not need: the answer belongs to the Node
+    executable, so it is kept for it while the file stays as it was.
+    """
     _check_deadline(deadline)
     environment, node, code = _located_node(deadline)
     if code is not None:
         return node, None, None, {code}
+    key = _node_probe_key(node)
+    cached = _cached_node_probe(key)
+    if cached is not None:
+        return cached
+    return _fresh_node_probe(node, environment, key, deadline)
+
+
+def _fresh_node_probe(
+    node: Path | None,
+    environment: dict | None,
+    key: tuple[object, ...] | None,
+    deadline: float | None,
+) -> tuple[Path | None, str | None, int | None, set[str]]:
+    """Spawn `node --version`, and keep the answer when it was one."""
     window = _probe_window(deadline)
     if window is None:
         return node, None, None, {"pyright_node_probe_timeout"}
-    return _probe_in_window(node, environment, window)
+    result = _probe_in_window(node, environment, window)
+    _remember_node_probe(key, result)
+    return result
 
 
 def _probe_in_window(
@@ -1524,11 +1764,24 @@ def _expected_source_server(
     return None
 
 
-def _path_is_reserved(path: Path, raw: str) -> bool:
-    is_reserved = getattr(os.path, "isreserved", None)
+def _windows_name_is_reserved(raw: str) -> bool:
+    """Windows rules for one path text; a pure function, so it runs anywhere."""
+    is_reserved = getattr(ntpath, "isreserved", None)
     if is_reserved is not None:
         return bool(is_reserved(raw))
-    return path.is_reserved()
+    # Below 3.13 only: from 3.13 the branch above answers, and the pathlib
+    # method is removed in 3.15.
+    return PureWindowsPath(raw).is_reserved()
+
+
+def _path_is_reserved(raw: str) -> bool:
+    """No name is reserved outside Windows, so nothing is asked there.
+
+    Research: `docs/research/2026-09-17-reserved-names-are-a-windows-question.md`.
+    """
+    if os.name != "nt":
+        return False
+    return _windows_name_is_reserved(raw)
 
 
 def _is_local_absolute_path(path: Path) -> bool:
@@ -1537,7 +1790,7 @@ def _is_local_absolute_path(path: Path) -> bool:
         return False
     if "\0" in raw or ".." in path.parts:
         return False
-    return not _path_is_reserved(path, raw)
+    return not _path_is_reserved(raw)
 
 
 def _lexical_absolute_path(path: Path) -> Path:

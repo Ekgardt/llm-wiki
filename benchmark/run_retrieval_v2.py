@@ -2012,8 +2012,6 @@ class ModelEmbeddingAdapter:
         self._usearch_search = usearch_search
         self._candidate_ids: tuple[str, ...] | None = None
         self._candidate_by_id: dict[str, Candidate] = {}
-        self._query_vectors = {}
-        self._query_sparse = {}
         self.document_vectors = None
         self.document_sparse = None
         self.learned_sparse_bytes = 0
@@ -2063,17 +2061,10 @@ class ModelEmbeddingAdapter:
         if tuple(candidate.evidence_id for candidate in candidates) != self._candidate_ids:
             raise ValueError("dense candidate universe mismatch")
 
-    def prepare_queries(self, query_texts: Sequence[str]) -> None:
-        formatted = [self._format(text, "query") for text in query_texts]
-        vectors, sparse = self._encode_signals(formatted)
-        self._query_vectors.update(zip(formatted, vectors))
-        if sparse is not None:
-            self._query_sparse.update(zip(formatted, sparse))
-
     def _query_signals(self, formatted_query: str):
-        query_vector = self._query_vectors.get(formatted_query)
-        if query_vector is not None:
-            return query_vector, self._query_sparse.get(formatted_query)
+        # Encoded per query, as the product encodes it. Two dictionaries here
+        # were read on every query and written nowhere, so the "cache" was a
+        # guaranteed miss that only made the stand's cost look conditional.
         vectors, sparse = self._encode_signals([formatted_query])
         if sparse is None:
             return vectors[0], None

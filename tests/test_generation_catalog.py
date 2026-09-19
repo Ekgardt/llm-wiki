@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -388,17 +387,6 @@ def test_v2_complete_generation_registers(tmp_path):
     assert catalog.register("v2-complete") == manifest
 
 
-def test_registered_non_code_v2_fixture_activates_without_capture(
-    non_code_v2_generation,
-) -> None:
-    from generation_catalog import GenerationCatalog
-
-    assert "code_capture" not in non_code_v2_generation.manifest
-    assert GenerationCatalog(
-        non_code_v2_generation.generation_path.parents[3]
-    ).get_active()["generation_id"] == non_code_v2_generation.generation_id
-
-
 def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> None:
     catalog = _catalog(tmp_path)
     _directory, manifest = _publish(catalog, "v1-search-only")
@@ -407,65 +395,10 @@ def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> 
     assert catalog.register("v1-search-only") == manifest
 
 
-@pytest.mark.parametrize("damage", ["source_id", "relative_path", "sha256"])
-def test_catalog_binds_v1_graph_v2_capture_to_sources(tmp_path: Path, damage: str) -> None:
-    import stat
-
-    from code_workspace import code_capture_as_dict
-    from corpus_snapshot import (
-        CodeCaptureContract,
-        CodeCaptureFile,
-        FileStatMetadata,
-        RepositoryCodeLimits,
-        RepositoryCodePolicy,
-    )
-    from reliable_memory import canonical_json_bytes
-
-    catalog = _catalog(tmp_path)
-    directory, manifest = _publish_v2(catalog, f"v1-capture-{damage}")
-    manifest["schema_version"] = "corpus-generation/v1"
-    source_manifest = json.loads((directory / "source-manifest.json").read_bytes())
-    source = source_manifest["sources"][0]
-    with closing(sqlite3.connect(directory / "evidence.sqlite3")) as database:
-        size = database.execute(
-            "SELECT size FROM source WHERE source_id=?", (source["logical_id"],)
-        ).fetchone()[0]
-    capture_file = CodeCaptureFile(
-        source["logical_id"],
-        source["relative_path"],
-        source["sha256"],
-        FileStatMetadata(size, 0, 0, stat.S_IFREG, 1, 1),
-    )
-    contract = CodeCaptureContract(
-        RepositoryCodePolicy(
-            (source["relative_path"],), ("**",), (), (Path(source["relative_path"]).suffix,)
-        ),
-        RepositoryCodeLimits(),
-        (capture_file,),
-        (),
-        "0" * 64,
-    )
-    capture = code_capture_as_dict(contract)
-    if damage == "source_id":
-        capture["files"][0]["source_id"] = "source:other"
-    elif damage == "relative_path":
-        capture["files"][0]["relative_path"] = "other.md"
-        capture["policy"]["roots"] = ["other.md"]
-    else:
-        capture["files"][0]["sha256"] = "f" * 64
-    capture["membership_sha256"] = hashlib.sha256(
-        canonical_json_bytes(
-            {"files": capture["files"], "directories": capture["directories"]}
-        )
-    ).hexdigest()
-    manifest["code_capture"] = capture
-    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(ValueError, match="source membership"):
-        catalog.register(directory.name)
-
-
-def test_v1_generation_rejects_graph_v3(tmp_path: Path) -> None:
+def test_a_manifest_naming_a_schema_the_catalog_does_not_publish_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`evidence-graph/v3` left the product on 2026-09-18; a manifest may not name it."""
     from reliable_memory import canonical_json_bytes
 
     catalog = _catalog(tmp_path)
@@ -474,92 +407,11 @@ def test_v1_generation_rejects_graph_v3(tmp_path: Path) -> None:
     manifest["graph_extractor_version"] = "graph/v3"
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
 
-    with pytest.raises(ValueError, match="v3|corpus-generation/v2"):
+    with pytest.raises(ValueError, match="graph schema must be null"):
         catalog.register("v1-v3")
 
 
-@pytest.mark.parametrize("graph_schema", ["evidence-graph/v2", "evidence-graph/v3"])
-def test_v2_generation_accepts_only_known_graph_schema_strings(
-    tmp_path: Path, graph_schema: str
-) -> None:
-    from code_intelligence import verify_native_analysis
-    from corpus_snapshot import collect_corpus
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from reliable_memory import canonical_json_bytes
-    from repository_scope import resolve_repository_scope
-
-    from tests.code_kernel_helpers import (
-        captured_snapshot_for_records,
-        make_analysis_scope,
-        make_normalized_analysis,
-    )
-
-    catalog = _catalog(tmp_path)
-    if graph_schema == "evidence-graph/v3":
-        repository = tmp_path / "repository"
-        (repository / "knowledge/notes").mkdir(parents=True)
-        (repository / "knowledge/projects").mkdir(parents=True)
-        (repository / "knowledge/notes/page.md").write_text(
-            "---\ntype: concept\n---\n# Page\nCanonical content.\n",
-            encoding="utf-8",
-        )
-        snapshot = collect_corpus(repository)
-        records = {
-            "sources": [
-                {
-                    "source_id": source.record.logical_id,
-                    "relative_path": source.record.relative_path,
-                    "sha256": source.record.sha256,
-                    "size": source.record.size,
-                    "media_type": source.record.media_type,
-                    "language": source.record.language,
-                    "git_oid": source.record.git_oid,
-                }
-                for source in snapshot.sources
-            ],
-            "source_bytes": {
-                source.record.logical_id: source.content for source in snapshot.sources
-            },
-            "nodes": (),
-            "occurrences": (),
-            "assertions": (),
-            "evidence": (),
-            "observations": (),
-            "dependencies": (),
-        }
-        snapshot = __import__("dataclasses").replace(
-            snapshot,
-            code_capture=captured_snapshot_for_records(records).code_capture,
-        )
-        scope = make_analysis_scope(snapshot)
-        repository_scope = resolve_repository_scope(repository)
-        result = build_full_generation(
-            catalog,
-            generation_id="known-v3",
-            graph_schema=GraphSchema.V3,
-            verified_analyses=(
-                verify_native_analysis(
-                    snapshot,
-                    make_normalized_analysis(snapshot, scope, repository_scope),
-                ),
-            ),
-            snapshot=snapshot,
-            code_capture=snapshot.code_capture,
-            repository_scope=repository_scope,
-            activate=False,
-            **records,
-        )
-        assert result.manifest["schema_version"] == "corpus-generation/v2"
-        assert result.manifest["graph_schema_version"] == graph_schema
-        assert catalog.register("known-v3") == result.manifest
-        return
-    directory, manifest = _publish_v2(catalog, "known-v2")
-    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
-    assert catalog.register(directory.name)["graph_schema_version"] == graph_schema
-
-
-@pytest.mark.parametrize("graph_schema", [None, "unknown-graph/v1"])
+@pytest.mark.parametrize("graph_schema", [None, "unknown-graph/v1", "evidence-graph/v3"])
 def test_v2_generation_rejects_null_and_unknown_graph_schema(
     tmp_path: Path, graph_schema: str | None
 ) -> None:
@@ -576,46 +428,6 @@ def test_v2_generation_rejects_null_and_unknown_graph_schema(
         catalog.register("invalid-v2-graph")
 
 
-def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
-    from reliable_memory import canonical_json_bytes
-
-    from tests.code_kernel_helpers import publish_v3_fixture
-
-    result = publish_v3_fixture(tmp_path, generation_id="mismatch")
-    manifest_path = result.generation_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_bytes())
-    manifest["graph_schema_version"] = "evidence-graph/v2"
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(ValueError, match="schema|contract|version"):
-        _catalog(tmp_path).register("mismatch")
-
-
-_V3_CAPTURE_DAMAGE = {
-    "missing": lambda manifest, capture: manifest.pop("code_capture"),
-    "unknown-top": lambda manifest, capture: capture.update(unknown=True),
-    "unknown-nested": lambda manifest, capture: capture["limits"].update(unknown=1),
-    "membership-hash": lambda manifest, capture: capture.update(
-        membership_sha256="0" * 64
-    ),
-    "directory-order": lambda manifest, capture: capture.update(
-        directories=list(reversed(capture["directories"]))
-    ),
-    "source-id": lambda manifest, capture: capture["files"][0].update(
-        source_id="source:wrong.py"
-    ),
-    "source-hash": lambda manifest, capture: capture["files"][0].update(
-        sha256="f" * 64
-    ),
-    "policy-nfc": lambda manifest, capture: capture["policy"].update(
-        include_globs=["cafe\u0301/**"]
-    ),
-    "stat-mtime": lambda manifest, capture: capture["files"][0]["stat"].update(
-        mtime_ns=capture["files"][0]["stat"]["mtime_ns"] + 1
-    ),
-}
-
-
 def _write_damaged_manifest(manifest_path: Path, manifest: dict, damage: str) -> None:
     """Only the NFC case must bypass canonical encoding — that is its point."""
     from reliable_memory import canonical_json_bytes
@@ -628,194 +440,6 @@ def _write_damaged_manifest(manifest_path: Path, manifest: dict, damage: str) ->
             manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     )
-
-
-@pytest.mark.parametrize("damage", sorted(_V3_CAPTURE_DAMAGE))
-def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
-    tmp_path: Path, damage: str
-) -> None:
-    from tests.code_kernel_helpers import publish_v3_fixture
-
-    result = publish_v3_fixture(tmp_path, generation_id=f"capture-{damage}")
-    manifest_path = result.generation_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_bytes())
-    _V3_CAPTURE_DAMAGE[damage](manifest, manifest.get("code_capture"))
-    _write_damaged_manifest(manifest_path, manifest, damage)
-
-    with pytest.raises(
-        ValueError,
-        match="code.capture|v3|manifest|membership|order|source_id|source membership",
-    ):
-        _catalog(tmp_path).register(result.generation_id)
-
-
-@pytest.mark.parametrize("damage", ["identity", "hash"])
-def test_catalog_matches_capture_identity_and_hash_to_source_manifest(
-    tmp_path: Path, damage: str
-) -> None:
-    from reliable_memory import canonical_json_bytes
-
-    from tests.code_kernel_helpers import publish_v3_fixture
-
-    result = publish_v3_fixture(tmp_path, generation_id=f"source-{damage}")
-    manifest_path = result.generation_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_bytes())
-    capture = manifest["code_capture"]
-    file = capture["files"][0]
-    if damage == "hash":
-        file["sha256"] = "f" * 64
-    else:
-        old_path = file["relative_path"]
-        file["source_id"] = "source:other.py"
-        file["relative_path"] = "other.py"
-        capture["policy"]["roots"] = sorted(
-            "other.py" if root == old_path else root
-            for root in capture["policy"]["roots"]
-        )
-    capture["membership_sha256"] = hashlib.sha256(
-        canonical_json_bytes(
-            {"files": capture["files"], "directories": capture["directories"]}
-        )
-    ).hexdigest()
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(ValueError, match="source membership"):
-        _catalog(tmp_path).register(result.generation_id)
-
-
-def _v2_damage_extra(capture: dict, file: dict) -> None:
-    extra = copy.deepcopy(file)
-    extra.update(source_id="source:extra", relative_path="extra.py", sha256="e" * 64)
-    capture["files"].append(extra)
-    capture["files"].sort(key=lambda item: item["relative_path"])
-    capture["policy"]["roots"] = sorted((*capture["policy"]["roots"], "extra.py"))
-
-
-def _v2_damage_relative_path(capture: dict, file: dict) -> None:
-    old_path = file["relative_path"]
-    file["relative_path"] = "other.py"
-    capture["policy"]["roots"] = sorted(
-        "other.py" if root == old_path else root
-        for root in capture["policy"]["roots"]
-    )
-
-
-_V2_CAPTURE_DAMAGE = {
-    "missing": lambda capture, file: capture.update(files=[]),
-    "extra": _v2_damage_extra,
-    "source_id": lambda capture, file: file.update(source_id="source:other"),
-    "relative_path": _v2_damage_relative_path,
-    "sha256": lambda capture, file: file.update(sha256="f" * 64),
-    "size": lambda capture, file: file["stat"].update(size=file["stat"]["size"] + 1),
-}
-
-
-@pytest.mark.parametrize("damage", sorted(_V2_CAPTURE_DAMAGE))
-def test_catalog_binds_present_v2_capture_to_exact_source_membership(
-    tmp_path: Path, damage: str
-) -> None:
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-    from reliable_memory import canonical_json_bytes
-    from repository_scope import resolve_repository_scope
-
-    from tests.code_kernel_helpers import basic_graph_records, captured_snapshot_for_records
-
-    records = basic_graph_records()
-    snapshot = captured_snapshot_for_records(records)
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    result = build_full_generation(
-        GenerationCatalog(tmp_path / "state"),
-        generation_id=f"v2-capture-{damage}",
-        graph_schema=GraphSchema.V2,
-        snapshot=snapshot,
-        code_capture=snapshot.code_capture,
-        repository_scope=resolve_repository_scope(repository),
-        activate=False,
-        **records,
-    )
-    manifest_path = result.generation_path / "manifest.json"
-    manifest = json.loads(manifest_path.read_bytes())
-    capture = manifest["code_capture"]
-    _V2_CAPTURE_DAMAGE[damage](capture, capture["files"][0])
-    capture["membership_sha256"] = hashlib.sha256(
-        canonical_json_bytes(
-            {"files": capture["files"], "directories": capture["directories"]}
-        )
-    ).hexdigest()
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(ValueError, match="source membership"):
-        GenerationCatalog(tmp_path / "state").register(result.generation_id)
-
-
-def test_manifest_schema_requires_code_capture_only_for_graph_v3(tmp_path: Path) -> None:
-    import jsonschema
-
-    schema_path = SCRIPTS / "schemas/evidence-graph-manifest-v1.json"
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(schema)
-    catalog = _catalog(tmp_path)
-    _directory, v2 = _publish_v2(catalog, "schema-v2")
-    assert not list(validator.iter_errors(v2))
-    v3 = dict(v2, graph_schema_version="evidence-graph/v3")
-    errors = list(validator.iter_errors(v3))
-    assert any("code_capture" in error.message for error in errors)
-
-
-def test_manifest_schema_uses_approved_capture_maxima_and_nested_file_shape() -> None:
-    schema = json.loads(
-        (SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text(encoding="utf-8")
-    )["properties"]["code_capture"]
-    limits = schema["properties"]["limits"]["properties"]
-    assert {name: value["maximum"] for name, value in limits.items()} == {
-        "max_files": 1_000_000,
-        "max_file_bytes": 1024**3,
-        "max_total_bytes": 16 * 1024**3,
-        "max_entries": 5_000_000,
-        "max_directories": 1_000_000,
-        "max_depth": 256,
-        "chunk_bytes": 8 * 1024 * 1024,
-    }
-    assert limits["max_depth"]["minimum"] == 1
-    assert limits["chunk_bytes"]["minimum"] == 4096
-    file_schema = schema["properties"]["files"]["items"]
-    assert file_schema["properties"]["source_id"]["maxLength"] == 512
-    import jsonschema
-
-    validator = jsonschema.Draft202012Validator(file_schema)
-    base_file = {
-        "relative_path": "src/a.py",
-        "sha256": "a" * 64,
-        "stat": {
-            "size": 1,
-            "mtime_ns": 1,
-            "ctime_ns": 1,
-            "mode": 1,
-            "device": 1,
-            "inode": 1,
-        },
-    }
-    for source_id in ("x" * 512, "界" * 512):
-        assert not list(validator.iter_errors({**base_file, "source_id": source_id}))
-    for source_id in ("x" * 513, "界" * 513):
-        assert list(validator.iter_errors({**base_file, "source_id": source_id}))
-    assert set(file_schema["required"]) == {
-        "source_id",
-        "relative_path",
-        "sha256",
-        "stat",
-    }
-    assert set(file_schema["properties"]["stat"]["required"]) == {
-        "size",
-        "mtime_ns",
-        "ctime_ns",
-        "mode",
-        "device",
-        "inode",
-    }
 
 
 @pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])
@@ -1465,49 +1089,6 @@ def test_v2_requires_validated_repository_scope(tmp_path):
         catalog.register("v2-unscoped")
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "UPDATE chunks SET content = content || ' tampered'",
-        "UPDATE chunks SET chunk_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
-        "UPDATE chunks SET span_sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
-        "UPDATE chunks SET byte_start = byte_start + 1",
-        "UPDATE chunks SET byte_end = byte_end - 1",
-        "UPDATE chunks SET line_start = line_start + 1",
-        "UPDATE chunks SET line_end = line_end + 1",
-        "UPDATE chunks SET source_sha256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
-        "UPDATE chunks SET source_id = 'source:other.md'",
-        "UPDATE chunks SET source_path = 'knowledge/notes/other.md'",
-        "UPDATE chunks SET parent_page = 'knowledge/notes/other.md'",
-        "UPDATE chunks SET heading_ancestry = '[\"Other\"]'",
-        "UPDATE chunks SET type = 'pattern'",
-        "UPDATE chunks SET project = 'other-project'",
-        "UPDATE chunks SET authority = 'web'",
-        "UPDATE chunks SET confidence = 'low'",
-        "UPDATE chunks SET status = 'superseded'",
-        "UPDATE chunks SET valid_from = '2025-01-01'",
-        "UPDATE chunks SET valid_to = '2028-01-01'",
-        "UPDATE chunks SET language = 'ru'",
-        "UPDATE chunks SET title = 'Other title'",
-        "DELETE FROM chunks",
-    ],
-)
-def test_v2_rejects_fts_rows_not_bound_to_captured_source_bytes(tmp_path, sql):
-    catalog = _catalog(tmp_path)
-    directory, manifest = _publish_v2(catalog, "v2-tampered-chunk")
-    with sqlite3.connect(directory / "search.sqlite3") as database:
-        database.execute(sql)
-        database.execute(
-            "UPDATE generation_metadata SET value=(SELECT CAST(COUNT(*) AS TEXT) FROM chunks) "
-            "WHERE key='chunk_count'"
-        )
-        database.commit()
-    _refresh_artifact(directory, manifest, "search.sqlite3")
-
-    with pytest.raises(ValueError, match="FTS|search"):
-        catalog.register("v2-tampered-chunk")
-
-
 def test_v2_rejects_extra_well_formed_stale_chunk_after_hash_recomputed(tmp_path):
     catalog = _catalog(tmp_path)
     directory, manifest = _publish_v2(catalog, "v2-extra-chunk")
@@ -1515,7 +1096,7 @@ def test_v2_rejects_extra_well_formed_stale_chunk_after_hash_recomputed(tmp_path
         row = list(database.execute("SELECT * FROM chunks LIMIT 1").fetchone())
         row[0] = "d" * 64
         row[1] = 1
-        database.execute("INSERT INTO chunks VALUES (" + ",".join("?" * 22) + ")", row)
+        database.execute("INSERT INTO chunks VALUES (" + ",".join("?" * len(row)) + ")", row)
         database.execute(
             "UPDATE generation_metadata SET value='2' WHERE key='chunk_count'"
         )
@@ -2782,12 +2363,12 @@ def test_deadline_bounds_writer_lock_admission_and_leaves_registration_unchanged
 def test_deadline_recomputes_busy_timeout_immediately_before_commit(tmp_path, monkeypatch):
     import generation_catalog
 
+    clock = _Monotonic()
     catalog = generation_catalog.GenerationCatalog(
-        tmp_path / "state", clock=lambda: NOW, monotonic=_Monotonic()
+        tmp_path / "state", clock=lambda: NOW, monotonic=clock
     )
     _publish(catalog, "gen-1")
     real_open = generation_catalog.open_operational_db
-    remaining_values = iter((900, 800, 400))
     observed: dict[str, int] = {}
 
     class TrackedConnection:
@@ -2808,8 +2389,14 @@ def test_deadline_recomputes_busy_timeout_immediately_before_commit(tmp_path, mo
         return TrackedConnection(real_open(path, busy_ms=busy_ms))
 
     monkeypatch.setattr(generation_catalog, "open_operational_db", tracked_open)
-    monkeypatch.setattr(catalog, "_remaining_busy_ms", lambda _deadline: next(remaining_values))
 
+    def spend_the_deadline(database, deadline):
+        clock.value = deadline - 0.4
+        generation_catalog.GenerationCatalog._apply_commit_busy_timeout(
+            catalog, database, deadline
+        )
+
+    monkeypatch.setattr(catalog, "_apply_commit_busy_timeout", spend_the_deadline)
     catalog.register("gen-1", deadline=1.0)
 
     assert observed == {"commit_busy_ms": 400}

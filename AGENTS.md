@@ -118,7 +118,7 @@ completion. See `knowledge/notes/solo-operator-superset-product-decision.md`.
 transactions with before/after hashes. Project handoff is projected from an
 append-only `journal.md`. `cache/` and `logs/` are disposable; `run/` must not be
 deleted while doctor reports a nonterminal, conflicted, or quarantined
-transaction, a transaction inside the 30-day undo window, or any retained queue
+transaction, a transaction inside the 2-day undo window, or any retained queue
 task or result, or while a project lease, writer, queue worker, or maintenance
 owner is live. Deleting eligible committed artifacts loses undo history.
 
@@ -132,29 +132,32 @@ writers. Queue delivery is at least once. Archives keep 90 hot days and preserve
 logical evidence in immutable uncompressed BagIt packages. Claims with uncertain
 evidence or evaluator disagreement enter quarantine; automatic semantic supersession
 and eager backfill remain disabled. Do not delete `run/` while doctor reports a
-source failure, any 30-day undo artifact, retained work/result, or live owner. There
+source failure, any 2-day undo artifact, retained work/result, or live owner. There
 is no persistent daemon, cloud service, remote queue/cache, exactly-once promise, or
 gzip archive tier. The single automatic Git operation is the nightly fast-forward
 update of the checkout, which never pushes, never resolves a conflict, and declines
 whenever the update would touch a locally modified file — see
 `knowledge/notes/automatic-code-update-decision.md`.
 
-**Approved Reliability v3 target (not implemented):** New
-unprocessed lifecycle evidence would be create-only under `run/capture-intents/`
+**Reliability v3 (implemented; the installers adopt it):** New
+unprocessed lifecycle evidence is create-only under `run/capture-intents/`
 until an immutable terminal record proves committed Markdown, validated
-no-durable-content, or operator discard; queue enqueue alone would not permit
-deletion. Compile receipts would bind logical path plus digest and a validated
-per-source disposition; digest-only v2 receipts would remain historical evidence
-only. Queue payload hashes would be checked at every transition, and dedupe would
-alias only identical kind, handler version, and payload. All operational actors would
+no-durable-content, or operator discard; queue enqueue alone does not permit
+deletion. Compile receipts bind logical path plus digest and a validated
+per-source disposition; digest-only v2 receipts remain historical evidence
+only. Queue payload hashes are checked at every transition, and dedupe
+aliases only identical kind, handler version, and payload. All operational actors
 use one canonical fenced admission registry, including capture, project/Markdown
-writers, queue, and LSP. Explicit offline adoption would publish versioned v3
-databases and replace legacy active paths with JSON tombstones, blocking normal
-v2 queue/transaction clients after cutover. Live, expired-but-not-proven-dead, or
-unknown owners, unresolved intents, and partial adoption would block `run/` deletion.
-Doctor would
-report a quiescent snapshot only after complete adoption, and never a durable deletion
-permit.
+writers, queue, and LSP. Explicit offline adoption publishes versioned v3
+databases and replaces legacy active paths with JSON tombstones, blocking normal
+v2 queue/transaction clients after cutover; `install.sh` and `install.ps1` run that
+adoption on a fresh vault, and the nightly pass works the adopted queue and adopts
+capture intents. Live, expired-but-not-proven-dead, or
+unknown owners, unresolved intents, and partial adoption block `run/` deletion.
+Doctor
+reports a quiescent snapshot only after complete adoption, and never a durable deletion
+permit. Class names that still say "Candidate" are the pre-adoption reader, not a
+statement that the target is unbuilt.
 See `knowledge/notes/v4-reliability-contracts-decision.md`.
 
 **Derived evidence generations:** Markdown, Git, and project journals are
@@ -180,16 +183,35 @@ search, and its index was keyed to a different embedder than the product's — s
 `knowledge/notes/retire-lancedb-decision.md`.
 
 **Implemented code-navigation slice:** The current authoritative corpus checkpoint
-remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
-2026-07-21 Plan A remain implemented, but its one-shot consent/SCIP/publication Tasks
-6-16 are superseded. The replacement plan implements the production-quality,
-Python 3.10-compatible read-only LSP path through pinned Pyright 1.1.411: paths,
-positions, bounded protocol, startup evidence, leased platform-qualified lifecycle
-ownership, repository containment, safe log redaction, explicit profile installation,
-document synchronization, session-manager capacity, the normalized navigation facade,
-deterministic rendering, precise `get_architecture` modes, doctor diagnostics, and
-qualification gates. A Windows Job Object owns the assigned server tree. On POSIX,
-the process group covers pinned Pyright descendants only while they remain in-group;
+remains `corpus-generation/v2` with `evidence-graph/v2`. The whole 2026-07-21 Plan A is
+superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by the
+replacement plan, and on 2026-09-18 the foundation that nothing in production ever ran --
+the sealed code workspace, the `code_capture` manifest section, the verified-analysis
+records and the `evidence-graph/v3` schema they filled -- was removed from the code
+(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
+The replacement plan implements the production-quality,
+Python 3.10-compatible read-only LSP path through four pinned managed language
+servers: paths, positions, bounded protocol, startup evidence, leased
+platform-qualified lifecycle ownership, repository containment, safe log redaction,
+explicit profile installation, document synchronization, session-manager capacity,
+the normalized navigation facade, deterministic rendering, precise
+`get_architecture` modes, doctor diagnostics, and qualification gates. A query is
+routed to one profile by file suffix; a suffix no profile claims falls back to
+Pyright, which opens the file, answers nothing, and degrades to structural evidence.
+A session whose close failed is closed again by the next caller for its key, under
+that caller's deadline, and is evicted before a healthy idle one. A start that ran
+out of time or met the operating system is retried at most three times, after 5 s,
+30 s and 120 s; identity, protocol and capability failures stay terminal. Open
+documents are a bounded cache, not a ledger: the least recently used is closed with
+`textDocument/didClose` to make room, and `synchronize` re-reads a retained document
+only when its file identity changed. A server unused for 300 seconds is closed by the
+next request for another checkout, at most one per call and never the session being
+asked for — there is still no daemon and no timer. The transport's server-notification
+allowlist is the profile registry's union, so a profile added there is carried by the
+transport; a server whose post-initialize identity does not name the engine we pinned
+answers as degraded.
+A Windows Job Object owns the assigned server tree. On POSIX, the process group
+covers the assigned managed server's descendants only while they remain in-group;
 hostile `setsid()` escape is unsupported, so this path remains limited to trusted
 local repositories and is not an OS sandbox.
 It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
@@ -197,14 +219,30 @@ pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observatio
 are not written into active generations. Language servers start lazily inside the
 owning MCP process, expose only allowlisted read operations, report readiness and
 capability limits, and fall back to existing structural evidence. Installation is
-a separate explicit operator action. The managed Pyright artifact lives at
-`cache/code-tools/pyright/1.1.411/`; bounded process scratch lives under
-`run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract, which
+a separate explicit operator action, per profile: `scripts/install_pyright.py` for
+Pyright and `scripts/install_language_server.py --profile <name>` for the other
+three. The managed artifacts live at `cache/code-tools/pyright/1.1.411/`,
+`cache/code-tools/typescript-language-server/6.0.0/` (tsserver 5.9.3),
+`cache/code-tools/gopls/v0.23.0/` (built at install time from the pinned Go 1.27.1
+toolchain, because upstream publishes no binary) and
+`cache/code-tools/rust-analyzer/1.98.1/` (published, and arriving with its pinned
+Rust toolchain because it reads the project through `cargo`). Bounded process
+scratch lives under `run/lsp/<owner-nonce>/`, holds the sealed digest-verified copy
+of a native server that is launched from it, and follows the existing `run/`
+deletion contract, which
 protects live LSP owners and retained LSP failure evidence. While ownership is live,
 `run/lsp/<owner-nonce>/lease.json` is a bounded mutable live lease, refreshed every
 10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only
-`owner.json` and `failure.json`. Controlled cleanup removes the lease after joining
-its heartbeat; abrupt death leaves it to expire. Second-fatal recovery completes
+`owner.json` and `failure.json`. `failure.json` carries an optional `stderr_tail`:
+the last kilobyte the failed server wrote, redacted line by line through
+`lsp_security.redact_lsp_text` and bounded by its JSON encoding. `owner.json` names
+the owner and the generation it started with; after a recovery restart the live
+generation is named by the lease and the failed one by the failure record, and doctor
+no longer requires the three to agree on a generation nonce or a pid. Controlled
+cleanup removes the lease after joining its heartbeat; abrupt death leaves it to
+expire, and starting a server sweeps sibling owner roots in `run/lsp/` whose records
+name only processes proven dead and which hold no `failure.json`; roots holding
+failure evidence are left for the operator. Second-fatal recovery completes
 without caller intervention. Incomplete startups enter a bounded module registry;
 Pyright sessions adopt returned cleanup owners into session-held normal-exit and
 caller-deadline retry, while unadopted owners stay registered. Windows lease refresh
@@ -292,7 +330,11 @@ writes to it. See `docs/research/2026-09-14-the-vault-log-is-private.md`.
    only in chat.
 4. Every important update should touch:
    - the most relevant wiki page(s)
-   - `knowledge/index.md`
+   - `knowledge/index.md` — regenerated, never hand-edited: run
+     `scripts/rebuild_memory_index.py` (the compile does it inside its
+     transaction). It is tracked and publication-filtered, so it names only
+     published pages; on a vault that publishes none, the private navigation is
+     `scripts/search_memory.py` plus the log below.
    - `knowledge/log.local.md` (the private vault log)
 5. Preserve provenance. When writing claims, include a `Source:` / Evidence
    line pointing to the relevant file(s).
@@ -330,7 +372,8 @@ you need it: `grep` it, or ask the memory for the decision you are after. Rule
 When asked to compile or ingest new material:
 1. Inspect `knowledge/inbox/` and/or the target source file.
 2. Decide whether to create or update pages under `knowledge/notes/`.
-3. Update `knowledge/index.md`.
+3. Regenerate `knowledge/index.md` with `scripts/rebuild_memory_index.py`; do
+   not edit it by hand.
 4. Append a concise entry to `knowledge/log.local.md`.
 5. Summarize what changed.
 
@@ -353,7 +396,10 @@ When asked to compile or ingest new material:
     (user|ai-derived|web|inferred) when a page makes a claim.** Hierarchy:
     user-stated > web-sourced > ai-derived > inferred. The compile/search
     pipeline uses these fields to rank retrieval results. Without them, pages
-    default to medium / inferred and lose ranking.
+    default to medium / inferred and lose ranking. A raw session record carries
+    a fifth value, `source_authority: session`: the user's own words, unreviewed,
+    so it ranks between `inferred` and `ai-derived` in retrieval and is never a
+    claim authority — a claim compiled from a session record is `ai-derived`.
 
 14. **Track knowledge gaps: when a concept is mentioned but has no page, add
     a stub to `knowledge/notes/`** so the absence is visible, not lost.
@@ -426,9 +472,9 @@ uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
 uv run python scripts/compile_memory.py            # compile daily logs → notes
 uv run python scripts/lookup_mode.py               # show retrieval tier
-# v4.0 optional features (require --extra flags):
-uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio)
+uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
+# v4.0 optional features (require --extra flags):
 uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation

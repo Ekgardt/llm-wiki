@@ -1540,15 +1540,20 @@ def _compile_marker_pid(payload: bytes) -> int:
 
 
 def _require_compile_marker_lines(lines: list[str]) -> None:
-    if len(lines) not in {2, 3}:
+    """2 or 3 lines before 2026-09-17; a fourth names the owner's process."""
+    if len(lines) not in {2, 3, 4}:
         raise ValueError("compile marker shape is invalid")
-    if len(lines) == 3 and not lines[2]:
+    if len(lines) >= 3 and not lines[2]:
         raise ValueError("compile marker owner token is empty")
 
 
 def _maintenance_marker_pid(payload: bytes) -> int:
+    """One line before 2026-09-17; a second names the owner's process.
+
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
     lines = _ascii_marker_lines(payload)
-    if len(lines) != 1:
+    if len(lines) not in {1, 2}:
         raise ValueError("maintenance marker shape is invalid")
     return _positive_pid(lines[0])
 
@@ -2028,6 +2033,21 @@ def _complete_adoption(
     return require_reliability_v3_adopted(root=root, state_root=state_root)
 
 
+_STABLE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _stable_codes(error: BaseException) -> tuple[str, ...]:
+    """The failure's own code, when it carries one in the product's own shape.
+
+    Only the code travels: it is a fixed identifier, never a message, so the
+    redaction boundary of this report is unchanged.
+    """
+    code = getattr(error, "code", None)
+    if not isinstance(code, str) or _STABLE_CODE.fullmatch(code) is None:
+        return ()
+    return (code,)
+
+
 def _report(
     *,
     mode: Literal["check", "apply"],
@@ -2232,7 +2252,12 @@ def repair_installed_vault(
     adopt_ownership_v3: bool,
     confirm_all_agents_stopped: bool,
 ) -> dict[str, object]:
-    """Perform the explicit resumable offline Reliability V3 adoption."""
+    """Perform the explicit resumable offline Reliability V3 adoption.
+
+    A refusal names its own stable code beside the generic one, so the operator
+    is told which precondition stopped the adoption. See `docs/research/
+    2026-09-18-an-expired-fence-is-not-an-obstacle-to-adoption.md`.
+    """
     if not adopt_ownership_v3 or not confirm_all_agents_stopped:
         return _report(
             mode="apply",
@@ -2244,12 +2269,12 @@ def repair_installed_vault(
         changed = _apply_reliability_v3_adoption(
             root=Path(root), state_root=Path(state_root)
         )
-    except Exception:  # noqa: BLE001 - stable redacted repair boundary
+    except Exception as error:  # noqa: BLE001 - stable redacted repair boundary
         return _report(
             mode="apply",
             status="error",
             state="conflict",
-            blockers=["reliability_v3_adoption_failed"],
+            blockers=["reliability_v3_adoption_failed", *_stable_codes(error)],
         )
     actions = [{"code": "reliability_v3_adopted"}] if changed else []
     return _report(

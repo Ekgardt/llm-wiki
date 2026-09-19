@@ -129,7 +129,9 @@ def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatc
     monkeypatch.setattr(
         consolidation,
         "_record_consolidation",
-        lambda day, count, records: recorded.update(day=day, count=count, records=records),
+        lambda day, count, records, digest: recorded.update(
+            day=day, count=count, records=records, digest=digest
+        ),
     )
 
     outcome = consolidation.consolidate_day(
@@ -150,7 +152,12 @@ def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatc
 
     assert outcome["status"] == "written"
     assert outcome["items"] == 1
-    assert recorded == {"day": "2026-08-23", "count": 1, "records": 1}
+    assert recorded == {
+        "day": "2026-08-23",
+        "count": 1,
+        "records": 1,
+        "digest": consolidation.record_set_digest(vault, "2026-08-23"),
+    }
 
 
 def test_a_day_already_consolidated_is_left_alone(vault: Path) -> None:
@@ -181,7 +188,7 @@ def test_a_day_with_nothing_durable_is_marked_done(vault: Path, monkeypatch) -> 
     monkeypatch.setattr(
         consolidation,
         "_record_consolidation",
-        lambda day, count, records: recorded.update(day=day, count=count),
+        lambda day, count, records, digest: recorded.update(day=day, count=count),
     )
 
     outcome = consolidation.consolidate_day(

@@ -7,11 +7,11 @@ import ctypes
 import hashlib
 import json
 import os
-import platform
 import re
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Literal, cast
 
 import markdown_transaction
+import process_liveness
+from process_liveness import _is_plain_int, _platform_system
 from reliable_memory import (
     DEFAULTS,
     OperationalDatabaseContract,
@@ -70,7 +72,6 @@ _LONG_LEASE_ROLES = frozenset(
 _MARKER_ROLES = frozenset({"compile", "nightly", "weekly"})
 _COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
-_MAX_PROCESS_STAT_BYTES = 8192
 _MAX_MARKER_BYTES = 4096
 
 
@@ -115,39 +116,8 @@ class MarkerIdentity:
     pid: int
 
 
-class _DarwinProcBsdInfo(ctypes.Structure):
-    _fields_ = (
-        ("flags", ctypes.c_uint32),
-        ("status", ctypes.c_uint32),
-        ("xstatus", ctypes.c_uint32),
-        ("pid", ctypes.c_uint32),
-        ("ppid", ctypes.c_uint32),
-        ("uid", ctypes.c_uint32),
-        ("gid", ctypes.c_uint32),
-        ("ruid", ctypes.c_uint32),
-        ("rgid", ctypes.c_uint32),
-        ("svuid", ctypes.c_uint32),
-        ("svgid", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-        ("command", ctypes.c_char * 16),
-        ("name", ctypes.c_char * 32),
-        ("files", ctypes.c_uint32),
-        ("process_group", ctypes.c_uint32),
-        ("job_control", ctypes.c_uint32),
-        ("tty_device", ctypes.c_uint32),
-        ("tty_process_group", ctypes.c_uint32),
-        ("nice", ctypes.c_int32),
-        ("start_seconds", ctypes.c_uint64),
-        ("start_microseconds", ctypes.c_uint64),
-    )
-
-
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _platform_system() -> str:
-    return platform.system()
 
 
 def _unsupported_platform() -> OperationalOwnershipError:
@@ -156,212 +126,18 @@ def _unsupported_platform() -> OperationalOwnershipError:
     )
 
 
-def _read_bounded_system_file(path: Path, maximum: int) -> bytes:
-    with path.open("rb") as stream:
-        content = stream.read(maximum + 1)
-    if len(content) > maximum:
-        raise OSError(f"system process file exceeded {maximum} bytes")
-    return content
-
-
-def _is_plain_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _linux_stat_fields(pid: int, raw: bytes) -> list[bytes]:
-    closing = raw.rfind(b")")
-    prefix = f"{pid} (".encode("ascii")
-    if not raw.startswith(prefix) or closing < len(prefix):
-        raise OSError("Linux process stat was malformed")
-    fields = raw[closing + 1 :].split()
-    if len(fields) <= 19:
-        raise OSError("Linux process stat was incomplete")
-    return fields
-
-
-def _linux_start_ticks(fields: list[bytes]) -> int:
-    try:
-        start_ticks = int(fields[19])
-    except ValueError as exc:
-        raise OSError("Linux process identity was malformed") from exc
-    if start_ticks <= 0:
-        raise OSError("Linux process identity was malformed")
-    return start_ticks
-
-
-def _linux_boot_id() -> str:
-    try:
-        boot_id = (
-            _read_bounded_system_file(Path("/proc/sys/kernel/random/boot_id"), 128)
-            .decode("ascii", errors="strict")
-            .strip()
-        )
-    except UnicodeError as exc:
-        raise OSError("Linux process identity was malformed") from exc
-    if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", boot_id):
-        raise OSError("Linux process identity was malformed")
-    return boot_id.lower()
-
-
-def _linux_process_start_identity(pid: int) -> str | None:
-    try:
-        raw = _read_bounded_system_file(
-            Path(f"/proc/{pid}/stat"), _MAX_PROCESS_STAT_BYTES
-        )
-    except FileNotFoundError:
-        return None
-    fields = _linux_stat_fields(pid, raw)
-    if fields[0] in {b"Z", b"X", b"x"}:
-        return None
-    start_ticks = _linux_start_ticks(fields)
-    return f"linux:{_linux_boot_id()}:{start_ticks}"
-
-
-def _windows_process_api(kernel32: object) -> tuple[object, object, object, object]:
-    """Bind the kernel32 entry points this probe uses, with exact signatures."""
-    from ctypes import wintypes
-
-    open_process = kernel32.OpenProcess
-    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    open_process.restype = wintypes.HANDLE
-    get_exit_code = kernel32.GetExitCodeProcess
-    get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-    get_exit_code.restype = wintypes.BOOL
-    get_process_times = kernel32.GetProcessTimes
-    get_process_times.argtypes = (
-        wintypes.HANDLE,
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME),
-    )
-    get_process_times.restype = wintypes.BOOL
-    close_handle = kernel32.CloseHandle
-    close_handle.argtypes = (wintypes.HANDLE,)
-    close_handle.restype = wintypes.BOOL
-    return open_process, get_exit_code, get_process_times, close_handle
-
-
-def _windows_open_refusal() -> None:
-    """A refused open means a missing process only for the two 'no such pid' errors."""
-    error = ctypes.get_last_error()
-    if error in {87, 1168}:
-        return None
-    raise ctypes.WinError(error)
-
-
-def _windows_creation_filetime(handle: object, get_process_times: object) -> int:
-    from ctypes import wintypes
-
-    creation = wintypes.FILETIME()
-    exit_time = wintypes.FILETIME()
-    kernel = wintypes.FILETIME()
-    user = wintypes.FILETIME()
-    if not get_process_times(
-        handle,
-        ctypes.byref(creation),
-        ctypes.byref(exit_time),
-        ctypes.byref(kernel),
-        ctypes.byref(user),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    created = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
-    if created <= 0:
-        raise OSError("Windows process creation time was unavailable")
-    return created
-
-
-def _windows_running_identity(
-    handle: object, get_exit_code: object, get_process_times: object
-) -> str | None:
-    from ctypes import wintypes
-
-    exit_code = wintypes.DWORD()
-    if not get_exit_code(handle, ctypes.byref(exit_code)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if exit_code.value != 259:
-        return None
-    return f"windows:{_windows_creation_filetime(handle, get_process_times)}"
-
-
-def _windows_process_start_identity(pid: int) -> str | None:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    open_process, get_exit_code, get_process_times, close_handle = (
-        _windows_process_api(kernel32)
-    )
-    handle = open_process(0x1000, False, pid)
-    if not handle:
-        return _windows_open_refusal()
-    try:
-        return _windows_running_identity(handle, get_exit_code, get_process_times)
-    finally:
-        close_handle(handle)
-
-
-def _darwin_proc_pidinfo(pid: int, information: object, size: int) -> int:
-    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    function = library.proc_pidinfo
-    function.argtypes = (
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_void_p,
-        ctypes.c_int,
-    )
-    function.restype = ctypes.c_int
-    return function(pid, 3, 0, ctypes.byref(information), size)
-
-
-def _darwin_absent_process(pid: int) -> None:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except PermissionError as exc:
-        raise OSError("Darwin process identity was inaccessible") from exc
-    raise OSError("Darwin process identity was unavailable")
-
-
-def _require_darwin_information(
-    information: object, pid: int, *, fully_sized: bool
-) -> None:
-    if not fully_sized or information.pid != pid:
-        raise OSError("Darwin process identity was malformed")
-    if information.start_seconds <= 0 or information.start_microseconds >= 1_000_000:
-        raise OSError("Darwin process start time was unavailable")
-
-
-def _darwin_process_start_identity(pid: int) -> str | None:
-    information = _DarwinProcBsdInfo()
-    size = ctypes.sizeof(information)
-    result = _darwin_proc_pidinfo(pid, information, size)
-    if result <= 0:
-        return _darwin_absent_process(pid)
-    _require_darwin_information(information, pid, fully_sized=result == size)
-    return f"darwin:{information.start_seconds}:{information.start_microseconds}"
-
-
-# Held by name, not by value: the probe is resolved at call time so that
-# substituting one platform's probe substitutes what this dispatch calls.
-_PROCESS_IDENTITY_PROBES = {
-    "Windows": "_windows_process_start_identity",
-    "Linux": "_linux_process_start_identity",
-    "Darwin": "_darwin_process_start_identity",
-}
-
-
-def _require_pid(pid: object) -> None:
-    if not _is_plain_int(pid) or pid <= 0:
-        raise ValueError("pid must be a positive integer")
-
-
 def process_start_identity(pid: int) -> str | None:
-    """Return the OS process-start identity, or ``None`` for a missing process."""
-    _require_pid(pid)
-    probe = _PROCESS_IDENTITY_PROBES.get(_platform_system())
-    if probe is None:
-        raise _unsupported_platform()
-    return globals()[probe](pid)
+    """The OS process-start identity, or ``None`` for a missing process.
+
+    The probes live in `process_liveness` so that a lock file naming its owner
+    can be read without importing the coordinator; this module keeps the name
+    and the refusal its callers expect.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    try:
+        return process_liveness.process_start_identity(pid)
+    except process_liveness.ProcessIdentityUnavailable as exc:
+        raise _unsupported_platform() from exc
 
 
 def current_process_identity() -> ProcessIdentity:
@@ -563,7 +339,13 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _timestamp(value: datetime) -> str:
-    return _as_utc(value).isoformat().replace("+00:00", "Z")
+    """Always six fractional digits, so the text order SQL compares is time order.
+
+    `isoformat()` drops the fraction on a whole second, and `Z` sorts after `.`:
+    `…:00Z` compared greater than `…:00.500000Z`. The reader takes both shapes.
+    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return _as_utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_timestamp(value: object) -> datetime:
@@ -954,6 +736,24 @@ class OwnershipRegistry:
         role = _validate_role(row["role"])
         self._validate_marker(role, marker, process)
 
+    def _retire_dead_marker(self, row: sqlite3.Row) -> None:
+        """Remove a dead owner's marker only while it is still exactly its own.
+
+        The proof of death is the lease and the OS, never this file. A marker
+        that is gone, or that someone else has published at the same path
+        since, is left alone and does not stand in the way of the reclaim.
+        """
+        marker = _marker_from_row(row)
+        if marker is None:
+            return
+        path = self.state_root / marker.relative_path
+        try:
+            before, content, after = self._read_marker_file(path)
+            _require_marker_match(before, after, content, marker)
+        except OperationalOwnershipError:
+            return
+        _remove_marker_file(path)
+
     @staticmethod
     def _row_matches_lease(row: sqlite3.Row, lease: OwnerLease) -> bool:
         return OwnershipRegistry._exact_parameters(row) == (
@@ -1017,9 +817,10 @@ class OwnershipRegistry:
         """Release the marker a dead owner left behind, with the registry's proof.
 
         A row for (role, scope) is reclaimed only when its lease lapsed and its
-        process is provably dead, and only while the file still matches what
-        the row recorded; a marker with no row is removed only when the PID it
-        names no longer exists. A live owner refuses by name. No age is read.
+        process is provably dead; the file goes with it only while it is still
+        the file the row recorded, and anyone else's file is left in place. A
+        marker with no row is removed only when the PID it names no longer
+        exists. A live owner refuses by name. No age is read.
         Decision: knowledge/notes/nightly-takes-the-canonical-fence-decision.md
         """
         selected_role = _validate_role(role)
@@ -1032,7 +833,6 @@ class OwnershipRegistry:
                 return self._remove_orphan_marker(relative_path)
             _require_marker_path_of_row(row, relative_path)
             self._reclaim_or_refuse(database, row, _as_utc(self._clock()), "owner_busy")
-            _remove_marker_file(self.state_root / relative_path)
             return "reclaimed"
 
     def _remove_orphan_marker(self, relative_path: str) -> str:
@@ -1122,7 +922,7 @@ class OwnershipRegistry:
     ) -> None:
         """The deletion permit blocks everyone else, and quiescence blocks it."""
         if request.role == "runtime-deletion-check":
-            self._require_quiescence(database, request)
+            self._require_quiescence(database, request, now)
             return
         deletion = database.execute(
             "SELECT * FROM maintenance_owners WHERE role='runtime-deletion-check'"
@@ -1132,18 +932,17 @@ class OwnershipRegistry:
                 database, deletion, now, "runtime_deletion_check_active"
             )
 
-    @staticmethod
     def _require_quiescence(
-        database: sqlite3.Connection, request: _AcquireRequest
+        self, database: sqlite3.Connection, request: _AcquireRequest, now: datetime
     ) -> None:
-        other = database.execute(
-            """SELECT 1 FROM maintenance_owners
-                WHERE NOT (role=? AND scope=?) LIMIT 1""",
+        """Every other owner must be gone; a provably dead one is reclaimed, not obeyed."""
+        others = database.execute(
+            "SELECT * FROM maintenance_owners WHERE NOT (role=? AND scope=?)",
             (request.role, request.scope),
-        ).fetchone()
-        if other is not None:
-            raise OperationalOwnershipError(
-                "runtime_deletion_check_requires_quiescence"
+        ).fetchall()
+        for other in others:
+            self._reclaim_or_refuse(
+                database, other, now, "runtime_deletion_check_requires_quiescence"
             )
 
     def _require_admission(
@@ -1179,7 +978,7 @@ class OwnershipRegistry:
         """Take over a provably dead owner, or refuse by name — doubt refuses."""
         if not self._expired_owner_is_dead(row, now):
             raise OperationalOwnershipError(refusal)
-        self._lease_marker(row, _row_process(row))
+        self._retire_dead_marker(row)
         _delete_owner_projections(database, row)
         self._delete_row(database, row)
 
@@ -1368,6 +1167,24 @@ def _marker_pid(path: Path, state_root: Path) -> int:
         raise OperationalOwnershipError("marker_identity_invalid") from exc
 
 
+def _marker_payload() -> bytes:
+    """What a scheduled marker records: this PID, and this process.
+
+    The registry's own rows have carried the start identity all along; the
+    marker beside them named only a number, which the next process to be given
+    that number would have inherited (audit Q-L7). Research:
+    docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+    """
+    return f"{os.getpid()}\n{_own_start_identity()}\n".encode("ascii", errors="replace")
+
+
+def _own_start_identity() -> str:
+    try:
+        return process_start_identity(os.getpid()) or ""
+    except (OperationalOwnershipError, OSError, ValueError):
+        return ""
+
+
 def _pid_exists(pid: int) -> bool:
     """Whether a process with this PID exists; doubt refuses by name."""
     try:
@@ -1476,7 +1293,7 @@ def acquire_scheduled_owner(
     now = utc_now().replace(microsecond=0)
     actor_id = ownership_actor_identity(role, "global")
     token = secrets.token_hex(16)
-    payload = str(os.getpid()).encode("ascii")
+    payload = _marker_payload()
     if registry is None:
         registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
     marker = _publish_marker_reclaiming(
@@ -1544,6 +1361,8 @@ def heartbeat_owner(
         registry = OwnershipRegistry(Path(lease.state_root))
     stop = threading.Event()
     failure: list[BaseException] = []
+    # The lease is already written; its expiry is counted from here.
+    held_since = time.monotonic()
 
     def heartbeat() -> None:
         # A busy database is retried until the lease expires; a lost fence is
@@ -1555,6 +1374,7 @@ def heartbeat_owner(
             interval=lease.heartbeat_seconds,
             lease_seconds=lease.ttl_seconds,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=held_since,
             stop=stop,
             wait=lambda seconds: _wait_for_owner_heartbeat(stop, seconds),
         )

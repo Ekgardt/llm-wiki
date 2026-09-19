@@ -9,7 +9,6 @@ import io
 import json
 import math
 import os
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -1063,61 +1062,6 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
         thread.join(SHORT_TIMEOUT)
         _close_owned(started)
         _retry_cleanup_errors(start_errors)
-
-
-def test_lsp_publication_uses_canonical_token_and_epoch_in_owner_and_lease_records(
-    tmp_path: Path,
-) -> None:
-    import markdown_transaction
-
-    state_root = tmp_path / "state"
-    candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    owner_root = state_root / "run/lsp" / OWNER_NONCE
-    owner_root.parent.mkdir(parents=True)
-
-    process = LspProcess._start_with_v3_candidate(
-        _command("--lifecycle"),
-        cwd=tmp_path,
-        owner_root=owner_root,
-        state_root=state_root,
-    )
-    try:
-        owner = json.loads((owner_root / "owner.json").read_bytes())
-        lease = json.loads((owner_root / "lease.json").read_bytes())
-        with sqlite3.connect(candidate) as database:
-            canonical = database.execute(
-                "SELECT role, scope, actor_id, owner_token, fencing_epoch, "
-                "process_start_identity FROM maintenance_owners WHERE role='lsp'"
-            ).fetchone()
-        expected = (
-            owner["canonical_role"],
-            owner["canonical_scope"],
-            owner["actor_id"],
-            owner["owner_token"],
-            owner["fencing_epoch"],
-            owner["process_start_identity"],
-        )
-        assert canonical == expected
-        assert tuple(
-            lease[field]
-            for field in (
-                "canonical_role",
-                "canonical_scope",
-                "actor_id",
-                "owner_token",
-                "fencing_epoch",
-                "process_start_identity",
-            )
-        ) == expected
-    finally:
-        process.close(time.monotonic() + 5)
-
-    assert not (owner_root / "lease.json").exists()
-    with sqlite3.connect(candidate) as database:
-        assert database.execute(
-            "SELECT COUNT(*) FROM maintenance_owners WHERE role='lsp'"
-        ).fetchone() == (0,)
 
 
 def test_startup_commit_rejects_heartbeat_terminal_failure_during_bootstrap(
@@ -3756,46 +3700,6 @@ def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) 
 
 
 _OS_INJECTED_ENVIRONMENT = frozenset({"__CF_USER_TEXT_ENCODING"})
-
-
-def _idle_boundary_probe(process) -> tuple[bool, bool, bool]:
-    """Exactly 300 seconds, measured against one pinned idle baseline.
-
-    Reading the baseline is not enough: any use of the process stamps
-    `last_used_monotonic`, and a startup or restart worker can still be running
-    when the probe starts. Pinning the value first makes a stamp visible as a
-    moved baseline instead of a silently wrong comparison.
-    """
-    # A whole number well inside float precision: `baseline + 300.0` is then
-    # exact. Taking the baseline from the clock made the comparison depend on
-    # the low bits of `time.monotonic()`, and on Windows the boundary probe
-    # came back one ulp short of the 300 seconds it was asserting.
-    baseline = 1_000_000.0
-    process.last_used_monotonic = baseline
-    below = process.idle_expired(baseline + 299.999)
-    at_boundary = process.idle_expired(baseline + 300.0)
-    return below, at_boundary, process.last_used_monotonic == baseline
-
-
-def _idle_boundary_holds(process) -> bool:
-    below, at_boundary, stable = _idle_boundary_probe(process)
-    return stable and below is False and at_boundary is True
-
-
-def test_idle_expiry_is_exactly_300_seconds_and_rejects_non_finite_input(
-    tmp_path: Path,
-) -> None:
-    process = _start(tmp_path, "--lifecycle")
-    try:
-        # A moved baseline means a concurrent stamp, not a wrong boundary, so
-        # the last probe is reported rather than a bare `assert False`.
-        attempts = [_idle_boundary_holds(process) for _attempt in range(20)]
-        assert any(attempts), _idle_boundary_probe(process)
-        for invalid in (math.nan, math.inf, True, "later"):
-            with pytest.raises((TypeError, ValueError)):
-                process.idle_expired(invalid)  # type: ignore[arg-type]
-    finally:
-        process.close(time.monotonic() + 5)
 
 
 def test_close_forces_stubborn_process_tree_within_caller_deadline(

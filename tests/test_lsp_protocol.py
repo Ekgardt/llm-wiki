@@ -86,13 +86,19 @@ def test_protocol_constants_are_exact() -> None:
             "workspace/configuration",
         }
     )
+    # Since 2026-09-17 (finding K-B16) this is derived from the profile
+    # registry, so a profile added there is carried by the transport.
     assert SERVER_NOTIFICATIONS == frozenset(
         {
             "$/progress",
+            "$/typescriptVersion",
+            "experimental/serverStatus",
             "pyright/beginProgress",
             "pyright/endProgress",
             "pyright/reportProgress",
             "textDocument/publishDiagnostics",
+            "window/logMessage",
+            "window/showMessage",
         }
     )
 

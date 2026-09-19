@@ -52,6 +52,7 @@ from markdown_transaction import mutate_knowledge, stable_operation_id
 from project_journal import (
     ProjectStore,
     legacy_state_project_root,
+    portable_slug,
     recover_project_handoff,
 )
 from secret_redact import redact_secrets
@@ -153,13 +154,17 @@ def _emit_empty() -> int:
 
 
 def _sanitize(text: str) -> str:
-    """Lowercase + replace unsafe chars + strip hyphens. Preserve non-ASCII."""
+    """Lowercase + replace unsafe chars + strip hyphens. Preserve non-ASCII.
+
+    The last step hands the result to the journal's own rule, so a directory
+    called `aux` or `notes.` gets a slug that can be checkpointed instead of one
+    refused on every write. See
+    `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
+    """
     s = unicodedata.normalize("NFC", text).lower()
     s = SLUG_UNSAFE_RE.sub("-", s)
     s = s.strip("-")
-    if not s or s in {".", ".."}:
-        return ""
-    return s
+    return portable_slug(s)
 
 
 def _require_not_the_vault(project_dir: Path, projects_dir: Path) -> None:
@@ -635,6 +640,14 @@ def _create_project_state(
     return True
 
 
+# Measured 2026-09-18: `bootstrap_project.py` takes 0.09 s on a one-commit
+# repository and 0.12 s on this one. The old bound was 30 s, which no
+# measurement chose. A run that does not finish writes no `bootstrap.md`, so the
+# next session start of the project runs it again and nothing is lost. See
+# `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
+BOOTSTRAP_BUDGET_SECONDS = 5.0
+
+
 def _bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> None:
     """Auto-generate context from git + README, on first discovery only.
 
@@ -648,11 +661,14 @@ def _bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> 
         _sp.run(
             [sys.executable, str(vault / "scripts" / "bootstrap_project.py"),
              "--cwd", str(project_dir), "--apply"],
-            capture_output=True, timeout=30, check=False,
+            capture_output=True, timeout=BOOTSTRAP_BUDGET_SECONDS, check=False,
             cwd=str(vault),
         )
     except Exception:  # noqa: BLE001
-        pass  # never block session start on bootstrap failure
+        # Nothing is written on failure or timeout, so the next session start of
+        # this project tries again; session start itself is never blocked longer
+        # than the budget above.
+        pass
 
 
 if __name__ == "__main__":

@@ -26,6 +26,11 @@ years are left alone — "two months ago" has no single correct answer — and s
 everything below a day. "Last night", "this morning", "a few hours ago" are
 exactly where a model's sense of elapsed time fails, and they are not resolved.
 
+A phrase that names a stretch of days rather than one — "last week" — is kept as
+a stretch, by `spans`, and only widens a search. It is never written into an
+entry as a dated fact, because the day inside the week is precisely what the
+user did not say. See `docs/research/2026-09-17-last-week-is-a-week.md`.
+
 **Only the user's turns.** A model will write "last night" for an hour ago. The
 arithmetic here is ours and the anchor is certain, so nothing depends on a
 model's estimate — but a phrase the assistant wrote can be wrong at the source,
@@ -59,10 +64,12 @@ _COUNTS = {
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
 
-_PLAIN = {"today": 0, "yesterday": -1, "tomorrow": 1}
+_PLAIN = {"the day before yesterday": -2, "today": 0, "yesterday": -1, "tomorrow": 1}
 
-_PLAIN_RE = re.compile(r"\b(today|yesterday|tomorrow)\b", re.IGNORECASE)
-_DAY_BEFORE_RE = re.compile(r"\bthe day before yesterday\b", re.IGNORECASE)
+# One pattern, the longest phrase first: matches do not overlap, so the
+# "yesterday" inside "the day before yesterday" is consumed with its phrase and
+# is not dated a second time, a day off.
+_PLAIN_RE = re.compile(r"\b(" + "|".join(_PLAIN) + r")\b", re.IGNORECASE)
 _WEEKDAY_RE = re.compile(
     r"\b(last|next|this past)\s+(" + "|".join(WEEKDAYS) + r")\b", re.IGNORECASE
 )
@@ -109,13 +116,6 @@ def _plain_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     ]
 
 
-def _day_before_hits(text: str, anchor: date) -> list[tuple[str, date]]:
-    return [
-        (match.group(0).casefold(), anchor - timedelta(days=2))
-        for match in _DAY_BEFORE_RE.finditer(text)
-    ]
-
-
 def _weekday_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     return [
         (
@@ -141,17 +141,35 @@ def _ago_hits(text: str, anchor: date) -> list[tuple[str, date]]:
     return hits
 
 
-def _last_week_hits(text: str, anchor: date) -> list[tuple[str, date]]:
-    return [
-        (match.group(0).casefold(), anchor - timedelta(days=7))
-        for match in _LAST_WEEK_RE.finditer(text)
-    ]
+def _last_week_span(anchor: date) -> tuple[date, date]:
+    """Monday to Sunday of the ISO week before the anchor's own week.
+
+    ISO 8601 identifies a week, not a day inside it: weeks run Monday (day 1)
+    to Sunday (day 7). "Last week" therefore has a correct machine value and it
+    is a pair of days — collapsing it to anchor − 7 wrote into the memory, as a
+    dated fact, a day the user never named.
+    See `docs/research/2026-09-17-last-week-is-a-week.md`.
+    """
+    this_monday = anchor - timedelta(days=anchor.weekday())
+    first = this_monday - timedelta(days=7)
+    return first, first + timedelta(days=6)
 
 
-_FINDERS = (_day_before_hits, _plain_hits, _weekday_hits, _ago_hits, _last_week_hits)
+def _last_week_spans(text: str, anchor: date) -> list[tuple[str, tuple[date, date]]]:
+    span = _last_week_span(anchor)
+    return [(match.group(0).casefold(), span) for match in _LAST_WEEK_RE.finditer(text)]
 
 
-_TURN_RE = re.compile(r"^\*\*(user|assistant):\*\*")
+_FINDERS = (_plain_hits, _weekday_hits, _ago_hits)
+# Expressions that name a stretch of days rather than one. Read by the query side
+# only: a span is not the unambiguous single date this module is allowed to write
+# into an entry, so no dated line is ever produced for one.
+_SPAN_FINDERS = (_last_week_spans,)
+
+
+# Multiline, because an entry begins with its heading: a turn marker opens a
+# line, not the text.
+_TURN_RE = re.compile(r"^\*\*(user|assistant):\*\*", re.MULTILINE)
 
 
 def _turn_role(line: str, current: str) -> str:
@@ -187,10 +205,26 @@ def spoken_by_the_user(text: str) -> str:
     return "\n".join(kept)
 
 
+def spans(text: str, anchor: date) -> dict[str, tuple[str, str]]:
+    """Every stretch of days the user named, as phrase to (first ISO day, last ISO day).
+
+    Separate from `resolutions` because the two are read differently: a point is
+    written into the entry as a dated fact, a span only widens a search. First
+    writing wins, and the same cap applies.
+    """
+    spoken = spoken_by_the_user(text)
+    found: dict[str, tuple[str, str]] = {}
+    for finder in _SPAN_FINDERS:
+        for phrase, (first, last) in finder(spoken, anchor):
+            found.setdefault(phrase, (first.isoformat(), last.isoformat()))
+    return dict(list(found.items())[:MAX_RESOLUTIONS])
+
+
 def resolutions(text: str, anchor: date) -> dict[str, str]:
     """Every unambiguous relative date the user stated, as phrase to ISO date.
 
-    First writing wins, so a phrase repeated in one entry resolves once.
+    First writing wins, so a phrase repeated in one entry resolves once. A phrase
+    naming a stretch of days is not here — see `spans`.
     """
     spoken = spoken_by_the_user(text)
     found: dict[str, str] = {}
@@ -265,11 +299,26 @@ def query_with_dates(query: str, anchor: date) -> str:
     that dates an entry dates the question, and the resolved dates join the
     query as ordinary terms — which is what makes the calendar reachable.
     """
-    found = resolutions(query, anchor)
-    if not found:
+    dates = [
+        *resolutions(query, anchor).values(),
+        *_neighbourhood(query, anchor),
+        *_span_days(query, anchor),
+    ]
+    if not dates:
         return query
-    dates = [*found.values(), *_neighbourhood(query, anchor)]
     return query + " " + " ".join(dict.fromkeys(dates))
+
+
+def _span_days(text: str, anchor: date) -> list[str]:
+    """Every day of every stretch the text named, so the lexical leg reaches any of them."""
+    days: list[str] = []
+    for first, last in spans(text, anchor).values():
+        start, end = date.fromisoformat(first), date.fromisoformat(last)
+        days.extend(
+            (start + timedelta(days=offset)).isoformat()
+            for offset in range((end - start).days + 1)
+        )
+    return days
 
 
 # "Four weeks ago" in a question means about four weeks; the day it resolves to
@@ -290,16 +339,24 @@ def _neighbourhood(text: str, anchor: date) -> list[str]:
 
 
 def window(text: str, anchor: date) -> tuple[str, str] | None:
-    """The span of days a question's relative expressions cover, widened by the neighbourhood.
+    """The stretch of days a question's relative expressions cover.
 
-    None when the text resolves no date; otherwise the earliest and latest
-    ISO days, the ends three days out, so "last weekend" reaches the entries
-    of that weekend and "four weeks ago" the week around it.
+    None when the text names no date; otherwise the earliest and latest ISO
+    days. A point is widened three days each side, so "last weekend" reaches the
+    entries of that weekend and "four weeks ago" the week around it. A stretch
+    the user named is already exact and is taken as it is: "last week" is that
+    Monday to that Sunday.
     """
-    found = resolutions(text, anchor)
-    if not found:
+    ends = _point_ends(text, anchor) + list(spans(text, anchor).values())
+    if not ends:
         return None
-    days = sorted(date.fromisoformat(value) for value in found.values())
-    first = days[0] - timedelta(days=NEIGHBOURHOOD_DAYS)
-    last = days[-1] + timedelta(days=NEIGHBOURHOOD_DAYS)
-    return first.isoformat(), last.isoformat()
+    return min(first for first, _last in ends), max(last for _first, last in ends)
+
+
+def _point_ends(text: str, anchor: date) -> list[tuple[str, str]]:
+    """Each single day the text resolves, as its own neighbourhood of days."""
+    out = timedelta(days=NEIGHBOURHOOD_DAYS)
+    return [
+        ((date.fromisoformat(value) - out).isoformat(), (date.fromisoformat(value) + out).isoformat())
+        for value in resolutions(text, anchor).values()
+    ]

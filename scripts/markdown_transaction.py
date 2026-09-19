@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import copy
 import ctypes
+import errno
+import functools
 import getpass
 import hashlib
 import json
@@ -101,6 +104,9 @@ _WRITER_RETRY_CAP_SECONDS = 0.05
 _ADOPTION_VALIDATION_SECONDS = 30.0
 _ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
 _ADOPTION_VALIDATION_LOCK = threading.Lock()
+# Nested gate releases that failed in this process: (database, owner token, fencing epoch).
+# Set operations are atomic under the interpreter lock; an entry is proof the row is residue.
+_UNRELEASED_PROJECTIONS: set[tuple[str, str, int]] = set()
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -1377,203 +1383,6 @@ def _coordinator_v3_cross_table_invariant(database: sqlite3.Connection) -> bool:
     ) and _coordinator_v3_blackboard_invariant(database)
 
 
-_BLACKBOARD_V3_TABLES = frozenset({"blackboard_claim_epochs", "blackboard_claims"})
-_COORDINATOR_V3_BASE_TABLE_SQL = tuple(
-    item for item in _COORDINATOR_V3_TABLE_SQL if item[0] not in _BLACKBOARD_V3_TABLES
-)
-
-
-def _coordinator_v3_base_schema_complete(database: sqlite3.Connection) -> bool:
-    objects = database.execute(
-        """SELECT type, name FROM sqlite_schema
-           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-    ).fetchall()
-    expected = {("table", name) for name, _sql in _COORDINATOR_V3_BASE_TABLE_SQL}
-    return {(str(row[0]), str(row[1])) for row in objects} == expected and all(
-        _coordinator_v3_object_matches(database, name, sql)
-        for name, sql in _COORDINATOR_V3_BASE_TABLE_SQL
-    )
-
-
-def _upgrade_object_names_valid(
-    observed: set[tuple[str, str]], expected: set[str]
-) -> bool:
-    for kind, name in observed:
-        if kind != "table":
-            return False
-        if name not in expected:
-            return False
-    return True
-
-
-def _coordinator_schema_upgrade_objects_valid(database: sqlite3.Connection) -> bool:
-    objects = database.execute(
-        """SELECT type, name FROM sqlite_schema
-           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-    ).fetchall()
-    expected = {name: sql for name, sql in _COORDINATOR_V3_TABLE_SQL}
-    observed = {(str(kind), str(name)) for kind, name in objects}
-    if not _upgrade_object_names_valid(observed, set(expected)):
-        return False
-    return all(
-        _coordinator_v3_object_matches(database, name, expected[name])
-        for _kind, name in observed
-    )
-
-
-def _bounded_table_rows(
-    database: sqlite3.Connection, table: str
-) -> list[tuple[object, ...]]:
-    rows = database.execute(f'SELECT * FROM "{table}" ORDER BY rowid').fetchmany(100_001)
-    if len(rows) > 100_000:
-        raise _coordinator_migration_error(
-            "coordinator_v3_source_conflict",
-            "coordinator v3 schema upgrade exceeded the row bound",
-        )
-    return [tuple(row) for row in rows]
-
-
-def _coordinator_base_rows_match(
-    source: sqlite3.Connection, candidate: sqlite3.Connection
-) -> bool:
-    for table, _sql in _COORDINATOR_V3_BASE_TABLE_SQL:
-        if _bounded_table_rows(source, table) != _bounded_table_rows(candidate, table):
-            return False
-    return True
-
-
-def _coordinator_v3_upgrade_source_healthy(database: sqlite3.Connection) -> bool:
-    integrity = database.execute("PRAGMA integrity_check").fetchall()
-    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-    integrity_ok = len(integrity) == 1 and integrity[0][0] == "ok"
-    checks = (
-        integrity_ok,
-        not foreign_keys,
-        _coordinator_v3_base_cross_table_invariant(database),
-    )
-    return all(checks)
-
-
-def _require_coordinator_v3_upgrade_schema(database: sqlite3.Connection) -> None:
-    if not _coordinator_v3_base_schema_complete(database):
-        raise _coordinator_migration_error(
-            "coordinator_v3_source_conflict",
-            "coordinator v3 schema upgrade source is not the previous exact schema",
-        )
-
-
-def _validate_coordinator_v3_upgrade_source(database: sqlite3.Connection) -> None:
-    _require_coordinator_v3_upgrade_schema(database)
-    if database.execute("SELECT COUNT(*) FROM maintenance_owners").fetchone()[0]:
-        raise _coordinator_migration_error(
-            "coordinator_v3_source_live",
-            "coordinator v3 schema upgrade source has active owners",
-        )
-    if not _coordinator_v3_upgrade_source_healthy(database):
-        raise _coordinator_migration_error(
-            "coordinator_v3_validation_failed",
-            "coordinator v3 schema upgrade source validation failed",
-        )
-
-
-def _copy_coordinator_v3_source(
-    source: sqlite3.Connection, candidate: Path
-) -> None:
-    if candidate.exists():
-        return
-    with contextlib.closing(
-        open_operational_db(candidate, busy_ms=DEFAULTS.markdown_busy_ms)
-    ) as destination:
-        source.backup(destination)
-
-
-def _require_upgrade_candidate_matches(
-    source: sqlite3.Connection, database: sqlite3.Connection
-) -> None:
-    if not _coordinator_schema_upgrade_objects_valid(database):
-        raise _coordinator_migration_error(
-            "coordinator_v3_source_conflict",
-            "coordinator v3 schema upgrade candidate has unknown objects",
-        )
-    if not _coordinator_base_rows_match(source, database):
-        raise _coordinator_migration_error(
-            "coordinator_v3_source_conflict",
-            "coordinator v3 schema upgrade candidate differs from source",
-        )
-
-
-def _require_empty_blackboard_tables(database: sqlite3.Connection) -> None:
-    for table in _BLACKBOARD_V3_TABLES:
-        if not _coordinator_table_exists(database, table):
-            continue
-        if database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone():
-            raise _coordinator_migration_error(
-                "coordinator_v3_source_conflict",
-                "coordinator v3 schema upgrade candidate has claim rows",
-            )
-
-
-def _blackboard_schema_statements() -> tuple[MigrationStatement, ...]:
-    return tuple(
-        statement
-        for statement in _coordinator_v3_statements()
-        if statement.name.removeprefix("create_") in _BLACKBOARD_V3_TABLES
-    )
-
-
-def _upgrade_coordinator_candidate_database(
-    source: sqlite3.Connection,
-    candidate: Path,
-    killpoint: Callable[[str], None] | None,
-) -> None:
-    with contextlib.closing(
-        open_operational_db(
-            candidate,
-            busy_ms=DEFAULTS.markdown_busy_ms,
-            contract=_COORDINATOR_V3_CONTRACT,
-        )
-    ) as database:
-        database.row_factory = sqlite3.Row
-        _require_upgrade_candidate_matches(source, database)
-        _require_empty_blackboard_tables(database)
-        run_resumable_migration(
-            database,
-            _blackboard_schema_statements(),
-            final_invariant=_coordinator_v3_schema_complete,
-            killpoint=killpoint,
-        )
-
-
-def upgrade_coordinator_v3_candidate(
-    path: Path,
-    *,
-    source_v3: Path,
-    killpoint: Callable[[str], None] | None = None,
-) -> dict[str, int]:
-    """Copy and resumably extend the previous exact coordinator-v3 schema."""
-    candidate = Path(path)
-    source_path = Path(source_v3)
-    _reject_coordinator_source_alias(candidate, source_path)
-    with contextlib.closing(
-        open_readonly_operational_db(
-            source_path,
-            source_path.parent.parent,
-            max_bytes=1 << 50,
-            owner_only=True,
-            contract=_COORDINATOR_V3_CONTRACT,
-        )
-    ) as source:
-        source.row_factory = sqlite3.Row
-        source.execute("BEGIN")
-        _validate_coordinator_v3_upgrade_source(source)
-        _copy_coordinator_v3_source(source, candidate)
-        _upgrade_coordinator_candidate_database(source, candidate, killpoint)
-    _harden_owner_only(candidate, 0o600)
-    return validate_coordinator_v3_database(
-        candidate, state_root=candidate.parent.parent
-    )["row_counts"]
-
-
 def _reject_coordinator_source_alias(candidate: Path, source: Path) -> None:
     if candidate.absolute() == source.absolute():
         raise ValueError("coordinator v3 candidate and v2 source are the same file")
@@ -1978,6 +1787,64 @@ class TargetTooLargeError(ValueError):
     """A transaction target exceeds the authoritative target-size contract."""
 
 
+class TargetPathBoundaryError(ValueError):
+    """A requested path is not a containable target inside the vault."""
+
+
+class PreconditionChangedError(ValueError):
+    """A target changed between the caller's read and its prepare."""
+
+
+class TransactionImageError(RuntimeError):
+    """A staged plan or after-image is not the one that was prepared."""
+
+
+class TransactionStateError(RuntimeError):
+    """A transaction cannot be applied from the state it is in."""
+
+    def __init__(self, state: str):
+        super().__init__(f"transaction cannot be applied from state {state}")
+        self.state = state
+
+    def __reduce__(self):
+        """Carry the state across a process boundary, not just the text."""
+        return (self.__class__, (self.state,))
+
+
+class TargetStateMismatch(RuntimeError):
+    """A target's bytes are not the ones the transaction recorded for it."""
+
+    def __init__(self, state_name: str, path: str):
+        super().__init__(f"{state_name} state mismatch for {path}")
+        self.state_name = state_name
+        self.path = path
+
+    def __reduce__(self):
+        return (self.__class__, (self.state_name, self.path))
+
+
+class RefusedOperation(RuntimeError):
+    """A refusal the CLI reports by its own code, never by its wording."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+    def __reduce__(self):
+        return (self.__class__, (str(self), self.code))
+
+
+class RefusedArgument(ValueError):
+    """An argument refusal the CLI reports by its own code."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
+
+    def __reduce__(self):
+        return (self.__class__, (str(self), self.code))
+
+
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _CLAIM_TARGET_FIELDS = {
     "page",
@@ -2286,10 +2153,71 @@ def _required_state_hash(value: object) -> str:
     return value
 
 
-def _preparing_owner_alive(selected_state: str, owner_pid: object) -> bool:
-    if selected_state != "preparing" or owner_pid is None:
+def _recovery_still_concerns(row: sqlite3.Row, cutoff: datetime) -> bool:
+    """Every unfinished row, and an aborted one only inside the undo window."""
+    if row["state"] != "aborted":
+        return True
+    return _parse_timestamp(row["updated_at"]) >= cutoff
+
+
+# A process number is handed out again after its process ends, so the writer of a
+# `preparing` row is named by its number and its start together. The coordinator
+# schema is compared text for text and pinned in the adoption record, so the start
+# identity lives beside the attempt's other evidence instead of in a column. See
+# `docs/research/2026-09-17-the-writer-of-an-unfinished-attempt-is-named-by-its-start.md`.
+_PREPARER_RECORD = "owner.json"
+_MAX_PREPARER_RECORD_BYTES = 4096
+
+
+def _preparer_record_bytes() -> bytes | None:
+    """This process's number and start; None where the platform names no start."""
+    from operational_ownership import (
+        OperationalOwnershipError,
+        current_process_identity,
+    )
+
+    try:
+        identity = current_process_identity()
+    except OperationalOwnershipError:
+        return None
+    return canonical_json_bytes(
+        {"pid": identity.pid, "start_identity": identity.start_identity}
+    )
+
+
+def _recorded_preparer(artifact_root: Path) -> tuple[int, str] | None:
+    """The writer an attempt recorded; None for a row older than the record."""
+    try:
+        with open(artifact_root / _PREPARER_RECORD, "rb") as handle:
+            raw = handle.read(_MAX_PREPARER_RECORD_BYTES + 1)
+        value = json.loads(raw)
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    pid, start = value.get("pid"), value.get("start_identity")
+    if not _preparer_fields_valid(pid, start):
+        return None
+    return pid, start
+
+
+def _preparer_fields_valid(pid: object, start: object) -> bool:
+    if type(pid) is not int or not isinstance(start, str):
         return False
-    return _pid_alive(owner_pid)
+    return start.isascii() and 0 < len(start) <= 512
+
+
+def _preparer_alive(artifact_root: Path, owner_pid: object) -> bool:
+    """Whether the process that wrote a `preparing` row still runs; doubt is alive."""
+    if owner_pid is None:
+        return False
+    recorded = _recorded_preparer(artifact_root)
+    if recorded is None or recorded[0] != owner_pid:
+        return _pid_alive(owner_pid)
+    from operational_ownership import ProcessIdentity, process_identity_state
+
+    identity = ProcessIdentity(pid=recorded[0], start_identity=recorded[1])
+    return process_identity_state(identity) != "dead"
 
 
 # Every write stores a full copy of the target before and a full copy after, and
@@ -2400,7 +2328,7 @@ def _require_change_precondition(
 ) -> None:
     expected_before = persisted_preconditions.get(change.path)
     if expected_before is not None and expected_before != before_hash:
-        raise ValueError(
+        raise PreconditionChangedError(
             f"target precondition changed before prepare: {change.path}"
         )
 
@@ -2553,22 +2481,32 @@ def _retry_gate_or_fail(
 
 
 def _is_target_boundary_error(error: BaseException) -> bool:
-    if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
-        return True
-    message = str(error).casefold()
-    return any(
-        marker in message
-        for marker in (
-            "parent identity",
-            "parent does not exist",
-            "reparse point",
-            "traverses a symlink",
-            "non-canonical parent",
-            "outside the vault",
-            "escapes the vault",
-            "stable directory",
-        )
+    """A containment failure is named by its type; a bare ENOENT is not one.
+
+    See `docs/research/2026-09-18-a-boundary-failure-is-a-type-not-a-phrase.md`.
+    """
+    return isinstance(error, (TargetBoundaryFailure, TargetPathBoundaryError))
+
+
+_BOUNDARY_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def _as_parent_boundary_failure(parent: Path, exc: OSError) -> TargetBoundaryFailure:
+    """The parent is gone, is not a directory, or is now a link."""
+    if exc.errno not in _BOUNDARY_ERRNOS:
+        raise exc
+    return TargetBoundaryFailure(
+        f"parent identity is not a stable directory: {parent}"
     )
+
+
+def _open_parent_directory(parent: Path) -> int:
+    """A descriptor on the parent itself, never on what a link points at."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(parent, flags)
+    except OSError as exc:
+        raise _as_parent_boundary_failure(parent, exc) from exc
 
 
 def _require_bytes(content: bytes) -> bytes:
@@ -2603,8 +2541,9 @@ def _before_state(root: Path, transaction_id: str, row: sqlite3.Row) -> object:
         return ABSENT
     content = _image_bytes(_before_artifact(root, transaction_id, row["position"]))
     if sha256_bytes(content) != row["before_hash"]:
-        raise RuntimeError(
-            f"transaction before-image is corrupt for {row['path']}"
+        raise RefusedOperation(
+            f"transaction before-image is corrupt for {row['path']}",
+            "before_image_corrupt",
         )
     return {
         "sha256": row["before_hash"],
@@ -2999,13 +2938,20 @@ def _dlp_code(exc: Exception) -> str:
     return "dlp_content_blocked"
 
 
-def _conflicted_failure(message: str) -> TransactionFailure | None:
+_CONFLICTED_STATE_CODES = {
+    "after": "unknown_target_bytes",
+    "before": "before_hash_mismatch",
+}
+
+
+def _conflicted_failure(error: BaseException) -> TransactionFailure | None:
     """The two mismatches a caller can act on; anything else is not ours to name."""
-    if "after state mismatch" in message:
-        return TransactionFailure(message, "unknown_target_bytes", "conflicted")
-    if "before state mismatch" in message:
-        return TransactionFailure(message, "before_hash_mismatch", "conflicted")
-    return None
+    if not isinstance(error, TargetStateMismatch):
+        return None
+    code = _CONFLICTED_STATE_CODES.get(error.state_name)
+    if code is None:
+        return None
+    return TransactionFailure(str(error), code, "conflicted")
 
 
 def _abort_receipt_matches(
@@ -3074,7 +3020,7 @@ def _link_or_replace(
             follow_symlinks=False,
         )
     except FileExistsError as exc:
-        raise RuntimeError(f"before state mismatch for {path}") from exc
+        raise TargetStateMismatch("before", str(path)) from exc
     os.unlink(temporary_name, dir_fd=parent_descriptor)
 
 
@@ -3224,7 +3170,7 @@ def _deletion_blocker_code(row: sqlite3.Row, now: datetime) -> str | None:
 def _within_undo_retention(row: sqlite3.Row, now: datetime) -> bool:
     if row["state"] != "committed" or row["artifacts_pruned_at"] is not None:
         return False
-    return _parse_timestamp(row["updated_at"]) >= now - timedelta(days=30)
+    return _parse_timestamp(row["updated_at"]) >= now - timedelta(days=UNDO_RETENTION_DAYS)
 
 
 def _require_same_lease_fence(
@@ -3251,6 +3197,25 @@ def _promotion_plan(
     )
 
 
+def _remove_temporary_publication(temporary: Path) -> None:
+    """Whatever happened, no half-written page is left beside the real one.
+
+    A publish that succeeded has already moved the file, so this is a no-op
+    there, and a failure to remove never replaces the error on its way up. See
+    `docs/research/2026-09-18-nothing-half-written-is-left-behind.md`.
+    """
+    with contextlib.suppress(OSError):
+        temporary.unlink(missing_ok=True)
+
+
+_STAGED_PRUNE_MARK = ".pruning-"
+
+
+def _staged_prune_owner(name: str) -> str:
+    """`.<id>.pruning-<uuid>` names the transaction whose images it holds."""
+    return name[1 : name.rindex(_STAGED_PRUNE_MARK)]
+
+
 def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
     # The floor is the undo window itself, not a literal. It was 30 because the
     # contract promised point-undo of any committed write for a month; the owner
@@ -3258,8 +3223,9 @@ def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
     # machine, which is what every database does with undo data and what no
     # database does is keep it for a month.
     if retention_days < UNDO_RETENTION_DAYS:
-        raise ValueError(
-            f"retention_days must be at least {UNDO_RETENTION_DAYS}"
+        raise RefusedArgument(
+            f"retention_days must be at least {UNDO_RETENTION_DAYS}",
+            "retention_too_short",
         )
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -3600,7 +3566,9 @@ def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:
     try:
         relative = absolute.relative_to(coordinator.vault).as_posix()
     except ValueError as exc:
-        raise ValueError(f"knowledge target is outside the vault: {path}") from exc
+        raise TargetPathBoundaryError(
+            f"knowledge target is outside the vault: {path}"
+        ) from exc
     coordinator.ensure_target_parent(relative)
     return relative
 
@@ -3746,9 +3714,7 @@ def _prepare_or_recover(
             validators=validators,
             preconditions=expected,
         )
-    except ValueError as exc:
-        if "operation_id is already bound" not in str(exc):
-            raise
+    except OperationBoundElsewhereError as exc:
         return _recovered_duplicate(coordinator, operation_id, relative_changes, exc)
     return None
 
@@ -3881,10 +3847,9 @@ def _apply_or_reread_terminal(
 ) -> TransactionRecord:
     try:
         return coordinator.apply(record.id, deadline=deadline, cancelled=cancelled)
-    except RuntimeError as exc:
+    except TransactionStateError as exc:
         current = coordinator._record(record.id)
-        message = f"transaction cannot be applied from state {current.state}"
-        if str(exc) != message or current.state in {"prepared", "applying"}:
+        if exc.state != current.state or current.state in {"prepared", "applying"}:
             raise
         return current
 
@@ -3892,14 +3857,14 @@ def _apply_or_reread_terminal(
 def _preparer_is_alive(coordinator: MarkdownCoordinator, operation_id: str) -> bool:
     with coordinator._connect() as database:
         owner = database.execute(
-            'SELECT owner_pid FROM "transaction" WHERE operation_id = ?',
+            'SELECT id, owner_pid FROM "transaction" WHERE operation_id = ?',
             (operation_id,),
         ).fetchone()
     if owner is None:
         return False
-    if owner["owner_pid"] is None:
-        return False
-    return _pid_alive(owner["owner_pid"])
+    return _preparer_alive(
+        coordinator.transaction_root / owner["id"], owner["owner_pid"]
+    )
 
 
 def _recover_abandoned_preparation(
@@ -4075,20 +4040,59 @@ def _classify_settled_append(
 ) -> _AppendAttemptResult:
     if record is None:
         return "retry"
+    if _nothing_to_compare(coordinator, record):
+        return "advance"
+    return _classify_comparable_append(coordinator, record, relative, block)
+
+
+def _nothing_to_compare(
+    coordinator: MarkdownCoordinator, record: TransactionRecord
+) -> bool:
+    """A record that cannot prove a duplicate: the next candidate id carries the write.
+
+    Either its images are gone with the undo window, or it was recovered before it
+    planned anything (its writer died inside `prepare`) and so wrote nothing.
+    """
+    if not record.operations:
+        return True
+    return coordinator._artifacts_pruned(record.id)
+
+
+def _classify_comparable_append(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord,
+    relative: str,
+    block: bytes,
+) -> _AppendAttemptResult:
+    """A record whose images still exist: the same request, or a different one."""
     if not _append_request_matches(coordinator, record, relative, block):
         raise OperationBoundElsewhereError("operation_id is already bound to a different request")
-    return record if record.state == "committed" else "advance"
+    if record.state != "committed":
+        return "advance"
+    return _committed_append_or_rewrite(coordinator, record, relative)
+
+
+def _committed_append_or_rewrite(
+    coordinator: MarkdownCoordinator, record: TransactionRecord, relative: str
+) -> _AppendAttemptResult:
+    """The earlier append still stands, unless its target is no longer there.
+
+    A committed record used to be answered with `committed` whatever had become
+    of the file, so append, delete, append said "written" over a file that did
+    not exist. A target that is gone took the block with it, so the next
+    candidate id writes again. Bytes that merely changed are not checked: a
+    daily log grows under every other writer, and that is not this block's
+    disappearance. See
+    `docs/research/2026-09-18-a-committed-append-still-needs-its-file.md`.
+    """
+    if coordinator._current_hash(relative) != ABSENT:
+        return record
+    return "advance"
 
 
 def _append_transaction_failure(error: TransactionFailure) -> Literal["advance"]:
     retryable = {"before_hash_mismatch", "unknown_target_bytes", "precondition_failed"}
     if error.code not in retryable:
-        raise error
-    return "advance"
-
-
-def _append_runtime_failure(error: RuntimeError) -> Literal["advance"]:
-    if "transaction cannot be applied from state" not in str(error):
         raise error
     return "advance"
 
@@ -4108,8 +4112,9 @@ def _settle_append_candidate(
         )
     except TransactionFailure as exc:
         return _append_transaction_failure(exc)
-    except RuntimeError as exc:
-        return _append_runtime_failure(exc)
+    except TransactionStateError:
+        # The candidate settled somewhere else; this id is spent, the next writes.
+        return "advance"
     except TimeoutError:
         return "retry"
     return _classify_settled_append(coordinator, record, relative, block)
@@ -4125,7 +4130,7 @@ def _append_value_failure(
     deadline: float,
     cancelled: Callable[[], bool] | None,
 ) -> _AppendAttemptResult:
-    if "operation_id is already bound" in str(error):
+    if isinstance(error, OperationBoundElsewhereError):
         return _settle_append_candidate(
             coordinator,
             candidate_id,
@@ -4134,7 +4139,7 @@ def _append_value_failure(
             deadline=deadline,
             cancelled=cancelled,
         )
-    if "precondition changed" in str(error):
+    if isinstance(error, PreconditionChangedError):
         return "retry"
     raise error
 
@@ -4165,8 +4170,11 @@ def _append_prepare_failure(
 
 
 def _append_other_failure(error: Exception) -> _AppendAttemptResult:
+    """A candidate that settled elsewhere is spent; a timeout is retried."""
+    if isinstance(error, TransactionStateError):
+        return "advance"
     if isinstance(error, RuntimeError):
-        return _append_runtime_failure(error)
+        raise error
     return "retry"
 
 
@@ -4276,6 +4284,29 @@ def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str 
     return record.id
 
 
+# How long an append may repeat one attempt without advancing before it gives up:
+# several full settle windows, so ordinary contention never reaches it. See
+# `docs/research/2026-09-17-a-transaction-that-is-over-stays-over.md`.
+_APPEND_STALL_SECONDS = 6 * _WRITER_WAIT_SECONDS
+
+
+class _AppendStall:
+    """The time an append has spent without advancing to a new attempt."""
+
+    def __init__(self, seconds: float) -> None:
+        self._seconds = seconds
+        self._since = time.monotonic()
+
+    def progressed(self) -> None:
+        self._since = time.monotonic()
+
+    def require_moving(self) -> None:
+        if time.monotonic() - self._since >= self._seconds:
+            raise TimeoutError(
+                "knowledge append stalled behind an attempt that never settled"
+            )
+
+
 def _append_until_committed(
     coordinator: MarkdownCoordinator,
     operation_id: str,
@@ -4286,10 +4317,16 @@ def _append_until_committed(
     content_guard: Literal["model_output"] | None = None,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    stall_seconds: float = _APPEND_STALL_SECONDS,
 ) -> TransactionRecord:
     attempt = 0
     parent: str | None = None
+    stall = _AppendStall(stall_seconds)
     while attempt < 64:
+        # `retry` repeats the same attempt, so the loop itself has to notice the
+        # caller's deadline and an attempt that never settles.
+        coordinator._require_operation_active(deadline, cancelled)
+        stall.require_moving()
         candidate_id = _append_candidate_id(operation_id, attempt)
         outcome = _run_append_candidate(
             coordinator,
@@ -4307,6 +4344,7 @@ def _append_until_committed(
         if outcome == "advance":
             parent = _refused_parent(coordinator, candidate_id) or parent
             attempt += 1
+            stall.progressed()
     raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
 
 
@@ -4418,9 +4456,11 @@ def _pid_alive(pid: int) -> bool:
 def _traversable_target(current: Path, value: str) -> bool:
     """False once the walk reaches a path that does not exist yet."""
     if current.is_symlink():
-        raise ValueError(f"target traverses a symlink: {value}")
+        raise TargetPathBoundaryError(f"target traverses a symlink: {value}")
     if _is_reparse_point(current):
-        raise ValueError(f"target traverses a Windows reparse point: {value}")
+        raise TargetPathBoundaryError(
+            f"target traverses a Windows reparse point: {value}"
+        )
     return current.exists()
 
 
@@ -4518,17 +4558,55 @@ def _harden_windows_acl(path: Path) -> None:
     identity = _windows_acl_identity()
     permission = _acl_permission(path, identity)
     verified = _apply_windows_acl(path, permission)
-    output = _acl_output_text(verified.stdout)
-    acl_lines = [line.strip() for line in output.splitlines() if ":(" in line]
+    acl_lines = _acl_lines_naming(verified.stdout, identity)
     owner_lines = [line for line in acl_lines if identity.casefold() in line.casefold()]
     _verified_owner_acl_line(path, owner_lines)
     _verify_no_other_acl(path, acl_lines, identity)
 
 
-def _acl_output_text(value: bytes | str | None) -> str:
+def _console_code_page() -> tuple[str, ...]:
+    """The console's output code page as a codec, when there is a console and a codec."""
+    name = f"cp{_windows_kernel32().GetConsoleOutputCP()}"
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return ()
+    return (name,)
+
+
+def _acl_output_encodings() -> tuple[str, ...]:
+    """The code pages `icacls` may have written its pipe in, most likely first.
+
+    No API reports which one it used, and a user name need not be ASCII. See
+    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
+    """
+    if sys.platform != "win32":  # the `oem` and `mbcs` codecs exist on Windows only
+        return ("utf-8",)
+    return tuple(dict.fromkeys((*_console_code_page(), "oem", "mbcs")))
+
+
+def _acl_output_text(value: bytes | str | None, encoding: str | None = None) -> str:
     if isinstance(value, bytes):
-        return value.decode("ascii", errors="ignore")
+        return value.decode(encoding or _acl_output_encodings()[0], errors="replace")
     return value or ""
+
+
+def _acl_entry_lines(output: str) -> list[str]:
+    return [line.strip() for line in output.splitlines() if ":(" in line]
+
+
+def _names_identity(acl_lines: list[str], identity: str) -> bool:
+    return any(identity.casefold() in line.casefold() for line in acl_lines)
+
+
+def _acl_lines_naming(stdout: bytes | str | None, identity: str) -> list[str]:
+    """The ACL entries, read under the first code page in which the owner is named."""
+    readings = [
+        _acl_entry_lines(_acl_output_text(stdout, encoding))
+        for encoding in _acl_output_encodings()
+    ]
+    named = [lines for lines in readings if _names_identity(lines, identity)]
+    return (named or readings)[0]
 
 
 def _harden_owner_only(path: Path, mode: int) -> None:
@@ -4557,9 +4635,54 @@ class _WindowsDispositionInformation(ctypes.Structure):
     _fields_ = [("delete_file", wintypes.BOOL)]
 
 
+_WINDOWS_KERNEL32_PROTOTYPES = (
+    (
+        "CreateFileW",
+        wintypes.HANDLE,
+        (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ),
+    ),
+    ("CloseHandle", wintypes.BOOL, (wintypes.HANDLE,)),
+    (
+        "GetFileInformationByHandle",
+        wintypes.BOOL,
+        (wintypes.HANDLE, ctypes.POINTER(_WindowsFileInformation)),
+    ),
+    (
+        "SetFileInformationByHandle",
+        wintypes.BOOL,
+        (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD),
+    ),
+    ("GetConsoleOutputCP", wintypes.UINT, ()),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_kernel32():
+    """kernel32 with its last error kept by ctypes and every handle at full width.
+
+    `ctypes.windll` keeps no last error and returns a C int, so a sharing
+    violation read as 0 and an invalid 64-bit handle went unnoticed. See
+    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    for name, restype, argtypes in _WINDOWS_KERNEL32_PROTOTYPES:
+        function = getattr(kernel32, name)
+        function.restype = restype
+        function.argtypes = argtypes
+    return kernel32
+
+
 def _require_windows_directory_identity(handle: int, path: Path) -> None:
     """Refuse a handle that cannot be identified or that is a reparse point."""
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     information = _WindowsFileInformation()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         error = ctypes.get_last_error()
@@ -4567,21 +4690,13 @@ def _require_windows_directory_identity(handle: int, path: Path) -> None:
         raise OSError(error, f"cannot identify Windows directory: {path}")
     if information.file_attributes & 0x400:
         kernel32.CloseHandle(handle)
-        raise RuntimeError(f"Windows directory handle resolves to a reparse point: {path}")
+        raise TargetBoundaryFailure(
+            f"Windows directory handle resolves to a reparse point: {path}"
+        )
 
 
 def _open_windows_directory(path: Path) -> int:
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateFileW.argtypes = (
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    )
-    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32 = _windows_kernel32()
     file_read_attributes = 0x80
     file_share_read = 0x1
     file_share_write = 0x2
@@ -4599,18 +4714,32 @@ def _open_windows_directory(path: Path) -> int:
     )
     invalid_handle = ctypes.c_void_p(-1).value
     if handle == invalid_handle:
-        raise OSError(ctypes.get_last_error(), f"cannot lock Windows directory: {path}")
+        raise _windows_directory_failure(path, ctypes.get_last_error())
     _require_windows_directory_identity(handle, path)
     return handle
 
 
+# ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_DIRECTORY: the three ways
+# Windows says the parent this transaction prepared against is not there any more.
+_WINDOWS_BOUNDARY_ERRORS = frozenset({2, 3, 267})
+
+
+def _windows_directory_failure(path: Path, code: int) -> BaseException:
+    """The boundary failure, or the raw error that is nobody's to name here."""
+    if code in _WINDOWS_BOUNDARY_ERRORS:
+        return TargetBoundaryFailure(
+            f"parent identity is not a stable directory: {path}"
+        )
+    return OSError(code, f"cannot lock Windows directory: {path}")
+
+
 def _close_windows_handle(handle: int) -> None:
-    if not ctypes.windll.kernel32.CloseHandle(handle):
+    if not _windows_kernel32().CloseHandle(handle):
         raise OSError(ctypes.get_last_error(), "cannot close Windows directory handle")
 
 
 def _open_windows_file_for_mutation(path: Path) -> int:
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     generic_read = 0x80000000
     delete_access = 0x00010000
     share_read = 0x1
@@ -4634,14 +4763,14 @@ def _open_windows_file_for_mutation(path: Path) -> int:
 def _delete_windows_handle(file_handle: int) -> None:
     information = _WindowsDispositionInformation(True)
     file_disposition_info = 4
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _windows_kernel32()
     if not kernel32.SetFileInformationByHandle(
         file_handle,
         file_disposition_info,
         ctypes.byref(information),
         ctypes.sizeof(information),
     ):
-        raise OSError(kernel32.GetLastError(), "cannot delete Windows target")
+        raise OSError(ctypes.get_last_error(), "cannot delete Windows target")
 
 
 class MarkdownCoordinator:
@@ -5038,7 +5167,7 @@ class MarkdownCoordinator:
         one, and refused: `operation_id is already bound to a different
         request`, permanently.
 
-        Measured on this vault 2026-08-30: `fix-pip` sequence 320 sat
+        Measured on this vault 2026-08-30: one project's sequence 320 sat
         `reserved` with a NULL transaction while a `discarded` transaction held
         its operation id. That single row had been refusing every checkpoint for
         that project since 08-28 — 366 log lines — and it also stopped the
@@ -5085,10 +5214,12 @@ class MarkdownCoordinator:
         it is not changed here.
 
         This exposes the same step for the one case where that door is walled
-        up: a row whose name no request can produce any more. It is used by the
-        explicit one-time repair after the 2026-08-30 rename of batch
-        identities, and by nothing else. The caller must already hold the
-        project lease.
+        up: a row whose name no request can produce any more. It has three
+        callers: the one-time repair after the 2026-08-30 rename of batch
+        identities (`repair_orphaned_checkpoint_names`), the journal-gap repair
+        (`repair_journal_gap`), and the project journal's own replay when the
+        files moved under a reservation (`_replayed_after_rebinding`). The
+        caller must already hold the project lease.
 
         `include_committed` is for the one repair that needs it: a sequence
         this database calls committed while the journal does not hold it. The
@@ -5404,6 +5535,7 @@ class MarkdownCoordinator:
             self._require_operation_active(deadline, cancelled)
             artifact_root.mkdir(parents=True)
             _harden_owner_only(artifact_root, 0o700)
+            self._record_preparer(artifact_root)
             before_root.mkdir()
             after_root.mkdir()
             if os.name != "nt":
@@ -5413,6 +5545,14 @@ class MarkdownCoordinator:
             self._remove_artifacts(artifact_root)
             raise
         return _ArtifactRoots(artifact_root, before_root, after_root)
+
+    def _record_preparer(self, artifact_root: Path) -> None:
+        """Name this writer durably before its `preparing` row can exist."""
+        record = _preparer_record_bytes()
+        if record is None:
+            return
+        self._write_new_file(artifact_root / _PREPARER_RECORD, record)
+        fsync_directory(artifact_root)
 
     def _insert_preparing_row(
         self,
@@ -5455,11 +5595,11 @@ class MarkdownCoordinator:
             self._remove_artifacts(artifact_root)
             existing = self._record_for_operation_id(operation_id)
             if existing is None:
-                raise ValueError(
+                raise OperationBoundElsewhereError(
                     "operation_id is already bound to a different request"
                 ) from None
             if self._request_hash_for_operation_id(operation_id) != request_hash:
-                raise ValueError(
+                raise OperationBoundElsewhereError(
                     "operation_id is already bound to a different request"
                 ) from None
             return existing
@@ -5902,7 +6042,7 @@ class MarkdownCoordinator:
             except TransactionFailure as exc:
                 self._record_transaction_failure(transaction_id, exc)
                 raise
-            except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            except (RuntimeError, ValueError) as exc:
                 self._translate_apply_error(transaction_id, exc)
             finally:
                 self._leave_recovery_scope(previous)
@@ -5957,13 +6097,12 @@ class MarkdownCoordinator:
     def _translate_apply_error(self, transaction_id: str, exc: Exception) -> None:
         """Name what went wrong, or re-raise what this layer cannot name."""
         self._require_named_target_boundary(transaction_id, exc)
-        message = str(exc)
-        if "after-image is corrupt" in message or "plan hash mismatch" in message:
+        if isinstance(exc, TransactionImageError):
             recovered = self._recover_corrupt_after_image(transaction_id)
             raise TransactionFailure(
-                message, "after_image_corrupt", recovered.state
+                str(exc), "after_image_corrupt", recovered.state
             ) from exc
-        failure = _conflicted_failure(message)
+        failure = _conflicted_failure(exc)
         if failure is None:
             raise
         self._set_transaction_state(
@@ -5975,9 +6114,7 @@ class MarkdownCoordinator:
     def _require_applicable_state(record: TransactionRecord) -> None:
         """Only a prepared or half-applied transaction may still be applied."""
         if record.state not in {"prepared", "applying"}:
-            raise RuntimeError(
-                f"transaction cannot be applied from state {record.state}"
-            )
+            raise TransactionStateError(record.state)
 
     def _apply_locked(self, transaction_id: str) -> TransactionRecord:
         record = self._record(transaction_id)
@@ -6024,7 +6161,7 @@ class MarkdownCoordinator:
         content_guard: object,
     ) -> None:
         if row["applied"]:
-            self._require_operation_state(row, row["after_hash"], "after state")
+            self._require_operation_state(row, row["after_hash"], "after")
             return
         self._mutate_and_mark(
             record.id, row, operation_plan, content_guard=content_guard
@@ -6033,7 +6170,7 @@ class MarkdownCoordinator:
 
     def _require_all_after_state(self, transaction_id: str) -> None:
         for row in self._operation_rows(transaction_id):
-            self._require_operation_state(row, row["after_hash"], "after state")
+            self._require_operation_state(row, row["after_hash"], "after")
 
     def _mark_transaction_state(self, transaction_id: str, state: str) -> None:
         self._require_current_operation_active()
@@ -6086,8 +6223,41 @@ class MarkdownCoordinator:
         content_guard: object,
     ) -> None:
         """Every project target moves inside the database transaction that
-        commits its checkpoint, so a failure rewinds both together."""
+        commits its checkpoint, so a failure rewinds both together.
+
+        The restore is outside the lock because the commit itself can fail: the
+        caller's deadline lands in `before_commit`, which runs as the lock exits.
+        See `docs/research/2026-09-18-the-restore-covers-the-commit-too.md`.
+        """
         changed: list[sqlite3.Row] = []
+        try:
+            self._commit_project_under_lock(
+                record, plan, rows, operation_states, content_guard, changed
+            )
+        except BaseException:
+            with self._uncancellable():
+                self._restore_inflight_operations(record.id, changed)
+            raise
+
+    @contextlib.contextmanager
+    def _uncancellable(self) -> Iterator[None]:
+        """Compensation runs to the end; the deadline that stopped the write
+        must not also stop the undo and leave the vault half-written."""
+        previous = self._enter_recovery_scope(float("inf"), None)
+        try:
+            yield
+        finally:
+            self._leave_recovery_scope(previous)
+
+    def _commit_project_under_lock(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+        content_guard: object,
+        changed: list[sqlite3.Row],
+    ) -> None:
         with self._connect() as database, begin_immediate(
             database, before_commit=self._require_current_operation_active
         ):
@@ -6105,9 +6275,6 @@ class MarkdownCoordinator:
                 self._commit_project_checkpoint(
                     database, record, rows, operation_states
                 )
-            except BaseException:
-                self._restore_inflight_operations(record.id, changed)
-                raise
             finally:
                 self._local.mutation_database = None
 
@@ -6146,7 +6313,7 @@ class MarkdownCoordinator:
     ) -> bool:
         """True when this call moved the target; False when it was already applied."""
         if row["applied"]:
-            self._require_operation_state(row, row["after_hash"], "after state")
+            self._require_operation_state(row, row["after_hash"], "after")
             return False
         assert isinstance(operation_plan, Mapping)
         self._mutate_and_mark(
@@ -6167,7 +6334,7 @@ class MarkdownCoordinator:
             record.preconditions, operation_states, database=database
         )
         for row in rows:
-            self._require_operation_state(row, row["after_hash"], "after state")
+            self._require_operation_state(row, row["after_hash"], "after")
         self._killpoint("before_commit", record.parent_transaction_id)
         self._require_current_operation_active()
         self._check_preconditions(
@@ -6203,7 +6370,7 @@ class MarkdownCoordinator:
                 after_hash=row["before_hash"],
             )
             self._apply_operation(inverse, {"after": before_state})
-            self._require_operation_state(inverse, row["before_hash"], "restored state")
+            self._require_operation_state(inverse, row["before_hash"], "restored")
 
     def _abort_before_manifest(self, transaction_id: str) -> list[dict[str, object]]:
         manifest = [
@@ -6343,7 +6510,7 @@ class MarkdownCoordinator:
         )
         self._apply_operation(inverse, {"after": before_state})
         self._require_operation_state(
-            inverse, operation["before_hash"], "restored state"
+            inverse, operation["before_hash"], "restored"
         )
         self._killpoint("after_each_abort_target")
 
@@ -6535,21 +6702,29 @@ class MarkdownCoordinator:
         )
 
     def _incomplete_transaction_rows(self, max_transactions: int | None) -> list[tuple]:
+        """Work that can still move goes first; a fresh abort is checked last.
+
+        An `aborted` row is terminal. It is looked at only while it has no
+        verdict and the undo window is open — the time a crash around its
+        receipt can still matter — so old aborts neither cost every `prepare`
+        nor use up a bounded caller's budget ahead of a crashed `applying` row.
+        See `docs/research/2026-09-17-a-transaction-that-is-over-stays-over.md`.
+        """
         query = (
-            'SELECT id, state, owner_pid FROM "transaction" '
-            "WHERE state IN ('aborting','aborted','preparing','prepared','applying') "
-            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 1 ELSE 2 END, "
+            'SELECT id, state, owner_pid, updated_at FROM "transaction" '
+            "WHERE state IN ('aborting','preparing','prepared','applying') "
+            "OR (state = 'aborted' AND error_code IS NULL) "
+            "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 2 ELSE 1 END, "
             "created_at, id"
         )
-        parameters: tuple[object, ...] = ()
-        if max_transactions is not None:
-            query += " LIMIT ?"
-            parameters = (max_transactions,)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=UNDO_RETENTION_DAYS)
         with self._connect() as database:
-            return [
+            selected = [
                 (row["id"], row["state"], row["owner_pid"])
-                for row in database.execute(query, parameters)
+                for row in database.execute(query)
+                if _recovery_still_concerns(row, cutoff)
             ]
+        return selected if max_transactions is None else selected[:max_transactions]
 
     def _quarantine_dlp(self, transaction_id: str, exc: BaseException) -> None:
         code = "dlp_content_blocked"
@@ -6578,30 +6753,36 @@ class MarkdownCoordinator:
             return "before_hash_mismatch"
         return "unknown_target_bytes"
 
-    def _conflicted_from_message(
-        self, transaction_id: str, exc: BaseException, message: str
+    def _conflicted_from_mismatch(
+        self, transaction_id: str, exc: BaseException
     ) -> TransactionRecord:
-        if "before state mismatch" in message:
-            return self._conflicted(
-                transaction_id, self._before_mismatch_code(transaction_id)
-            )
-        if "after state mismatch" in message:
-            return self._conflicted(transaction_id, "unknown_target_bytes")
-        raise exc
+        code = self._mismatch_conflict_code(transaction_id, exc)
+        if code is None:
+            raise exc
+        return self._conflicted(transaction_id, code)
 
-    def _recovered_from_message(
+    def _mismatch_conflict_code(
+        self, transaction_id: str, exc: BaseException
+    ) -> str | None:
+        """The conflict this mismatch settles as, or None when it is not ours."""
+        if not isinstance(exc, TargetStateMismatch):
+            return None
+        if exc.state_name == "before":
+            return self._before_mismatch_code(transaction_id)
+        return _CONFLICTED_STATE_CODES.get(exc.state_name)
+
+    def _recovered_from_failure(
         self, transaction_id: str, exc: BaseException
     ) -> TransactionRecord:
         """Turn a known apply failure into the state it should settle in."""
-        message = str(exc)
         if _is_target_boundary_error(exc):
             self._set_transaction_state(
                 transaction_id, "quarantined", error_code="parent_identity_changed"
             )
             return self._record(transaction_id)
-        if "after-image is corrupt" in message or "plan hash mismatch" in message:
+        if isinstance(exc, TransactionImageError):
             return self._recover_corrupt_after_image(transaction_id)
-        return self._conflicted_from_message(transaction_id, exc, message)
+        return self._conflicted_from_mismatch(transaction_id, exc)
 
     def _apply_recovered(
         self, transaction_id: str, recovered: list[TransactionRecord]
@@ -6614,8 +6795,8 @@ class MarkdownCoordinator:
         except TransactionFailure as exc:
             self._settle_transaction_failure(transaction_id, exc)
             recovered.append(self._record(transaction_id))
-        except (FileNotFoundError, RuntimeError, ValueError) as exc:
-            recovered.append(self._recovered_from_message(transaction_id, exc))
+        except (RuntimeError, ValueError) as exc:
+            recovered.append(self._recovered_from_failure(transaction_id, exc))
 
     def _promoted_for_recovery(
         self, transaction_id: str, recovered: list[TransactionRecord]
@@ -6661,6 +6842,13 @@ class MarkdownCoordinator:
             return True
         return False
 
+    def _preparing_writer_alive(
+        self, transaction_id: str, selected_state: str, owner_pid: object
+    ) -> bool:
+        if selected_state != "preparing":
+            return False
+        return _preparer_alive(self.transaction_root / transaction_id, owner_pid)
+
     def _recover_one(
         self,
         transaction_id: str,
@@ -6672,11 +6860,15 @@ class MarkdownCoordinator:
             transaction_id, selected_state, recovered
         ):
             return
-        if _preparing_owner_alive(
-            selected_state, owner_pid
-        ) or not self._promoted_for_recovery(transaction_id, recovered):
+        if self._preparing_writer_alive(transaction_id, selected_state, owner_pid):
             return
-        self._apply_recovered(transaction_id, recovered)
+        self._promote_and_apply(transaction_id, recovered)
+
+    def _promote_and_apply(
+        self, transaction_id: str, recovered: list[TransactionRecord]
+    ) -> None:
+        if self._promoted_for_recovery(transaction_id, recovered):
+            self._apply_recovered(transaction_id, recovered)
 
     def _recover_selected(
         self,
@@ -6750,7 +6942,7 @@ class MarkdownCoordinator:
         )
         self._apply_operation(inverse, {"after": before_state})
         self._require_operation_state(
-            inverse, operation["before_hash"], "restored state"
+            inverse, operation["before_hash"], "restored"
         )
         return None
 
@@ -6780,15 +6972,9 @@ class MarkdownCoordinator:
             )
         except (OSError, TypeError, ValueError):
             return False
-        return _abort_receipt_matches(
-            receipt, receipt_bytes, transaction_id, row
-        ) and self._targets_hold_before_state(transaction_id)
-
-    def _targets_hold_before_state(self, transaction_id: str) -> bool:
-        return all(
-            self._operation_hash(operation) == operation["before_hash"]
-            for operation in self._operation_rows(transaction_id)
-        )
+        # Whether the targets still hold their before-state is not asked: that
+        # was true when the abort finished, and any later write makes it false.
+        return _abort_receipt_matches(receipt, receipt_bytes, transaction_id, row)
 
     @staticmethod
     def _recovery_stopped(
@@ -7065,10 +7251,11 @@ class MarkdownCoordinator:
         return _required_state_hash(state["sha256"])
 
     def _rollback_for_quarantine(self, transaction_id: str, error_code: str) -> None:
+        """The undo runs to the end: the deadline that stopped the write must
+        not also stop the rollback and leave the vault half-written."""
         try:
-            for row in self._operation_rows(transaction_id):
-                if row["applied"]:
-                    self._rollback_one_operation(transaction_id, row)
+            with self._uncancellable():
+                self._rollback_applied_operations(transaction_id)
         except _TargetBoundaryChanged:
             self._set_transaction_state(
                 transaction_id, "quarantined", error_code="parent_identity_changed"
@@ -7077,6 +7264,11 @@ class MarkdownCoordinator:
         self._set_transaction_state(
             transaction_id, "quarantined", error_code=error_code
         )
+
+    def _rollback_applied_operations(self, transaction_id: str) -> None:
+        for row in self._operation_rows(transaction_id):
+            if row["applied"]:
+                self._rollback_one_operation(transaction_id, row)
 
     def _rollback_one_operation(self, transaction_id: str, row: sqlite3.Row) -> None:
         """An operation that cannot be rolled back is left as it stands."""
@@ -7267,11 +7459,33 @@ class MarkdownCoordinator:
         cutoff = _prune_cutoff(retention_days, now)
         pruned = 0
         with self.writer_gate():
+            self._recover_interrupted_prunes()
             for row in self._prunable_rows():
                 self._require_operation_active(deadline, cancelled)
                 if _parse_timestamp(row["updated_at"]) < cutoff:
                     pruned += self._prune_one(row, deadline, cancelled)
         return pruned
+
+    def _recover_interrupted_prunes(self) -> None:
+        """Put back the images of every prune that died between rename and mark.
+
+        The writer gate is held, so no live prune can be mid-rename: a staged
+        directory here is the debris of a process that is gone, and nothing else
+        ever looks at it again. See
+        `docs/research/2026-09-18-nothing-half-written-is-left-behind.md`.
+        """
+        if not self.transaction_root.is_dir():
+            return
+        for staged in sorted(self.transaction_root.glob(".*.pruning-*")):
+            self._restore_staged_prune(staged)
+
+    def _restore_staged_prune(self, staged: Path) -> None:
+        """The images go back where the row still says they are; a live one wins."""
+        artifact_root = self.transaction_root / _staged_prune_owner(staged.name)
+        if artifact_root.exists():
+            self._remove_artifacts(staged)
+            return
+        staged.replace(artifact_root)
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
         with self._connect() as database:
@@ -7294,7 +7508,7 @@ class MarkdownCoordinator:
         if not artifact_root.exists():
             return 0
         staged_root = self.transaction_root / (
-            f".{row['id']}.pruning-{uuid.uuid4().hex}"
+            f".{row['id']}{_STAGED_PRUNE_MARK}{uuid.uuid4().hex}"
         )
         artifact_root.replace(staged_root)
         try:
@@ -7476,7 +7690,7 @@ class MarkdownCoordinator:
         wait_seconds: float | None = None,
     ) -> Iterator[OwnerLease]:
         if owner is not None:
-            yield from self._nested_writer_gate(owner)
+            yield from self._nested_writer_gate(owner, wait_seconds)
             return
         depth = getattr(self._local, "gate_depth", 0)
         if depth:
@@ -7550,7 +7764,7 @@ class MarkdownCoordinator:
         everybody, including the generation publication.
 
         Measured on the live vault 2026-08-28: one row for `gate_name`
-        `global`, canonical owner `project:fix-pip`, lease expired at
+        `global`, canonical owner `project:<one project>`, lease expired at
         20:50:21Z, pid 2095087 gone — and every generation pass since answered
         `sqlite3.IntegrityError: UNIQUE constraint failed:
         writer_owners.gate_name`, twice in a row on an otherwise idle machine.
@@ -7592,9 +7806,10 @@ class MarkdownCoordinator:
         stop: threading.Event,
         lost: threading.Event,
     ) -> threading.Thread:
+        # The gate is already taken; its expiry is counted from here.
         heartbeat = threading.Thread(
             target=self._heartbeat_canonical_writer_gate,
-            args=(registry, lease, stop, lost),
+            args=(registry, lease, stop, lost, time.monotonic()),
             name="markdown-writer-heartbeat",
             daemon=True,
         )
@@ -7673,6 +7888,7 @@ class MarkdownCoordinator:
         owner: OwnerLease,
         stop: threading.Event,
         lost: threading.Event,
+        held_since: float,
     ) -> None:
         """Renew the gate and its projection; a busy database is not a lost gate.
 
@@ -7685,6 +7901,7 @@ class MarkdownCoordinator:
             interval=owner.heartbeat_seconds,
             lease_seconds=owner.ttl_seconds,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
+            held_since=held_since,
             stop=stop,
         )
         if ended is not None:
@@ -7716,24 +7933,85 @@ class MarkdownCoordinator:
         if getattr(self, "_database_contract", None) != _COORDINATOR_V3_CONTRACT:
             raise RuntimeError("canonical writer projection requires a v3 coordinator")
 
-    def _nested_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
+    def _nested_writer_gate(
+        self, owner: OwnerLease, wait_seconds: float | None = None
+    ) -> Iterator[OwnerLease]:
         self._require_nested_gate_owner(owner)
+        _require_wait_seconds(wait_seconds)
         if getattr(self._local, "gate_depth", 0):
             yield from self._reentered_writer_gate(owner)
             return
 
-        registry = self._ownership_registry()
-        with self._connect() as database, begin_immediate(database):
-            registry.require(database, owner)
-            self._reclaim_dead_writer_projection(database, registry)
-            self._insert_writer_projection(database, owner)
+        self._project_nested_owner(owner, wait_seconds)
         self._enter_gate(owner)
         try:
             yield owner
         finally:
+            self._leave_nested_gate(owner)
+
+    def _project_nested_owner(
+        self, owner: OwnerLease, wait_seconds: float | None
+    ) -> None:
+        """Take the gate row for this owner, waiting out a live writer as the canonical gate does.
+
+        The wait used to be ignored: one attempt, then `owner_busy`, so a project
+        checkpoint that met a running compile failed at once. When the window
+        closes the `owner_busy` it was given is what the caller sees.
+        """
+        from operational_ownership import OperationalOwnershipError
+
+        deadline = time.monotonic() + _writer_wait_window(wait_seconds)
+        attempt = 0
+        while True:
+            try:
+                return self._project_nested_owner_once(owner)
+            except OperationalOwnershipError as exc:
+                delay = _writer_retry_delay(attempt, deadline)
+                if exc.code != "owner_busy" or delay <= 0:
+                    raise
+            time.sleep(delay)
+            attempt += 1
+
+    def _project_nested_owner_once(self, owner: OwnerLease) -> None:
+        registry = self._ownership_registry()
+        with self._connect() as database, begin_immediate(database):
+            registry.require(database, owner)
+            self._drop_own_stale_projection(database, owner)
+            self._reclaim_dead_writer_projection(database, registry)
+            self._insert_writer_projection(database, owner)
+
+    def _leave_nested_gate(self, owner: OwnerLease) -> None:
+        """Delete the projection, and clear this thread's gate whatever the delete did.
+
+        A delete that raised — `database is locked` after the busy timeout — used to leave
+        the thread believing it was still inside the gate, and the row shut every other
+        process out until this one exited. The row it may leave behind is removed on the
+        next entry (`_drop_own_stale_projection`). Research:
+        `docs/research/2026-09-17-a-failed-release-does-not-keep-the-gate.md`.
+        """
+        residue = (str(self.database_path), owner.token, owner.epoch)
+        _UNRELEASED_PROJECTIONS.add(residue)
+        try:
             with self._connect() as database, begin_immediate(database):
                 self._delete_writer_projection(database, owner)
+            _UNRELEASED_PROJECTIONS.discard(residue)
+        finally:
             self._clear_gate()
+
+    def _drop_own_stale_projection(self, database: sqlite3.Connection, owner: OwnerLease) -> None:
+        """Remove the row a failed release of this very lease left behind.
+
+        Only a release recorded as failed in this process is proof; a row that merely
+        looks like ours may be a live gate held through another coordinator.
+        """
+        residue = (str(self.database_path), owner.token, owner.epoch)
+        if residue not in _UNRELEASED_PROJECTIONS:
+            return
+        database.execute(
+            "DELETE FROM writer_owners WHERE gate_name='global' AND owner_token=? AND fencing_epoch=?",
+            (owner.token, owner.epoch),
+        )
+        _UNRELEASED_PROJECTIONS.discard(residue)
 
     def _reentered_writer_gate(self, owner: OwnerLease) -> Iterator[OwnerLease]:
         """A nested gate belongs to the same owner or it is not the same gate."""
@@ -7880,13 +8158,15 @@ class MarkdownCoordinator:
 
     def _require_canonical_parent(self, target: Path, value: str) -> None:
         if target.parent.resolve(strict=False) != target.parent:
-            raise ValueError(f"target has a non-canonical parent: {value}")
+            raise TargetPathBoundaryError(
+                f"target has a non-canonical parent: {value}"
+            )
         try:
             target.relative_to(self.vault)
         except ValueError as exc:
-            raise ValueError("target escapes the vault") from exc
+            raise TargetPathBoundaryError("target escapes the vault") from exc
         if not target.parent.is_dir():
-            raise ValueError(f"target parent does not exist: {value}")
+            raise TargetPathBoundaryError(f"target parent does not exist: {value}")
 
     def _target(self, value: str) -> Path:
         relative = restricted_relative_path(
@@ -8027,10 +8307,20 @@ class MarkdownCoordinator:
         return self._read_bounded_target(target, MAX_KNOWLEDGE_TARGET_BYTES)
 
     def _parent_identity(self, parent: Path) -> tuple[int, int]:
-        metadata = parent.stat(follow_symlinks=False)
+        metadata = self._parent_metadata(parent)
         if not stat.S_ISDIR(metadata.st_mode) or _is_reparse_point(parent):
-            raise RuntimeError(f"parent identity is not a stable directory: {parent}")
+            raise TargetBoundaryFailure(
+                f"parent identity is not a stable directory: {parent}"
+            )
         return _stat_identity(metadata)
+
+    @staticmethod
+    def _parent_metadata(parent: Path) -> os.stat_result:
+        """A parent that is gone or replaced is a boundary failure, not an ENOENT."""
+        try:
+            return parent.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise _as_parent_boundary_failure(parent, exc) from exc
 
     def _capture_target(
         self, target: Path, *, max_before_bytes: int | None = None
@@ -8040,10 +8330,11 @@ class MarkdownCoordinator:
                 before = self._parent_identity(target.parent)
                 content = self._read_bounded_target(target, max_before_bytes)
                 if self._parent_identity(target.parent) != before:
-                    raise RuntimeError(f"parent identity changed while reading {target}")
+                    raise TargetBoundaryFailure(
+                        f"parent identity changed while reading {target}"
+                    )
                 return content, before
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(target.parent, flags)
+        descriptor = _open_parent_directory(target.parent)
         try:
             metadata = os.fstat(descriptor)
             identity = _stat_identity(metadata)
@@ -8051,7 +8342,9 @@ class MarkdownCoordinator:
                 descriptor, target.name, max_before_bytes
             )
             if self._parent_identity(target.parent) != identity:
-                raise RuntimeError(f"parent identity changed while reading {target}")
+                raise TargetBoundaryFailure(
+                    f"parent identity changed while reading {target}"
+                )
             return content, identity
         finally:
             os.close(descriptor)
@@ -8164,13 +8457,10 @@ class MarkdownCoordinator:
     def _posix_stable_parent(
         self, target: Path, expected: object, path: str
     ) -> Iterator[tuple[Path, int | None]]:
-        flags = (
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        )
-        descriptor = os.open(target.parent, flags)
+        descriptor = _open_parent_directory(target.parent)
         try:
             if _stat_identity(os.fstat(descriptor)) != expected:
-                raise RuntimeError(f"parent identity mismatch for {path}")
+                raise TargetBoundaryFailure(f"parent identity mismatch for {path}")
             yield target, descriptor
             self._require_parent_identity(target.parent, expected, path)
         finally:
@@ -8180,7 +8470,7 @@ class MarkdownCoordinator:
         self, parent: Path, expected: object, path: str
     ) -> None:
         if self._parent_identity(parent) != expected:
-            raise RuntimeError(f"parent identity mismatch for {path}")
+            raise TargetBoundaryFailure(f"parent identity mismatch for {path}")
 
     @contextlib.contextmanager
     def _hold_windows_parent(self, parent: Path) -> Iterator[None]:
@@ -8205,7 +8495,7 @@ class MarkdownCoordinator:
         try:
             relative = parent.relative_to(self.vault)
         except ValueError as exc:
-            raise RuntimeError("target parent is outside the vault") from exc
+            raise TargetBoundaryFailure("target parent is outside the vault") from exc
         paths = [self.vault]
         current = self.vault
         for part in relative.parts:
@@ -8303,11 +8593,17 @@ class MarkdownCoordinator:
     def _require_undoable(self, transaction_id: str) -> None:
         original = self._record(transaction_id)
         if original.state != "committed":
-            raise RuntimeError("only a committed transaction can be undone")
+            raise RefusedOperation(
+                "only a committed transaction can be undone",
+                "transaction_not_committed",
+            )
         if _parse_timestamp(original.updated_at) < datetime.now(
             timezone.utc
-        ) - timedelta(days=30):
-            raise RuntimeError("transaction is outside the 30-day undo window")
+        ) - timedelta(days=UNDO_RETENTION_DAYS):
+            raise RefusedOperation(
+                f"transaction is outside the {UNDO_RETENTION_DAYS}-day undo window",
+                "undo_window_expired",
+            )
         self._require_retained_undo_images(transaction_id)
 
     def _require_retained_undo_images(self, transaction_id: str) -> None:
@@ -8324,8 +8620,9 @@ class MarkdownCoordinator:
         for row in rows:
             self._require_operation_active(deadline, cancelled)
             if self._operation_hash(row) != row["after_hash"]:
-                raise RuntimeError(
-                    "undo precondition failed: current target changed"
+                raise RefusedOperation(
+                    "undo precondition failed: current target changed",
+                    "undo_precondition_failed",
                 )
 
     def _undo_changes(
@@ -8355,7 +8652,9 @@ class MarkdownCoordinator:
         )
         before = _image_bytes(before)
         if sha256_bytes(before) != row["before_hash"]:
-            raise RuntimeError("transaction before-image is corrupt")
+            raise RefusedOperation(
+                "transaction before-image is corrupt", "before_image_corrupt"
+            )
         return (
             MarkdownChange.create(row["path"], before)
             if row["after_hash"] == ABSENT
@@ -8614,7 +8913,7 @@ class MarkdownCoordinator:
         current = self._operation_hash(row)
         if row["applied"]:
             if current != row["after_hash"]:
-                raise RuntimeError(f"after state mismatch for {row['path']}")
+                raise TargetStateMismatch("after", str(row["path"]))
             return True
         return self._reconcile_unapplied_operation(transaction_id, row, current)
 
@@ -8626,7 +8925,7 @@ class MarkdownCoordinator:
             self._mark_operation_applied(transaction_id, row["position"])
             return True
         if current != row["before_hash"]:
-            raise RuntimeError(f"before state mismatch for {row['path']}")
+            raise TargetStateMismatch("before", str(row["path"]))
         return False
 
     def _mark_operation_applied(self, transaction_id: str, position: int) -> None:
@@ -8660,7 +8959,7 @@ class MarkdownCoordinator:
         if active_database is not None:
             self._assert_writer_ownership(active_database)
             self._apply_forward_operation(row, operation_plan, content_guard)
-            self._require_operation_state(row, row["after_hash"], "after state")
+            self._require_operation_state(row, row["after_hash"], "after")
             self._mark_operation_applied(transaction_id, row["position"])
             return
         with self._connect() as database, begin_immediate(
@@ -8670,7 +8969,7 @@ class MarkdownCoordinator:
             self._local.mutation_database = database
             try:
                 self._apply_forward_operation(row, operation_plan, content_guard)
-                self._require_operation_state(row, row["after_hash"], "after state")
+                self._require_operation_state(row, row["after_hash"], "after")
                 self._mark_operation_applied(transaction_id, row["position"])
             finally:
                 self._local.mutation_database = None
@@ -8760,9 +9059,11 @@ class MarkdownCoordinator:
         if cursor.rowcount != 1:
             raise RuntimeError("Markdown writer gate ownership was lost before mutation")
 
-    def _require_operation_state(self, row: sqlite3.Row, expected: str, label: str) -> None:
+    def _require_operation_state(
+        self, row: sqlite3.Row, expected: str, state_name: str
+    ) -> None:
         if self._operation_hash(row) != expected:
-            raise RuntimeError(f"{label} mismatch for {row['path']}")
+            raise TargetStateMismatch(state_name, str(row["path"]))
 
     def _apply_operation(self, row: sqlite3.Row, operation_plan: Mapping[str, object]) -> None:
         with self._stable_parent(row) as (target, parent_descriptor):
@@ -8774,11 +9075,21 @@ class MarkdownCoordinator:
                 return
             self._before_target_mutation(target)
             if row["kind"] == "delete":
-                os.unlink(target.name, dir_fd=parent_descriptor)
-                os.fsync(parent_descriptor)
+                self._unlink_at_parent(row, target, parent_descriptor)
                 return
             content = self._verified_after_content(row, operation_plan)
             self._publish_at_parent(row, target, parent_descriptor, content)
+
+    @staticmethod
+    def _unlink_at_parent(
+        row: sqlite3.Row, target: Path, parent_descriptor: int
+    ) -> None:
+        """A target that vanished under the delete is a before state that moved."""
+        try:
+            os.unlink(target.name, dir_fd=parent_descriptor)
+        except FileNotFoundError as exc:
+            raise TargetStateMismatch("before", str(row["path"])) from exc
+        os.fsync(parent_descriptor)
 
     def _require_operation_target_state(
         self,
@@ -8789,7 +9100,7 @@ class MarkdownCoordinator:
     ) -> None:
         current = self._hash_operation_target(target, parent_descriptor)
         if current != row[f"{state_name}_hash"]:
-            raise RuntimeError(f"{state_name} state mismatch for {row['path']}")
+            raise TargetStateMismatch(state_name, str(row["path"]))
 
     def _verified_after_content(
         self, row: sqlite3.Row, operation_plan: Mapping[str, object]
@@ -8803,7 +9114,7 @@ class MarkdownCoordinator:
         )
         content = _image_bytes(artifact)
         if sha256_bytes(content) != row["after_hash"]:
-            raise RuntimeError(
+            raise TransactionImageError(
                 f"transaction after-image is corrupt for {row['path']}"
             )
         self._require_safe_model_output(content)
@@ -8869,18 +9180,25 @@ class MarkdownCoordinator:
         self, row: sqlite3.Row, target: Path, content: bytes
     ) -> None:
         temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            outcome = self._published_windows_outcome(row, target, temporary, content)
+        finally:
+            _remove_temporary_publication(temporary)
+        if outcome == "duplicate":
+            fsync_directory(target.parent)
+
+    def _published_windows_outcome(
+        self, row: sqlite3.Row, target: Path, temporary: Path, content: bytes
+    ) -> str:
         self._write_new_file(temporary, content, owner_only=False)
         self._before_target_mutation(target)
-        outcome = durable_publish_file(
+        return durable_publish_file(
             temporary,
             target,
             replace=row["kind"] == "replace",
             expected_sha256=row["after_hash"],
             max_bytes=MAX_KNOWLEDGE_TARGET_BYTES,
         )
-        if outcome == "duplicate":
-            temporary.unlink()
-            fsync_directory(target.parent)
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""
@@ -8900,6 +9218,15 @@ class MarkdownCoordinator:
             raise TimeoutError("transaction mutation deadline or cancellation reached")
 
     def _write_new_file_at(self, parent_descriptor: int, name: str, content: bytes) -> None:
+        descriptor = self._create_at_parent(parent_descriptor, name)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _create_at_parent(parent_descriptor: int, name: str) -> int:
+        """`O_CREAT` cannot miss a file, so an ENOENT here is the parent, gone."""
         flags = (
             os.O_WRONLY
             | os.O_CREAT
@@ -8907,11 +9234,12 @@ class MarkdownCoordinator:
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_BINARY", 0)
         )
-        descriptor = os.open(name, flags, 0o600, dir_fd=parent_descriptor)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            return os.open(name, flags, 0o600, dir_fd=parent_descriptor)
+        except FileNotFoundError as exc:
+            raise TargetBoundaryFailure(
+                "parent identity is not a stable directory while writing"
+            ) from exc
 
     def _load_verified_plan(self, record: TransactionRecord) -> dict[str, object]:
         plan_path = self.transaction_root / record.id / "plan.json"
@@ -8922,12 +9250,12 @@ class MarkdownCoordinator:
                     'SELECT plan_hash FROM "transaction" WHERE id = ?', (record.id,)
                 ).fetchone()["plan_hash"]
             if sha256_bytes(plan_bytes) != expected:
-                raise RuntimeError("transaction plan hash mismatch")
+                raise TransactionImageError("transaction plan hash mismatch")
             plan = json.loads(plan_bytes)
             validate_schema(plan, _SCHEMA)
             self._verify_plan_artifacts(plan, self.transaction_root / record.id)
         except (AssertionError, KeyError, OSError, RuntimeError, ValueError) as exc:
-            raise RuntimeError("transaction after-image is corrupt") from exc
+            raise TransactionImageError("transaction after-image is corrupt") from exc
         return plan
 
     def _operation_rows(self, transaction_id: str) -> list[sqlite3.Row]:
@@ -8985,6 +9313,15 @@ class MarkdownCoordinator:
             parent_transaction_id=row["parent_transaction_id"],
             error_code=row["error_code"],
         )
+
+    def _artifacts_pruned(self, transaction_id: str) -> bool:
+        """Whether `prune` already removed this transaction's plan and images."""
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT artifacts_pruned_at FROM "transaction" WHERE id = ?',
+                (transaction_id,),
+            ).fetchone()
+        return row is not None and row["artifacts_pruned_at"] is not None
 
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
         with self._connect() as database:
@@ -9052,18 +9389,6 @@ def _relax_legacy_state_constraint(database: sqlite3.Connection) -> None:
         database.execute("PRAGMA ignore_check_constraints = ON")
 
 
-_CLI_MESSAGE_CODES = (
-    # Keyed on the window, not on the literal 30 it used to be: when the window
-    # changed, this table silently stopped matching and a too-short retention
-    # started reporting itself as an invalid argument instead.
-    (f"at least {UNDO_RETENTION_DAYS}", "retention_too_short"),
-    ("undo precondition", "undo_precondition_failed"),
-    ("undo window", "undo_window_expired"),
-    ("only a committed transaction", "transaction_not_committed"),
-    ("before-image is corrupt", "before_image_corrupt"),
-)
-
-
 _UNDO_KILLPOINT_ALIASES = {
     "after_each_target": "after_each_undo_target",
     "before_commit": "before_undo_commit",
@@ -9089,18 +9414,12 @@ def _undo_killpoint_alias(name: str, parent_transaction_id: str | None) -> str:
 
 
 def _cli_error_code(error: Exception) -> str:
-    if isinstance(error, TransactionFailure):
+    """Every refusal names its own code; the text is for the reader only."""
+    if isinstance(error, (TransactionFailure, RefusedOperation, RefusedArgument)):
         return error.code
     if isinstance(error, KeyError):
         return "unknown_transaction"
-    return _cli_message_code(str(error)) or _cli_type_code(error)
-
-
-def _cli_message_code(message: str) -> str | None:
-    for fragment, code in _CLI_MESSAGE_CODES:
-        if fragment in message:
-            return code
-    return None
+    return _cli_type_code(error)
 
 
 def _cli_type_code(error: Exception) -> str:

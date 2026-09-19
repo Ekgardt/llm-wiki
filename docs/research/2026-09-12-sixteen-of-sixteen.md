@@ -48,7 +48,7 @@ them. The other tool stays installed until the default surface passes too.
   within 5 s of them.
 - **Tokens: 2 156 of 8 836 are one answer.** The architecture summary lists 110
   entry points, and every row repeats the absolute prefix
-  `/home/user/llm-wiki-tasks/` — about a quarter of that answer is the same 25
+  `<vault>/` — about a quarter of that answer is the same 25
   characters said 110 times, in an answer whose top level already names the
   directory.
 

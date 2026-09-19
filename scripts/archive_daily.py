@@ -34,6 +34,7 @@ from evidence_resolver import (  # noqa: E402
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
+    _acl_lines_naming,
     _acl_output_text,
     _harden_owner_only,
     _run_acl_command,
@@ -1852,10 +1853,6 @@ class DailyArchiver:
         DailyArchiver._require_read_only_acl(identity, applied, verified)
 
     @staticmethod
-    def _acl_lines(acl: str) -> list[str]:
-        return [line.strip() for line in acl.splitlines() if ":(" in line]
-
-    @staticmethod
     def _acl_grants_only_identity(identity: str, acl_lines: list[str]) -> bool:
         return all(identity.casefold() in line.casefold() for line in acl_lines)
 
@@ -1883,12 +1880,21 @@ class DailyArchiver:
 
     @staticmethod
     def _require_read_only_acl(identity: str, applied: list, verified: object) -> None:
+        """Read the listing under the code page in which the owner is named.
+
+        A name that is not ASCII is dropped by the wrong code page, and the seal
+        then fails on every archive. Research:
+        docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
+        """
         DailyArchiver._require_acl_commands_succeeded(applied, verified)
-        acl = _acl_output_text(verified.stdout)
-        acl_lines = DailyArchiver._acl_lines(acl)
+        acl_lines = _acl_lines_naming(verified.stdout, identity)
         if not acl_lines:
-            raise DailyArchiver._acl_failure("no ACL entries", acl)
-        DailyArchiver._require_acl_grants_read_only(identity, acl, acl_lines)
+            raise DailyArchiver._acl_failure(
+                "no ACL entries", _acl_output_text(verified.stdout)
+            )
+        DailyArchiver._require_acl_grants_read_only(
+            identity, "\n".join(acl_lines), acl_lines
+        )
 
     @staticmethod
     def _require_acl_grants_read_only(

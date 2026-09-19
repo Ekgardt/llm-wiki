@@ -71,7 +71,7 @@ MCP_OPERATION_SECONDS = 10.0
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
-# /home/user/agenticos/checkout-claude/main, 436 sources, 1,235 chunks -- took
+# 436 sources, 1,235 chunks -- took
 # 118.9 s end to end, most of it embedding. 600 s leaves room for a repository
 # several times that size; anything larger is refused by name on the deadline
 # rather than half-built, because the build registers only after every artifact
@@ -181,12 +181,11 @@ _LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
 def _tool_operation_seconds(name: str, arguments: object) -> float:
     if name != "get_architecture" or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
-    mode = arguments.get("mode", "summary")
-    if mode in PRECISE_ARCHITECTURE_MODES or _positioned_architecture_call(
-        arguments, mode
-    ):
+    if _is_precise_architecture_request(arguments):
         return MCP_LSP_STARTUP_SECONDS
-    return _LONG_ARCHITECTURE_BUDGETS.get(mode, MCP_OPERATION_SECONDS)
+    return _LONG_ARCHITECTURE_BUDGETS.get(
+        arguments.get("mode", "summary"), MCP_OPERATION_SECONDS
+    )
 
 
 def _operation_cancelled():
@@ -215,13 +214,22 @@ def _cancellation_context():
         _OPERATION_CANCELLED.reset(cancellation_token)
 
 
+class _WorkerCapacityExhausted(TimeoutError):
+    """Every worker slot was busy, so this call never started.
+
+    A `TimeoutError` so that every caller which already bounds a call keeps
+    working, but a distinct one: a lapse means the work ran and did not finish,
+    this means it never ran and an immediate retry is reasonable (audit 3, B4).
+    """
+
+
 def _reserve_mcp_worker(submitted) -> None:
     with _MCP_WORKERS_LOCK:
         _MCP_WORKERS.difference_update(
             future for future in _MCP_WORKERS if future.done()
         )
         if len(_MCP_WORKERS) >= MCP_WORKER_SLOTS:
-            raise TimeoutError("MCP worker capacity exhausted")
+            raise _WorkerCapacityExhausted("MCP worker capacity exhausted")
         _MCP_WORKERS.add(submitted)
 
 
@@ -364,8 +372,17 @@ async def _run_bounded(function, *args, deadline: float):
 
 
 def _timeout_envelope_text() -> str:
+    return _refused_envelope_text("operation_timeout", "operation_timeout")
 
-    error = "operation_timeout"
+
+def _busy_envelope_text() -> str:
+    """The answer to a call that never started because no worker slot was free."""
+    return _refused_envelope_text(
+        "worker_capacity_exhausted", "retry_after_running_calls_finish"
+    )
+
+
+def _refused_envelope_text(error: str, warning: str) -> str:
     envelope = {
         "schema_version": "1.0",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -376,7 +393,7 @@ def _timeout_envelope_text() -> str:
         "confidence": 0.2,
         "fallback": False,
         "partial": True,
-        "warnings": [error],
+        "warnings": [warning],
         "components": {},
         "data": {"error": error},
     }
@@ -972,7 +989,10 @@ def _page_with_evidence(
     if isinstance(evidence, dict):
         return evidence
     if emit_telemetry:
-        _record_page_reads(slug, evidence)
+        # One column, one identity: the page's vault-relative path, never the
+        # bare slug two pages can share. See
+        # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+        _record_page_reads(page_path.relative_to(root).as_posix(), evidence)
     return {
         "slug": slug,
         "path": str(page_path.relative_to(root)),
@@ -1083,7 +1103,8 @@ def _page_read_events(make_event, kinds) -> list:
     return events
 
 
-def _record_page_reads(slug: str, evidence: list) -> None:
+def _record_page_reads(page_path: str, evidence: list) -> None:
+    """`page_path` is the page's vault-relative path; an evidence row names its quote."""
     try:
         from retrieval_telemetry import (
             best_effort_make_event,
@@ -1091,7 +1112,7 @@ def _record_page_reads(slug: str, evidence: list) -> None:
         )
 
         kinds = [
-            ("page_read", slug),
+            ("page_read", page_path),
             *(("evidence_read", item["sha256"]) for item in evidence),
         ]
         events = _page_read_events(best_effort_make_event, kinds)
@@ -1149,8 +1170,10 @@ def _retrieval_degradations() -> dict[str, str]:
 
 
 def _daily_files(root: Path) -> list[Path]:
+    from memory_state import daily_logs
+
     try:
-        return list((root / "knowledge" / "daily").glob("*.md"))
+        return daily_logs(root / "knowledge" / "daily")
     except OSError:
         return []
 
@@ -1212,7 +1235,10 @@ def _decision_impression_events(make_event, effective_query: str, results: list)
             event_kind="impression",
             query=effective_query,
             retrieval_mode="decision-filter",
-            candidate_id=result.get("slug") or Path(result.get("path", "")).stem,
+            # One column, one identity: the page's vault-relative path, as every
+            # other writer of `retrieval_events` names a page. See
+            # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+            candidate_id=result.get("path", ""),
             rank=rank,
             generation="legacy",
             source_tool="mcp.get_decisions",
@@ -1418,12 +1444,15 @@ def _context_result(compiled, snapshot, selection: dict, token_budget: int, incl
 
 def _context_injection_events(make_event, selected_paths: set) -> list:
     events = []
-    for slug in sorted({Path(path).stem for path in selected_paths}):
+    # One column, one identity: the page's vault-relative path, which is what
+    # `selected_paths` already holds, not the stem two pages can share. See
+    # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    for page_path in sorted(selected_paths):
         event = make_event(
             event_kind="context_injected",
             query=None,
             retrieval_mode="direct",
-            candidate_id=slug,
+            candidate_id=page_path,
             rank=None,
             generation="legacy",
             source_tool="mcp.get_context",
@@ -1802,7 +1831,21 @@ def _architecture_symbol_dependencies(request: dict):
 
 # The row keys whose lines a file can contradict. A summary's counts, a
 # community's roster and a path's hops carry no line of their own.
-_POSITION_KEYS = ("callers", "callees", "definition", "unresolved_callers")
+#
+# Audit 3, A3: only a row whose line is the *definition* of the symbol it names
+# can be corrected from that symbol's definition. A one-hop caller row, a live
+# one and an unresolved one carry the call site beside the caller's name, so
+# they are left alone; the depth walk builds its rows from node locations and
+# says so with `depth_applied`. Research:
+# `docs/research/2026-09-17-a-fresh-line-belongs-to-the-symbol-it-names.md`.
+_DEFINITION_ROW_KEYS = ("definition",)
+_WALKED_ROW_KEYS = ("callers", "callees", "definition")
+
+
+def _definition_row_keys(answer) -> tuple[str, ...]:
+    if isinstance(answer, dict) and "depth_applied" in answer:
+        return _WALKED_ROW_KEYS
+    return _DEFINITION_ROW_KEYS
 
 
 def _with_lines_from_disk(answer, request: dict):
@@ -1817,7 +1860,7 @@ def _with_lines_from_disk(answer, request: dict):
 
     if isinstance(answer, list):
         return refreshed_rows(answer, request["resolved"])
-    return refreshed_answer(answer, request["resolved"], _POSITION_KEYS)
+    return refreshed_answer(answer, request["resolved"], _definition_row_keys(answer))
 
 
 def _architecture_definition(request: dict) -> list:
@@ -1947,26 +1990,94 @@ def _request_worktree_follow(checkout: Path) -> str:
         stdout_path=out_log,
         stderr_path=err_log,
     )
-    return "worktree_follow_started" if pid is not None else "spawn_failed"
+    if pid is None:
+        _forget_follow_request(checkout)
+        return "spawn_failed"
+    return "worktree_follow_started"
+
+
+def _forget_follow_request(checkout: Path) -> None:
+    """A spawn that failed was not a request: the next question tries again.
+
+    Audit 3, B2. Research:
+    `docs/research/2026-09-17-a-refresh-that-never-started-is-asked-for-again.md`.
+    """
+    with _REFRESH_REQUESTED_LOCK:
+        _FOLLOW_REQUESTED.discard(str(checkout))
+
+
+def _forget_refresh_request(checkout) -> None:
+    """Take back this commit's mark, and only this commit's."""
+    with _REFRESH_REQUESTED_LOCK:
+        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+            del _REFRESH_REQUESTED[checkout.repository_id]
+
+
+# The freshness block decorates an answer that is already computed, so a
+# generation that cannot be read must say so rather than turn a good structural
+# answer into an error at the tool boundary (audit 3, B26), and the read is
+# bounded in time like every other one on this path (audit 3, B3). Research:
+# `docs/research/2026-09-18-graph-an-unreadable-generation-must-not-fail-a-good-answer.md`.
+FRESHNESS_LIMIT_SECONDS = 5.0
 
 
 def _repository_freshness(resolved: Path) -> dict | None:
     import code_graph
 
-    lease = code_graph._active_evidence_graph(resolved)
+    try:
+        lease = code_graph._active_evidence_graph(
+            resolved, deadline=time.monotonic() + FRESHNESS_LIMIT_SECONDS
+        )
+    except code_graph.GenerationUnreadable as error:
+        return {"unavailable": error.reason}
+    except TimeoutError:
+        return {"unavailable": "deadline"}
     if lease is None:
         return None
+    return _freshness_of_lease(resolved, lease)
+
+
+def _freshness_of_lease(resolved: Path, lease) -> dict | None:
     try:
         checkout = getattr(lease, "cached_scope", None)
         if checkout is None:
             return None
-        return _freshness_block(resolved, checkout, lease.repository_scope)
+        return _freshness_block(
+            resolved, checkout, lease.repository_scope, lease.generation_id
+        )
     finally:
         lease.close()
 
 
-def _freshness_block(resolved: Path, checkout, generation) -> dict:
-    stale = checkout.git_commit != generation.git_commit
+def _confirmed_at_commit(checkout, generation_id) -> bool:
+    """Whether a refresh already confirmed this generation against this commit.
+
+    A commit that changes no source leaves the generation's own commit behind
+    for ever, and the checkout would be called stale until something edited a
+    file. The hint table records the commit its generation was last confirmed
+    at. See `docs/research/2026-09-17-small-corrections-in-the-generations-area.md`.
+    """
+    import sqlite3
+
+    from code_hints import hints_path, read_meta
+    from memory_state import STATE_ROOT
+
+    try:
+        meta = read_meta(hints_path(Path(STATE_ROOT), checkout.checkout_id))
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    if meta is None:
+        return False
+    return (meta.get("generation_id"), meta.get("git_commit")) == (
+        str(generation_id),
+        str(checkout.git_commit or ""),
+    )
+
+
+def _freshness_block(resolved: Path, checkout, generation, generation_id) -> dict:
+    stale = checkout.git_commit != generation.git_commit and not _confirmed_at_commit(
+        checkout, generation_id
+    )
     return {
         "generation_commit": generation.git_commit,
         "checkout_commit": checkout.git_commit,
@@ -1985,8 +2096,10 @@ def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
     if not stale:
         return "not_needed"
     if _is_the_vault(resolved):
-        # The vault's own generation is rebuilt and activated by the nightly
-        # pass and the freshness watch; a foreign-repository refresh refuses it.
+        # The vault's own memory generation is rebuilt and activated by the
+        # nightly pass. Its code generation is refreshed
+        # by the same nightly step as every other checkout's since 2026-09-12;
+        # this path does not start one here (audit 3, G-L5).
         return "vault_nightly"
     return _request_repository_refresh(resolved, checkout)
 
@@ -2014,7 +2127,10 @@ def _request_repository_refresh(resolved: Path, checkout) -> str:
         stdout_path=out_log,
         stderr_path=err_log,
     )
-    return "started" if pid is not None else "spawn_failed"
+    if pid is None:
+        _forget_refresh_request(checkout)
+        return "spawn_failed"
+    return "started"
 
 
 def _get_architecture_mode(
@@ -2210,11 +2326,7 @@ def _is_precise_architecture_request(arguments: dict) -> bool:
     mode = arguments.get("mode", "summary")
     if mode in PRECISE_ARCHITECTURE_MODES:
         return True
-    if mode in {"callers", "callees"} and all(
-        key in arguments for key in ("path", "line", "character")
-    ):
-        return True
-    return False
+    return _positioned_architecture_call(arguments, mode)
 
 
 def _same_filesystem_path(
@@ -2298,16 +2410,30 @@ def _check_navigation_stop(deadline: float | None) -> None:
     _check_deadline(deadline)
 
 
-def _open_navigation_graph(scope, deadline: float | None):
+def _opened_navigation_generation(scope, deadline: float | None):
+    """The generation, or None when there is none or it cannot be read.
+
+    A generation that cannot be opened degrades exactly as a missing one does
+    (audit 3, B26): all three callers of `_open_navigation_graph` answer with
+    structural or empty evidence, and none of their return types has anywhere
+    to carry a reason.
+    """
     import code_graph
 
+    try:
+        return code_graph._active_evidence_graph(
+            Path(scope.checkout_root),
+            read_only=True,
+            deadline=deadline,
+            cancelled=_operation_cancelled(),
+        )
+    except code_graph.GenerationUnreadable:
+        return None
+
+
+def _open_navigation_graph(scope, deadline: float | None):
     _check_navigation_stop(deadline)
-    graph = code_graph._active_evidence_graph(
-        Path(scope.checkout_root),
-        read_only=True,
-        deadline=deadline,
-        cancelled=_operation_cancelled(),
-    )
+    graph = _opened_navigation_generation(scope, deadline)
     _check_navigation_stop(deadline)
     if graph is None:
         return None
@@ -4007,9 +4133,16 @@ def _validate_architecture_arguments(arguments: dict) -> str | None:
     return _positioned_architecture_path_error(arguments, mode, positioned)
 
 
+# Modes whose `path` names one file that is then read from disk. `search` is
+# absent on purpose: its `path` is a prefix compared inside the graph, never
+# opened. Audit 3, A2:
+# `docs/research/2026-09-17-coverage-reads-only-inside-the-repository.md`.
+FILE_READING_ARCHITECTURE_MODES = PRECISE_ARCHITECTURE_MODES | {"coverage"}
+
+
 def _positioned_architecture_path_error(arguments: dict, mode: str, positioned: bool):
-    """Only a precise or positioned call carries a path to validate."""
-    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
+    """Every call that opens the file its path names carries a path to validate."""
+    if mode in FILE_READING_ARCHITECTURE_MODES or positioned:
         return _architecture_path_error(arguments)
     return None
 
@@ -5385,13 +5518,21 @@ def _search_architecture_call(arguments: dict, deadline: float):
 
 
 def _data_flow_architecture_call(arguments: dict, deadline: float):
-    """Issue #24, B3: which argument binds which parameter, hop by hop."""
-    del deadline
+    """Issue #24, B3: which argument binds which parameter, hop by hop.
+
+    The walk carries the caller's deadline and cancellation, so it stops when
+    the caller has stopped waiting instead of holding one of the four worker
+    slots to the end (audit 3, B3).
+    """
     from code_graph import find_argument_flows
 
     directory = Path(arguments["directory"]).resolve()
     answer = find_argument_flows(
-        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+        str(arguments["symbol"]),
+        directory,
+        max_depth=arguments.get("depth"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
     )
     if answer is None:
         return {"flows": [], "mode": "index", "reason": "no_active_generation"}
@@ -5399,13 +5540,19 @@ def _data_flow_architecture_call(arguments: dict, deadline: float):
 
 
 def _cross_service_architecture_call(arguments: dict, deadline: float):
-    """Issue #24, B3: follow a request across the route it reaches."""
-    del deadline
+    """Issue #24, B3: follow a request across the route it reaches.
+
+    Bounded by the caller's deadline and cancellation, like `data_flow`.
+    """
     from code_graph import find_service_paths
 
     directory = Path(arguments["directory"]).resolve()
     answer = find_service_paths(
-        str(arguments["symbol"]), directory, max_depth=arguments.get("depth")
+        str(arguments["symbol"]),
+        directory,
+        max_depth=arguments.get("depth"),
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
     )
     if answer is None:
         return {"hops": [], "mode": "index", "reason": "no_active_generation"}
@@ -5508,7 +5655,26 @@ def _architecture_tool_call(arguments: dict, deadline: float):
         "changes": _changes_architecture_call,
     }
     call = calls.get(mode, _architecture_mode_call)
+    if mode in _DIRECTORY_CHECKED_MODES:
+        return _checked_directory_call(call, arguments, deadline)
     return call(arguments, deadline)
+
+
+# The task-shaped modes that answer about `directory` and used to only
+# `resolve()` it: a relative path meant the server's working directory and a
+# filesystem root was accepted (audit 3, B1). Research:
+# `docs/research/2026-09-17-every-mode-checks-the-directory-it-is-given.md`.
+_DIRECTORY_CHECKED_MODES = frozenset(
+    {"provenance", "snippet", "coverage", "search", "query", "data_flow", "cross_service"}
+)
+
+
+def _checked_directory_call(call, arguments: dict, deadline: float):
+    """Run one mode on a directory that passed the validator the older modes use."""
+    resolved, error = _validated_code_directory(arguments.get("directory"), deadline=deadline)
+    if error:
+        return {"error": error}
+    return call({**arguments, "directory": str(resolved)}, deadline)
 
 
 def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
@@ -5648,16 +5814,31 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
         _OPERATION_DEADLINE.reset(deadline_token)
 
 
-async def _handle_tool_call(name: str, arguments) -> str:
-    """Handle a tool call without blocking unrelated MCP event-loop work."""
-    operation_seconds = _tool_operation_seconds(name, arguments)
-    operation_deadline = time.monotonic() + operation_seconds
+async def _bounded_tool_call(name: str, arguments, execute, render):
+    """One tool call, off-loop, under its own deadline, with its refusal answers.
+
+    Both entry points share this policy: the registered `call_tool` callback
+    renders formatted results, `_handle_tool_call` renders text. Audit 3, B5:
+    they used to be twins and had already drifted apart.
+    """
+    operation_deadline = time.monotonic() + _tool_operation_seconds(name, arguments)
     try:
         return await _run_bounded(
-            _execute_tool_call, name, arguments, operation_deadline, deadline=operation_deadline
+            execute, name, arguments, operation_deadline, deadline=operation_deadline
         )
+    except _WorkerCapacityExhausted:
+        return render(_busy_envelope_text())
     except TimeoutError:
-        return _tool_timeout_envelope_text(name, arguments)
+        return render(_tool_timeout_envelope_text(name, arguments))
+
+
+def _same_text(text: str) -> str:
+    return text
+
+
+async def _handle_tool_call(name: str, arguments) -> str:
+    """One tool call as envelope text, without blocking unrelated event-loop work."""
+    return await _bounded_tool_call(name, arguments, _execute_tool_call, _same_text)
 
 
 def _build_resource_definitions() -> list:
@@ -5734,6 +5915,8 @@ def _register_resources(server) -> bool:
                 operation_deadline,
                 deadline=operation_deadline,
             )
+        except _WorkerCapacityExhausted:
+            text = _busy_envelope_text()
         except TimeoutError:
             text = _timeout_envelope_text()
         return [
@@ -5813,31 +5996,11 @@ def _register_tools(server, tools):
         if supports_validate_input
         else call_tool_method()
     )
-    timeout_result = _format_tool_result(_timeout_envelope_text())
-
     @decorator
     async def call_tool(name: str, arguments):
-        operation_deadline = time.monotonic() + _tool_operation_seconds(
-            name,
-            arguments,
+        return await _bounded_tool_call(
+            name, arguments, _execute_formatted_tool_call, _format_tool_result
         )
-        try:
-            return await _run_bounded(
-                _execute_formatted_tool_call,
-                name,
-                arguments,
-                operation_deadline,
-                deadline=operation_deadline,
-            )
-        except TimeoutError:
-            if name == "get_architecture" and isinstance(
-                arguments,
-                dict,
-            ) and _is_precise_architecture_request(arguments):
-                return _format_tool_result(
-                    _tool_timeout_envelope_text(name, arguments)
-                )
-            return timeout_result
 
     return call_tool
 

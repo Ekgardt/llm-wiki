@@ -17,6 +17,7 @@ import io
 import json
 import os
 import sys
+import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -29,6 +30,20 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+
+# How long a hook's append may try before it gives up and says why. Each is
+# shorter than the host's own timeout for that hook, with room left to start
+# the interpreter and to write the failure line: the shipped prompt and tool
+# hooks get 5 seconds, the session-end hook 15 (its delegate 10). A writer with
+# no deadline retried until it was killed and left no reason. See
+# `docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md`.
+BREADCRUMB_APPEND_BUDGET_SECONDS = 3.0
+LIFECYCLE_APPEND_BUDGET_SECONDS = 7.0
+
+
+def append_deadline(budget_seconds: float) -> float:
+    """The monotonic instant a hook's append stops trying."""
+    return time.monotonic() + budget_seconds
 
 
 def locked_append(
@@ -206,8 +221,27 @@ def _append_event(payload: dict, block: str) -> None:
             block,
             operation_id=_event_operation_id(payload),
         )
-    except OSError as e:
-        print(f"daily_log_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
+    except Exception as error:  # noqa: BLE001 - the helper's contract is exit 0; the reason is kept
+        report_helper_failure(
+            "daily_log_append", "opencode_daily_append", error, payload.get("sessionId")
+        )
+
+
+def report_helper_failure(
+    helper: str, kind: str, error: BaseException, session_id: object
+) -> None:
+    """The reason on stderr and in the capture-failure trail; never an exit status.
+
+    The plugin helpers say "never fails" and caught `OSError` only, while the
+    writer also raises value, transaction and ownership errors. See
+    `docs/research/2026-09-17-a-helper-that-says-it-never-fails-does-not.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+
+    reason = redact_secrets(f"{type(error).__name__}: {error}")
+    print(f"{helper}: write failed: {reason}", file=sys.stderr)
+    known_session = session_id if isinstance(session_id, str) else None
+    record_capture_failure(kind, reason, error=error, session_id=known_session)
 
 
 def _event_operation_id(payload: dict) -> str | None:

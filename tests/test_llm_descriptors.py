@@ -36,10 +36,8 @@ def test_candidate_zero_has_known_identity_and_no_fallback(monkeypatch):
 
     candidates = llm_client.provider_candidates()
 
-    assert candidates[0].candidate_index == 0
-    assert candidates[0].fallback_from == ()
-    assert candidates[1].provider == "codex"
-    assert candidates[1].model == "gpt-5"
+    assert (candidates[0].candidate_index, candidates[0].fallback_from) == (0, ())
+    assert (candidates[1].provider, candidates[1].model) == ("codex", "gpt-5")
     assert "structured_output" in candidates[1].capabilities
 
 
@@ -67,10 +65,8 @@ def test_call_candidate_reports_unavailable_without_calling_backend(monkeypatch)
     result = llm_client.call_candidate(descriptor, "prompt", "system", max_tokens=10)
 
     assert result.descriptor is descriptor
-    assert result.available is False
-    assert result.text is None
-    assert result.failure_class == "unavailable"
-    assert result.structured_output == "prompt"
+    assert (result.available, result.text) == (False, None)
+    assert (result.failure_class, result.structured_output) == ("unavailable", "prompt")
 
 
 def test_explicit_probe_then_call_does_not_probe_twice(monkeypatch):
@@ -112,10 +108,8 @@ def test_call_candidate_returns_actual_identity_and_native_structured_mode(monke
     )
 
     assert result.descriptor == descriptor
-    assert result.available is True
-    assert result.text == '{"ok":true}'
-    assert result.failure_class is None
-    assert result.structured_output == "native"
+    assert (result.available, result.text) == (True, '{"ok":true}')
+    assert (result.failure_class, result.structured_output) == (None, "native")
 
 
 def test_call_llm_result_preserves_selected_provider_descriptor(monkeypatch):
@@ -156,9 +150,8 @@ def test_call_candidate_redacts_builtins_and_policy_literals_before_transport(
 
     assert result.text == "answer"
     transported = json.dumps(captured)
-    assert "transport-secret" not in transported
-    assert "system-secret" not in transported
-    assert "internal-codename" not in transported
+    secrets = ("transport-secret", "system-secret", "internal-codename")
+    assert [secret for secret in secrets if secret in transported] == []
     assert "[REDACTED" in transported
 
 
@@ -281,8 +274,7 @@ def test_provider_descriptor_has_restricted_canonical_representation(monkeypatch
 
     canonical = descriptor.canonical()
 
-    assert canonical["provider"] == "openai"
-    assert canonical["model"] == "resolved-model"
+    assert (canonical["provider"], canonical["model"]) == ("openai", "resolved-model")
     assert canonical["inference_settings"]["temperature_milli"] == 200
     assert canonical["inference_settings"]["max_tokens"] == 321
     assert canonical_json_bytes(canonical)
@@ -694,10 +686,8 @@ def test_call_candidate_accepts_response_envelope_and_plain_string(monkeypatch):
     first = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
     second = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
 
-    assert first.text == "first"
-    assert first.usage == usage
-    assert second.text == "second"
-    assert second.usage == TokenUsage()
+    assert (first.text, first.usage) == ("first", usage)
+    assert (second.text, second.usage) == ("second", TokenUsage())
     assert second.input_token_count == TokenCount(
         len(b"system\n\nprompt"), "estimated"
     )
@@ -1186,12 +1176,10 @@ def test_the_claude_call_does_not_inherit_the_operator_persona(monkeypatch):
 
     command = llm_client._claude_command("/usr/bin/claude", "some-model", "BE A COMPILER")
 
-    assert "--system-prompt" in command
-    assert command[command.index("--system-prompt") + 1] == "BE A COMPILER"
-    assert "--setting-sources" in command
+    assert command[command.index("--system-prompt") + 1].startswith("BE A COMPILER\n\n")
     assert command[command.index("--setting-sources") + 1] == ""
     # The system text travels once, through the flag rather than the prompt.
-    assert llm_client._claude_stdin("BE A COMPILER", "work") == "work"
+    assert llm_client._claude_stdin("BE A COMPILER", "work") == "<task>\nwork\n</task>"
 
 
 def test_an_older_claude_cli_still_gets_the_system_text(monkeypatch):
@@ -1200,7 +1188,7 @@ def test_an_older_claude_cli_still_gets_the_system_text(monkeypatch):
     command = llm_client._claude_command("/usr/bin/claude", None, "BE A COMPILER")
 
     assert "--system-prompt" not in command
-    assert "<system>BE A COMPILER</system>" in llm_client._claude_stdin("BE A COMPILER", "work")
+    assert llm_client._claude_stdin("BE A COMPILER", "work").startswith("<system>BE A COMPILER\n\n")
 
 
 def _descriptor_for(provider: str) -> object:

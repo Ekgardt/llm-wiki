@@ -280,12 +280,17 @@ def render_navigation(
     *,
     offset: int | None = None,
     limit: int | None = None,
-    include_source: bool = False,
 ) -> dict[str, object]:
+    """Render one navigation answer. Source bodies are never included.
+
+    The 2026-07-22 plan carried an `include_source` parameter fixed at False for
+    MCP Task 12, with "a future explicit expansion request requires a separate
+    approved design". It validated its argument and changed nothing, so it is
+    gone: the renderer cannot emit source, and that expansion still needs the
+    separate design (audit 3, C7).
+    """
     if not isinstance(result, NavigationResult):
         raise TypeError("result must be a NavigationResult")
-    if not isinstance(include_source, bool):
-        raise TypeError("include_source must be a boolean")
     page = _NavigationPage(
         result,
         _coerce_offset(result.offset if offset is None else offset),

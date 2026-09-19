@@ -135,47 +135,6 @@ def _compute_slug_from_cwd(cwd: str) -> str:
             return "unknown"
 
 
-def _rate_limited(slug: str, prompt_hash: str) -> bool:
-    """True if this (slug, prompt) was logged in the last RATE_LIMIT_SECONDS."""
-    try:
-        state_file = STATE_ROOT / "run" / "state.json"
-        if not state_file.exists():
-            return False
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return False
-    key = f"{slug}::{prompt_hash}"
-    last = state.get("prompt_capture_dedupe", {}).get(key)
-    if not last:
-        return False
-    try:
-        age = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
-        return age < RATE_LIMIT_SECONDS
-    except (ValueError, TypeError):
-        return False
-
-
-def _record_dedupe(slug: str, prompt_hash: str) -> None:
-    """Record this (slug, prompt) in the dedupe map. Best-effort."""
-    try:
-        key = f"{slug}::{prompt_hash}"
-        now = datetime.now().isoformat(timespec="seconds")
-
-        def _mutate(state: dict) -> None:
-            state.setdefault("prompt_capture_dedupe", {})[key] = now
-            if len(state["prompt_capture_dedupe"]) > 100:
-                items = sorted(
-                    state["prompt_capture_dedupe"].items(),
-                    key=lambda kv: kv[1],
-                    reverse=True,
-                )[:100]
-                state["prompt_capture_dedupe"] = dict(items)
-
-        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        pass  # never fail the hook on dedupe-bookkeeping
-
-
 def _claim_prompt_operation(
     slug: str, prompt_hash: str, *, source_event_id: str | None = None
 ) -> str | None:
@@ -205,42 +164,22 @@ def _complete_prompt_operation(
     )
 
 
-def _claim_prompt_dedupe(slug: str, prompt_hash: str) -> bool:
-    """Atomically reserve a prompt key; return True only for the first caller."""
-    claimed = False
-    key = f"{slug}::{prompt_hash}"
-    now = datetime.now()
-
-    def _mutate(state: dict) -> None:
-        nonlocal claimed
-        dedupe = state.setdefault("prompt_capture_dedupe", {})
-        last = dedupe.get(key)
-        if last:
-            try:
-                if (now - datetime.fromisoformat(last)).total_seconds() < RATE_LIMIT_SECONDS:
-                    return
-            except (ValueError, TypeError):
-                pass
-        claimed = True
-        dedupe[key] = now.isoformat(timespec="seconds")
-        if len(dedupe) > 100:
-            state["prompt_capture_dedupe"] = dict(
-                sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:100]
-            )
-
-    try:
-        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        return True
-    return claimed
-
-
 def _prompt_counter_key(session_id: str, slug: str) -> str:
     """Count per session; fall back to the project when the id is unknown."""
     normalized = str(session_id or "").strip()
     if normalized and normalized != "unknown":
         return normalized
     return f"project:{slug or 'unknown'}"
+
+
+# One key per session for ever made `run/state.json` grow towards the size its
+# readers refuse. See `docs/research/2026-09-17-four-small-capture-corrections.md`.
+MAX_PROMPT_COUNTERS = 200
+
+
+def _forget_oldest_counts(counters: dict) -> None:
+    while len(counters) > MAX_PROMPT_COUNTERS:
+        counters.pop(next(iter(counters)))
 
 
 def _increment_prompt_count(session_id: str, slug: str) -> int:
@@ -250,8 +189,10 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
     def _mutate(state: dict) -> None:
         nonlocal count
         counters = state.setdefault("user_prompt_counts", {})
-        count = int(counters.get(key, 0)) + 1
+        # Re-inserted, so the map's order is "counted most recently last".
+        count = int(counters.pop(key, 0)) + 1
         counters[key] = count
+        _forget_oldest_counts(counters)
 
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
@@ -261,18 +202,29 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
 
 
 def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
+    """Hand the session so far to the adapter's capture route, detached.
+
+    No transcript, nothing to capture: an empty flush used to be started and
+    counted as a session with nothing worth keeping. See
+    `docs/research/2026-09-17-the-twentieth-prompt-captures-the-session.md`.
+    """
     from event_envelope import canonical_agent
 
-    args = [
+    transcript = hook.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return
+    payload = {
+        "session_id": str(session_id),
+        "cwd": hook.get("cwd"),
+        "transcript_path": transcript,
+        "trigger": "prompt-count-20",
+    }
+    spawn_detached([
         sys.executable,
-        str(ROOT / "scripts" / "flush_memory.py"),
-        "--event", "pre-compact",
-        "--session-id", str(session_id),
-        "--transcript", str(hook.get("transcript_path", "")),
-        "--trigger", "prompt-count-20",
-        "--agent", canonical_agent(str(hook.get("agent") or "claude")),
-    ]
-    spawn_detached(args)
+        str(ROOT / "scripts" / "integration_adapter.py"),
+        "--source", canonical_agent(str(hook.get("agent") or "claude")),
+        "--running-capture", json.dumps(payload, ensure_ascii=False),
+    ])
 
 
 def _build_advisory_refresh() -> str:
@@ -300,7 +252,11 @@ def _append_prompt_tag(
 ) -> bool:
     """Append a one-line breadcrumb to today's daily log."""
     try:
-        from daily_log_append import append_daily
+        from daily_log_append import (
+            BREADCRUMB_APPEND_BUDGET_SECONDS,
+            append_daily,
+            append_deadline,
+        )
 
         ts = datetime.now().strftime("%H:%M:%S")
         safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
@@ -308,7 +264,15 @@ def _append_prompt_tag(
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"
         )
-        append_daily(slug, session_id, block, operation_id=operation_id)
+        # A deadline inside the host's: without one the append retried until the
+        # host cancelled the hook, and the lost breadcrumb left no reason.
+        append_daily(
+            slug,
+            session_id,
+            block,
+            operation_id=operation_id,
+            deadline=append_deadline(BREADCRUMB_APPEND_BUDGET_SECONDS),
+        )
         return True
     except Exception as error:  # noqa: BLE001
         record_capture_failure(

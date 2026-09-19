@@ -331,17 +331,33 @@ def _category_rows(report: dict) -> list[tuple[str, dict]]:
     ]
 
 
+def _evidence_columns(row: dict) -> str:
+    """Both prompt-evidence figures as `seen/denominator`, never as a bare share.
+
+    A share without its denominator is what let one run be quoted as two
+    different "coverage" numbers. `gold_text` is the gold string appearing word
+    for word, over the rows that have such a gold; `evidence` is the dataset's
+    own answer-carrying turns reaching the prompt, over the rows that recorded
+    it. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    return (
+        f"{row['gold_text_in_prompt']}/{row['gold_text_applicable']} "
+        f"{row['evidence_in_prompt']}/{row['evidence_measured']}"
+    )
+
+
 def _print_summary(report: dict) -> None:
     columns = (
-        "category n scored accuracy em judge f1 prov_fail est_tokens total_tokens "
-        "per_1M_tok retrieve_s answer_s"
+        "category n scored accuracy em judge f1 prov_fail gold_text_in_prompt "
+        "evidence_in_prompt est_tokens total_tokens per_1M_tok retrieve_s answer_s"
     )
     print(columns)
     for name, row in _category_rows(report):
         print(
             f"{name} {row['n']} {row['scored']} {row['accuracy']} {row['em']} "
             f"{row.get('judge_accuracy')} "
-            f"{row['f1']} {row['provider_failures']} {row['mean_est_prompt_tokens']} "
+            f"{row['f1']} {row['provider_failures']} {_evidence_columns(row)} "
+            f"{row['mean_est_prompt_tokens']} "
             f"{row.get('mean_est_total_prompt_tokens')} "
             f"{row.get('correct_per_million_tokens')} "
             f"{row['mean_retrieve_seconds']} {row['mean_answer_seconds']}"
@@ -408,7 +424,12 @@ def _published(scoped: list[dict], args) -> int:
     """Write the report, print it, and say plainly what the run measured."""
     report = longmemeval_score.aggregate(scoped)
     report["retrieval_path"] = retrieval_path(scoped)
-    report["coverage"] = longmemeval_coverage.aggregate(scoped)
+    # Three stages, three names. What search returned, what the compiler could
+    # place, and — on the per-category rows above — what the reader saw. They
+    # were all called "coverage" and they read 0.912, 1.0 and 0.508 on the same
+    # run. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    report["retrieval_coverage"] = longmemeval_coverage.aggregate(scoped)
+    report["compile_evidence"] = longmemeval_coverage.compile_evidence(scoped)
     report["failure_split"] = longmemeval_coverage.failure_split(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

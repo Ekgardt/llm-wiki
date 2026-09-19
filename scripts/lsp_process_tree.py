@@ -624,9 +624,9 @@ def _scan_proc_entries(entries, group: int) -> bool | None:
     for scanned, entry in enumerate(_numeric_entries(entries), 1):
         if scanned > _LINUX_PROC_SCAN_LIMIT:
             return None
-        verdict = _proc_entry_verdict(entry.path, group)
-        if verdict is not None:
-            return verdict
+        keeps = _proc_entry_keeps_group(entry.path, group)
+        if keeps is not False:
+            return _scan_verdict(keeps)
     return True
 
 
@@ -635,14 +635,16 @@ def _numeric_entries(entries):
     return (entry for entry in entries if entry.name.isdecimal())
 
 
-def _proc_entry_verdict(entry_path: str, group: int) -> bool | None:
-    """None to keep scanning; False when live; None-unreadable maps to None."""
-    keeps = _proc_entry_keeps_group(entry_path, group)
+def _scan_verdict(keeps: bool | None) -> bool | None:
+    """What an entry that is not proven outside the group does to the scan.
+
+    False is the only value the scan may pass over: the entry was read and
+    does not belong to the group. An entry we could not read ends the scan
+    unknown, because a group cannot be called inert over evidence nobody has.
+    """
     if keeps is None:
         return None
-    if keeps:
-        return False
-    return None
+    return False
 
 
 def _linux_group_is_inert(proc_root: Path, group: int) -> bool | None:

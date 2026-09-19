@@ -369,11 +369,15 @@ def test_exact_filename_short_circuit_emits_final_impressions_once(tmp_path, mon
 
     rows = retrieval_telemetry.read_events(limit=10, db_path=database)
     assert len(rows) == len(results) == 1
-    assert (rows[0].event_kind, rows[0].candidate_id, rows[0].rank) == (
-        "impression", "exact-page", 1
-    )
-    assert rows[0].retrieval_mode == "exact"
-    assert rows[0].source_tool == "test.search"
+    # One column, one identity: the page's vault-relative path. See
+    # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    assert (
+        rows[0].event_kind,
+        rows[0].candidate_id,
+        rows[0].rank,
+        rows[0].retrieval_mode,
+        rows[0].source_tool,
+    ) == ("impression", "knowledge/notes/exact-page.md", 1, "exact", "test.search")
 
 
 def test_empty_search_emits_no_impressions(tmp_path, monkeypatch):
@@ -1598,10 +1602,15 @@ def test_generation_search_reports_generation_to_telemetry(tmp_path, monkeypatch
     )
 
     assert len(events) == len(results) == 1
-    assert events[0]["generation"] == "gen-search"
-    assert events[0]["candidate_id"] == results[0]["chunk_id"]
-    assert events[0]["retrieval_mode"] == "base"
-    assert events[0]["source_tool"] == "test.generation-search"
+    # One column, one identity: the page's vault-relative path, not the chunk
+    # hash. See
+    # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    assert (
+        events[0]["generation"],
+        events[0]["candidate_id"],
+        events[0]["retrieval_mode"],
+        events[0]["source_tool"],
+    ) == ("gen-search", results[0]["path"], "base", "test.generation-search")
 
 
 def test_generation_filters_use_indexed_authority_status_and_validity(tmp_path):

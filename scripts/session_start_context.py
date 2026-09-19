@@ -2,13 +2,13 @@
 
 Emits a JSON object on stdout with `hookSpecificOutput.additionalContext`
 containing a trimmed view of project memory:
-  - `knowledge/index.md` — H1, Entry points, first 3 non-empty knowledge sections,
-    with each bullet line clipped to keep the section visually scannable.
+  - `knowledge/index.md` — H1, Entry points, first 3 non-empty knowledge sections.
+    Lines are kept whole; the section budgets decide what fits.
   - Latest daily log — a short excerpt of the most recent meaningful session
     block. Empty hook-trigger blocks, XML `<analysis>`/`<summary>` wrappers,
     and mojibake lines are stripped. If nothing clean remains, falls back to
     a one-line note.
-  - the private vault log (`vault_log.LOG_RELATIVE`) — last 3 dated entries, each clipped.
+  - the private vault log (`vault_log.LOG_RELATIVE`) — last 3 dated entries, whole.
 
 All complete sections are packed under the shared token budget. A debug dump
 of the payload is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
@@ -22,7 +22,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,10 +83,7 @@ SECTION_PRIORITIES: dict[str, int] = {
 }
 INDEX_KNOWLEDGE_SECTIONS = 3
 INDEX_MAX_CHARS = 1200
-INDEX_BULLET_MAX = 140
-LOG_ENTRY_MAX = 200
 DAILY_EXCERPT_LINES = 6
-DAILY_LINE_MAX = 160
 HOOK_STATE_LOCK_TIMEOUT = 0.1
 RECOVERY_LIMIT_SECONDS = 0.1
 RECOVERY_MAX_TRANSACTIONS = 4
@@ -149,7 +146,17 @@ def _release_nightly_claim(today: str) -> None:
         pass
 
 
-def _maybe_spawn_nightly_catchup(today: str | None = None) -> None:
+def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
+    """Run the nightly once from a session when the scheduler's run did not happen.
+
+    Called by the detached session-start maintenance pass, not by the hook itself:
+    every shipped hook goes through the adapter, which never reached this module's
+    `main()`. The schedulers catch up on their own where they can — a systemd timer
+    with `Persistent=true`, a LaunchAgent at wake, a Windows task with
+    `-StartWhenAvailable` after sign-in — but a machine signed out at 03:00, and the
+    explicit cron fallback, never do. See
+    `docs/research/2026-09-17-a-missed-nightly-is-caught-up-and-codex-keeps-its-stop.md`.
+    """
     if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
         return
     today = _today_iso(today)
@@ -187,6 +194,12 @@ NOISE_PATTERNS = (
     re.compile(r"^\s*-\s*Trigger:\s*.*$"),
     re.compile(r"^\s*-\s*Transcript:\s*.*$"),
     re.compile(r"^\s*-\s*Project root:\s*.*$"),
+    # The labels the capture worker writes under its header: the host's name, a
+    # 64-character digest and one word of tier took three of the six excerpt lines. See
+    # `docs/research/2026-09-17-the-daily-excerpt-shows-the-entry-not-its-label.md`.
+    re.compile(r"^\s*-\s*Agent:\s*.*$"),
+    re.compile(r"^\s*-\s*Capture intent:\s*.*$"),
+    re.compile(r"^\s*-\s*Tier:\s*.*$"),
     re.compile(r"^\s*\(no summary.*\)\s*$"),
     re.compile(r"^\s*###\s*Compact summary\s*$", re.IGNORECASE),
 )
@@ -196,7 +209,7 @@ XML_TAG_RE = re.compile(r"</?(analysis|summary)>", re.IGNORECASE)
 # Strip the `| <uuid>` session-id tail from `## [HH:MM:SS] session-end`
 # headers — the UUID is useless noise in the injected context.
 SESSION_ID_STRIP_RE = re.compile(
-    r"^(##\s+\[\d{2}:\d{2}:\d{2}\]\s+session-end)\s*\|.*$"
+    r"^(##\s+\[\d{2}:\d{2}:\d{2}\]\s+(?:session-end|pre-compact))\s*\|.*$"
 )
 
 
@@ -216,11 +229,6 @@ def is_noise(line: str) -> bool:
     if XML_TAG_RE.fullmatch(stripped):
         return True
     return any(pat.match(line) for pat in NOISE_PATTERNS)
-
-
-def clip(line: str, limit: int) -> str:
-    """Keep lines whole; section and global budgets decide whether they fit."""
-    return line
 
 
 @dataclass
@@ -409,7 +417,7 @@ def clean_block(block: list[str]) -> list[str]:
         ln = SESSION_ID_STRIP_RE.sub(r"\1", ln)
         if not ln.strip():
             continue
-        cleaned.append(clip(ln, DAILY_LINE_MAX))
+        cleaned.append(ln)
     return cleaned
 
 
@@ -454,7 +462,7 @@ def last_log_entries(n: int = 3) -> str:
     for ln in MEMORY_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
         ln = ln.rstrip()
         if ln.startswith("- ") and not is_mojibake(ln):
-            entries.append(clip(ln, LOG_ENTRY_MAX))
+            entries.append(ln)
     return "\n".join(entries[-n:])
 
 
@@ -693,7 +701,34 @@ def metacognitive_block() -> str:
     return "\n".join(lines) + "\n"
 
 
-def advisory_block() -> str:
+def _latest_heartbeat_slug() -> str | None:
+    """The project of the most recent heartbeat — the fallback when none is given.
+
+    It is only a fallback: two sessions that start together would otherwise swap
+    advisories, because the newest heartbeat is whichever session wrote last. The
+    caller that knows the session's own project passes it. See
+    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
+    """
+    try:
+        heartbeats = load_state().get("codex_heartbeats", {})
+    except Exception:  # noqa: BLE001 - no state is no slug, never a failed session start
+        return None
+    if not isinstance(heartbeats, dict) or not heartbeats:
+        return None
+    return max(heartbeats.items(), key=lambda kv: _heartbeat_time(kv[1]))[0]
+
+
+def _heartbeat_time(entry: object) -> str:
+    if not isinstance(entry, Mapping):
+        return ""
+    return str(entry.get("at", ""))
+
+
+def _context_slug(slug: str | None) -> str | None:
+    return slug or _latest_heartbeat_slug()
+
+
+def advisory_block(slug: str | None = None) -> str:
     """Proactive advisory — actionable intelligence for the current project.
 
     Unlike the metacognitive block (inventory/backlog), this surfaces
@@ -708,28 +743,13 @@ def advisory_block() -> str:
     except ImportError:
         return ""
 
-    # Try to detect the current project slug from heartbeat state.
-    slug = None
-    try:
-        state = load_state()
-        heartbeats = state.get("codex_heartbeats", {})
-        if heartbeats:
-            # Use the most recent heartbeat's slug
-            latest = max(
-                heartbeats.items(),
-                key=lambda kv: kv[1].get("at", ""),
-            )
-            slug = latest[0]
-    except Exception:
-        pass
-
-    advisory = build_advisory(slug)
+    advisory = build_advisory(_context_slug(slug))
     if not advisory:
         return ""
     return f"## Advisory\n\n{advisory}\n\n"
 
 
-def guardrails_block() -> str:
+def guardrails_block(slug: str | None = None) -> str:
     """Learned rules from past corrections — prevents repeating mistakes.
 
     Reads promoted feedback candidates + correction-type knowledge
@@ -742,32 +762,30 @@ def guardrails_block() -> str:
     except ImportError:
         return ""
 
-    # Try to detect slug from heartbeat
-    slug = None
-    try:
-        state = load_state()
-        heartbeats = state.get("codex_heartbeats", {})
-        if heartbeats:
-            latest = max(heartbeats.items(), key=lambda kv: kv[1].get("at", ""))
-            slug = latest[0]
-    except Exception:
-        pass
-
-    guardrails = build_guardrails(slug)
+    guardrails = build_guardrails(_context_slug(slug))
     if not guardrails:
         return ""
     return f"{guardrails}\n\n"
 
 
+# The advisory prints only what the graph proved, so the note scan is not paid,
+# and the start path gives the analysis a budget of its own instead of the
+# five-second interactive ceiling (audit 3 B30).
+IMPACT_BUDGET_SECONDS = 1.0
+
+
 def _impact_block() -> str:
     """Code-knowledge impact analysis (v4.0).
 
-    Detects wiki pages that might be stale due to recent code changes.
+    Names the pages and decisions the graph proves the uncommitted change reaches.
     Non-blocking — failures are silently ignored.
     """
     try:
         from impact_analysis import analyze_impact, format_for_advisory
-        impact = analyze_impact()
+        impact = analyze_impact(
+            textual_fallback=False,
+            deadline=time.monotonic() + IMPACT_BUDGET_SECONDS,
+        )
         return format_for_advisory(impact, max_pages=3)
     except Exception:
         return ""
@@ -1017,14 +1035,19 @@ def _log_section_text() -> str:
     return f"## Recent {LOG_RELATIVE}\n\n{tail}"
 
 
-def build_context_items() -> list[ContextItem]:
-    """Build structured SessionStart items for direct and adapter injection."""
+def build_context_items(slug: str | None = None) -> list[ContextItem]:
+    """Build structured SessionStart items for direct and adapter injection.
+
+    `slug` is the project of the session being started, which the adapter reads from
+    the session's own working directory. Without one the advisory falls back to the
+    most recent heartbeat, which belongs to whichever session wrote last.
+    """
     sections = [
         ("title", "# Project memory context"),
-        ("guardrails", guardrails_block()),
+        ("guardrails", guardrails_block(slug)),
         ("metacognitive", metacognitive_block()),
         ("health", health_block()),
-        ("advisory", advisory_block()),
+        ("advisory", advisory_block(slug)),
         ("impact", _impact_block()),
         ("index", _index_section_text()),
         ("daily", _daily_section_text()),
@@ -1107,7 +1130,7 @@ def main() -> int:
     args = p.parse_args()
 
     _recover_transactions()
-    _maybe_spawn_nightly_catchup()
+    maybe_spawn_nightly_catchup()
     additional = build_context()
     daily = latest_daily()
     write_debug(additional, daily.name if daily else "(none)")

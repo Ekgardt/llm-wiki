@@ -11,7 +11,7 @@ notes about this vault. The two tracked daily logs say so in their own first
 lines: *"Synthetic public fixture. Real session content was scrubbed before the
 public release."*
 
-One real leak, and it is mine, from yesterday: `fix-pip` — the name of another
+One real leak, and it is mine, from yesterday: `other-worktree` — the name of another
 of the owner's projects — appears twice in
 `knowledge/notes/identity-is-a-function-of-its-content-decision.md`, as the
 project whose queue had jammed.

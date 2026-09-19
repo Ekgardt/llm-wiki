@@ -22,8 +22,24 @@ run/
 state/
 .ci-lint-state/
 
+# === The knowledge zone is denied by default ===
+# Anything new directly under knowledge/ used to be allowed: the runtime writes
+# knowledge/guardrails.md (rules learned from private sessions) and `git add -A`
+# would have staged it. Entries are denied, then published one literal line at a
+# time; the subdirectories are re-included and keep their own rules below.
+# See docs/research/2026-09-17-the-knowledge-zone-is-denied-by-default.md.
+knowledge/*
+!knowledge/README.md
+!knowledge/index.md
+!knowledge/log.md
+# Directories stay open so the literal `!` lines below can publish a file inside
+# one (git cannot re-include a file whose directory is excluded), and everything
+# inside them is denied until such a line names it.
+!knowledge/*/
+knowledge/*/**
+
 # === Personal session data (private, NOT in git) ===
-knowledge/daily/*.md
+knowledge/daily/*
 # A writer that died mid-write leaves its atomic-write temp beside the
 # page, holding the page's private bytes under a name the rule above
 # does not match. Seen 2026-09-07: `.2026-09-07.md.<hex>.tmp`, 91 KB.
@@ -48,6 +64,7 @@ knowledge/notes/*/**
 # === Per-project state ===
 knowledge/projects/*
 !knowledge/projects/_template/
+!knowledge/projects/_template/**
 !knowledge/projects/README.md
 
 # === Personal feedback / staging ===
@@ -60,6 +77,9 @@ knowledge/raw/**
 # The vault's editorial log. The tracked knowledge/log.md is the shipped template and
 # nothing writes it; see docs/research/2026-09-14-the-vault-log-is-private.md.
 knowledge/log.local.md
+# `build_guardrails.py --apply` writes summaries of private pages here; see
+# docs/research/2026-09-17-the-guard-rails-say-how-many-rules-they-left-out.md.
+knowledge/guardrails.md
 
 # === Skills allowlist ===
 # Only the 9 public memory-system skills ship in this repo.

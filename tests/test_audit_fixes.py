@@ -62,8 +62,8 @@ def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
         "query",
         {"prompt": "hello", "system_prompt": "sys", "max_tokens": 10, "enqueued_by": "test"},
     )
-    pending = memory_queue.list_pending()
-    assert any(t["id"] == tid for t in pending)
+    pending = memory_queue._queue().list_tasks(states=("ready",))
+    assert any(task.id == tid for task in pending)
 
     def fake_call_llm(prompt, system_prompt="", max_tokens=1000):
         return "answer-ok"
@@ -72,18 +72,18 @@ def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
 
     monkeypatch.setattr(llm_client, "call_llm", fake_call_llm)
 
+    def default_output(task):
+        """Where a query with no output path of its own writes its answer."""
+        results_dir = tmp_path / "run" / "queue-results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        return str(results_dir / f"{task['id']}.txt")
+
     def processor(task):
         payload = task.get("payload", {})
-        if task.get("type") != "query":
-            return False
-        if not payload.get("prompt"):
+        if task.get("type") != "query" or not payload.get("prompt"):
             return False
         result = llm_client.call_llm(payload["prompt"])
-        out = payload.get("output_path")
-        if not out:
-            results_dir = tmp_path / "run" / "queue-results"
-            results_dir.mkdir(parents=True, exist_ok=True)
-            out = str(results_dir / f"{task['id']}.txt")
+        out = payload.get("output_path") or default_output(task)
         Path(out).write_text(result, encoding="utf-8")
         return True
 

@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import BinaryIO
 
@@ -75,6 +75,14 @@ STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
 
 _OWNER_CLEANUP_SECONDS = 2.0
+# How long a session may go unused before the next request closes the server it
+# owns. The manager keeps one clock: this bound and capacity eviction both read
+# the session's own last-used instant, so "idle" means one thing here. See
+# `docs/research/2026-09-18-lsp-one-clock-for-one-idea-of-idle.md`.
+_IDLE_SECONDS = 300.0
+# How much of a caller's time one idle reap may spend. There is no daemon, so
+# the reap rides on a request; it must not become the request's cost.
+_IDLE_REAP_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.01
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
 _MAX_OPEN_DOCUMENTS = 256
@@ -408,6 +416,26 @@ def _startup_code(error: BaseException, prefix: str = "pyright") -> str:
             return code
         current = current.__cause__
     return f"{prefix}_startup_failed"
+
+
+# How long a session waits before it tries a failed start again, and -- by its
+# length -- how many times it tries at all. Microsoft's retry guidance for an
+# interactive caller is "a smaller number of retries with only a short delay";
+# a language server is heavier than an HTTP call, so the delays grow.
+_STARTUP_RETRY_BACKOFF = (5.0, 30.0, 120.0)
+
+
+def _startup_is_retryable(error: BaseException, prefix: str) -> bool:
+    """Whether trying this start again could plausibly end differently.
+
+    The clock and the operating system are transient: a cold two-second query
+    deadline, a machine under load, a temporary file-system error. Identity,
+    protocol and capability failures are not -- they describe the install, and
+    the same install will fail the same way.
+    """
+    if _startup_code(error, prefix).endswith("_startup_timeout"):
+        return True
+    return isinstance(error, OSError) and not isinstance(error, PermissionError)
 
 
 
@@ -868,6 +896,30 @@ def _validated_entry_size(entry: object) -> int:
     return size
 
 
+def _documents_fit(count: int, used: int) -> bool:
+    """Whether this many open documents of this size are within both bounds."""
+    if count > _MAX_OPEN_DOCUMENTS:
+        return False
+    return used <= _MAX_OPEN_DOCUMENT_BYTES
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int] | None:
+    """What a file would have to keep for its bytes to still be the same bytes.
+
+    Device and inode say it is the same file; size and nanosecond modification
+    time say it was not rewritten. A rewrite that keeps all four -- the same
+    length written inside one clock tick -- is the one change this misses, and
+    it is what `synchronize` trades for not re-reading every open document on
+    every query. The workspace revision is still authoritative about what
+    changed: this only decides whether the second, confirming read is needed.
+    """
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
 def _retained_document_bytes(entry: object, document: OpenDocument) -> int:
     """The revision's size for a document that must stay open."""
     if _entry_missing(entry):
@@ -974,6 +1026,12 @@ _NEUTRAL_PROGRESS_METHOD = "$/progress"
 # progress-gated profile makes readiness out of. Short because the whole gate is
 # measured at 0.67-0.82 s on a small project and the caller holds a deadline.
 _PROGRESS_POLL_SECONDS = 0.02
+
+# How long a query waits for a progress-gated server that has not asked us to
+# create any work-done token. A server that reports progress asks during
+# initialization, before it answers anything, so this only has to outlast the
+# gap between the handshake and the first query -- not a project load.
+_PROGRESS_GATE_GRACE_SECONDS = 1.0
 
 # At most this many outstanding work-done tokens are remembered per generation.
 # A server that opens more than this without ending them is not one we can gate
@@ -1678,12 +1736,19 @@ class _LaunchServerGuard:
         keep a name. The owner root is created for this process tree alone, and
         the digest was verified on the bytes that were written there. Research:
         `docs/research/2026-09-12-installing-go-and-building-gopls.md`.
+
+        The guard therefore stops owning the file: until 2026-09-17 it kept the
+        path and unlinked it on the way out of the `with` block, taking the name
+        away from the server that had just been started by it. What removes it
+        now is what removes everything else in the owner root, when the
+        generation ends.
         """
         path = self._snapshot_path
         if path is None:
             raise RuntimeError("native launch has no verified copy")
         snapshot.close()
         self._snapshot = None
+        self._snapshot_path = None
         return GenerationLaunch((str(path), *self._command[1:]), ())
 
     def _package_launch_from(self, snapshot: BinaryIO) -> GenerationLaunch:
@@ -1993,6 +2058,12 @@ class LanguageServerSession:
         self._process: LspProcess | None = None
         self._documents: dict[str, OpenDocument] = {}
         self._document_bytes = 0
+        # What each open document's file looked like when its bytes were last
+        # confirmed against the workspace revision. See `_file_identity`.
+        self._document_identities: dict[str, tuple[int, int, int, int]] = {}
+        # Use order, for eviction only: a counter per URI, highest used last.
+        self._document_use = 0
+        self._document_used: dict[str, int] = {}
         self._workspace_revision: WorkspaceRevision | None = None
         self._synchronize_epoch = 0
         self._readiness_target_uri: str | None = None
@@ -2013,6 +2084,11 @@ class LanguageServerSession:
         self._wire_sending: set[tuple[str, str, int]] = set()
         self._starting = False
         self._startup_attempted = False
+        # A start that ran out of time, or met the operating system, may be
+        # tried again -- at most `len(_STARTUP_RETRY_BACKOFF)` times, and never
+        # before the monotonic instant the last failure named.
+        self._startup_retries = 0
+        self._startup_retry_after = 0.0
         self._startup_cleanup_error: StartupCleanupError | None = None
         self._startup_process: LspProcess | None = None
         self._bootstrap_owner_nonce: str | None = None
@@ -2020,6 +2096,7 @@ class LanguageServerSession:
         self._startup_atexit_registered = False
         self._closing = False
         self._closed = False
+        self._close_stranded = False
         self._capacity_locked = False
 
     @property
@@ -2336,12 +2413,12 @@ class LanguageServerSession:
             self._wire_condition.notify_all()
         return retained
 
-    @staticmethod
-    def _did_open_params(document: OpenDocument) -> dict[str, object]:
+    def _did_open_params(self, document: OpenDocument) -> dict[str, object]:
+        suffix = PurePosixPath(document.source.relative_path).suffix
         return {
             "textDocument": {
                 "uri": document.source.uri,
-                "languageId": "python",
+                "languageId": self._profile.language_id_for(suffix),
                 "version": document.version,
                 "text": document.content.decode("utf-8", errors="strict"),
             }
@@ -2470,13 +2547,28 @@ class LanguageServerSession:
         generation = self._generation_nonce
         return generation is not None and self._progress_ready_generation == generation
 
+    def _progress_gate_limit_locked(self, deadline: float, grace: float) -> float:
+        """How long to wait: a server that opened no token is not loading."""
+        if self._work_done_tokens:
+            return deadline
+        return min(deadline, grace)
+
     def _await_progress_gate(self, deadline: float) -> None:
-        """Block until the project load is declared finished, or the deadline."""
+        """Block until the project load is declared finished, or the deadline.
+
+        A server that has not asked us to create a work-done token is not
+        loading a project: either it does not report progress at all, or it has
+        not started. Waiting the caller's whole deadline for a notification that
+        is not coming spends the budget the query itself needs, and the answer
+        is `not_ready` either way -- so that case waits only a short grace.
+        """
         if not self._profile.gates_on_progress():
             return
+        grace = time.monotonic() + _PROGRESS_GATE_GRACE_SECONDS
         with self._lock:
             while not self._progress_gate_satisfied_locked():
-                remaining = deadline - time.monotonic()
+                limit = self._progress_gate_limit_locked(deadline, grace)
+                remaining = limit - time.monotonic()
                 if remaining <= 0:
                     return
                 self._condition.wait(min(remaining, _PROGRESS_POLL_SECONDS))
@@ -2947,10 +3039,24 @@ class LanguageServerSession:
             return None
         retained = (self._startup_cleanup_error, self._startup_process)
         nothing_retained = retained == (None, None)
-        if self._startup_attempted and nothing_retained:
+        if self._startup_claim_refused_locked(nothing_retained):
             return None
+        self._degradation_codes = ()
         self._begin_startup_locked(nothing_retained)
         return retained
+
+    def _startup_claim_refused_locked(self, nothing_retained: bool) -> bool:
+        """Whether a fresh attempt is refused because the last one is spent.
+
+        A first attempt, and one that still has a retained owner to clear, are
+        never refused. A spent attempt is refused for good unless the failure
+        scheduled a retry, and then only until that instant has passed.
+        """
+        if not nothing_retained:
+            return False
+        if self._startup_attempted:
+            return True
+        return time.monotonic() < self._startup_retry_after
 
     def _begin_startup_locked(self, nothing_retained: bool) -> None:
         """Take the startup claim; a first attempt also records that it happened."""
@@ -3064,19 +3170,13 @@ class LanguageServerSession:
     def _add_identity_handler(self, handlers: dict[str, object]) -> None:
         """Register the post-initialize identity assertion, where a profile has one.
 
-        Honest limitation, measured 2026-08-28: `lsp_protocol.SERVER_NOTIFICATIONS`
-        is a module-level allowlist and does not carry `$/typescriptVersion`, so
-        this handler is registered but not yet reached -- the transport drops the
-        method with one "unknown notification" warning and nothing else. Widening
-        that allowlist means editing `lsp_protocol.py`, which the complexity gate
-        refuses wholesale over roughly thirty pre-existing findings in the
-        transport hot path; that is a separate piece of work.
-
-        The guarantee is not lost in the meantime, it is taken earlier:
-        `lsp_identity` digests the pinned engine at `tsserver.path` against the
-        install receipt *before* the process starts, so the file the server is
-        pointed at is known to be ours. What is missing is the server's own
-        confirmation that it used it rather than something else.
+        Two checks, not one. `lsp_identity` digests the pinned engine at
+        `tsserver.path` against the install receipt *before* the process
+        starts, so the file the server is pointed at is known to be ours. This
+        is the server's own word, afterwards, that it used that file rather
+        than one it found for itself. Since 2026-09-17 the transport's
+        allowlist is derived from the profile registry, so the notification
+        reaches here instead of being dropped with one warning.
         """
         identity = self._profile.identity_notification
         if identity is None:
@@ -3089,6 +3189,21 @@ class LanguageServerSession:
             return
         version, confirmed = identity.confirmed(params)
         self._retain_progress((identity.method, str(version), str(confirmed)))
+        self._record_identity_confirmation(confirmed)
+
+    def _record_identity_confirmation(self, confirmed: bool) -> None:
+        """A server that did not name the engine we pinned answers as degraded.
+
+        Readiness is left alone: the session still answers, and the caller is
+        told the answers come from an engine we did not verify.
+        """
+        if confirmed:
+            return
+        code = self._profile.degradation_code("server_identity_unconfirmed")
+        with self._lock:
+            self._degradation_codes = tuple(
+                sorted({*self._degradation_codes, code})
+            )
 
     def _prepare_owner(
         self, attempt: _StartupAttempt, *, startup_deadline: float
@@ -3209,6 +3324,19 @@ class LanguageServerSession:
             self._process = None
             self._record_retained_cleanup_locked(retained_error)
             self._degrade_locked(code)
+            self._schedule_startup_retry_locked(error)
+
+    def _schedule_startup_retry_locked(self, error: BaseException) -> None:
+        """Let a later caller try this start again, once the backoff has passed."""
+        if self._startup_retries >= len(_STARTUP_RETRY_BACKOFF):
+            return
+        if not _startup_is_retryable(error, self._profile.degradation_prefix):
+            return
+        self._startup_retry_after = (
+            time.monotonic() + _STARTUP_RETRY_BACKOFF[self._startup_retries]
+        )
+        self._startup_retries += 1
+        self._startup_attempted = False
 
     def _handle_launch_failure(
         self,
@@ -3615,6 +3743,112 @@ class LanguageServerSession:
         self._document_bytes = document_bytes
         self._readiness_target_uri = uri
         self._ready_uri_generations.pop(uri, None)
+        self._note_document_use_locked(uri)
+
+    def _evictable_document_locked(self, document: OpenDocument) -> bool:
+        """Whether closing this document would cut across work in flight."""
+        uri = document.source.uri
+        return not any(key[1] == uri for key in self._wire_sending)
+
+    def _documents_by_use_locked(self) -> list[OpenDocument]:
+        """The open documents, the one untouched longest first."""
+        return sorted(
+            self._documents.values(),
+            key=lambda document: self._document_used.get(document.source.uri, 0),
+        )
+
+    def _crowded_documents_locked(self, incoming_bytes: int) -> list[OpenDocument]:
+        """The least recently used documents to close so one more fits.
+
+        An empty list means one more already fits within both bounds -- or, for
+        a document larger than the whole budget, that no amount of closing
+        would help, so nothing is given up to make room it could not use.
+        """
+        if incoming_bytes > _MAX_OPEN_DOCUMENT_BYTES:
+            return []
+        crowded: list[OpenDocument] = []
+        count = len(self._documents) + 1
+        used = self._document_bytes + incoming_bytes
+        for document in self._documents_by_use_locked():
+            if _documents_fit(count, used):
+                break
+            if self._evictable_document_locked(document):
+                crowded.append(document)
+                count -= 1
+                used -= len(document.content)
+        return crowded
+
+    def _forget_wire_uri_locked(self, uri: str) -> None:
+        """Forget that this URI was announced; a reopen has to announce it again."""
+        generation = self._wire_generation
+        if generation is None:
+            return
+        self._wire_opened = _without_wire_uri(self._wire_opened, generation, uri)
+        self._wire_failed = _without_wire_uri(self._wire_failed, generation, uri)
+
+    def _forget_document_locked(self, document: OpenDocument) -> None:
+        """Drop a closed document and everything else keyed to its URI."""
+        uri = document.source.uri
+        if self._documents.get(uri) is not document:
+            return
+        del self._documents[uri]
+        self._document_bytes -= len(document.content)
+        self._document_identities.pop(uri, None)
+        self._document_used.pop(uri, None)
+        self._ready_uri_generations.pop(uri, None)
+        self._forget_wire_uri_locked(uri)
+        snapshot = self._diagnostics.pop(uri, None)
+        self._diagnostic_bytes -= 0 if snapshot is None else snapshot.retained_bytes
+        self._forget_readiness_target_locked(uri)
+
+    def _forget_readiness_target_locked(self, uri: str) -> None:
+        """A session whose proven document is gone is only initialized again."""
+        if self._readiness_target_uri != uri:
+            return
+        self._readiness_target_uri = None
+        self._relax_readiness_locked(self._documents, None)
+
+    def _close_evicted_document(
+        self, document: OpenDocument, process: LspProcess, deadline: float
+    ) -> None:
+        """Tell the server we are done with a document, then forget it.
+
+        The notification is best effort, as `didOpen` is: a server that refused
+        it, or a generation that has since been replaced, will not be holding
+        the document either way.
+        """
+        params = {"textDocument": {"uri": document.source.uri}}
+        generation = self._current_generation_nonce()
+        if generation is not None:
+            self._try_process_did_close(process, params, generation, deadline)
+        with self._lock:
+            self._forget_document_locked(document)
+
+    @staticmethod
+    def _try_process_did_close(
+        process: LspProcess,
+        params: dict[str, object],
+        generation_nonce: str,
+        deadline: float,
+    ) -> None:
+        try:
+            process.notify_generation(
+                "textDocument/didClose",
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+        except (ProtocolViolation, RuntimeError, TimeoutError):
+            return
+
+    def _make_room_for_document(
+        self, incoming_bytes: int, process: LspProcess, deadline: float
+    ) -> None:
+        """Close the least recently used documents until one more would fit."""
+        with self._lock:
+            crowded = self._crowded_documents_locked(incoming_bytes)
+        for document in crowded:
+            self._close_evicted_document(document, process, deadline)
 
     def _open_new_document(
         self,
@@ -3626,6 +3860,7 @@ class LanguageServerSession:
     ) -> OpenDocument:
         document = OpenDocument(source, content, digest, 1)
         _check_did_open_encodable(self._did_open_params(document))
+        self._make_room_for_document(len(content), process, deadline)
         with self._lock:
             self._register_document_locked(document, content)
         sent = self._try_process_did_open(document, process, deadline)
@@ -3635,13 +3870,30 @@ class LanguageServerSession:
         self._probe_document(document, process, deadline=deadline)
         return document
 
+    def _reused_document_locked(self, uri: str) -> OpenDocument | None:
+        """The document already held for this URI, marked as used just now."""
+        document = self._documents.get(uri)
+        if document is None:
+            return None
+        self._note_document_use_locked(uri)
+        return document
+
+    def _note_document_use_locked(self, uri: str) -> None:
+        """Order documents by use without reordering `self._documents` itself.
+
+        Replay after a restart walks `self._documents`, and that has to stay the
+        order the documents were opened in; only eviction cares about use.
+        """
+        self._document_use += 1
+        self._document_used[uri] = self._document_use
+
     def _open_document_within_operation(
         self, path: str, deadline: float
     ) -> OpenDocument:
         self.start(deadline=deadline)
         source, content, digest = self._document_source_bytes(path, deadline)
         with self._lock:
-            current = self._documents.get(source.uri)
+            current = self._reused_document_locked(source.uri)
             process = self._process
             ready = self._document_ready_locked(source.uri)
         if process is None:
@@ -4708,6 +4960,20 @@ class LanguageServerSession:
             *(("didOpen",) if next_documents else ()),
         )
 
+    def _projected_document_identities(
+        self, plan: _SyncPlan
+    ) -> dict[str, tuple[int, int, int, int]]:
+        """The file identities that still describe the content we will hold."""
+        replaced = {
+            document.source.uri for document, _next, _params in plan.changed_replacements
+        }
+        kept = set(plan.next_documents) - replaced
+        return {
+            uri: identity
+            for uri, identity in self._document_identities.items()
+            if uri in kept
+        }
+
     def _apply_synchronize_commit_locked(self, plan: _SyncPlan) -> None:
         """Publish the planned state; the caller holds the session and wire locks."""
         next_diagnostics, next_ready, next_target = self._projected_readiness(plan)
@@ -4715,6 +4981,12 @@ class LanguageServerSession:
         self._wire_condition.notify_all()
         self._documents = plan.next_documents
         self._document_bytes = plan.projected_document_bytes
+        self._document_identities = self._projected_document_identities(plan)
+        self._document_used = {
+            uri: used
+            for uri, used in self._document_used.items()
+            if uri in plan.next_documents
+        }
         self._ready_uri_generations = next_ready
         self._diagnostics = next_diagnostics
         self._diagnostic_bytes = sum(
@@ -4812,15 +5084,45 @@ class LanguageServerSession:
         *,
         deadline: float,
     ) -> dict[str, bytes]:
-        """Re-read every retained document and check it against the revision."""
+        """Check every retained document against the revision, re-reading it
+        only when its file has moved since the last check."""
         contents: dict[str, bytes] = {}
         for path, document in snapshot.open_by_path.items():
             if path in closing_paths:
                 continue
-            contents[path] = _verified_document_content(
-                entries[path], document, deadline=deadline
+            content = self._retained_content(
+                document, entries[path], deadline=deadline
             )
+            if content is not None:
+                contents[path] = content
         return contents
+
+    def _retained_content(
+        self, document: OpenDocument, entry: object, *, deadline: float
+    ) -> bytes | None:
+        """The document re-read and checked, or None when its file has not moved.
+
+        Without this, every query paid one read and one SHA-256 for every open
+        document, because `synchronize` runs before each one.
+        """
+        path = document.source.absolute_path
+        before = _file_identity(path)
+        with self._lock:
+            known = self._document_identities.get(document.source.uri)
+        if before is not None and before == known:
+            return None
+        content = _verified_document_content(entry, document, deadline=deadline)
+        self._record_document_identity(document.source.uri, path, before)
+        return content
+
+    def _record_document_identity(
+        self, uri: str, path: Path, before: tuple[int, int, int, int] | None
+    ) -> None:
+        """Keep the file's identity only when the read saw one state throughout."""
+        if before is None or _file_identity(path) != before:
+            return
+        with self._lock:
+            self._document_identities[uri] = before
 
     def _changed_replacement(
         self,
@@ -4978,14 +5280,34 @@ class LanguageServerSession:
             raise ValueError("workspace revision must describe this checkout")
 
     def close(self, *, deadline: float) -> None:
+        """Close what this session owns; a failure leaves it stranded, not lost.
+
+        A close that raises after `_closing` was set leaves a session nobody is
+        closing. It is marked, so the manager's next caller retries the close
+        under its own deadline instead of polling a flag that never clears.
+        """
         deadline = _validated_deadline(deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not self._close_lock.acquire(timeout=remaining):
             raise TimeoutError("Pyright close serialization deadline expired")
         try:
-            self._close_owned(deadline)
+            self._close_attempt_recorded(deadline)
         finally:
             self._close_lock.release()
+
+    def _close_attempt_recorded(self, deadline: float) -> None:
+        """Close under the close lock, remembering one that did not finish.
+
+        `_close_stranded` is written only by the thread holding `_close_lock`,
+        so the flag is never set while another thread is still closing: it
+        means "the last close attempt ended badly and nobody took it up".
+        """
+        self._close_stranded = False
+        try:
+            self._close_owned(deadline)
+        except BaseException:
+            self._close_stranded = True
+            raise
 
     def _close_finished_locked(
         self,
@@ -5064,6 +5386,8 @@ class LanguageServerSession:
         self._reset_readiness_locked()
         self._documents.clear()
         self._document_bytes = 0
+        self._document_identities.clear()
+        self._document_used.clear()
         self._readiness_target_uri = None
         self._forget_generation_locked()
         self._progress_events.clear()
@@ -5368,13 +5692,29 @@ class LanguageServerSessionManager:
             live.append((key, session))
         return live
 
+    @staticmethod
+    def _eviction_rank(session: LanguageServerSession, deadline: float) -> int:
+        """0 for a session that owns no server; it costs a caller nothing.
+
+        A checkout whose start failed keeps answering `get()`, and each answer
+        renews its last-used time, so least-recently-used alone would evict a
+        healthy neighbour to keep a session that owns nothing.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            return 1 if session._process is not None else 0
+        finally:
+            session._lock.release()
+
     def _idle_entry(
         self,
         key: tuple[str, PyrightIdentity],
         session: LanguageServerSession,
         deadline: float,
-    ) -> tuple[float, tuple[str, PyrightIdentity], LanguageServerSession] | None:
-        """The session's last-used time, when it is idle enough to evict."""
+    ) -> tuple[int, float, tuple[str, PyrightIdentity], LanguageServerSession] | None:
+        """The session's eviction order, when it is idle enough to evict."""
         closed, closing, starting, active, last_used = self._session_state(
             session,
             deadline,
@@ -5383,7 +5723,7 @@ class LanguageServerSessionManager:
             return None
         if active != 0:
             return None
-        return last_used, key, session
+        return self._eviction_rank(session, deadline), last_used, key, session
 
     def _reserve_lru_idle_locked(
         self,
@@ -5391,29 +5731,131 @@ class LanguageServerSessionManager:
         deadline: float,
     ) -> tuple[tuple[str, PyrightIdentity], LanguageServerSession] | None:
         idle: list[
-            tuple[float, tuple[str, PyrightIdentity], LanguageServerSession]
+            tuple[int, float, tuple[str, PyrightIdentity], LanguageServerSession]
         ] = []
         for key, session in live:
             entry = self._idle_entry(key, session, deadline)
             if entry is not None:
                 idle.append(entry)
-        for _last_used, key, session in sorted(idle, key=lambda item: item[0]):
+        for _rank, _last_used, key, session in sorted(idle, key=lambda item: item[:2]):
             if session._reserve_idle_close(deadline):
                 return key, session
         return None
 
     @staticmethod
-    def _wait_for_session_close(session: LanguageServerSession, deadline: float) -> None:
-        while True:
-            closed, closing, _starting, _active, _last_used = (
-                LanguageServerSessionManager._session_state(session, deadline)
-            )
-            if closed or not closing:
-                return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Pyright session close wait deadline expired")
-            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+    def _finish_session_close(session: LanguageServerSession, deadline: float) -> None:
+        """Close a session found closing, under this caller's deadline.
+
+        `close` is serialized: while another caller is closing, this waits for
+        it and then finds nothing left to do. When the earlier close failed and
+        nobody is closing, this is the retry -- polling the flag, as this did
+        before 2026-09-17, waited for a close that was never coming.
+        """
+        session.close(deadline=deadline)
+
+    def _stranded_entry_locked(
+        self,
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]],
+        deadline: float,
+    ) -> tuple[tuple[str, PyrightIdentity], LanguageServerSession] | None:
+        """A session whose close failed: it holds a slot and serves nobody."""
+        for key, session in live:
+            if self._close_is_stranded(session, deadline):
+                return key, session
+        return None
+
+    @staticmethod
+    def _close_is_stranded(session: LanguageServerSession, deadline: float) -> bool:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            return not session._closed and session._close_stranded
+        finally:
+            session._lock.release()
+
+    def _idle_expired_session(
+        self,
+        key: tuple[str, PyrightIdentity],
+        session: LanguageServerSession,
+        now: float,
+        deadline: float,
+    ) -> bool:
+        """Whether the server this session owns has gone unused past the limit.
+
+        The clock is the session's own last-used instant, the one capacity
+        eviction already orders by: one idea of "idle" in one place. A session
+        that owns no server is rank 0 and costs a caller nothing, so there is
+        nothing in it to reap.
+        """
+        entry = self._idle_entry(key, session, deadline)
+        if entry is None:
+            return False
+        rank, last_used, _key, _session = entry
+        if rank == 0:
+            return False
+        return now - last_used >= _IDLE_SECONDS
+
+    def _reserve_if_idle_expired(
+        self,
+        key: tuple[str, PyrightIdentity],
+        session: LanguageServerSession,
+        now: float,
+        deadline: float,
+    ) -> bool:
+        if not self._idle_expired_session(key, session, now, deadline):
+            return False
+        return session._reserve_idle_close(deadline)
+
+    def _first_reservable_idle(
+        self,
+        key: object,
+        live: list[tuple[tuple[str, PyrightIdentity], LanguageServerSession]],
+        now: float,
+        deadline: float,
+    ) -> tuple[object, LanguageServerSession] | None:
+        for entry_key, session in live:
+            if entry_key == key:
+                continue
+            if self._reserve_if_idle_expired(entry_key, session, now, deadline):
+                return entry_key, session
+        return None
+
+    def _reserve_idle_expired(
+        self, key: object, deadline: float
+    ) -> tuple[object, LanguageServerSession] | None:
+        """One server unused past the idle limit, reserved for closing."""
+        now = time.monotonic()
+        self._acquire_manager(deadline)
+        try:
+            live = self._live_entries_locked(deadline)
+        finally:
+            self._lock.release()
+        return self._first_reservable_idle(key, live, now, deadline)
+
+    def _reap_idle_sessions(self, key: object, deadline: float) -> None:
+        """Close one server left unused past the idle limit, on this caller's time.
+
+        There is no daemon, so a request is the only clock the product has. The
+        reap is bounded, it never touches the session being asked for, and it
+        never fails the caller: a close that does not finish leaves a stranded
+        session, which the next caller for that key retries.
+        """
+        reap_deadline = min(deadline, time.monotonic() + _IDLE_REAP_SECONDS)
+        try:
+            reserved = self._reserve_idle_expired(key, reap_deadline)
+        except TimeoutError:
+            return
+        if reserved is None:
+            return
+        self._close_reaped(reserved[1], reap_deadline)
+
+    @staticmethod
+    def _close_reaped(session: LanguageServerSession, deadline: float) -> None:
+        try:
+            session.close(deadline=deadline)
+        except (OSError, RuntimeError, TimeoutError):
+            return
 
     def _admit_manager_locked(self) -> None:
         if self._closed:
@@ -5496,7 +5938,9 @@ class LanguageServerSessionManager:
         deadline: float,
     ) -> _SessionLookup:
         """At capacity: evict the least recently used idle session, or refuse."""
-        reserved = self._reserve_lru_idle_locked(live, deadline)
+        reserved = self._stranded_entry_locked(
+            live, deadline
+        ) or self._reserve_lru_idle_locked(live, deadline)
         if reserved is None:
             return _SessionLookup(
                 session=self._capacity_denied_session(repository, identity, profile)
@@ -5590,9 +6034,9 @@ class LanguageServerSessionManager:
         profile: LanguageServerProfile,
         deadline: float,
     ) -> LanguageServerSession | None:
-        """Wait out a closing session, or evict a reserved one; None to look again."""
+        """Finish a closing session, or evict a reserved one; None to look again."""
         if lookup.wait_for is not None:
-            self._wait_for_session_close(lookup.wait_for, deadline)
+            self._finish_session_close(lookup.wait_for, deadline)
             return None
         assert lookup.reserved is not None
         return self._evict_and_adopt(
@@ -5637,6 +6081,7 @@ class LanguageServerSessionManager:
         try:
             self._acquire_key_lock(key_lock_state.lock, deadline)
             key_lock_acquired = True
+            self._reap_idle_sessions(key, deadline)
             return self._session_for_key(
                 key, repository, identity, profile, deadline
             )

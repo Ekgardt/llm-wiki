@@ -4,7 +4,7 @@
 A nested gate records the project lease that entered it, and the registry
 reclaims a dead owner by `(role, scope)` — which that row is keyed by neither.
 Measured on the live vault 2026-08-28: one row for `global`, canonical owner
-`project:fix-pip`, lease expired 20:50:21Z, pid 2095087 gone, and every
+`project:project-alpha`, lease expired 20:50:21Z, pid 2095087 gone, and every
 generation pass answered `sqlite3.IntegrityError: UNIQUE constraint failed:
 writer_owners.gate_name` — twice in a row on an otherwise idle machine.
 """

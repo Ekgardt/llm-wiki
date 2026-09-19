@@ -153,14 +153,40 @@ def _write_new_token(path: Path) -> str:
     with contextlib.suppress(OSError):
         os.chmod(path.parent, TOKEN_DIR_MODE)
     token = secrets.token_urlsafe(TOKEN_ENTROPY_BYTES)
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, TOKEN_FILE_MODE
-    )
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(token + "\n")
+    temporary = path.with_name(f".{path.name}-{secrets.token_hex(8)}")
+    _write_private_file(temporary, token + "\n")
+    os.replace(temporary, path)
     with contextlib.suppress(OSError):
         os.chmod(path, TOKEN_FILE_MODE)
     return token
+
+
+_NEW_PRIVATE_FILE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Create `path` anew with mode 0600; never open something already there.
+
+    Audit 3, B6: the token used to be written with `O_TRUNC`, through any link
+    that sat at its path. Research:
+    `docs/research/2026-09-17-a-new-token-never-lands-in-someone-elses-file.md`.
+    The descriptor and the stream above it are both untranslated, so the secret
+    reaches disk as the characters it is on every platform. Research:
+    `docs/research/2026-09-18-a-payload-is-written-as-the-bytes-it-is.md`.
+    """
+    descriptor = os.open(path, _NEW_PRIVATE_FILE_FLAGS, TOKEN_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def ensure_token(path: Path) -> str:
@@ -386,13 +412,27 @@ def _announce(host: str, port: int, token_path: Path) -> None:
         )
 
 
-def _shutdown() -> None:
+def _close_navigation_sessions() -> None:
     try:
         mcp_server._close_navigation_session_manager(
             time.monotonic() + mcp_server.MCP_OPERATION_SECONDS
         )
     except Exception as error:  # noqa: BLE001 - reported, never hidden
         print(f"mcp_http: navigation sessions not closed cleanly: {error}", file=sys.stderr)
+
+
+def _shutdown() -> None:
+    """Close navigation, then let no model be mid-inference when we exit.
+
+    Audit 3, A8: the stdio transport settled inference and this one did not,
+    although abandoned retrieval stages run here. One rule, one function:
+    `mcp_server._settle_inference`. Research:
+    `docs/research/2026-09-17-the-shared-server-settles-inference-too.md`.
+    """
+    try:
+        _close_navigation_sessions()
+    finally:
+        mcp_server._settle_inference()
 
 
 # How long the warm-up may take before we give up and serve anyway. It is not a

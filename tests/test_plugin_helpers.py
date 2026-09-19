@@ -420,7 +420,7 @@ def _wire_session_start_callback(monkeypatch, integration_adapter):
     monkeypatch.setattr(
         integration_adapter,
         "build_session_start_context",
-        lambda: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
+        lambda slug=None: "# Project memory context\n\n## Health\n\nScheduler degraded.\n",
     )
     return spawned
 
@@ -1264,7 +1264,8 @@ def _assert_bounded_icacls(call: tuple, path: Path) -> None:
         str(path),
         "/inheritance:r",
         "/grant:r",
-        "Test User:(R,W)",
+        # Delete included: the transient file is removed once it has been read.
+        "Test User:(R,W,D)",
     ]
     assert call[1]["timeout"] > 0
 
@@ -1756,8 +1757,8 @@ def _claude_post_tool_payload(stdout: str) -> dict:
     """The shape Claude Code's PostToolUse hook actually sends."""
     return {
         "session_id": "abcdefgh-1111",
-        "transcript_path": "/home/user/.claude/projects/x/abcdefgh-1111.jsonl",
-        "cwd": "/home/user/llm-wiki",
+        "transcript_path": "/repo/home/.claude/projects/x/abcdefgh-1111.jsonl",
+        "cwd": "/repo/llm-wiki",
         "permission_mode": "acceptEdits",
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",

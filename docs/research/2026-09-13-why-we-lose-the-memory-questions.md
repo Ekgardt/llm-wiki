@@ -98,7 +98,7 @@ Husbands of Evelyn Hugo». Наш ответ: «the book you bought at the museu
 - Тот же вопрос `6d550036`, запущенный напрямую из основной копии:
   `vector_state: complete`, `reranker_applied: True`, статус `answered`. Два
   рабочих процесса одновременно — то же самое.
-- Причина: прогон на 500 я запустил из worktree `/home/user/llm-wiki-tasks`, а в
+- Причина: прогон на 500 я запустил из worktree `<vault>`, а в
   его окружении нет `torch`, `transformers` и `sentence_transformers`. В основной
   копии они есть (torch 2.13.0, transformers 5.13.0).
 

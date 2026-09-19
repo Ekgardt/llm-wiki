@@ -3,7 +3,6 @@
 Covers:
 - compile_memory no longer exposes heuristic lifecycle mutation
 - feedback_capture stdin JSON (OpenCode plugin)
-- loop_detector matches real breadcrumb format
 - MEMORY_LLM_PROVIDER=fake smoke for compile plan apply
 """
 
@@ -19,7 +18,6 @@ import sys
 import tarfile
 import zipfile
 from argparse import Namespace
-from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -289,125 +287,6 @@ def test_adapter_uses_canonical_source_as_agent_identity():
         "codex": "codex",
         "claude": "claude",
     }
-
-
-def test_agent_timeline_reports_the_canonical_agent_ids(tmp_path):
-    import agent_timeline
-
-    day = tmp_path / f"{date.today().isoformat()}.md"
-    blocks = []
-    for index, agent in enumerate(("opencode", "codex", "claude")):
-        blocks.append(
-            f"## [10:0{index}:00] {agent}-session | session-{index}\n"
-            "**Decisions made**\n"
-            f"- Decision from {agent}.\n"
-        )
-    day.write_text("\n".join(blocks), encoding="utf-8")
-
-    activity = agent_timeline._extract_activity(day, None, days=30)
-
-    assert {item["agent"] for item in activity} == {"opencode", "codex", "claude"}
-
-
-def test_agent_timeline_reads_historical_tool_breadcrumbs():
-    import agent_timeline
-
-    breadcrumb = agent_timeline.parse_tool_breadcrumb(
-        "- `[10:00:01] tool | abcd1234 | demo | edit` src/app.py",
-        fallback_agent="codex",
-    )
-
-    assert breadcrumb == {
-        "time": "10:00:01",
-        "agent": "codex",
-        "session": "abcd1234",
-        "slug": "demo",
-        "tool": "edit",
-        "target": "src/app.py",
-    }
-
-
-def test_loop_detector_classifies_single_agent_churn(tmp_path, monkeypatch):
-    import loop_detector
-
-    daily = tmp_path / "knowledge" / "daily"
-    daily.mkdir(parents=True)
-    day = daily / f"{date.today().isoformat()}.md"
-    day.write_text(
-        "# Daily\n"
-        "- `[10:00:01] tool | opencode | abcd1234 | demo | edit` src/app.py\n"
-        "- `[10:05:02] tool | opencode | abcd1234 | demo | write` src/app.py\n"
-        "- `[10:10:03] tool | opencode | efgh5678 | demo | Edit` src/app.py\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(loop_detector, "DAILY_DIR", daily)
-    monkeypatch.setattr(loop_detector, "ROOT", tmp_path)
-    loops = loop_detector.detect_file_edit_loops("demo", days=30, threshold=3)
-    _assert_single_agent_churn(loops)
-
-
-def _assert_single_agent_churn(loops) -> None:
-    assert loops
-    first = loops[0]
-    assert (first["type"], first["agents"], first["target"]) == (
-        "single_agent_churn",
-        ["opencode"],
-        "src/app.py",
-    )
-    assert first["edit_count"] >= 3
-
-
-def test_loop_detector_classifies_multi_agent_loop(tmp_path, monkeypatch):
-    import loop_detector
-
-    daily = tmp_path / "knowledge" / "daily"
-    daily.mkdir(parents=True)
-    day = daily / f"{date.today().isoformat()}.md"
-    day.write_text(
-        "# Daily\n"
-        "- `[10:00:01] tool | opencode | session1 | demo | edit` src/app.py\n"
-        "- `[10:05:02] tool | codex | session2 | demo | write` src/app.py\n"
-        "- `[10:10:03] tool | opencode | session1 | demo | edit` src/app.py\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(loop_detector, "DAILY_DIR", daily)
-
-    loops = loop_detector.detect_file_edit_loops("demo", days=30, threshold=3)
-
-    assert loops[0]["type"] == "multi_agent_loop"
-    assert loops[0]["agents"] == ["codex", "opencode"]
-
-
-def test_loop_detector_groups_recurring_normalized_errors(tmp_path, monkeypatch):
-    import loop_detector
-
-    daily = tmp_path / "knowledge" / "daily"
-    daily.mkdir(parents=True)
-    agents = ("opencode", "codex", "claude")
-    error_prefixes = ("Error: RuntimeError:", "Error: RuntimeError:", "RuntimeError:")
-    for offset, agent in enumerate(agents):
-        current = date.today() - timedelta(days=offset)
-        (daily / f"{current.isoformat()}.md").write_text(
-            f"## [10:00:0{offset}] {agent}-session | session-{offset}\n"
-            "- Project slug: `demo`\n"
-            f"- {error_prefixes[offset]} build {100 + offset} failed at "
-            f"C:/tmp/job-{100 + offset}\n",
-            encoding="utf-8",
-        )
-    monkeypatch.setattr(loop_detector, "DAILY_DIR", daily)
-    monkeypatch.setattr(loop_detector, "FEEDBACK_DIR", tmp_path / "feedback")
-
-    loops = loop_detector.detect_all("demo", days=30, threshold=3)
-    recurring = [item for item in loops if item["type"] == "recurring_error"]
-
-    _assert_recurring_error(recurring)
-
-
-def _assert_recurring_error(recurring) -> None:
-    assert len(recurring) == 1
-    assert recurring[0]["occurrence_count"] == 3
-    assert recurring[0]["agents"] == ["claude", "codex", "opencode"]
-    assert "<n>" in recurring[0]["signature"]
 
 
 def test_fake_llm_provider_returns_canned_json(monkeypatch):

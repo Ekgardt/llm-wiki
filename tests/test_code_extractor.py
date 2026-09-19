@@ -41,6 +41,74 @@ def _node(result, kind: str, name: str):
     )
 
 
+def _node_kinds(result) -> set:
+    return {node["kind"] for node in result.nodes}
+
+
+def _node_by_id(result, node_id: str) -> dict:
+    return next(item for item in result.nodes if item["node_id"] == node_id)
+
+
+def _module_paths(result) -> dict:
+    return {
+        item["node_id"]: item["metadata"]["path"]
+        for item in result.nodes
+        if item["kind"] == "module"
+    }
+
+
+def _assertion_edge_types(result) -> set:
+    return {assertion["edge_type"] for assertion in result.assertions}
+
+
+def _all_resolved(result) -> bool:
+    return all(item["resolution"] == "resolved" for item in result.assertions)
+
+
+def _first_assertion(result, edge_type: str) -> dict:
+    return next(item for item in result.assertions if item["edge_type"] == edge_type)
+
+
+def _observations_by_edge(result, edge_type: str) -> list:
+    return [item for item in result.observations if item["edge_type"] == edge_type]
+
+
+def _first_observation(result, edge_type: str) -> dict:
+    return next(item for item in result.observations if item["edge_type"] == edge_type)
+
+
+def _observation_reasons(result) -> set:
+    return {item["reason"] for item in result.observations}
+
+
+def _observation_ids(items) -> set:
+    return {item["observation_id"] for item in items}
+
+
+def _observed_triples(result) -> set:
+    return {
+        (item["edge_type"], item["target_text"], item["reason"])
+        for item in result.observations
+    }
+
+
+def _target_texts(items) -> list:
+    return [item["target_text"] for item in items]
+
+
+_REQUIRED_NODE_KINDS = {
+    "repository", "directory", "file", "module", "class", "method",
+    "function", "route", "table", "entry-point",
+}
+_REQUIRED_EDGE_TYPES = {
+    "CONTAINS", "DEFINES", "IMPORTS", "CALLS", "INHERITS", "EXPOSES",
+}
+_ALLOWED_OBSERVATION_REASONS = {
+    "ambiguous_target", "dynamic_dispatch", "missing_dependency", "parse_error",
+    "unresolved_reference", "unsupported_semantics",
+}
+
+
 def test_expired_deadline_aborts_before_code_source_iteration():
     from code_extractor import extract_code
 
@@ -79,14 +147,9 @@ def test_extracts_required_python_nodes_and_honest_relationships():
         (_source("src/app.py", content), dependency), repository_id="example/repo"
     )
 
-    kinds = {node["kind"] for node in result.nodes}
-    assert {
-        "repository", "directory", "file", "module", "class", "method",
-        "function", "route", "table", "entry-point",
-    } <= kinds
-    edges = {assertion["edge_type"] for assertion in result.assertions}
-    assert {"CONTAINS", "DEFINES", "IMPORTS", "CALLS", "INHERITS", "EXPOSES"} <= edges
-    assert all(assertion["resolution"] == "resolved" for assertion in result.assertions)
+    assert _REQUIRED_NODE_KINDS <= _node_kinds(result)
+    assert _REQUIRED_EDGE_TYPES <= _assertion_edge_types(result)
+    assert _all_resolved(result) is True
 
 
 def _occurrence_of(result, node_id: str) -> dict:
@@ -128,36 +191,19 @@ def test_preserves_exact_utf8_byte_and_line_spans_for_declarations_and_edges():
     )
 
 
-def test_uses_stable_non_line_identity_and_scip_symbol_when_supplied():
-    from code_extractor import SCIP_DEFINITION_ROLE, ScipSymbol, extract_code
+def test_uses_one_stable_non_line_identity_scheme():
+    """`scip/v1` was a second scheme no caller ever asked for (audit 3, C2)."""
+    from code_extractor import extract_code
 
     original = b"def run(value: int):\n    return value\n"
     shifted = b"\n\n" + original
     first = extract_code((_source("app.py", original),), repository_id="repo")
     second = extract_code((_source("app.py", shifted),), repository_id="repo")
     first_run = _node(first, "function", "run")
-    second_run = _node(second, "function", "run")
-    name_start = shifted.index(b"run")
-    symbols = (
-        ScipSymbol("source:app.py", shifted.index(b"def run"), len(shifted), "overlap", SCIP_DEFINITION_ROLE),
-        ScipSymbol("source:app.py", name_start, name_start + 3, "reference", 0),
-        ScipSymbol(
-            "source:app.py", name_start, name_start + 3,
-            "scip-python . repo 1 app/run().", SCIP_DEFINITION_ROLE,
-        ),
-    )
-    scip_result = extract_code(
-        (_source("app.py", shifted),), repository_id="repo", scip_symbols=symbols
-    )
 
-    assert first_run["node_id"] == second_run["node_id"]
+    assert first_run["node_id"] == _node(second, "function", "run")["node_id"]
     assert "@L" not in first_run["identity_key"]
-    assert _node(scip_result, "function", "run")["identity_scheme"] == "scip/v1"
-
-    without_exact_definition = extract_code(
-        (_source("app.py", shifted),), repository_id="repo", scip_symbols=symbols[:2]
-    )
-    assert _node(without_exact_definition, "function", "run")["identity_scheme"] == "code-symbol/v1"
+    assert first_run["identity_scheme"] == "code-symbol/v1"
 
 
 def test_unresolved_semantics_are_controlled_observations_with_evidence():
@@ -171,14 +217,11 @@ def test_unresolved_semantics_are_controlled_observations_with_evidence():
     )
     result = extract_code((_source("app.py", content),), repository_id="repo")
 
-    reasons = {item["reason"] for item in result.observations}
+    reasons = _observation_reasons(result)
+
     assert {"dynamic_dispatch", "missing_dependency"} <= reasons
-    assert all(item["reason"] in {
-        "ambiguous_target", "dynamic_dispatch", "missing_dependency", "parse_error",
-        "unresolved_reference", "unsupported_semantics",
-    } for item in result.observations)
-    observed = {item["observation_id"] for item in result.observations}
-    assert observed <= {item["observation_id"] for item in result.evidence}
+    assert reasons <= _ALLOWED_OBSERVATION_REASONS
+    assert _observation_ids(result.observations) <= _observation_ids(result.evidence)
 
 
 def test_cross_file_resolution_keeps_ambiguous_and_missing_targets_as_observations():
@@ -194,17 +237,12 @@ def test_cross_file_resolution_keeps_ambiguous_and_missing_targets_as_observatio
 
     result = extract_code(sources, repository_id="repo")
 
-    assert not [
-        item for item in result.assertions
-        if item["edge_type"] == "CALLS"
-    ]
-    observed = {
-        (item["edge_type"], item["target_text"], item["reason"])
-        for item in result.observations
-    }
-    assert ("CALLS", "helper", "ambiguous_target") in observed
-    assert ("IMPORTS", "absent", "missing_dependency") in observed
-    assert ("CALLS", "missing", "missing_dependency") in observed
+    assert _assertions_of_type(result, "CALLS") == []
+    assert {
+        ("CALLS", "helper", "ambiguous_target"),
+        ("IMPORTS", "absent", "missing_dependency"),
+        ("CALLS", "missing", "missing_dependency"),
+    } <= _observed_triples(result)
 
 
 def test_package_init_relative_import_resolves_sibling_module():
@@ -235,22 +273,9 @@ def test_package_init_from_dot_import_targets_submodule_when_alias_is_unused():
         _source("scripts/pkg/dep.py", b"VALUE = 1\n"),
     )
     result = extract_code(sources, repository_id="repo")
-    modules = {
-        item["node_id"]: item["metadata"]["path"]
-        for item in result.nodes
-        if item["kind"] == "module"
-    }
-    imported = next(item for item in result.assertions if item["edge_type"] == "IMPORTS")
+    imported = _first_assertion(result, "IMPORTS")
 
-    assert modules[imported["target_node_id"]] == "scripts/pkg/dep.py"
-
-
-def _module_paths(result) -> dict:
-    return {
-        item["node_id"]: item["metadata"]["path"]
-        for item in result.nodes
-        if item["kind"] == "module"
-    }
+    assert _module_paths(result)[imported["target_node_id"]] == "scripts/pkg/dep.py"
 
 
 def _module_node_id(result, relative_path: str) -> str:
@@ -291,13 +316,12 @@ def test_from_dot_import_preserves_ambiguous_submodule_candidates():
         _source("scripts/pkg/dep/__init__.py", b"VALUE = 2\n"),
     )
     result = extract_code(sources, repository_id="repo")
-    observation = next(
-        item for item in result.observations
-        if item["edge_type"] == "IMPORTS"
-    )
+    observation = _first_observation(result, "IMPORTS")
 
-    assert observation["target_text"] == "scripts.pkg.dep"
-    assert observation["reason"] == "ambiguous_target"
+    assert (observation["target_text"], observation["reason"]) == (
+        "scripts.pkg.dep",
+        "ambiguous_target",
+    )
     assert result.observation_source_dependencies[observation["observation_id"]] == (
         "source:scripts/pkg/dep.py",
         "source:scripts/pkg/dep/__init__.py",
@@ -312,11 +336,10 @@ def test_from_dot_import_keeps_package_attribute_as_imported_name():
         b"def exported(): pass\nfrom . import exported\nexported()\n",
     )
     result = extract_code((source,), repository_id="repo")
-    call = next(item for item in result.assertions if item["edge_type"] == "CALLS")
-    target = next(item for item in result.nodes if item["node_id"] == call["target_node_id"])
+    call = _first_assertion(result, "CALLS")
+    target = _node_by_id(result, call["target_node_id"])
 
-    assert target["kind"] == "function"
-    assert target["metadata"]["name"] == "exported"
+    assert (target["kind"], target["metadata"]["name"]) == ("function", "exported")
 
 
 def test_ordinary_module_relative_import_keeps_module_parent_context():
@@ -425,7 +448,7 @@ def test_module_alias_lookup_uses_index_without_scanning_10k_modules():
             return super().get(key, default)
 
     collector = code_extractor._Collector(
-        (), "repo", (), code_extractor.ExtractionLimits(), None, None
+        (), "repo", code_extractor.ExtractionLimits(), None, None
     )
     collector.modules = CountingModules(
         {
@@ -467,7 +490,7 @@ def test_syntax_traversal_checks_cancellation_before_walking_large_fake_tree():
         return state["checks"] >= 2
 
     collector = code_extractor._Collector(
-        (), "repo", (), code_extractor.ExtractionLimits(), None, cancelled
+        (), "repo", code_extractor.ExtractionLimits(), None, cancelled
     )
 
     with pytest.raises(TimeoutError, match="cancelled"):
@@ -476,14 +499,7 @@ def test_syntax_traversal_checks_cancellation_before_walking_large_fake_tree():
     assert state["visited"] <= 256
 
 
-@pytest.mark.parametrize(
-    ("argument", "limit_name", "message"),
-    [
-        ("scip_symbols", "max_scip_symbols", "SCIP symbol ceiling"),
-        ("co_changes", "max_co_changes", "co-change ceiling"),
-    ],
-)
-def test_optional_iterable_overflow_stops_after_limit_plus_one(argument, limit_name, message):
+def test_bounded_iterable_overflow_stops_after_limit_plus_one():
     from code_extractor import ExtractionLimits, extract_code
 
     consumed = 0
@@ -494,20 +510,16 @@ def test_optional_iterable_overflow_stops_after_limit_plus_one(argument, limit_n
             consumed += 1
             yield object()
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="source ceiling"):
         extract_code(
-            (_source("app.py", b"def app(): pass\n"),),
-            repository_id="repo",
-            limits=ExtractionLimits(**{limit_name: 2}),
-            **{argument: values()},
+            values(), repository_id="repo", limits=ExtractionLimits(max_sources=2)
         )
 
     assert consumed == 3
 
 
-@pytest.mark.parametrize("argument", ["scip_symbols", "co_changes"])
-def test_optional_iterable_consumption_checks_cancellation(argument):
-    from code_extractor import ExtractionLimits, extract_code
+def test_bounded_iterable_consumption_checks_cancellation():
+    from code_extractor import extract_code
 
     state = {"consumed": 0, "cancelled": False}
 
@@ -520,11 +532,7 @@ def test_optional_iterable_consumption_checks_cancellation(argument):
 
     with pytest.raises(TimeoutError, match="cancelled"):
         extract_code(
-            (_source("app.py", b"def app(): pass\n"),),
-            repository_id="repo",
-            limits=ExtractionLimits(max_scip_symbols=10, max_co_changes=10),
-            cancelled=lambda: state["cancelled"],
-            **{argument: values()},
+            values(), repository_id="repo", cancelled=lambda: state["cancelled"]
         )
 
     assert state["consumed"] == 2
@@ -598,11 +606,15 @@ def _target_starting_with(targets: list, prefix: str) -> str:
     return next(target for target in targets if target.startswith(prefix))
 
 
-def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact():
+def test_a_blank_observation_target_is_refused():
     import code_extractor
 
     with pytest.raises(ValueError, match="must not be empty"):
         code_extractor._canonical_observation_target(" \r\n\t")
+
+
+def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact():
+    import code_extractor
 
     oversized_function = 'client["' + ("e\u0301" * 3000) + '"]'
     content = (
@@ -619,10 +631,8 @@ def test_javascript_observation_targets_are_canonical_and_evidence_stays_exact()
     source = _source("llm-wiki-memory-opencode.js", content, language="javascript")
 
     result = code_extractor.extract_code((source,), repository_id="repo")
-    call_observations = [
-        item for item in result.observations if item["edge_type"] == "CALLS"
-    ]
-    targets = [item["target_text"] for item in call_observations]
+    call_observations = _observations_by_edge(result, "CALLS")
+    targets = _target_texts(call_observations)
     oversized = _target_starting_with(targets, 'client["')
     digest = hashlib.sha256(oversized_function.encode()).hexdigest()
 
@@ -900,27 +910,6 @@ def test_output_is_accepted_by_task18_schema(tmp_path):
     )
 
     assert (tmp_path / "evidence.sqlite3").is_file()
-
-
-def test_co_change_requires_explicit_captured_history_evidence():
-    from code_extractor import CoChange, extract_code
-
-    first = _source("a.py", b"def a(): pass\n")
-    second = _source("b.py", b"def b(): pass\n")
-    history = _source("history.log", b"commit abc: a.py b.py\n", language="unknown")
-    proven = CoChange(
-        "a.py", "b.py", 0.8, history.record.logical_id, 0, len(history.content)
-    )
-    unproven = CoChange("b.py", "a.py", 0.8)
-
-    result = extract_code(
-        (first, second, history), repository_id="repo", co_changes=(unproven, proven)
-    )
-
-    edges = [item for item in result.assertions if item["edge_type"] == "CO_CHANGED_WITH"]
-    assert len(edges) == 1
-    evidence = next(item for item in result.evidence if item["assertion_id"] == edges[0]["assertion_id"])
-    assert evidence["source_id"] == history.record.logical_id
 
 
 def test_facade_prefers_store_and_falls_back_to_live_extraction(tmp_path, monkeypatch):

@@ -30,6 +30,13 @@ from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import read_runtime_bytes, sha256_bytes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+# One column, one identity: every writer of `retrieval_events` names a page by
+# its vault-relative path. This module's public surface is slug-shaped, because
+# the CLI and `archive_stale` call it that way, so the slug is resolved to that
+# path in one place — here. A stem is not an identity: two projects each hold a
+# `state.md`. See
+# `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+NOTES_RELATIVE = "knowledge/notes"
 ACCESS_LOG_FILE = STATE_ROOT / "cache" / "access_log.jsonl"
 MAX_ACCESS_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_LEGACY_ACCESS_LOG_BYTES = 16 * 1024 * 1024
@@ -80,6 +87,27 @@ def _set_frontmatter_integer(fm: str, name: str, value: int, present: bool) -> s
     return f"{fm}\n{name}: {value}"
 
 
+def page_identity(slug: str) -> str:
+    """The vault-relative path of a note, which is how the telemetry names a page."""
+    return f"{NOTES_RELATIVE}/{slug}.md"
+
+
+def _note_slug(candidate: str) -> str | None:
+    """The slug of a note this vault holds, or None when the row names anything else.
+
+    Rows written before one identity was settled hold chunk hashes and bare
+    stems; rows for daily entries, projects and raw sources name pages that carry
+    no access frontmatter. None of them is a note to flush.
+    """
+    prefix = f"{NOTES_RELATIVE}/"
+    if not candidate.startswith(prefix) or not candidate.endswith(".md"):
+        return None
+    slug = candidate[len(prefix) : -len(".md")]
+    if "/" in slug or not (KNOWLEDGE_DIR / f"{slug}.md").is_file():
+        return None
+    return slug
+
+
 def record_access(slug: str, source: str = "search", query: str | None = None,
                   rank: int | None = None) -> None:
     """Best-effort compatibility adapter to durable retrieval telemetry.
@@ -103,15 +131,15 @@ def record_access(slug: str, source: str = "search", query: str | None = None,
             event_kind=kind,
             query=query,
             retrieval_mode="legacy-search" if kind == "impression" else "direct",
-            candidate_id=slug,
+            candidate_id=page_identity(slug),
             rank=rank if kind == "impression" else None,
             generation="legacy",
             source_tool=source,
         )
         if event is not None:
             best_effort_record_event(event)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - named, never silent
+        _note_flush_failure(slug, exc)
 
 
 # Pages the last flush could not export, named: [{"slug", "error"}]. The
@@ -136,7 +164,9 @@ def _note_flush_failure(slug: str, error: BaseException) -> None:
 def _page_events(slug: str, watermark: int) -> list:
     from retrieval_telemetry import read_events_after
 
-    return read_events_after(slug, after_sequence=watermark, limit=MAX_EVENTS_PER_PAGE_EXPORT)
+    return read_events_after(
+        page_identity(slug), after_sequence=watermark, limit=MAX_EVENTS_PER_PAGE_EXPORT
+    )
 
 
 def _with_last_accessed(fm: str, last_accessed: str) -> str:
@@ -265,8 +295,9 @@ class _Scan:
 
     def visit(self, candidate: str) -> bool:
         """Flush one candidate and move the cursor; False when the cursor is stuck."""
-        if (KNOWLEDGE_DIR / f"{candidate}.md").is_file():
-            self.updated += flush_access_to_frontmatter(candidate)
+        slug = _note_slug(candidate)
+        if slug is not None:
+            self.updated += flush_access_to_frontmatter(slug)
         if not _advance_cursor(candidate):
             return False
         self.cursor = candidate
@@ -347,7 +378,7 @@ def _count_telemetry(stats: _Stats, slug: str) -> None:
     try:
         from retrieval_telemetry import read_events
 
-        for event in read_events(candidate_id=slug, limit=1_000):
+        for event in read_events(candidate_id=page_identity(slug), limit=1_000):
             stats.count(event.timestamp, event.source_tool)
     except Exception as exc:  # noqa: BLE001 - the legacy log still answers
         _note_flush_failure(slug, exc)
@@ -394,35 +425,50 @@ def get_access_stats(slug: str) -> dict:
     return stats.as_dict()
 
 
+def _half_life_days(page_type: str) -> float | None:
+    """The page's own window from the contract, or None for a type that never archives.
+
+    One set, two readers, as `okf_types` says of these numbers: the archiver and
+    the answer path already use them, and this is the third reader of the same
+    set. It used to keep a private copy that disagreed with six of eight types.
+    """
+    from okf_types import DEFAULT_AGE_DAYS, NEVER_ARCHIVE_TYPES, TYPE_AGE_DAYS
+
+    if page_type in NEVER_ARCHIVE_TYPES:
+        return None
+    return float(TYPE_AGE_DAYS.get(page_type, DEFAULT_AGE_DAYS))
+
+
+def _decayed(base: float, delta_days: int, half_life: float | None) -> float:
+    """What is left of a page's importance after that many days.
+
+    A half-life halves: `0.5 ** (delta / h)`, not `exp(-delta / h)`, which is
+    decay with a *time constant* and leaves 0.37 at the stated half-life. The
+    sibling of the same shape, `co_activation`, has always had it right. See
+    `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
+    """
+    if half_life is None:
+        return base
+    return base * 0.5 ** (delta_days / half_life)
+
+
 def decay_score(slug: str, page_type: str = "concept",
                 confidence: str = "medium") -> float:
     """Calculate Ebbinghaus-inspired decay score for a page.
 
     Score 0.0-1.0. Higher = more relevant/alive. Low scores are archive candidates.
 
-    Formula: base_importance * exp(-delta_t / half_life) + reinforcement * access_count
+    Formula: base_importance * 0.5 ** (delta_t / half_life) + reinforcement
 
     - base_importance: from confidence (high=1.0, medium=0.7, low=0.4)
     - delta_t: days since last access (or creation if never accessed)
-    - half_life: per type (debugging=30d, pattern=90d, concept=365d, decision=inf)
+    - half_life: the type's own window from `okf_types.TYPE_AGE_DAYS`; a type
+      that never archives never decays
     - reinforcement: access_count * 0.05 (capped at 0.3)
     """
-    import math
-
     base_map = {"high": 1.0, "medium": 0.7, "low": 0.4}
     base = base_map.get(confidence, 0.7)
-
-    half_life_map = {
-        "debugging": 30,
-        "pattern": 90,
-        "gap": 60,
-        "qa": 180,
-        "concept": 365,
-        "decision": 99999,  # effectively never decay
-        "entity": 99999,
-        "synthesis": 365,
-    }
-    half_life = half_life_map.get(page_type, 180)
+    half_life = _half_life_days(page_type)
 
     stats = get_access_stats(slug)
     access_count = stats["total_count"]
@@ -438,13 +484,10 @@ def decay_score(slug: str, page_type: str = "concept",
     else:
         delta_days = 0  # Never accessed — treat as "just created" for decay
 
-    # Decay component.
-    decay = base * math.exp(-delta_days / half_life) if half_life < 99999 else base
-
     # Reinforcement from access.
     reinforcement = min(0.3, access_count * 0.05)
 
-    return round(min(1.0, decay + reinforcement), 4)
+    return round(min(1.0, _decayed(base, delta_days, half_life) + reinforcement), 4)
 
 
 def main() -> int:

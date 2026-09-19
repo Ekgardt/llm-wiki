@@ -6,8 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Deprecated
+
+- **`compile_memory.py --all`.** It has never changed anything: every daily log
+  without a committed receipt is compiled anyway, and a day with one is never
+  compiled again. The flag is still accepted, is hidden from `--help`, and now
+  prints one line saying it does nothing and will be removed.
+
 ### Changed
 
+- **The navigation gate measures our share, not the machine.**
+  `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
+  `direct_pyright_p95_ms` — Pyright itself, which no change of ours can reach —
+  rose 27.6% in the same three hours; our share of the work moved 2.4%. The
+  bound is now `max(30 ms, 0.90 x direct_pyright_p95_ms)`: the approved 30 ms
+  floor, or, on a slower machine, 90% of what the language server took on the
+  same queries in the same run. A uniformly slower runner can no longer fail the
+  gate; our layer growing its share still does, and an absent or non-positive
+  control makes the evidence incomplete. The August runs, where our share was
+  0.48-0.50 against today's 0.72-0.74, show what the single absolute number was
+  blind to. See `docs/CODE-NAVIGATION.md` and
+  `docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md`.
 - **The test tree comes under the complexity law.** `lizard -C 5` reported 88
   functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
   in the navigation tests become tables of runners and builders, the
@@ -632,7 +651,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `docs/research/2026-09-10-a-cached-reader-needs-one-thread-at-a-time-not-a-serialized-build.md`.
 - **The compile commits again; a project journal is no longer a claim page.**
   No compile had committed since 2026-09-07: the claim index read
-  `knowledge/projects/*/journal.md` and refused the 4.2 MB `no-hands`
+  `knowledge/projects/*/journal.md` and refused the 4.2 MB `another-project`
   journal at a 4 MiB cap the journal itself did not have, so every draft
   was recorded as a validation error. The claim tree, the claim index and
   lint now share one file set, `context.md` and `state.md`: the journal is

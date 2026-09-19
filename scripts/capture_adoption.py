@@ -43,6 +43,7 @@ import argparse
 import json
 import sys
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,11 @@ from integration_adapter import (  # noqa: E402
 # failures goes in the first Monday capture. A bound defers work and never drops
 # it: the sweeper runs again on the next capture and again every night.
 MAX_ADOPTED_INTENTS_PER_PASS = 32
+
+# A record that cannot be adopted is skipped and left untouched; it must not use
+# the bound above up, or 32 bad records hide every orphan behind them for good.
+# The pass still ends: after this many skips it stops looking further.
+MAX_SKIPPED_INTENTS_PER_PASS = 256
 
 
 def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
@@ -133,32 +139,69 @@ def _adopt_one(
 
 def _skip(record: dict[str, Any], error: BaseException) -> dict[str, str]:
     """A refusal names the intent and the reason; the record is left untouched."""
+    from capture_diagnostics import is_contention
+
     return {
         "intent_id": str(record["intent_id"]),
         "reason": f"{type(error).__name__}: {error}",
+        # A writer race is tried again by the next pass; anything else will not mend itself.
+        "retried": is_contention(error),
     }
+
+
+def _adopt_batch(
+    queue: object,
+    coordinator: object,
+    state_root: Path,
+    records: list[dict[str, Any]],
+    outcome: dict[str, Any],
+) -> None:
+    for record in records:
+        outcome["examined"] += 1
+        try:
+            task_id = _adopt_one(queue, coordinator, state_root, record)
+        except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
+            outcome["skipped"].append(_skip(record, error))
+            continue
+        outcome["adopted"].append(
+            {"intent_id": str(record["intent_id"]), "task_id": task_id}
+        )
+
+
+def _not_skipped(
+    records: list[dict[str, Any]], skipped: set[str]
+) -> list[dict[str, Any]]:
+    return [record for record in records if str(record["intent_id"]) not in skipped]
+
+
+def _next_records(reader, outcome: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """The orphans still owed to this pass; a skipped record does not use the bound up.
+
+    A skipped record is left untouched, so it is among the oldest again on every
+    read. The window is therefore wider by the skips so far, and the pass goes on
+    to the orphans behind them instead of stalling at a head of bad records.
+    See `docs/research/2026-09-17-bad-intents-do-not-use-up-the-adoption-bound.md`.
+    """
+    remaining = limit - len(outcome["adopted"])
+    skipped = {entry["intent_id"] for entry in outcome["skipped"]}
+    if remaining < 1 or len(skipped) >= MAX_SKIPPED_INTENTS_PER_PASS:
+        return []
+    return _not_skipped(reader(remaining + len(skipped)), skipped)[:remaining]
 
 
 def _adopt_records(
     queue: object,
     coordinator: object,
     state_root: Path,
-    records: list[dict[str, Any]],
+    reader,
+    limit: int,
 ) -> dict[str, Any]:
-    adopted: list[dict[str, str]] = []
-    skipped: list[dict[str, str]] = []
-    for record in records:
-        try:
-            task_id = _adopt_one(queue, coordinator, state_root, record)
-        except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
-            skipped.append(_skip(record, error))
-            continue
-        adopted.append({"intent_id": str(record["intent_id"]), "task_id": task_id})
-    return {
-        "examined": len(records),
-        "adopted": adopted,
-        "skipped": skipped,
-    }
+    outcome: dict[str, Any] = {"examined": 0, "adopted": [], "skipped": []}
+    while True:
+        records = _next_records(reader, outcome, limit)
+        if not records:
+            return outcome
+        _adopt_batch(queue, coordinator, state_root, records, outcome)
 
 
 def adopt_orphaned_capture_intents(
@@ -177,7 +220,90 @@ def adopt_orphaned_capture_intents(
     reader = getattr(queue, "ready_capture_intents_without_task", None)
     if reader is None:
         return {"examined": 0, "adopted": [], "skipped": [], "reason": "unsupported"}
-    return _adopt_records(queue, coordinator, Path(state_root), reader(limit))
+    return _adopt_records(queue, coordinator, Path(state_root), reader, limit)
+
+
+# How long a `pending` row must have sat still before this pass touches it. Twice
+# the 30 s intent fence: inside that window the publisher may still be running, and
+# its own fence would refuse this pass anyway. See
+# `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
+PENDING_INTENT_RECOVERY_SECONDS = 60
+
+
+def _stale_pending_cutoff(now: datetime | None = None) -> str:
+    moment = now or datetime.now(timezone.utc)
+    return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat()
+
+
+def _ready_relative_path(record: dict[str, Any]) -> str:
+    return str(record["relative_path"]).replace(
+        "run/capture-intents/pending/", "run/capture-intents/ready/", 1
+    )
+
+
+def _complete_one_pending(
+    queue: object, coordinator: object, state_root: Path, record: dict[str, Any]
+) -> str:
+    """Finish one half-published intent by running the publication sequence again.
+
+    Every step of that sequence is idempotent: the files are create-only and
+    re-publishing identical bytes is a duplicate, the index returns the state the row
+    already holds, and the enqueue is replay-safe. The sequence takes its own owner
+    and fence, so a publisher that is somehow still alive refuses this pass.
+    """
+    from integration_adapter import _publish_capture_files_and_task
+
+    payload = _verified_intent_bytes(state_root, record)
+    intent_id = str(record["intent_id"])
+    _publish_capture_files_and_task(
+        queue,
+        coordinator,
+        intent_id=intent_id,
+        payload=payload,
+        intent_sha256=str(record["intent_sha256"]),
+        pending_relative=str(record["relative_path"]),
+        ready_relative=_ready_relative_path(record),
+    )
+    return intent_id
+
+
+def _complete_pending_batch(
+    queue: object,
+    coordinator: object,
+    state_root: Path,
+    records: list[dict[str, Any]],
+    outcome: dict[str, Any],
+) -> None:
+    for record in records:
+        outcome["examined"] += 1
+        try:
+            intent_id = _complete_one_pending(queue, coordinator, state_root, record)
+        except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
+            outcome["skipped"].append(_skip(record, error))
+            continue
+        outcome["completed"].append({"intent_id": intent_id})
+
+
+def complete_pending_capture_intents(
+    queue: object,
+    coordinator: object,
+    *,
+    state_root: Path,
+    limit: int = MAX_ADOPTED_INTENTS_PER_PASS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Finish intents whose publisher died before it could mark them ready.
+
+    Never raises for a single bad record, exactly as adoption does: a record whose
+    bytes moved, or whose publisher still holds the fence, is a named skip.
+    """
+    outcome: dict[str, Any] = {"examined": 0, "completed": [], "skipped": []}
+    reader = getattr(queue, "pending_capture_intents", None)
+    if reader is None:
+        return {**outcome, "reason": "unsupported"}
+    records = reader(limit, _stale_pending_cutoff(now))
+    _complete_pending_batch(queue, coordinator, Path(state_root), records, outcome)
+    return outcome
 
 
 def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[str, Any]:
@@ -226,11 +352,18 @@ def _dry_run(limit: int) -> int:
     queue = active_memory_queue(
         Path(ROOT).resolve(strict=True), Path(STATE_ROOT).resolve(strict=True)
     )
-    records = queue.ready_capture_intents_without_task(limit)
-    print(f"orphaned capture intents: {len(records)}")
+    _print_records("orphaned capture intents", queue.ready_capture_intents_without_task(limit))
+    _print_records(
+        "half-published capture intents",
+        queue.pending_capture_intents(limit, _stale_pending_cutoff()),
+    )
+    return 0
+
+
+def _print_records(label: str, records: list[dict[str, Any]]) -> None:
+    print(f"{label}: {len(records)}")
     for record in records:
         print(f"  {record['intent_id']} {record['updated_at']} {record['byte_size']}")
-    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point

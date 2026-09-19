@@ -36,7 +36,6 @@ from reliable_memory import (
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
-RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 # The claim tree's ceiling, which is the journal's: a project journal is one of
 # the pages this index reads, and a page the journal accepts must never be one
 # the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile
@@ -74,7 +73,6 @@ _NON_SUBSTANTIVE_RELATIONS = frozenset(
 # ambiguous is admitted; anything else still refuses by name. See
 # `docs/research/2026-08-28-which-daily-header-is-canonical.md`.
 _DATE_RE = re.compile(r"^# (?:[^\r\n]*?[ \t]\u2014[ \t])?(\d{4}-\d{2}-\d{2})(?:\r?\n|$)")
-_BLOCK_RE = re.compile(rb"(?m)^## \[(\d{2}:\d{2}:\d{2})\][^\r\n]*(?:\r?\n|$)")
 # The one definition of a Claims ledger, for its readers and its writers alike:
 # opening, the canonical JSON line, closing fence — then only blank lines before
 # the next section or the end. Three copies of this once required exactly one
@@ -808,19 +806,6 @@ def _literal_agrees(
     if not isinstance(literal, str) or literal != record.get("text"):
         return False
     return sha256_bytes(literal.encode("utf-8")) == evidence["sha256"]
-
-
-def page_may_auto_supersede(ledger: Mapping[str, object] | None) -> bool:
-    if ledger is None or ledger.get("schema_version") != "claim-ledger/v1":
-        return False
-    claims = ledger.get("claims")
-    if not isinstance(claims, list):
-        return False
-    return any(_substantive_entry(item) for item in claims)
-
-
-def _substantive_entry(item: object) -> bool:
-    return isinstance(item, Mapping) and is_substantive(item)
 
 
 _EXPECTED_CLAIM_INDEX_SHAPES = (

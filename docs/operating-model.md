@@ -4,7 +4,7 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 
 ## Raw layer
 - `knowledge/daily/YYYY-MM-DD.md` stores captured session-end and (optionally) pre-compact summaries.
-- Baseline path is the `SessionEnd` hook: just work and close Claude — `scripts/session_end_capture.py` spawns `flush_memory.py` and a daily-log entry lands automatically. No `/compact` required.
+- Baseline path is the `SessionEnd` hook: just work and close Claude — `scripts/integration_adapter.py` publishes a durable capture intent and the capture worker turns it into a daily-log entry. No `/compact` required.
 - The `PreCompact` hook is a safety net for long sessions that auto-compact; `/compact` is an **optional manual tool**, not part of the regular capture regimen.
 
 ## Compiled layer
@@ -61,7 +61,7 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
   30/3600 seconds, and short-lived worker limits 20 tasks/600 seconds/2 idle seconds.
   Transaction undo retention is 30 days. Runtime CLI flags provide explicit overrides.
 - `run/` deletion is blocked by nonterminal/conflicted/quarantined transactions,
-  source failure, the 30-day undo window, retained queue tasks/results, and any live
+  source failure, the 2-day undo window, retained queue tasks/results, and any live
   project lease, writer, queue worker, or maintenance owner.
 - There is no automatic Git operation, persistent daemon, cloud service, remote
   queue/cache, SQLite knowledge source, gzip archive tier, or automatic purge.

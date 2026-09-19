@@ -62,8 +62,6 @@ OUTCOMES = (
     "source-only",
     "silent-loss",
 )
-#: outcomes in which the capture's content is durably in the vault.
-CONTENT_OUTCOMES = frozenset({"landed", "duplicated", "content-partial"})
 
 
 @dataclass

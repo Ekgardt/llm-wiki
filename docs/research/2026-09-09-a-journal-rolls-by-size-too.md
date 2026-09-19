@@ -3,7 +3,7 @@
 ## What broke
 
 The nightly compile has failed since 2026-09-07 with `claim tree page
-exceeds 4194304 bytes`. The page is `knowledge/projects/no-hands/journal.md`:
+exceeds 4194304 bytes`. The page is `knowledge/projects/another-project/journal.md`:
 4.2 MB, 981 checkpoint events of about 4.3 KB each. The journal rolls into
 a sealed segment only at `MAX_JOURNAL_EVENTS = 1000`, and the claim tree
 refuses any page over `MAX_CLAIM_TREE_FILE_BYTES = 4 MB`, so a journal of

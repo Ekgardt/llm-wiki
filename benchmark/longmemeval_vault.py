@@ -31,7 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -257,8 +257,16 @@ def _warm_reranker() -> None:
     _get_reranker_bundle()
 
 
-def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[object, dict]:
-    """Build and activate one generation over the ingested daily evidence."""
+def build_generation(
+    root: Path, state: Path, daily_files: list[str], ask: Callable[[str, str], str | None] | None = None
+) -> tuple[object, dict]:
+    """Build and activate one generation over the ingested daily evidence.
+
+    The turns are keyed before the build, because the build is what indexes
+    the keys: keyed afterwards, the stand's `keys` column was always empty.
+    `ask` replaces the provider for the keying. Research:
+    `docs/research/2026-09-17-the-stand-keys-the-turns-before-it-builds.md`.
+    """
     from corpus_snapshot import collect_corpus
     from doctor import (
         _corpus_policy,
@@ -273,6 +281,7 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
 
     deadline = time.monotonic() + BUILD_DEADLINE_SECONDS
     snapshot = collect_corpus(root, code_roots=(), daily_paths=daily_files, deadline=deadline)
+    keyed = _key_the_haystack(state, snapshot, ask)
     scope = resolve_repository_scope(root)
     catalog = GenerationCatalog(state)
     built = build_incremental_generation(
@@ -300,6 +309,7 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
         "vector_state": active.get("vector_state"),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
+        "keyed_turns": keyed,
     }
     return snapshot, info
 
@@ -307,25 +317,31 @@ def build_generation(root: Path, state: Path, daily_files: list[str]) -> tuple[o
 FACT_KEYS_ENV = "LLMWIKI_BENCH_FACT_KEYS"
 
 
-def _key_the_haystack(state: Path, snapshot: object) -> int | None:
+def _ask_the_provider(prompt: str, system_prompt: str) -> str | None:
+    from llm_client import call_llm
+
+    return call_llm(prompt, system_prompt, 1500)
+
+
+def _key_the_haystack(
+    state: Path, snapshot: object, ask: Callable[[str, str], str | None] | None = None
+) -> int | None:
     """Extract fact keys for this question's turns when the arm asks for it.
 
     About ten batched provider calls a question; off by default because it is
     the stand's cost, not the product's, where the nightly step pays it once.
+    Keyed exactly as the nightly keys: words only, read by the index column.
     """
     if os.environ.get(FACT_KEYS_ENV, "").strip() != "1":
         return None
     import fact_keys
-    from llm_client import call_llm
-    from query_memory import _sentence_encoder
 
     store = fact_keys.KeyStore(fact_keys.store_path(state))
     try:
         return fact_keys.key_turns(
             store,
             snapshot.chunks,
-            lambda prompt, system_prompt: call_llm(prompt, system_prompt, 1500),
-            _sentence_encoder(),
+            ask or _ask_the_provider,
             time.monotonic() + BUILD_DEADLINE_SECONDS,
         )
     finally:
@@ -445,6 +461,36 @@ def gold_in_candidates(question: Mapping[str, object], rows: list[dict]) -> bool
     return any(gold.casefold() in _row_text(row).casefold() for row in rows)
 
 
+def lane_matrix(question: Mapping[str, object], rows: list[dict]) -> list[dict]:
+    """What each lane said about every candidate, and whether it carries the answer.
+
+    The rows a refit of `lane_score` needs, recorded by the run that produced
+    them: one entry per candidate, labelled from the dataset's own `has_answer`
+    turns. Written whether or not the reranker ran, so a degraded run is
+    fittable too — that is the condition the constants were never fitted under.
+    See `docs/research/2026-09-17-the-lane-score-refit-is-one-command.md`.
+    """
+    from longmemeval_coverage import evidence_turns
+
+    windows = evidence_turns(question)
+    return [_lane_row(row, windows) for row in rows]
+
+
+def _lane_row(row: Mapping[str, object], windows: list[tuple[str, ...]]) -> dict:
+    from lane_score import is_user_turn
+    from longmemeval_coverage import normalized
+
+    text = str(row.get("content") or row.get("summary") or "")
+    folded = normalized(text)
+    return {
+        "lexical_rank": row.get("bm25_rank"),
+        "dense_rank": row.get("vector_rank"),
+        "rerank_score": row.get("rerank_score"),
+        "user_turn": is_user_turn(text),
+        "evidence": any(window in folded for turn in windows for window in turn),
+    }
+
+
 # Where the answer session stands in the ranking, because that is what decides
 # whether it survives.
 #
@@ -482,18 +528,48 @@ def answer_session_rank(question: Mapping[str, object], rows: list[dict]) -> int
     return 0
 
 
-def _instrumented_generator(metrics: dict, gold: str = ""):
+def _needle_seen(needle: str, prompt: str) -> bool:
+    return bool(needle) and needle in prompt.casefold()
+
+
+def _turns_seen(windows: Sequence[tuple[str, ...]], folded: str) -> int:
+    return sum(1 for turn in windows if any(window in folded for window in turn))
+
+
+def _record_prompt_evidence(metrics: dict, prompt: str, needle: str, windows: list) -> None:
+    """What of this question's evidence the model actually received.
+
+    Two different questions, kept apart because one of them has no answer for a
+    sixth of the set. `gold_in_prompt` asks whether the gold string is in the
+    prompt: real evidence where the gold is a span somebody said, and
+    unanswerable where it was computed ("6 days.") or written by the dataset's
+    authors as a rubric. `evidence_in_prompt` asks whether the turns the dataset
+    itself flags as carrying the answer reached the prompt, which is defined for
+    every question type. Both are kept, and the report names each for what it is.
+    See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
+    """
+    from longmemeval_coverage import normalized
+
+    seen = _turns_seen(windows, normalized(prompt))
+    metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or _needle_seen(needle, prompt)
+    metrics["evidence_turns_labelled"] = len(windows)
+    metrics["evidence_turns_in_prompt"] = max(metrics.get("evidence_turns_in_prompt", 0), seen)
+    metrics["evidence_in_prompt"] = bool(windows) and metrics["evidence_turns_in_prompt"] == len(windows)
+
+
+def _instrumented_generator(metrics: dict, gold: str = "", evidence: Sequence = ()):
     """The shared provider client, measuring what one retrieval hands it.
 
-    `gold_in_prompt` is the measurement the earlier signals could not make.
-    `gold_in_candidates` read a candidate's summary and heading, which almost
-    never carry the answering sentence: measured 2026-08-30 it was true for 2
-    of 50 questions, including 0 of the 17 the system answered, so it measured
-    nothing. This reads the prompt the model actually received.
+    The prompt-evidence signals are the measurement the earlier ones could not
+    make. `gold_in_candidates` read a candidate's summary and heading, which
+    almost never carry the answering sentence: measured 2026-08-30 it was true
+    for 2 of 50 questions, including 0 of the 17 the system answered, so it
+    measured nothing. These read the prompt the model actually received.
     """
     from llm_client import call_llm
 
     needle = " ".join(str(gold).split()).casefold()
+    windows = list(evidence)
 
     def generate(prompt: str, system_prompt: str, max_tokens: int) -> str | None:
         _count_call(metrics, system_prompt)
@@ -514,9 +590,7 @@ def _instrumented_generator(metrics: dict, gold: str = ""):
         metrics["est_total_prompt_tokens"] = metrics.get("est_total_prompt_tokens", 0) + round(
             (len(prompt) + len(system_prompt)) / 4
         )
-        metrics["gold_in_prompt"] = metrics.get("gold_in_prompt", False) or (
-            bool(needle) and needle in prompt.casefold()
-        )
+        _record_prompt_evidence(metrics, prompt, needle, windows)
         started = time.monotonic()
         try:
             reply = call_llm(prompt, system_prompt, max_tokens)
@@ -623,6 +697,9 @@ def _compile_trace_metrics(context: object) -> dict[str, object]:
     if trace is None:
         return {}
     return {
+        # What the rendering dropped from its tail after the compiler was done:
+        # `packer_dropped` is the compiler's own shed, this one is the last.
+        "rendering_shed": getattr(context, "shed_for_budget", 0),
         "compile_l0": trace.l0_count,
         "compile_l1": trace.l1_count,
         "compile_l2": trace.l2_count,
@@ -659,6 +736,7 @@ def _answer_outcome(
     metrics: dict,
     profile: str,
     gold: str = "",
+    evidence: Sequence = (),
     retrieve=None,
     search=None,
     chosen: str = "refuse",
@@ -675,7 +753,7 @@ def _answer_outcome(
             retrieve=retrieve,
             search=search,
             keep_unverified=chosen == "answer",
-            generator=_instrumented_generator(metrics, gold),
+            generator=_instrumented_generator(metrics, gold, evidence),
             profile=profile,
             budget=ContextBudget(None, _answer_budget(), QA_MAX_OUTPUT_TOKENS, 512),
             deadline=time.monotonic() + ANSWER_DEADLINE_SECONDS,
@@ -726,6 +804,12 @@ def _retrieval_only_outcome(question: dict, searchable: str, profile: str) -> di
     }
 
 
+def _evidence_windows(question: Mapping[str, object]) -> list[tuple[str, ...]]:
+    from longmemeval_coverage import evidence_turns
+
+    return evidence_turns(question)
+
+
 def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, searchable):
     """The reader's outcome, or — in a retrieval-only run — coverage in its place."""
     if retrieval_only():
@@ -733,6 +817,10 @@ def _answer_or_coverage(question, root, snapshot, rows, metrics, profile, search
     return _answer_outcome(
         dated_question(question), root, snapshot, rows, metrics, profile,
         str(question.get("answer", "")),
+        # The turns the dataset itself flags as carrying the answer, so the row
+        # can say whether the evidence reached the prompt on a question whose
+        # gold is a rubric or a computed value.
+        evidence=_evidence_windows(question),
         # The second look's way of asking for more than the first twelve, and
         # for what a fanned-out sub-query finds, without the cross-encoder.
         retrieve=lambda limit: _retrieved_rows(searchable, profile, limit),
@@ -755,7 +843,6 @@ def run_question(question: dict, work: Path) -> dict:
     build_started = time.monotonic()
     snapshot, build_info = build_generation(root, state, daily_files)
     _warm_reranker()
-    keyed = _key_the_haystack(state, snapshot)
     plain = str(question["question"])
     profile = profile_for(plain)
     retrieve_started = time.monotonic()
@@ -786,10 +873,11 @@ def run_question(question: dict, work: Path) -> dict:
         # What the reader was handed, by the dataset's own evidence labels:
         # distinct answer sessions and flagged evidence turns, not row counts.
         "coverage": _coverage_of(question, rows),
+        # The rows `benchmark/fit_lane_score.py` refits the lane constants on.
+        "lane_matrix": lane_matrix(question, rows),
         **_reranker_fields(rows),
         **_measured_compile(root, snapshot, rows, profile),
         **build_info,
-        "keyed_turns": keyed,
         **outcome,
         **metrics,
         "ingest_seconds": round(build_started - ingest_started, 2),

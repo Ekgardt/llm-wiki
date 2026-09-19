@@ -183,7 +183,7 @@ def _component_platforms(components) -> set[tuple[str, str]]:
 
 
 def test_every_rust_component_is_pinned_for_every_platform_we_support():
-    profile = lsp_profiles.profile_named("rust-analyzer")
+    profile = lsp_profiles.REGISTRY.get("rust-analyzer")
     names = [component.name for component in profile.components]
 
     assert names == ["rustc", "rust-std", "cargo", "rust-src"]
@@ -203,7 +203,7 @@ def test_a_component_refuses_an_empty_or_foreign_artifact_table():
 
 def test_the_rust_profile_names_the_library_path_its_copy_needs():
     """The verified copy runs outside the toolchain, so the loader needs telling."""
-    profile = lsp_profiles.profile_named("rust-analyzer")
+    profile = lsp_profiles.REGISTRY.get("rust-analyzer")
     environment = profile.launch_environment(Path("/state"))
 
     assert environment["LD_LIBRARY_PATH"].endswith("/toolchain/lib")

@@ -30,7 +30,7 @@ def test_a_claude_call_that_runs_out_of_time_raises_instead_of_answering_nothing
 ):
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
     monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
-    monkeypatch.setattr(llm_client.subprocess, "run", _raise_timeout)
+    monkeypatch.setattr(llm_client, "_run_cli", _raise_timeout)
     descriptor = llm_client.provider_candidates("claude", max_tokens=2000)[0]
 
     with pytest.raises(llm_client.ProviderTimeout):

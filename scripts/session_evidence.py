@@ -162,18 +162,57 @@ def _decoded_entry(line: str) -> Mapping[str, object] | None:
     return value
 
 
+CAPTURE_GAP_TYPE = "capture_gap"
+
+
+def capture_gap_line(dropped_bytes: int) -> str:
+    """The line that says, in the transcript's own format, what was not captured.
+
+    A plain sentence between two halves of a JSONL transcript was dropped by the
+    renderer below, so the stored record of a cut session read as if it were whole.
+    See `docs/research/2026-09-17-the-evidence-fits-its-record-and-says-what-it-dropped.md`.
+    """
+    note = (
+        f"_({dropped_bytes} bytes of this transcript were not captured; "
+        "the durable record keeps the beginning and the end.)_"
+    )
+    entry = {"type": CAPTURE_GAP_TYPE, "dropped_bytes": dropped_bytes, "note": note}
+    return json.dumps(entry, ensure_ascii=False)
+
+
+def _gap_note(entry: Mapping[str, object] | None) -> str | None:
+    if entry is None or entry.get("type") != CAPTURE_GAP_TYPE:
+        return None
+    return str(entry.get("note") or "")
+
+
+def _is_conversation(entry: Mapping[str, object] | None) -> bool:
+    return entry is not None and _gap_note(entry) is None
+
+
+def _verbatim_line(line: str) -> str:
+    note = _gap_note(_decoded_entry(line))
+    return line if note is None else note
+
+
+def _conversation_lines(entry: Mapping[str, object] | None) -> list[str]:
+    if entry is None:
+        return []
+    note = _gap_note(entry)
+    if note is not None:
+        return [note]
+    return _rendered_entry(entry)
+
+
 def render_transcript(text: str) -> str:
     """Render a JSONL transcript as conversation; keep anything else verbatim."""
+    lines = text.splitlines()
+    entries = list(map(_decoded_entry, lines))
+    if not any(map(_is_conversation, entries)):
+        return "\n".join(map(_verbatim_line, lines)).strip()
     rendered: list[str] = []
-    decoded_any = False
-    for line in text.splitlines():
-        entry = _decoded_entry(line)
-        if entry is None:
-            continue
-        decoded_any = True
-        rendered.extend(_rendered_entry(entry))
-    if not decoded_any:
-        return text.strip()
+    for entry in entries:
+        rendered.extend(_conversation_lines(entry))
     return "\n\n".join(rendered)
 
 

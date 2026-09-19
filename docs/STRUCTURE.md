@@ -92,7 +92,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
 │   ├── code-tools/                  managed code-tool artifacts
-│   │   └── pyright/1.1.411/           reserved pinned Pyright installation root
+│   │   ├── pyright/1.1.411/           reserved pinned Pyright installation root
+│   │   ├── typescript-language-server/6.0.0/   with tsserver 5.9.3
+│   │   ├── gopls/v0.23.0/             built from the pinned Go 1.27.1 toolchain
+│   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
 │   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
 │   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 │   ├── access_log.jsonl             legacy bounded read-only access history
@@ -216,6 +219,15 @@ snapshot ID plus manifest digest; restore requires both, runs `restic check`, an
 keeps a validated `vault/` + `state/` image only on success. It does not publish over
 an installed vault. Restic repositories must be outside the vault and staging tree.
 
+The image carries what Git does not (decided 2026-09-17): the knowledge, the runtime
+half, untracked files, and tracked files modified since `HEAD`. Paths git holds
+identically are skipped, as are `cache/`, `logs/`, `run/`, `.git/`, `.venv/` and
+regenerable tool caches (`__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+`node_modules`); directories left holding nothing are not part of the image. Where git
+cannot answer, nothing is skipped on git's word. This is what lets `publish` — which
+overwrites nothing — land in a fresh clone. See
+`docs/research/2026-09-17-a-backup-image-carries-what-git-does-not.md`.
+
 Windows Task Scheduler remains the native Windows scheduler. macOS uses a per-user
 LaunchAgent and Linux uses a per-user systemd timer; cron is explicit degraded
 fallback only. Blackboard tables reuse `markdown-transactions-v3.sqlite3`, capture
@@ -271,7 +283,8 @@ on 2026-08-05, explicitly approved implementation of the operational database pa
 and offline adoption backend on 2026-08-12, and approved durable capture producer
 activation on 2026-08-16. This scope keeps the three root zones and existing runtime
 environment variables.
-Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`. The only
+Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`; the verified
+commit becomes local `main` tracking `origin/main`, so the nightly fast-forward applies. The only
 new runtime directory is `run/capture-intents/`. New create-only
 `capture-intent/v1` records remain there until an immutable terminal record under
 existing `run/queue-results/` proves committed Markdown, validated no-durable-content,
@@ -382,10 +395,12 @@ implemented.
 
 This section records the implemented Python/Pyright slice. The runtime path helpers are implemented,
 while the authoritative corpus checkpoint remains
-`corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
-2026-07-21 Plan A remain implemented, including explicit Graph v3 selection contracts
-and bounded sealed-workspace utilities, but its one-shot consent/SCIP/publication
-Tasks 6-16 are superseded.
+`corpus-generation/v2` with `evidence-graph/v2`. The whole 2026-07-21 Plan A is
+superseded: its one-shot consent/SCIP/publication Tasks 6-16 were superseded by the
+replacement plan below, and on 2026-09-18 its foundation — the Graph v3 selection
+contracts, the sealed-workspace utilities and the `code_capture` manifest section that
+nothing in production ever filled — was removed from the code
+(`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
 
 The replacement plan implements path derivation, position and URI conversion,
 bounded protocol transport, process startup evidence, platform-qualified lifecycle
@@ -413,19 +428,25 @@ step — under the ownership registry's `doctor` role scoped
 `repository:<repository_id>`. It is not a daemon: the process exits when the
 refresh does. Answers carry a `freshness` block naming both commits.
 
-The runtime starts Pyright lazily within the owning MCP process, exposes only
-allowlisted read operations, reports readiness and capability limitations, and falls
-back to existing structural evidence when unavailable. Exact small results use a
-deterministic compact renderer; the Context Compiler remains responsible for broad
-multi-source synthesis. Pyright installation is a separate explicit operator action.
-See
+The runtime starts a managed language server lazily within the owning MCP process,
+exposes only allowlisted read operations, reports readiness and capability
+limitations, and falls back to existing structural evidence when unavailable. The
+server is chosen by file suffix from the four managed profiles; a suffix no profile
+claims falls back to Pyright and degrades to structural evidence. Exact small results
+use a deterministic compact renderer; the Context Compiler remains responsible for
+broad multi-source synthesis. Installation is a separate explicit operator action
+per profile: `scripts/install_pyright.py`, or
+`scripts/install_language_server.py --profile <name>`. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
 `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
 
-The approved managed Pyright artifact path is
-`cache/code-tools/pyright/1.1.411/`. Live LSP process scratch is bounded under
-`run/lsp/<owner-nonce>/`; doctor and deletion eligibility must treat a live owner
-or retained failure evidence as protected operational state.
+The approved managed artifact paths are `cache/code-tools/pyright/1.1.411/`,
+`cache/code-tools/typescript-language-server/6.0.0/`,
+`cache/code-tools/gopls/v0.23.0/` and `cache/code-tools/rust-analyzer/1.98.1/`.
+Live LSP process scratch is bounded under
+`run/lsp/<owner-nonce>/`, which also holds the sealed digest-verified copy of a
+native server that is launched from it; doctor and deletion eligibility must treat a
+live owner or retained failure evidence as protected operational state.
 
 Every startup coordinator enters an eight-entry module registry before its first
 owned mutation. Successful startup hands ownership to the instance's existing
@@ -455,11 +476,11 @@ A successful terminal layout never contains a hidden temp. See
 
 LSP process containment is platform-qualified rather than one portable sandbox. A
 Windows Job Object owns the assigned server tree. On Linux and macOS, a POSIX
-process group owns the pinned Pyright server and descendants only while they remain
-in that group. A hostile descendant can call `setsid()` and escape; containing that
-case is unsupported. The POSIX runtime is therefore limited to qualified Pyright in
-trusted repositories and does not use a `/proc` or `ps` ancestry scan to claim
-stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
+process group owns the assigned managed server and its descendants only while they
+remain in that group. A hostile descendant can call `setsid()` and escape; containing
+that case is unsupported. The POSIX runtime is therefore limited to the qualified
+managed servers in trusted repositories and does not use a `/proc` or `ps` ancestry
+scan to claim stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
 candidate requiring a separate capability-gated design. See
 `knowledge/notes/lsp-process-containment-decision.md`.
 
@@ -542,6 +563,9 @@ or nonzero active state remains fail-closed.
 - `knowledge/projects/<slug>/` — generated `state.md`, append-only
   `knowledge/projects/<slug>/journal.md`,
   `context.md`, `.blackboard/`. Template tracked; real projects gitignored.
+  `context.md` is written on request by
+  `uv run python scripts/build_context.py --slug <name> --write`; see
+  `docs/research/2026-09-18-the-project-context-page-gets-its-command-back.md`.
 - `knowledge/daily/archive/YYYY-MM/bag-<timestamp>-<id>/` — private immutable,
   uncompressed BagIt-style daily-log bags and
   a derived archive index. Archive means move, never delete; evidence resolves by
@@ -567,9 +591,11 @@ or nonzero active state remains fail-closed.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
-  `cache/code-tools/pyright/1.1.411/` is the managed Pyright artifact root;
-  `scripts/install_pyright.py` is the only supported download/publish path and
-  `scripts/lsp_paths.py` derives it without directory creation.
+  `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
+  roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
+  `rust-analyzer/1.98.1`); `scripts/install_pyright.py` and
+  `scripts/install_language_server.py` are the only supported download/publish paths
+  and `scripts/lsp_paths.py` derives them without directory creation.
   v4.0: `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
@@ -674,7 +700,7 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 **Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
 The current `run/` contains recoverable but operationally significant transactions
 and queued work. Delete it only after `doctor` reports no nonterminal, conflicted, or
-quarantined transaction, no transaction inside the 30-day undo window, and no
+quarantined transaction, no transaction inside the 2-day undo window, and no
 retained queue task or result, and no live project lease, writer, queue worker, or
 maintenance or LSP owner, and no retained LSP failure evidence. Deleting eligible
 committed artifacts loses undo history.

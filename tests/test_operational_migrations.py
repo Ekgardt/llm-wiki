@@ -153,14 +153,54 @@ def _coordinator_schema(path: Path) -> tuple[set[str], set[str], dict[str, str]]
     return tables, triggers, sql
 
 
+_CONNECTION_PRAGMAS = (
+    "journal_mode",
+    "synchronous",
+    "foreign_keys",
+    "trusted_schema",
+    "busy_timeout",
+    "application_id",
+    "user_version",
+)
+
+
+def _connection_pragmas(database: sqlite3.Connection) -> tuple:
+    """The durability and identity pragmas, read back from the open connection."""
+    return tuple(
+        database.execute(f"PRAGMA {name}").fetchone()[0] for name in _CONNECTION_PRAGMAS
+    )
+
+
+def _pragma_facts(validated: dict) -> tuple:
+    """One validated database's identity and durability, in a fixed order."""
+    return (
+        validated["application_id"],
+        validated["user_version"],
+        validated["integrity_check"],
+        validated["foreign_key_check"],
+        validated["journal_mode"],
+        validated["synchronous"],
+        validated["trusted_schema"],
+    )
+
+
+_OWNER_PROJECTION_CLAUSES = (
+    "length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64",
+    "length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512",
+    "length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256",
+    "process_id > 0",
+    "length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512",
+    "REFERENCES maintenance_owners",
+)
+
+
+def _missing_owner_projection_clauses(sql: str) -> tuple[str, ...]:
+    return tuple(clause for clause in _OWNER_PROJECTION_CLAUSES if clause not in sql)
+
+
 def _assert_owner_projection_sql(values: tuple[str, str]) -> None:
-    for sql in values:
-        assert "length(CAST(canonical_role AS BLOB)) BETWEEN 1 AND 64" in sql
-        assert "length(CAST(canonical_scope AS BLOB)) BETWEEN 1 AND 512" in sql
-        assert "length(CAST(actor_id AS BLOB)) BETWEEN 1 AND 256" in sql
-        assert "process_id > 0" in sql
-        assert "length(CAST(process_start_identity AS BLOB)) BETWEEN 1 AND 512" in sql
-        assert "REFERENCES maintenance_owners" in sql
+    """Every owner projection carries the same bounds and the same reference."""
+    assert tuple(_missing_owner_projection_clauses(sql) for sql in values) == ((), ())
 
 
 def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
@@ -169,37 +209,47 @@ def test_queue_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> None:
     initialized = memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
     validated = memory_queue.validate_queue_v3_database(path, state_root=tmp_path)
 
-    assert initialized == {
-        "attempt_history": 0,
-        "payload_hash_mismatches": 0,
-        "source_failures": 0,
-        "source_fences": 0,
-        "task_source_links": 0,
-        "tasks": 0,
-    }
-    assert validated["application_id"] == 0x4C575133
-    assert validated["user_version"] == 3
-    assert validated["integrity_check"] == "ok"
     tables, indexes, triggers, task_sql, task_columns = _queue_schema(path)
-
-    assert tables == QUEUE_V3_TABLES
-    assert QUEUE_V3_INDEXES <= indexes
-    assert {
+    required_triggers = {
         "attempt_history_immutable_update",
         "attempt_history_authorized_delete",
         "capture_task_links_immutable_update",
-            "capture_task_link_resolutions_immutable_update",
-            "capture_task_link_seals_immutable_update",
-            "semantic_decisions_immutable_update",
-            "semantic_decisions_authorized_delete",
-            "queue_lineage_insert",
+        "capture_task_link_resolutions_immutable_update",
+        "capture_task_link_seals_immutable_update",
+        "semantic_decisions_immutable_update",
+        "semantic_decisions_authorized_delete",
+        "queue_lineage_insert",
         "queue_lineage_update_old",
         "queue_lineage_update_new",
         "queue_lineage_delete",
-    } <= triggers
-    assert task_columns["payload_blob"] == "BLOB"
-    assert "length(payload_blob) <= 1048576" in task_sql
-    assert "attempts BETWEEN 0 AND 100" in task_sql
+    }
+
+    assert (
+        initialized,
+        (
+            validated["application_id"],
+            validated["user_version"],
+            validated["integrity_check"],
+        ),
+        (tables, QUEUE_V3_INDEXES <= indexes, required_triggers <= triggers),
+        (
+            task_columns["payload_blob"],
+            "length(payload_blob) <= 1048576" in task_sql,
+            "attempts BETWEEN 0 AND 100" in task_sql,
+        ),
+    ) == (
+        {
+            "attempt_history": 0,
+            "payload_hash_mismatches": 0,
+            "source_failures": 0,
+            "source_fences": 0,
+            "task_source_links": 0,
+            "tasks": 0,
+        },
+        (0x4C575133, 3, "ok"),
+        (QUEUE_V3_TABLES, True, True),
+        ("BLOB", True, True),
+    )
     _assert_queue_states(task_sql)
 
 
@@ -213,62 +263,34 @@ def test_coordinator_v3_fresh_schema_has_complete_invariant(tmp_path: Path) -> N
         path, state_root=tmp_path
     )
 
-    assert initialized == {
-        "operations": 0,
-        "project_checkpoint_attempts": 0,
-        "project_checkpoints": 0,
-        "transactions": 0,
-        "writer_fences": 0,
-    }
-    assert validated["application_id"] == COORDINATOR_APPLICATION_ID
-    assert validated["user_version"] == 3
-    assert validated["integrity_check"] == "ok"
-    assert validated["foreign_key_check"] == []
-    assert validated["journal_mode"] == "delete"
-    assert validated["synchronous"] == 2
-    assert validated["trusted_schema"] == 0
     tables, triggers, sql = _coordinator_schema(path)
+    claim_clauses = (
+        "PRIMARY KEY(project, resource)",
+        "REFERENCES blackboard_claim_epochs",
+        "fencing_epoch >= 1",
+    )
+    abort_states = ("'aborting'", "'aborted'")
 
-    assert tables == COORDINATOR_V3_TABLES
-    assert triggers == set()
-    assert "'aborting'" in sql["transaction"]
-    assert "'aborted'" in sql["transaction"]
+    assert (
+        initialized,
+        _pragma_facts(validated),
+        (tables, triggers),
+        tuple(state in sql["transaction"] for state in abort_states),
+        tuple(clause in sql["blackboard_claims"] for clause in claim_clauses),
+    ) == (
+        {
+            "operations": 0,
+            "project_checkpoint_attempts": 0,
+            "project_checkpoints": 0,
+            "transactions": 0,
+            "writer_fences": 0,
+        },
+        (COORDINATOR_APPLICATION_ID, 3, "ok", [], "delete", 2, 0),
+        (COORDINATOR_V3_TABLES, set()),
+        (True, True),
+        (True, True, True),
+    )
     _assert_owner_projection_sql((sql["project_leases"], sql["writer_owners"]))
-    claim_sql = sql["blackboard_claims"]
-    assert "PRIMARY KEY(project, resource)" in claim_sql
-    assert "REFERENCES blackboard_claim_epochs" in claim_sql
-    assert "fencing_epoch >= 1" in claim_sql
-
-
-def test_coordinator_v3_schema_upgrade_copies_old_rows_and_adds_empty_blackboard(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "run/markdown-transactions-v3.sqlite3"
-    candidate = tmp_path / "run/markdown-transactions-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(source, source_v2=None)
-    with contextlib.closing(sqlite3.connect(source)) as database:
-        database.execute("DROP TABLE blackboard_claims")
-        database.execute("DROP TABLE blackboard_claim_epochs")
-        database.execute(
-            "INSERT INTO writer_fences(gate_name,last_epoch) VALUES ('global',7)"
-        )
-        database.commit()
-
-    result = markdown_transaction.upgrade_coordinator_v3_candidate(
-        candidate,
-        source_v3=source,
-    )
-
-    assert result["writer_fences"] == 1
-    validated = markdown_transaction.validate_coordinator_v3_database(
-        candidate, state_root=tmp_path
-    )
-    assert validated["row_counts"]["blackboard_claims"] == 0
-    assert validated["row_counts"]["blackboard_claim_epochs"] == 0
-    with contextlib.closing(sqlite3.connect(candidate)) as database:
-        assert database.execute(
-            "SELECT last_epoch FROM writer_fences WHERE gate_name='global'"
-        ).fetchone() == (7,)
 
 
 def test_coordinator_candidate_header_is_unpublished_until_schema_is_complete(
@@ -600,19 +622,18 @@ def test_v3_connection_reads_back_delete_full_foreign_keys_and_untrusted_schema(
             initialize_contract=True,
         )
     ) as database:
-        assert database.isolation_level is None
-        assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
-        assert database.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert database.execute("PRAGMA trusted_schema").fetchone()[0] == 0
-        assert database.execute("PRAGMA busy_timeout").fetchone()[0] == 321
-        assert database.execute("PRAGMA application_id").fetchone()[0] == 0x4C575133
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+        opened = (database.isolation_level, _connection_pragmas(database))
 
     with contextlib.closing(
         open_operational_db(path, busy_ms=321, contract=QUEUE_CONTRACT)
     ) as database:
-        assert database.execute("PRAGMA application_id").fetchone()[0] == 0x4C575133
+        reopened = database.execute("PRAGMA application_id").fetchone()[0]
+
+    # The pragmas are read back from the connection, not assumed from the call.
+    assert (opened, reopened) == (
+        (None, ("delete", 2, 1, 0, 321, 0x4C575133, 3)),
+        0x4C575133,
+    )
 
 
 @pytest.mark.parametrize(
@@ -721,8 +742,7 @@ def test_restart_skips_only_a_statement_with_its_completed_invariant(
                 final_invariant=lambda _current: False,
                 killpoint=crash_after_first,
             )
-        assert _row_exists(database, "first")
-        assert not _row_exists(database, "second")
+        after_crash = (_row_exists(database, "first"), _row_exists(database, "second"))
 
         resumed_events: list[str] = []
         run_resumable_migration(
@@ -734,11 +754,15 @@ def test_restart_skips_only_a_statement_with_its_completed_invariant(
             killpoint=resumed_events.append,
         )
 
-    assert resumed_events == [
-        "before:insert_second",
-        "after_execute:insert_second",
-        "after_commit:insert_second",
-    ]
+    # The committed statement is not replayed; only the unfinished one runs.
+    assert (after_crash, resumed_events) == (
+        (True, False),
+        [
+            "before:insert_second",
+            "after_execute:insert_second",
+            "after_commit:insert_second",
+        ],
+    )
 
 
 def test_after_execute_failure_rolls_back_and_restart_replays_statement(
@@ -910,8 +934,6 @@ with contextlib.closing(open_operational_db(path, busy_ms=100)) as database:
         check=False,
         env=environment,
     )
-    assert crashed.returncode == 86
-
     with contextlib.closing(open_operational_db(path, busy_ms=100)) as database:
         events: list[str] = []
 
@@ -924,13 +946,13 @@ with contextlib.closing(open_operational_db(path, busy_ms=100)) as database:
             final_invariant=completed,
             killpoint=events.append,
         )
-        assert _table_exists(database, "values_table")
+        table_exists = _table_exists(database, "values_table")
 
-    if event == "after_commit:create_values":
-        assert events == []
-    else:
-        assert events == [
-            "before:create_values",
-            "after_execute:create_values",
-            "after_commit:create_values",
-        ]
+    # A crash after the commit leaves nothing to replay; any earlier one replays
+    # the whole statement.
+    replayed = [] if event == "after_commit:create_values" else [
+        "before:create_values",
+        "after_execute:create_values",
+        "after_commit:create_values",
+    ]
+    assert (crashed.returncode, table_exists, events) == (86, True, replayed)

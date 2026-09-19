@@ -37,6 +37,7 @@ from tests.code_kernel_helpers import (
     PyrightInstallArtifactFixture,
     PyrightTarEntry,
     create_pyright_install_artifact,
+    pyright_executed_tree_sha256,
     use_pyright_install_artifact_identity,
 )
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
@@ -132,7 +133,10 @@ def test_successful_local_install_is_exact_and_canonical(
 
     root = _root(state_root)
     server_sha256 = sha256_bytes(artifact.server_bytes)
-    expected_manifest = build_pyright_install_manifest(server_sha256=server_sha256)
+    expected_manifest = build_pyright_install_manifest(
+        server_sha256=server_sha256,
+        executed_tree_sha256=pyright_executed_tree_sha256(artifact.server_bytes, {}),
+    )
     manifest_bytes = canonical_json_bytes(expected_manifest)
     assert result == InstalledPyright(
         root=root,
@@ -2192,6 +2196,29 @@ def test_existing_invalid_or_unsafe_target_is_never_overwritten(
     assert _error_code(error) == "pyright_existing_install_invalid"
     assert tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*"))) == before
     _assert_no_owned_scratch(state_root)
+
+
+def test_scratch_an_abrupt_death_left_behind_is_swept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`.install-pyright-*` outlives a `SIGKILL`; the next install holds the lock.
+
+    Audit 3, B22. Research:
+    `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
+    """
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    install_pyright(state_root=state_root, artifact=artifact.path)
+    abandoned = state_root / "cache/code-tools/pyright/.install-pyright-stage-dead"
+    (abandoned / "package").mkdir(parents=True)
+    (abandoned / "package/half-written.js").write_bytes(b"z" * 4096)
+    shutil.rmtree(_root(state_root))
+
+    install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert not abandoned.exists()
+    assert _installer_entries(state_root) == (PYRIGHT_VERSION,)
 
 
 def test_concurrent_installers_converge_on_one_valid_publication(

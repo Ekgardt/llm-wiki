@@ -155,12 +155,33 @@ def _rendered_location_count(rendered: dict[str, object]) -> int:
     return sum(len(group["locations"]) for group in rendered["groups"])  # type: ignore[index,union-attr]
 
 
+def _fields(rendered: dict[str, object], *names: str) -> tuple:
+    """The named top-level values, in the order asked, as one comparable tuple."""
+    return tuple(rendered[name] for name in names)
+
+
+def _warns(rendered: dict[str, object], *needles: str) -> tuple:
+    """Whether each needle appears in the rendered warnings, in order."""
+    warnings = rendered["warnings"]
+    return tuple(needle in warnings for needle in needles)
+
+
+def _diagnostic_messages(rendered: dict[str, object]) -> list:
+    return [item["message"] for item in rendered["diagnostics"]]
+
+
+def _first_signature(rendered: dict[str, object]) -> str:
+    return rendered["groups"][0]["locations"][0]["signature"]
+
+
 def test_renderer_constants_are_exact() -> None:
-    assert DEFAULT_LIMIT == 10
-    assert MAX_LIMIT == 100
-    assert MAX_ESTIMATED_TOKENS == 1_200
-    assert estimate_tokens("abcd") == 1
-    assert estimate_tokens("abc") == 1
+    assert (
+        DEFAULT_LIMIT,
+        MAX_LIMIT,
+        MAX_ESTIMATED_TOKENS,
+        estimate_tokens("abcd"),
+        estimate_tokens("abc"),
+    ) == (10, 100, 1_200, 1, 1)
 
 
 def test_renderer_puts_keys_in_exact_order() -> None:
@@ -169,13 +190,18 @@ def test_renderer_puts_keys_in_exact_order() -> None:
     assert list(rendered) == _TOP_LEVEL_KEYS
 
 
+def _paged_encodings(result: NavigationResult, offsets: tuple[int, ...]) -> list:
+    """Each page of `result` at the given offsets, encoded, for comparison."""
+    return [_encoded(render_navigation(result, offset=offset, limit=2)) for offset in offsets]
+
+
 def test_default_limit_is_ten_and_truncation_truth() -> None:
     rendered = render_navigation(_result(25), offset=0, limit=10)
-    assert len(rendered["groups"][0]["locations"]) <= 10
-    assert rendered["truncated"] is True
-    assert rendered["omitted"] == 15
-    assert rendered["next_offset"] == 10
-    assert rendered["status"] == NavigationStatus.PARTIAL.value
+    within_limit = len(rendered["groups"][0]["locations"]) <= 10
+    assert (
+        within_limit,
+        _fields(rendered, "truncated", "omitted", "next_offset", "status"),
+    ) == (True, (True, 15, 10, NavigationStatus.PARTIAL.value))
 
 
 def test_default_output_is_bounded_without_silent_clipping() -> None:
@@ -237,24 +263,25 @@ def test_byte_identical_output_for_repeated_input() -> None:
 
 def test_offset_past_total_returns_empty_window() -> None:
     rendered = render_navigation(_result(5), offset=100, limit=10)
-    assert rendered["groups"] == []
-    assert rendered["offset"] == 100
-    assert rendered["limit"] == 10
-    assert rendered["omitted"] == 0
-    assert rendered["next_offset"] is None
-    assert rendered["truncated"] is False
-    assert rendered["status"] == NavigationStatus.OK.value
+    assert _fields(
+        rendered,
+        "groups",
+        "offset",
+        "limit",
+        "omitted",
+        "next_offset",
+        "truncated",
+        "status",
+    ) == ([], 100, 10, 0, None, False, NavigationStatus.OK.value)
 
 
 def test_complete_nonzero_offset_final_page_is_not_partial() -> None:
     rendered = render_navigation(_result(5), offset=3, limit=2)
 
-    assert _rendered_location_count(rendered) == 2
-    assert rendered["offset"] == 3
-    assert rendered["omitted"] == 0
-    assert rendered["next_offset"] is None
-    assert rendered["truncated"] is False
-    assert rendered["status"] == NavigationStatus.OK.value
+    assert (
+        _rendered_location_count(rendered),
+        _fields(rendered, "offset", "omitted", "next_offset", "truncated", "status"),
+    ) == (2, (3, 0, None, False, NavigationStatus.OK.value))
 
 
 def test_default_window_uses_result_values_and_explicit_values_override() -> None:
@@ -365,12 +392,18 @@ def test_signature_strips_source_body() -> None:
         (),
     )
     rendered = render_navigation(result, offset=0, limit=10)
-    sig = rendered["groups"][0]["locations"][0]["signature"]
-    assert sig == "def foo():"
-    assert "\n" not in sig
-    assert "signature_truncated" in rendered["warnings"]
-    assert f"signature_original_bytes:{len(original.encode('utf-8'))}" in rendered["warnings"]
-    assert rendered["status"] == NavigationStatus.PARTIAL.value
+    sig = _first_signature(rendered)
+    one_line = "\n" not in sig
+    assert (
+        sig,
+        one_line,
+        _warns(
+            rendered,
+            "signature_truncated",
+            f"signature_original_bytes:{len(original.encode('utf-8'))}",
+        ),
+        rendered["status"],
+    ) == ("def foo():", True, (True, True), NavigationStatus.PARTIAL.value)
 
 
 def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() -> None:
@@ -381,18 +414,31 @@ def test_multibyte_signature_stays_on_utf8_boundary_and_reports_original_size() 
         limit=1,
     )
 
-    signature = rendered["groups"][0]["locations"][0]["signature"]
-    assert signature.startswith("def пример(")
-    assert "\n" not in signature
-    assert len(signature.encode("utf-8")) <= 1_024
-    assert f"signature_original_bytes:{len(original.encode('utf-8'))}" in rendered["warnings"]
-    assert "signature_truncated" in rendered["warnings"]
+    signature = _first_signature(rendered)
+    one_line = "\n" not in signature
+    within_bytes = len(signature.encode("utf-8")) <= 1_024
+    assert (
+        signature.startswith("def пример("),
+        one_line,
+        within_bytes,
+        _warns(
+            rendered,
+            f"signature_original_bytes:{len(original.encode('utf-8'))}",
+            "signature_truncated",
+        ),
+    ) == (True, True, True, (True, True))
 
 
-def test_include_source_disabled_by_default() -> None:
+def test_a_rendered_location_never_carries_source() -> None:
     rendered = render_navigation(_result(1), offset=0, limit=10)
     location_view = rendered["groups"][0]["locations"][0]
     assert "source" not in location_view
+
+
+def test_the_renderer_refuses_an_include_source_request() -> None:
+    """The inert flag is gone; asking for source is an error, not a silent no."""
+    with pytest.raises(TypeError):
+        render_navigation(_result(1), offset=0, limit=10, include_source=True)
 
 
 def test_grouping_by_path_and_symbol() -> None:
@@ -462,27 +508,32 @@ def test_diagnostics_are_canonical_primary_pageable_facts() -> None:
     result_a = _diagnostic_result(diagnostics)
     result_b = _diagnostic_result((diagnostics[1], diagnostics[0], diagnostics[2]))
 
-    for page_offset in (0, 2):
-        rendered_a = render_navigation(result_a, offset=page_offset, limit=2)
-        rendered_b = render_navigation(result_b, offset=page_offset, limit=2)
-        assert _encoded(rendered_a) == _encoded(rendered_b)
+    assert _paged_encodings(result_a, (0, 2)) == _paged_encodings(result_b, (0, 2))
 
     first_page = render_navigation(result_a, offset=0, limit=1)
     second_page = render_navigation(result_a, offset=1, limit=1)
     first = first_page["diagnostics"][0]
-    assert first["message"] == "first"
-    assert type(first["severity"]) is str
-    assert first["severity"] == DiagnosticSeverity.HINT.value
-    assert first["code"] == "A"
-    assert first["range"] == {"byte_start": 0, "byte_end": 1}
-    assert len(first["related"]) == 1
-    assert second_page["diagnostics"][0]["message"] == "second"
-    assert second_page["groups"] == []
-    assert second_page["offset"] == 1
-    assert second_page["omitted"] == 1
-    assert second_page["next_offset"] == 2
-    assert second_page["truncated"] is True
-    assert second_page["status"] == NavigationStatus.PARTIAL.value
+    assert (
+        first["message"],
+        type(first["severity"]),
+        first["severity"],
+        first["code"],
+        first["range"],
+        len(first["related"]),
+    ) == (
+        "first",
+        str,
+        DiagnosticSeverity.HINT.value,
+        "A",
+        {"byte_start": 0, "byte_end": 1},
+        1,
+    )
+    assert (
+        _diagnostic_messages(second_page),
+        _fields(
+            second_page, "groups", "offset", "omitted", "next_offset", "truncated", "status"
+        ),
+    ) == (["second"], ([], 1, 1, 2, True, NavigationStatus.PARTIAL.value))
 
 
 def test_oversized_diagnostic_consumes_one_fact_and_next_page_progresses() -> None:
@@ -502,52 +553,69 @@ def test_oversized_diagnostic_consumes_one_fact_and_next_page_progresses() -> No
 
     first_page = render_navigation(result, offset=0, limit=2)
     first_encoded = _encoded(first_page)
-    assert first_page["diagnostics"] == []
-    assert message not in first_encoded
-    assert "output_token_bound" in first_page["warnings"]
-    assert "fact_omitted_token_bound" in first_page["warnings"]
-    assert "original_warning" in first_page["warnings"]
-    assert "hover_truncated" in first_page["warnings"]
-    assert f"hover_original_bytes:{len(hover.encode('utf-8'))}" in first_page["warnings"]
-    assert first_page["provider"] == {"name": "pyright", "version": "1.1.411"}
-    assert first_page["repository"] == {
-        "repository_id": "repo",
-        "checkout_id": "checkout",
-    }
-    assert first_page["freshness"] == {
-        "workspace_revision_before": "abc123",
-        "workspace_revision_after": "abc123",
-        "current": "abc123",
-    }
-    assert first_page["symbol"] == "PublicApi"
-    assert first_page["readiness"] == "query_ready"
-    assert first_page["provenance"] == [
+    assert _warns(
+        first_page,
+        "output_token_bound",
+        "fact_omitted_token_bound",
+        "original_warning",
+        "hover_truncated",
+        f"hover_original_bytes:{len(hover.encode('utf-8'))}",
+    ) == (True, True, True, True, True)
+    assert _fields(
+        first_page,
+        "diagnostics",
+        "provider",
+        "repository",
+        "freshness",
+        "symbol",
+        "readiness",
+        "provenance",
+    ) == (
+        [],
+        {"name": "pyright", "version": "1.1.411"},
+        {"repository_id": "repo", "checkout_id": "checkout"},
         {
-            "source": "lsp",
-            "provider": "pyright",
-            "version": "1.1.411",
-            "observation": "provider_reported",
-        }
-    ]
-    assert first_page["omitted"] == 2
-    assert first_page["next_offset"] == 1
-    assert first_page["next_offset"] != first_page["offset"]
-    assert first_page["truncated"] is True
-    assert first_page["status"] == NavigationStatus.PARTIAL.value
-    assert estimate_tokens(first_encoded) <= MAX_ESTIMATED_TOKENS
+            "workspace_revision_before": "abc123",
+            "workspace_revision_after": "abc123",
+            "current": "abc123",
+        },
+        "PublicApi",
+        "query_ready",
+        [
+            {
+                "source": "lsp",
+                "provider": "pyright",
+                "version": "1.1.411",
+                "observation": "provider_reported",
+            }
+        ],
+    )
+    hides_message = message not in first_encoded
+    within_budget = estimate_tokens(first_encoded) <= MAX_ESTIMATED_TOKENS
+    assert (
+        hides_message,
+        within_budget,
+        _fields(first_page, "omitted", "next_offset", "offset", "truncated", "status"),
+    ) == (True, True, (2, 1, 0, True, NavigationStatus.PARTIAL.value))
 
     second_page = render_navigation(result, offset=first_page["next_offset"], limit=2)
-    assert [item["message"] for item in second_page["diagnostics"]] == [
-        "later diagnostic"
-    ]
-    assert second_page["omitted"] == 0
-    assert second_page["next_offset"] is None
-    assert second_page["truncated"] is True
-    assert second_page["status"] == NavigationStatus.PARTIAL.value
-    assert "output_token_bound" not in second_page["warnings"]
-    assert "fact_omitted_token_bound" not in second_page["warnings"]
-    assert "hover_truncated" in second_page["warnings"]
-    assert estimate_tokens(_encoded(second_page)) <= MAX_ESTIMATED_TOKENS
+    second_within_budget = estimate_tokens(_encoded(second_page)) <= MAX_ESTIMATED_TOKENS
+    assert (
+        _diagnostic_messages(second_page),
+        _fields(second_page, "omitted", "next_offset", "truncated", "status"),
+        _warns(
+            second_page,
+            "output_token_bound",
+            "fact_omitted_token_bound",
+            "hover_truncated",
+        ),
+        second_within_budget,
+    ) == (
+        ["later diagnostic"],
+        (0, None, True, NavigationStatus.PARTIAL.value),
+        (False, False, True),
+        True,
+    )
 
 
 def test_single_oversized_diagnostic_counts_consumed_fact_as_omitted() -> None:
@@ -559,14 +627,14 @@ def test_single_oversized_diagnostic_counts_consumed_fact_as_omitted() -> None:
         limit=1,
     )
 
-    assert rendered["diagnostics"] == []
-    assert rendered["next_offset"] is None
-    assert rendered["omitted"] == 1
-    assert rendered["truncated"] is True
-    assert rendered["status"] == NavigationStatus.PARTIAL.value
-    assert "output_token_bound" in rendered["warnings"]
-    assert "fact_omitted_token_bound" in rendered["warnings"]
-    assert estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
+    within_budget = estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
+    assert (
+        _fields(
+            rendered, "diagnostics", "next_offset", "omitted", "truncated", "status"
+        ),
+        _warns(rendered, "output_token_bound", "fact_omitted_token_bound"),
+        within_budget,
+    ) == (([], None, 1, True, NavigationStatus.PARTIAL.value), (True, True), True)
 
 
 def test_oversized_metadata_is_rejected_before_tiny_fact_is_rendered(
@@ -591,33 +659,42 @@ def test_oversized_metadata_is_rejected_before_tiny_fact_is_rendered(
     assert location_views == 0
 
 
+def _mixed_signature_locations(kept: str) -> tuple:
+    """Ten locations: the first keeps `kept`, the other nine are oversized."""
+    signatures = [kept] + ["def " + "x" * 700] * 9
+    return tuple(
+        _location(start=index, end=index + 1, signature=signature)
+        for index, signature in enumerate(signatures)
+    )
+
+
 def test_nonempty_token_reduction_always_adds_warning_and_partial_status() -> None:
     clipped_signature = "def kept():\n    return 1"
-    locations = tuple(
-        _location(
-            start=index,
-            end=index + 1,
-            signature=(
-                clipped_signature if index == 0 else "def " + "x" * 700
-            ),
-        )
-        for index in range(10)
-    )
     rendered = render_navigation(
-        replace(_result(10), locations=locations),
+        replace(_result(10), locations=_mixed_signature_locations(clipped_signature)),
         offset=0,
         limit=10,
     )
     rendered_count = _rendered_location_count(rendered)
+    some_but_not_all = 0 < rendered_count < 10
+    within_budget = estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
 
-    assert 0 < rendered_count < 10
-    assert "output_token_bound" in rendered["warnings"]
-    assert "signature_truncated" in rendered["warnings"]
-    assert f"signature_original_bytes:{len(clipped_signature.encode('utf-8'))}" in rendered["warnings"]
-    assert rendered["status"] == NavigationStatus.PARTIAL.value
-    assert rendered["omitted"] == 10 - rendered_count
-    assert rendered["next_offset"] == rendered_count
-    assert estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
+    assert (
+        some_but_not_all,
+        within_budget,
+        _warns(
+            rendered,
+            "output_token_bound",
+            "signature_truncated",
+            f"signature_original_bytes:{len(clipped_signature.encode('utf-8'))}",
+        ),
+        _fields(rendered, "status", "omitted", "next_offset"),
+    ) == (
+        True,
+        True,
+        (True, True, True),
+        (NavigationStatus.PARTIAL.value, 10 - rendered_count, rendered_count),
+    )
 
 
 def test_token_fitting_uses_bounded_monotonic_prefix_search(
@@ -658,11 +735,17 @@ def test_token_fitting_uses_bounded_monotonic_prefix_search(
         limit=100,
     )
 
-    assert 0 < len(rendered["diagnostics"]) < 100
-    assert "output_token_bound" in rendered["warnings"]
-    assert diagnostic_views <= 800
-    assert payload_attempts <= 10
-    assert estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
+    some_but_not_all = 0 < len(rendered["diagnostics"]) < 100
+    bounded_views = diagnostic_views <= 800
+    bounded_attempts = payload_attempts <= 10
+    within_budget = estimate_tokens(_encoded(rendered)) <= MAX_ESTIMATED_TOKENS
+    assert (
+        some_but_not_all,
+        _warns(rendered, "output_token_bound"),
+        bounded_views,
+        bounded_attempts,
+        within_budget,
+    ) == (True, (True,), True, True, True)
 
 
 def test_mixed_or_wrong_mode_fact_shapes_fail_closed() -> None:

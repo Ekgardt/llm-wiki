@@ -9,7 +9,7 @@ is alive.
 
 This matters now because the repair moved from a hand-run rescue to a nightly
 step: on 2026-09-07 `llm-wiki` 2214 lost a precondition during the benchmark
-runs, 2215 sat reserved behind it, `no-hands` 830 likewise, and six hundred
+runs, 2215 sat reserved behind it, `another-project` 830 likewise, and six hundred
 hook failures accumulated over a day, one per session end.
 """
 

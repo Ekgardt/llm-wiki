@@ -206,18 +206,36 @@ def _read_json_document(path: Path, max_bytes: int, deadline: float | None) -> o
     return json.loads(raw.decode("utf-8", errors="strict"))
 
 
+# Most specific first: both FileNotFoundError and PermissionError are OSErrors.
+_READ_FAILURE_REASONS = (
+    (FileNotFoundError, "missing"),
+    (PermissionError, "unsafe"),
+    (ValueError, "oversized"),
+    (OSError, "unreadable"),
+)
+
+
+def _read_failure_reason(error: Exception) -> str:
+    for kind, reason in _READ_FAILURE_REASONS:
+        if isinstance(error, kind):
+            return reason
+    return "unreadable"
+
+
 def _digest_of(path: Path, max_bytes: int, deadline: float | None) -> tuple[str, str]:
-    """(digest, reason) for one managed file; reason is empty when it is fine."""
+    """(digest, reason) for one managed file; reason is empty when it is fine.
+
+    A deadline that passes mid-read is the caller's timeout, not a property of
+    the file: `TimeoutError` is an `OSError` and used to read as "unreadable"
+    (audit 3, B7). Research:
+    `docs/research/2026-09-17-a-slow-read-is-not-a-corrupt-install.md`.
+    """
     try:
         content = read_stable_bytes(path, max_bytes, label="server", deadline=deadline)
-    except FileNotFoundError:
-        return "", "missing"
-    except PermissionError:
-        return "", "unsafe"
-    except ValueError:
-        return "", "oversized"
-    except OSError:
-        return "", "unreadable"
+    except TimeoutError:
+        raise
+    except (OSError, ValueError) as error:
+        return "", _read_failure_reason(error)
     return sha256_bytes(content), ""
 
 
@@ -334,6 +352,8 @@ def _manifest_codes(
         value = _read_json_document(
             root / INSTALL_MANIFEST_NAME, MAX_INSTALL_MANIFEST_BYTES, deadline
         )
+    except TimeoutError:
+        raise
     except (OSError, UnicodeDecodeError, ValueError):
         return {profile.degradation_code("manifest_unreadable")}
     return _validated_manifest_codes(profile, value, server_sha256, runtime_sha256)

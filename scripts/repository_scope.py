@@ -360,8 +360,22 @@ class _GitWatch:
         self.reason: list[str] = []
         self.thread = threading.Thread(target=self._monitor, daemon=True)
 
+    def _caller_cancelled(self) -> bool:
+        """The caller's answer; a callback that raises is taken as "stop".
+
+        This runs on the watcher thread, which is the only bound on a blocking
+        read: an exception from a caller's callback used to end the thread and
+        leave the probe running with nothing to kill it (audit 3, G-L9).
+        """
+        if self.cancelled is None:
+            return False
+        try:
+            return bool(self.cancelled())
+        except Exception:  # noqa: BLE001 - a caller's callback must not end the watch
+            return True
+
     def _stop_reason(self) -> str | None:
-        if self.cancelled is not None and self.cancelled():
+        if self._caller_cancelled():
             return "cancelled"
         if self.deadline - time.monotonic() <= 0:
             return "deadline"
@@ -590,6 +604,22 @@ def _requested_directory(directory: Path) -> Path:
     return requested
 
 
+def _local_scope_path(requested: Path) -> str:
+    """The canonical text of this path, or a named refusal.
+
+    A path this module cannot serialize -- a UNC share, an extended-length
+    Windows path -- is an identity it cannot provide, not a programming error:
+    callers handle `RepositoryScopeUnavailable`, and `path_coverage` handles
+    nothing else (audit 3, G-L9).
+    """
+    try:
+        return _local_serialized_path(requested, strict=True)
+    except ValueError as exc:
+        raise RepositoryScopeUnavailable(
+            f"repository identity is unavailable for this path: {exc}"
+        ) from exc
+
+
 def resolve_repository_scope(
     directory: Path,
     *,
@@ -599,7 +629,7 @@ def resolve_repository_scope(
     """Resolve a directory to a stable local repository and checkout scope."""
     _check_stop(deadline, cancelled)
     requested = _requested_directory(directory)
-    local_root = _local_serialized_path(requested, strict=True)
+    local_root = _local_scope_path(requested)
     try:
         checkout_root, git_common_dir = _git_roots(requested, deadline, cancelled)
     except TimeoutError:

@@ -26,6 +26,7 @@ from markdown_transaction import (
     ABSENT,
     MarkdownChange,
     MarkdownCoordinator,
+    OperationBoundElsewhereError,
     ProjectCheckpointReservation,
     ProjectPendingPriorError,
     TransactionFailure,
@@ -750,7 +751,12 @@ def _journal_body(content: bytes) -> str:
 
 
 def _journal_event_lines(content: bytes) -> list[str]:
-    lines = [line for line in _journal_body(content).splitlines() if line]
+    # A line ends at "\n" and nowhere else. `str.splitlines()` also breaks at
+    # U+2028, U+2029 and U+0085, which canonical JSON writes raw inside a string:
+    # one such character in a checkpoint's text wedged the journal for good. See
+    # `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+    split = (line.removesuffix("\r") for line in _journal_body(content).split("\n"))
+    lines = [line for line in split if line]
     if len(lines) > MAX_JOURNAL_EVENTS:
         raise ProjectJournalReadError(
             "too_many_events",
@@ -838,9 +844,45 @@ def _portable_slug_characters(slug: str) -> bool:
     )
 
 
+def _is_reserved_slug(slug: str) -> bool:
+    return slug.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES
+
+
 def _require_unreserved_slug(slug: str) -> None:
-    if slug.rstrip(" .").split(".", 1)[0].casefold() in _RESERVED_WINDOWS_NAMES:
+    if _is_reserved_slug(slug):
         raise ValueError("project slug uses a reserved Windows name")
+
+
+_UNUSABLE_SLUGS = frozenset({"", ".", ".."})
+
+
+def _portable_slug_characters_only(candidate: str) -> str:
+    """The candidate with every character this journal refuses removed."""
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFC", candidate).lower()
+        if _portable_slug_characters(character) and character not in "/\\"
+    ).rstrip(" .")
+
+
+def _unreserved_slug(kept: str) -> str:
+    if _is_reserved_slug(kept):
+        return f"project-{kept}"
+    return kept
+
+
+def portable_slug(candidate: str) -> str:
+    """The nearest slug this journal accepts, or "" when nothing is left.
+
+    Whoever mints a slug has to satisfy the rules below, or the project it names
+    never gets a handoff and the only trace is a line in `logs/hook-errors.log`.
+    Sharing one test is what keeps the two from drifting apart again. See
+    `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
+    """
+    kept = _portable_slug_characters_only(candidate)
+    if kept in _UNUSABLE_SLUGS:
+        return ""
+    return _unreserved_slug(kept)
 
 
 def _require_portable_slug(slug: str) -> None:
@@ -1364,12 +1406,6 @@ def _legacy_probe_event(project_root: Path | str) -> dict[str, object]:
     }
 
 
-# What `prepare` says when an attempt's id is bound to the request it was first
-# prepared with and the request has since changed. See
-# `ProjectStore._replayed_as_a_new_attempt`.
-REBOUND_REQUEST = "operation_id is already bound to a different request"
-
-
 def _project_lease_precondition(slug: str, lease: ProjectLease) -> dict[str, object]:
     return {
         "project": slug,
@@ -1423,7 +1459,7 @@ def _appended_journal(current_journal: bytes, event: object, records: list) -> b
 _ROTATION_ID = "journal-rotation"
 # A journal also rolls by size, as every append-only log does (Kafka rolls a
 # segment at `segment.bytes` or `segment.ms`, whichever comes first). Rolling
-# by count alone let the no-hands journal reach 4.2 MB at 981 events, past
+# by count alone let the another-project journal reach 4.2 MB at 981 events, past
 # the claim tree's 4 MB page cap, and the nightly compile failed for two
 # nights. Two megabytes keeps a live journal at half that cap.
 # See `docs/research/2026-09-09-a-journal-rolls-by-size-too.md`.
@@ -1453,6 +1489,14 @@ def _snapshot_operations(items: Mapping[str, str], limit: int) -> list[dict[str,
     ]
 
 
+# What a rotation snapshot carries per list. Each list keeps the tail a reader
+# can see — except blockers: the session handoff shows every open blocker, so a
+# tail of five silently dropped blockers nobody had closed. A hundred is the
+# event schema's own bound for the field. See
+# `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+_SNAPSHOT_LIST_ITEMS = {**_MAX_LIST_ITEMS, "blockers": 100}
+
+
 def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
     """One delta that reproduces the fold of every sealed event.
 
@@ -1464,7 +1508,7 @@ def _snapshot_delta(active: Mapping[str, dict[str, str]], context: str) -> dict:
     for name in _SCALAR_FIELDS:
         delta[name] = {"id": _ROTATION_ID, "action": "close", "value": ""}
         delta[f"{name}_operations"] = _snapshot_operations(active[name], 1)
-    for name, limit in _MAX_LIST_ITEMS.items():
+    for name, limit in _SNAPSHOT_LIST_ITEMS.items():
         delta[name] = _snapshot_operations(active[name], limit)
     return delta
 
@@ -2410,8 +2454,8 @@ class ProjectStore:
             )
         except ProjectPendingPriorError:
             return None
-        except ValueError as exc:
-            return self._replayed_after_rebinding(exc, row, lease, writer_wait_seconds)
+        except OperationBoundElsewhereError:
+            return self._replayed_as_a_new_attempt(row, lease, writer_wait_seconds)
         except TransactionFailure as exc:
             return self._quarantined_or_raised(exc, row)
 
@@ -2422,17 +2466,6 @@ class ProjectStore:
             raise exc
         self._set_checkpoint_state(row.project, row.sequence, "quarantined")
         return None
-
-    def _replayed_after_rebinding(
-        self,
-        exc: ValueError,
-        row: ProjectCheckpointReservation,
-        lease: ProjectLease,
-        writer_wait_seconds: float | None,
-    ) -> CheckpointReceipt | None:
-        if REBOUND_REQUEST not in str(exc):
-            raise exc
-        return self._replayed_as_a_new_attempt(row, lease, writer_wait_seconds)
 
     def _replayed_as_a_new_attempt(
         self,
@@ -2448,7 +2481,7 @@ class ProjectStore:
         `prepare` refuses: same id, different request. The row can never settle
         and every event behind it queues forever.
 
-        Measured on this vault on 2026-09-07: `no-hands` sequence 839 refused
+        Measured on this vault on 2026-09-07: `another-project` sequence 839 refused
         this way, 1 127 events queued behind it over five hours, `run/state.json`
         grew to 2.8 MB — eleven times the bound doctor is allowed to read — and
         two of its checks went blind while the state lock started timing out
@@ -2545,10 +2578,22 @@ class ProjectStore:
         and any sealed segment the fold produced; the checkpoint rows are not
         touched. Pending sequences are settled afterwards by `recover`. See
         `rebuilt_journal`.
+
+        The project is held for the whole read-fold-write, as both sibling
+        repairs hold it: without the lease a checkpoint committed between the
+        read and the write was left out of the rebuilt journal. See
+        `docs/research/2026-09-18-a-rebuild-takes-the-lease-its-siblings-take.md`.
         """
+        slug = _require_slug(slug)
+        lease = self.acquire_lease(slug, "journal-rebuild")
+        try:
+            return self._rebuild_under_lease(slug)
+        finally:
+            self._release(lease)
+
+    def _rebuild_under_lease(self, slug: str) -> dict[str, object]:
         from markdown_transaction import _mutate_knowledge
 
-        slug = _require_slug(slug)
         events = self.committed_events(slug)
         if not events:
             raise ProjectJournalReadError("no_committed_events", f"project {slug!r} has no committed checkpoints")
@@ -2564,7 +2609,34 @@ class ProjectStore:
         transaction = _mutate_knowledge(
             self.coordinator, f"journal-rebuild:{slug}:{last}:{uuid.uuid4().hex}", changes, (), None
         )
-        return {"project": slug, "events": len(events), "last_sequence": last, "sealed": len(sealed), "transaction": transaction.id}
+        released = self._release_parked_checkpoints(slug, last)
+        return {
+            "project": slug,
+            "events": len(events),
+            "last_sequence": last,
+            "sealed": len(sealed),
+            "transaction": transaction.id,
+            "released": released,
+        }
+
+    def _release_parked_checkpoints(self, slug: str, head: int) -> int:
+        """Hand the checkpoints parked above the rebuilt head back to `recover`.
+
+        A checkpoint that met a journal in need of this rebuild was marked
+        `quarantined`, which `recover` never replays and which blocks every later
+        sequence. The rebuild is what it was waiting for, so it goes back to
+        `reserved`; a row that fails again is quarantined again by the replay rules.
+        See `docs/research/2026-09-17-a-journal-line-ends-at-a-newline.md`.
+        """
+        with self.coordinator._connect() as database:
+            rows = database.execute(
+                "SELECT sequence FROM project_checkpoints WHERE project = ? "
+                "AND sequence > ? AND state = 'quarantined' ORDER BY sequence",
+                (slug, head),
+            ).fetchall()
+        for row in rows:
+            self._set_checkpoint_state(slug, int(row["sequence"]), "reserved")
+        return len(rows)
 
     def _ensure_project_directory(self, slug: str) -> None:
         target = self._project_directory(slug)
@@ -2607,10 +2679,6 @@ class ProjectStore:
             active.legacy_context = _legacy_context_or(delta, active.legacy_context)
             _apply_delta(targets, delta)
         return active
-
-    @staticmethod
-    def _reduce(target: dict[str, str], operation: Mapping[str, object]) -> None:
-        _reduce_operation(target, operation)
 
     def _reserve(
         self,

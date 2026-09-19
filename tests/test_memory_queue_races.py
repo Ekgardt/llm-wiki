@@ -24,6 +24,16 @@ import operational_ownership  # noqa: E402
 from memory_queue import LeaseFenceError, MemoryQueue  # noqa: E402
 
 
+def _worked(module, processor, *, max_tasks: int = 1):
+    """One bounded worker pass, running the handler in this process."""
+    return module.run_worker(
+        processor,
+        max_tasks=max_tasks,
+        idle_seconds=0,
+        processor_runner=module._run_processor_inline,
+    )
+
+
 def _heartbeat_thread_alive(task_id: str) -> bool:
     name = f"memory-queue-heartbeat-{task_id}"
     return any(t.name == name and t.is_alive() for t in threading.enumerate())
@@ -304,16 +314,16 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
         return real_heartbeat(lease, lease_seconds=lease_seconds)
 
     monkeypatch.setattr(queue, "heartbeat", heartbeat)
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: queue)
 
-    counts = memory_queue.drain_with(
+    summary = _worked(
+        memory_queue,
         # The handler waits for the heartbeat thread to reach its seventh beat.
         # Two seconds was not enough on a loaded runner, and the task then
         # failed on the fixture rather than on the behaviour under test.
         lambda task: completed.wait(LONG_TIMEOUT),
-        max_tasks=1,
     )
-    assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
+    assert (summary.succeeded, summary.failed, summary.dead) == (1, 0, 0)
     assert (heartbeat_calls, waits[:7], queue.get(task_id).state) == (
         [120] * 7,
         [40] * 7,
@@ -354,13 +364,10 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
             raise
 
     monkeypatch.setattr(primary, "heartbeat", heartbeat)
-    monkeypatch.setattr(memory_queue, "_queue", lambda: primary)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **_kwargs: primary)
 
-    counts = memory_queue.drain_with(
-        lambda task: fence_lost.wait(SHORT_TIMEOUT),
-        max_tasks=1,
-    )
-    assert counts == {"ok": 0, "failed": 1, "dead": 0, "skipped": 0}
+    summary = _worked(memory_queue, lambda task: fence_lost.wait(SHORT_TIMEOUT))
+    assert (summary.succeeded, summary.failed, summary.dead) == (0, 1, 0)
     task = primary.get(task_id)
     assert replacement[0] is not None
     assert (task.state, task.lease_owner, task.result_reference) == (

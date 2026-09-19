@@ -35,8 +35,30 @@ MAX_STEP_HEAD_BYTES = 8 * 1024
 REPORT_RETENTION_DAYS = 30
 REPORT_RETENTION_FILES = 60
 REPORT_RETENTION_BYTES = 32 * 1024 * 1024
-MAINTENANCE_REPORT_PATTERNS = ("nightly-*.md", "weekly-*.md", "lint-*.md")
+# The scheduler's own logs are appended to for the life of the vault (launchd's
+# StandardOutPath, the cron `>>`) and nothing rotates them, so the family size rule
+# above is their only bound. See
+# docs/research/2026-09-17-the-scheduler-log-is-bounded-and-the-hard-kill-is-named.md.
+MAINTENANCE_REPORT_PATTERNS = (
+    "nightly-*.md",
+    "weekly-*.md",
+    "lint-*.md",
+    "scheduled-*.log",
+    "cron-*.log",
+)
 ARTIFACT_PATTERN = "*.log"
+# The files a scheduler redirects a pass into: launchd writes the first pair,
+# cron the second. They are append-only and nothing else names them, so they
+# grew for the life of the install. They are the file this very process is
+# writing, so they are trimmed in place — never renamed, never unlinked.
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
+SCHEDULER_LOG_NAMES = (
+    "scheduled-nightly.log",
+    "scheduled-weekly.log",
+    "cron-nightly.log",
+    "cron-weekly.log",
+)
+SCHEDULER_LOG_KEEP_BYTES = 2 * 1024 * 1024
 
 
 def _artifact_stem(label: str) -> str:
@@ -188,10 +210,20 @@ def _safe_entry(path: Path) -> tuple[float, int, Path] | None:
 
 
 def _report_entries(directory: Path, pattern: str) -> list[tuple[float, int, Path]]:
-    """(mtime, size, path) newest first; unreadable entries are ignored."""
+    """(mtime, size, path) newest first, smallest first where ages tie.
+
+    The mtime alone is not a total order. Windows moves its file-time clock in
+    ~15.6 ms ticks and HFS+ stores whole seconds, so a scheduler that redirects
+    two jobs writes a family's logs inside one tick; the sort is stable, so the
+    tie fell through to `glob` order and which log survived was an accident of
+    the filesystem. Keeping the smaller of two equally recent files is
+    deterministic and keeps the most evidence - age still decides everything
+    else. Unreadable entries are ignored. Research:
+    docs/research/2026-09-18-a-retention-order-does-not-depend-on-the-clocks-granularity.md
+    """
     entries = [_safe_entry(path) for path in directory.glob(pattern)]
     present = [entry for entry in entries if entry is not None]
-    present.sort(key=lambda entry: entry[0], reverse=True)
+    present.sort(key=lambda entry: (entry[0], -entry[1]), reverse=True)
     return present
 
 
@@ -248,6 +280,48 @@ def prune_maintenance_output() -> int:
         prune_reports(REPORTS_DIR, pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
     )
     return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN)
+
+
+def _trim_in_place(path: Path, keep_bytes: int) -> None:
+    """Keep the last `keep_bytes` of a file that is being appended to.
+
+    The writer is this pass's own redirection: renaming or unlinking the file
+    would send the rest of tonight's output to a file nobody reads, while an
+    `O_APPEND` writer simply continues at the new end after this.
+    """
+    with path.open("r+b") as handle:
+        handle.seek(-keep_bytes, os.SEEK_END)
+        tail = handle.read()
+        handle.seek(0)
+        handle.write(tail)
+        handle.truncate()
+
+
+def _trim_one_scheduler_log(path: Path, keep_bytes: int) -> int:
+    """Bytes dropped from one log; 0 when it is small enough or cannot be opened."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= keep_bytes:
+        return 0
+    try:
+        _trim_in_place(path, keep_bytes)
+    except OSError:
+        return 0
+    return size - keep_bytes
+
+
+def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
+    """Bound the append-only logs a scheduler redirects a pass into.
+
+    Returns how many bytes were dropped in total. A log held open with no
+    sharing (Windows) is left exactly as it is.
+    """
+    return sum(
+        _trim_one_scheduler_log(REPORTS_DIR / name, keep_bytes)
+        for name in SCHEDULER_LOG_NAMES
+    )
 
 
 def wait_for_compile_idle(log_fn) -> None:

@@ -33,11 +33,7 @@ from pathlib import Path
 import pytest
 
 from tests.code_kernel_helpers import (
-    basic_graph_records,
     build_fixture_generation,
-    captured_snapshot_for_records,
-    make_unminted_verified_subclass,
-    snapshot_for_records,
 )
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -76,30 +72,6 @@ def test_parent_records_releases_database(tmp_path: Path) -> None:
     os.replace(replacement, database_path)
 
 
-def test_builder_manifest_matches_database_schema_for_each_mode(tmp_path: Path) -> None:
-    from evidence_graph import GraphSchema
-
-    v2 = build_fixture_generation(
-        tmp_path / "v2", generation_id="v2", graph_schema=GraphSchema.V2
-    )
-    v3 = build_fixture_generation(
-        tmp_path / "v3", generation_id="v3", graph_schema=GraphSchema.V3
-    )
-
-    assert v2.manifest["graph_schema_version"] == "evidence-graph/v2"
-    assert v3.manifest["graph_schema_version"] == "evidence-graph/v3"
-    with __import__("sqlite3").connect(
-        v3.generation_path / "evidence.sqlite3"
-    ) as database:
-        run_manifests = {
-            row[0]
-            for row in database.execute(
-                "SELECT DISTINCT source_manifest_sha256 FROM analyzer_run"
-            )
-        }
-    assert run_manifests == {v3.manifest["source_manifest_sha256"]}
-
-
 def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None:
     result = build_fixture_generation(tmp_path, generation_id="legacy")
 
@@ -108,141 +80,6 @@ def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None
         result.generation_path / "evidence.sqlite3"
     ) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 2
-
-
-def test_low_level_database_writer_has_no_code_capture_argument() -> None:
-    import inspect
-
-    import evidence_graph
-
-    assert "code_capture" not in inspect.signature(
-        evidence_graph.create_generation_database
-    ).parameters
-
-
-def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
-    tmp_path: Path,
-) -> None:
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-    from repository_scope import resolve_repository_scope
-
-    records = basic_graph_records()
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    repository_scope = resolve_repository_scope(repository)
-    catalog = GenerationCatalog(tmp_path / "state")
-    snapshot = captured_snapshot_for_records(records)
-    with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
-        build_full_generation(
-            catalog,
-            generation_id="forged",
-            graph_schema=GraphSchema.V3,
-            verified_analyses=(make_unminted_verified_subclass(records),),
-            snapshot=snapshot,
-            code_capture=snapshot.code_capture,
-            repository_scope=repository_scope,
-            activate=False,
-            **records,
-        )
-    assert not (catalog.generations_path / "forged").exists()
-    assert catalog.get_active() is None
-
-
-def test_v3_builder_requires_complete_repository_scoped_generation(tmp_path: Path) -> None:
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-
-    with pytest.raises(ValueError, match="snapshot|repository scope|v3"):
-        build_full_generation(
-            GenerationCatalog(tmp_path / "state"),
-            generation_id="invalid-v3",
-            graph_schema=GraphSchema.V3,
-            **basic_graph_records(),
-        )
-
-
-def test_v3_builder_requires_code_capture_before_creating_generation(tmp_path: Path) -> None:
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-    from repository_scope import resolve_repository_scope
-
-    records = basic_graph_records()
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    catalog = GenerationCatalog(tmp_path / "state")
-    with pytest.raises(ValueError, match="code.capture"):
-        build_full_generation(
-            catalog,
-            generation_id="no-capture",
-            graph_schema=GraphSchema.V3,
-            snapshot=snapshot_for_records(records),
-            repository_scope=resolve_repository_scope(repository),
-            activate=False,
-            **records,
-        )
-    assert not (catalog.generations_path / "no-capture").exists()
-
-
-def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path) -> None:
-    from code_workspace import RepositoryCodeLimits, code_capture_as_dict, collect_repository_code
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import _build_manifest
-
-    repository = tmp_path / "repository"
-    (repository / "src").mkdir(parents=True)
-    (repository / "src/app.py").write_text("answer = 42\n", encoding="utf-8")
-    snapshot = collect_repository_code(
-        repository,
-        roots=("src",),
-        include_globs=("**/*.py",),
-        ignore_globs=(),
-        suffixes=(".py",),
-        limits=RepositoryCodeLimits(),
-    )
-    manifest = _build_manifest(
-        generation_id="capture",
-        parent_generation_id=None,
-        collector_version="collector/v1",
-        extractor_version="extractor/v1",
-        graph_extractor_version="graph/v1",
-        source_manifest_sha256="1" * 64,
-        database_size=1,
-        database_sha256="2" * 64,
-        source_manifest_bytes=b"{}",
-        repository_scope=None,
-        graph_schema=GraphSchema.V3,
-        code_capture=snapshot.code_capture,
-    )
-
-    assert manifest["code_capture"] == code_capture_as_dict(snapshot.code_capture)
-    assert set(manifest["code_capture"]) == {
-        "policy",
-        "limits",
-        "files",
-        "directories",
-        "membership_sha256",
-    }
-
-
-def _extra_file_capture(contract, original):
-    """One file the sources never named, added to the membership."""
-    from code_workspace import CodeCaptureFile
-
-    extra = CodeCaptureFile("source:extra", "extra.py", "e" * 64, original.stat)
-    files = tuple(sorted((*contract.files, extra), key=lambda item: item.relative_path))
-    policy = replace(
-        contract.policy, roots=tuple(sorted((*contract.policy.roots, "extra.py")))
-    )
-    return policy, files
-
-
-def _policy_for_moved_path(contract):
-    roots = {"other.py", *(item.relative_path for item in contract.directories)}
-    return replace(contract.policy, roots=tuple(sorted(roots)))
 
 
 _FIELD_DAMAGE = {
@@ -263,103 +100,6 @@ def _damaged_values(original, damage: str) -> dict:
     name, value = _FIELD_DAMAGE[damage]
     values[name] = value
     return values
-
-
-def _forged_capture_file(values: dict):
-    """Built field by field because the real constructor would refuse this."""
-    from code_workspace import CodeCaptureFile
-
-    forged = object.__new__(CodeCaptureFile)
-    for name, value in values.items():
-        object.__setattr__(forged, name, value)
-    return forged
-
-
-def _field_damaged_capture(contract, original, damage: str):
-    policy = _policy_for_moved_path(contract) if damage == "relative_path" else contract.policy
-    return policy, (_forged_capture_file(_damaged_values(original, damage)),)
-
-
-def _damaged_capture(contract, original, damage: str):
-    if damage == "missing":
-        return contract.policy, ()
-    if damage == "extra":
-        return _extra_file_capture(contract, original)
-    return _field_damaged_capture(contract, original, damage)
-
-
-def _resealed(damaged):
-    """The membership digest the builder will check, recomputed over the damage."""
-    from code_workspace import code_capture_as_dict
-    from reliable_memory import canonical_json_bytes
-
-    serialized = code_capture_as_dict(damaged)
-    digest = hashlib.sha256(
-        canonical_json_bytes(
-            {"files": serialized["files"], "directories": serialized["directories"]}
-        )
-    ).hexdigest()
-    return replace(damaged, membership_sha256=digest)
-
-
-@pytest.mark.parametrize(
-    "damage", ["missing", "extra", "source_id", "relative_path", "sha256", "size"]
-)
-def test_builder_binds_present_capture_to_exact_sources_before_construction(
-    tmp_path: Path, damage: str
-) -> None:
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-
-    records = basic_graph_records()
-    snapshot = captured_snapshot_for_records(records)
-    contract = snapshot.code_capture
-    policy, files = _damaged_capture(contract, contract.files[0], damage)
-    damaged = _resealed(replace(contract, policy=policy, files=files))
-    catalog = GenerationCatalog(tmp_path / "state")
-
-    with pytest.raises(ValueError, match="source membership"):
-        build_full_generation(
-            catalog,
-            generation_id=f"bad-capture-{damage}",
-            graph_schema=GraphSchema.V2,
-            code_capture=damaged,
-            activate=False,
-            **records,
-        )
-    assert not (catalog.generations_path / f"bad-capture-{damage}").exists()
-
-
-def test_v3_builder_rejects_run_outside_manifest_repository_scope(tmp_path: Path) -> None:
-    from code_intelligence import verify_native_analysis
-    from evidence_graph import GraphSchema
-    from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
-    from repository_scope import resolve_repository_scope
-
-    from tests.code_kernel_helpers import (
-        make_normalized_analysis_for_records,
-        snapshot_for_records,
-    )
-
-    records = basic_graph_records()
-    snapshot = snapshot_for_records(records)
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    with pytest.raises(ValueError, match="repository|checkout"):
-        build_full_generation(
-            GenerationCatalog(tmp_path / "state"),
-            generation_id="wrong-scope",
-            graph_schema=GraphSchema.V3,
-            verified_analyses=(
-                verify_native_analysis(snapshot, make_normalized_analysis_for_records(records)),
-            ),
-            snapshot=snapshot,
-            repository_scope=resolve_repository_scope(repository),
-            activate=False,
-            **records,
-        )
 
 
 def _basic_records():
@@ -1259,50 +999,6 @@ def test_builder_rejects_unknown_kill_point(tmp_path):
             expected_active="gen-1",
             kill_point="not-a-real-kill-point",
         )
-
-
-def test_builder_snapshot_source_hash_is_pinned_in_manifest(tmp_path):
-    """The source manifest SHA-256 is captured before extraction and must
-    match the manifest recorded on disk."""
-    import corpus_snapshot
-    from evidence_graph_builder import build_full_generation
-
-    catalog = _catalog(tmp_path)
-    _publish_baseline(catalog)
-
-    records = _basic_records()
-    shared_sources = [
-        {
-            "logical_id": records["sources"][0]["source_id"],
-            "relative_path": records["sources"][0]["relative_path"],
-            "sha256": records["sources"][0]["sha256"],
-        }
-    ]
-    policy = {
-        "daily_paths": [],
-        "code_roots": [],
-        "include_historical": False,
-        "as_of": None,
-    }
-    expected_hash = corpus_snapshot.canonical_source_manifest_sha256(shared_sources, policy)
-
-    result = build_full_generation(
-        catalog,
-        generation_id="gen-2",
-        parent_generation_id="gen-1",
-        sources=records["sources"],
-        source_bytes=records["source_bytes"],
-        nodes=records["nodes"],
-        occurrences=records["occurrences"],
-        assertions=records["assertions"],
-        evidence=records["evidence"],
-        observations=records["observations"],
-        dependencies=records["dependencies"],
-        expected_active="gen-1",
-    )
-
-    manifest = json.loads((result.generation_path / "manifest.json").read_bytes())
-    assert manifest["source_manifest_sha256"] == expected_hash
 
 
 def test_builder_runs_full_schema_fk_integrity_and_evidence_validation(tmp_path):

@@ -18,13 +18,23 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
-from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
+from bounded_io import (
+    MAX_KNOWLEDGE_PAGE_BYTES,
+    SourceChangedDuringRead,
+    read_stable_bytes,
+)
 from code_languages import language_for_path
 from page_status import is_retired
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
-EXTRACTOR_VERSION = "markdown-heading-extractor/v3"
+# The name of the rule that cuts a source into chunks. Change where anything is cut
+# and this moves with it: deep validation, the doctor and the nightly all ask whether a
+# generation was made by today's rule by reading this string. v4 (2026-09-17) names the
+# 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
+# `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
+# `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
+EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
 MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
@@ -37,7 +47,6 @@ MAX_CORPUS_CHUNKS = 100_000
 DEFAULT_DEADLINE_SECONDS = 30.0
 
 PROJECT_FILES = frozenset({"state.md", "journal.md", "context.md"})
-SESSION_RECORD_ROOT = "knowledge/raw/sessions"
 # What counts as a code-shaped path (provenance, repository policies). Not
 # what the vault's own generation indexes: that is `VAULT_CODE_ROOTS`.
 APPROVED_CODE_ROOTS = frozenset(
@@ -62,7 +71,6 @@ GENERATED_DIRECTORIES = frozenset({"__pycache__"})
 # the silence of NEW-67 and NEW-135. So they prune only the walks that read
 # this vault's knowledge tree. See the 2026-08-29 note.
 VAULT_SKIP_DIRECTORIES = frozenset({"_template", "gaps", "raw-sources"})
-SKIP_DIRECTORIES = GENERATED_DIRECTORIES | VAULT_SKIP_DIRECTORIES
 _HEADING = re.compile(
     rb"(?m)^[ \t]{0,3}(#{1,6})(?:[ \t]+([^\r\n]*?)|[ \t]*)(?:\r?\n|$)"
 )
@@ -106,157 +114,6 @@ def _normalized_values(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
     if name == "suffixes":
         return tuple(value.casefold() for value in nfc_values)
     return nfc_values
-
-
-def _normalize_policy_tuples(policy: object) -> None:
-    for name in _POLICY_BOUNDS:
-        values = getattr(policy, name)
-        if isinstance(values, tuple) and all(isinstance(value, str) for value in values):
-            object.__setattr__(policy, name, _normalized_values(name, values))
-
-
-def _all_nonempty_strings(values: tuple) -> bool:
-    return all(isinstance(value, str) and value for value in values)
-
-
-def _bounded_unique_tuple(values: object, minimum: int, maximum: int) -> bool:
-    if not isinstance(values, tuple):
-        return False
-    if not minimum <= len(values) <= maximum:
-        return False
-    return values == tuple(sorted(set(values))) and _all_nonempty_strings(values)
-
-
-def _require_policy_tuples(policy: object) -> None:
-    for name, (minimum, maximum) in _POLICY_BOUNDS.items():
-        if not _bounded_unique_tuple(getattr(policy, name), minimum, maximum):
-            raise ValueError(f"{name} must be a bounded sorted unique tuple")
-
-
-def _normalized_relative_root(root: str) -> bool:
-    if not _normalized_text(root, 4096) or root == ".":
-        return False
-    return _relative_parts_ok(PurePosixPath(root))
-
-
-def _require_policy_roots(roots: tuple[str, ...]) -> None:
-    if any(not _normalized_relative_root(root) for root in roots):
-        raise ValueError("roots must contain normalized relative POSIX paths")
-
-
-def _windows_rooted(value: str) -> bool:
-    windows_path = PureWindowsPath(value)
-    return bool(windows_path.drive or windows_path.root)
-
-
-def _dot_segments(value: str) -> bool:
-    if value.startswith("./") or "//" in value:
-        return True
-    return any(part == "." for part in value.split("/"))
-
-
-def _normalized_glob(value: str) -> bool:
-    if not _normalized_text(value, 4096):
-        return False
-    if _windows_rooted(value) or _dot_segments(value):
-        return False
-    return _relative_parts_ok(PurePosixPath(value))
-
-
-def _require_policy_globs(policy: object) -> None:
-    for name in ("include_globs", "ignore_globs"):
-        if any(not _normalized_glob(value) for value in getattr(policy, name)):
-            raise ValueError(f"{name} must contain normalized relative POSIX globs")
-
-
-def _normalized_suffix(value: str) -> bool:
-    if not _normalized_text(value, 128):
-        return False
-    if value != value.casefold() or not value.startswith(".") or len(value) < 2:
-        return False
-    return "/" not in value
-
-
-def _require_policy_suffixes(suffixes: tuple[str, ...]) -> None:
-    if any(not _normalized_suffix(value) for value in suffixes):
-        raise ValueError("suffixes must contain normalized lowercase suffixes")
-
-
-def _encoded_source_id(source_id: object) -> bytes:
-    try:
-        return source_id.encode("utf-8")
-    except (AttributeError, UnicodeEncodeError) as exc:
-        raise ValueError("source_id must be valid UTF-8 text") from exc
-
-
-def _require_source_id(source_id: object) -> None:
-    encoded = _encoded_source_id(source_id)
-    if not encoded or not _bounded_nfc_text(source_id, 512):
-        raise ValueError("source_id must be normalized UTF-8 text of at most 512 characters")
-
-
-_CODE_LIMIT_MAXIMA = {
-    "max_files": 1_000_000,
-    "max_file_bytes": 1024**3,
-    "max_total_bytes": 16 * 1024**3,
-    "max_entries": 5_000_000,
-    "max_directories": 1_000_000,
-    "max_depth": 256,
-    "chunk_bytes": 8 * 1024 * 1024,
-}
-_CODE_LIMIT_MINIMA = {"max_depth": 1, "chunk_bytes": 4096}
-
-
-def _whole_number(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _require_limit_in_range(field: str, value: object, minimum: int, maximum: int) -> None:
-    if _whole_number(value) and minimum <= value <= maximum:
-        return
-    raise ValueError(f"{field} must be an integer from {minimum} to {maximum}")
-
-
-def _require_non_negative(name: str, value: object) -> None:
-    if _whole_number(value) and value >= 0:
-        return
-    raise ValueError(f"{name} must be a non-negative integer")
-
-
-def _plain_relative_text(value: object) -> str | None:
-    """The path as text when it is bounded NFC without a backslash, else None."""
-    if not _bounded_nfc_text(value, 4096):
-        return None
-    text = str(value)
-    return None if "\\" in text else text
-
-
-def _valid_relative_path(value: object, reject_dot: bool) -> bool:
-    text = _plain_relative_text(value)
-    if text is None:
-        return False
-    if reject_dot and text == ".":
-        return False
-    return _relative_parts_ok(PurePosixPath(text))
-
-
-def _require_relative_path(value: object, *, reject_dot: bool = False) -> None:
-    if not _valid_relative_path(value, reject_dot):
-        raise ValueError("relative_path must be normalized relative POSIX text")
-
-
-def _require_sha256(value: object, label: str) -> None:
-    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise ValueError(f"{label} must be lowercase SHA-256")
-
-
-def _ordered_by_path(items: object, kind: type) -> bool:
-    if not isinstance(items, tuple):
-        return False
-    if any(not isinstance(item, kind) for item in items):
-        return False
-    paths = tuple(item.relative_path for item in items)
-    return paths == tuple(sorted(paths))
 
 
 def _require_manifest_versions(collector_version: object, extractor_version: object) -> None:
@@ -371,97 +228,6 @@ class SnapshotPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class RepositoryCodeLimits:
-    max_files: int = 10_000
-    max_file_bytes: int = 8 * 1024 * 1024
-    max_total_bytes: int = 512 * 1024 * 1024
-    max_entries: int = 50_000
-    max_directories: int = 5_000
-    max_depth: int = 32
-    chunk_bytes: int = 64 * 1024
-
-    def __post_init__(self) -> None:
-        for field, maximum in _CODE_LIMIT_MAXIMA.items():
-            minimum = _CODE_LIMIT_MINIMA.get(field, 1)
-            _require_limit_in_range(field, getattr(self, field), minimum, maximum)
-
-
-@dataclass(frozen=True, slots=True)
-class RepositoryCodePolicy:
-    roots: tuple[str, ...]
-    include_globs: tuple[str, ...]
-    ignore_globs: tuple[str, ...]
-    suffixes: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _normalize_policy_tuples(self)
-        _require_policy_tuples(self)
-        _require_policy_roots(self.roots)
-        _require_policy_globs(self)
-        _require_policy_suffixes(self.suffixes)
-
-
-@dataclass(frozen=True, slots=True)
-class FileStatMetadata:
-    size: int
-    mtime_ns: int
-    ctime_ns: int
-    mode: int
-    device: int
-    inode: int
-
-    def __post_init__(self) -> None:
-        for name in self.__dataclass_fields__:
-            _require_non_negative(name, getattr(self, name))
-
-
-@dataclass(frozen=True, slots=True)
-class CodeCaptureFile:
-    source_id: str
-    relative_path: str
-    sha256: str
-    stat: FileStatMetadata
-
-    def __post_init__(self) -> None:
-        _require_source_id(self.source_id)
-        _require_relative_path(self.relative_path)
-        _require_sha256(self.sha256, "sha256")
-        if not isinstance(self.stat, FileStatMetadata):
-            raise TypeError("stat must be FileStatMetadata")
-
-
-@dataclass(frozen=True, slots=True)
-class DirectoryMembership:
-    relative_path: str
-    entry_count: int
-    entries_sha256: str
-
-    def __post_init__(self) -> None:
-        _require_relative_path(self.relative_path, reject_dot=True)
-        if isinstance(self.entry_count, bool) or not isinstance(self.entry_count, int):
-            raise ValueError("entry_count must be a non-negative integer")
-        if self.entry_count < 0:
-            raise ValueError("entry_count must be a non-negative integer")
-        _require_sha256(self.entries_sha256, "entries_sha256")
-
-
-@dataclass(frozen=True, slots=True)
-class CodeCaptureContract:
-    policy: RepositoryCodePolicy
-    limits: RepositoryCodeLimits
-    files: tuple[CodeCaptureFile, ...]
-    directories: tuple[DirectoryMembership, ...]
-    membership_sha256: str
-
-    def __post_init__(self) -> None:
-        _require_capture_types(self.policy, self.limits)
-        _require_capture_files(self.files)
-        if not _ordered_by_path(self.directories, DirectoryMembership):
-            raise ValueError("directories must be an ordered DirectoryMembership tuple")
-        _require_sha256(self.membership_sha256, "membership_sha256")
-
-
-@dataclass(frozen=True, slots=True)
 class CorpusSnapshot:
     sources: tuple[CapturedSource, ...]
     chunks: tuple[RetrievalChunk, ...]
@@ -469,7 +235,6 @@ class CorpusSnapshot:
     policy: SnapshotPolicy
     collector_version: str = COLLECTOR_VERSION
     extractor_version: str = EXTRACTOR_VERSION
-    code_capture: CodeCaptureContract | None = None
 
     @property
     def source_hashes(self) -> tuple[tuple[str, str], ...]:
@@ -530,26 +295,6 @@ def canonical_chunk_id(
             "sha256": span_sha256,
         }
     )
-
-
-def _require_capture_types(policy: object, limits: object) -> None:
-    if not isinstance(policy, RepositoryCodePolicy):
-        raise TypeError("policy must be RepositoryCodePolicy")
-    if not isinstance(limits, RepositoryCodeLimits):
-        raise TypeError("limits must be RepositoryCodeLimits")
-
-
-def _unique_capture_identity(files: tuple) -> bool:
-    file_paths = [item.relative_path.casefold() for item in files]
-    source_ids = [item.source_id for item in files]
-    return len(file_paths) == len(set(file_paths)) and len(source_ids) == len(set(source_ids))
-
-
-def _require_capture_files(files: object) -> None:
-    if not _ordered_by_path(files, CodeCaptureFile):
-        raise ValueError("files must be an ordered CodeCaptureFile tuple")
-    if not _unique_capture_identity(files):
-        raise ValueError("files contain a path or source ID collision")
 
 
 def _require_closed_source_mapping(record: object) -> Mapping[str, object]:
@@ -789,11 +534,14 @@ def _windows_shaped(raw: str) -> bool:
 _CODE_ROOT_ERROR = "code root must be a normalized approved relative POSIX path"
 
 
-def _always_pruned_name(name: str) -> bool:
+def always_pruned_directory_name(name: str) -> bool:
     """Pruned in every repository: generated bytecode, and anything hidden.
 
     Hidden is the one that carries weight -- `.claude/worktrees/` is a whole
-    second copy of the repository, the defect closed in commit 1d06e6a.
+    second copy of the repository, the defect closed in commit 1d06e6a. The
+    workspace revision walks by this rule too, so the freshness proof covers
+    what the corpus covers and no more. See
+    `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md`.
     """
     return name in GENERATED_DIRECTORIES or name.startswith(".")
 
@@ -811,7 +559,7 @@ def _pruned_directory_name(
     walk is reading this vault's knowledge tree, where `gaps` and `_template`
     are page types, or somebody's code, where they are just directory names.
     """
-    if _always_pruned_name(name):
+    if always_pruned_directory_name(name):
         return True
     if vault_vocabulary and name in VAULT_SKIP_DIRECTORIES:
         return True
@@ -914,6 +662,36 @@ def _seal_path(
     )
     _verify_seal(seal, changed_error=PermissionError)
     return seal
+
+
+def _seal_source_file(
+    vault: Path, path: Path, max_components: int
+) -> tuple[_PathIdentity, ...]:
+    """The seal of one source read by path: its ancestors, then the file itself.
+
+    An ancestor that moved between the two looks is still a `PermissionError`.
+    The file itself moving is somebody writing it, which the descriptor walk
+    calls `CorpusChanged`, so this one does too. Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+    seal = _build_path_seal(
+        vault, path, target_directory=False, max_components=max_components
+    )
+    _verify_seal(seal[:-1], changed_error=PermissionError)
+    _require_source_as_sealed(seal[-1])
+    return seal
+
+
+def _require_source_as_sealed(expected: _PathIdentity) -> None:
+    try:
+        current = _identity(expected.path, _safe_info(expected.path))
+    except FileNotFoundError as exc:
+        raise CorpusChanged(f"corpus source vanished: {expected.path.name}") from exc
+    if current != expected:
+        raise CorpusChanged(
+            f"corpus source changed: {expected.path.name} "
+            f"({_identity_delta(expected, current)})"
+        )
 
 
 def _relative_within(vault: Path, path: Path) -> Path:
@@ -1149,6 +927,21 @@ def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes:
     return content
 
 
+def _opened_listed_entry(name: str, descriptor: int, *, directory: bool) -> int:
+    """Open one entry the listing named; one that has gone is a changed corpus.
+
+    A file deleted between the listing and the open is the tree moving under the
+    walk, which is what `CorpusChanged` means and what `collect_corpus` retries.
+    Left as a bare `FileNotFoundError` it reached `repository_index` as "this
+    repository exceeds the corpus bounds", which is neither true nor actionable.
+    See `docs/research/2026-09-17-a-file-that-vanishes-mid-walk-is-a-changed-corpus.md`.
+    """
+    try:
+        return os.open(name, _descriptor_flags(directory=directory), dir_fd=descriptor)
+    except FileNotFoundError as exc:
+        raise CorpusChanged(f"corpus entry vanished before open: {name}") from exc
+
+
 class _Discovery:
     def __init__(
         self,
@@ -1192,12 +985,7 @@ class _Discovery:
                 os.close(descriptor)
             self._store(path, kind, project, (), content)
             return
-        seal = _seal_path(
-            self.vault,
-            path,
-            target_directory=False,
-            max_components=self.max_depth + 3,
-        )
+        seal = _seal_source_file(self.vault, path, self.max_depth + 3)
         self._store(path, kind, project, seal, None)
 
     def _store(
@@ -1317,7 +1105,7 @@ class _Discovery:
         """The child directory to descend into, or None once the file is stored."""
         _check_deadline(self.deadline)
         path = Path(entry.path)
-        info = entry.stat(follow_symlinks=False)
+        info = self._entry_info(entry)
         _require_safe_entry(path, info, symlink=entry.is_symlink())
         if stat.S_ISDIR(info.st_mode):
             return self._windows_child(path, entry.name, depth, kind)
@@ -1377,6 +1165,26 @@ class _Discovery:
         for name, info in sorted(entries, key=lambda item: item[0]):
             self._posix_entry(root, current, depth, descriptor, kind, name, info)
 
+    def _entry_info(self, entry: os.DirEntry) -> os.stat_result:
+        """This listed entry's metadata taken now; one that has gone is a changed corpus.
+
+        Not `entry.stat()`. CPython: "On Unix, this method always requires a
+        system call. On Windows, it only requires a system call if
+        follow_symlinks is True and the entry is a reparse point" — so on
+        Windows it answers out of the directory listing, a name deleted since
+        the listing still returns metadata, and the walk carries on over a file
+        that is not there until an unretryable FileNotFoundError ends the whole
+        capture. The POSIX branch already states each listed name itself
+        (`_posix_entries`). Research:
+        docs/research/2026-09-18-a-listed-entry-is-stated-now-not-remembered.md
+        """
+        try:
+            return os.lstat(entry.path)
+        except FileNotFoundError as exc:
+            raise CorpusChanged(
+                f"corpus entry vanished during the walk: {entry.name}"
+            ) from exc
+
     def _posix_entry(
         self,
         root: Path,
@@ -1410,7 +1218,7 @@ class _Discovery:
             return
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")
-        child = os.open(name, _descriptor_flags(directory=True), dir_fd=descriptor)
+        child = _opened_listed_entry(name, descriptor, directory=True)
         try:
             if not _same_descriptor_identity(info, os.fstat(child)):
                 raise CorpusChanged("corpus child directory changed before open")
@@ -1427,7 +1235,7 @@ class _Discovery:
         name: str,
         info: os.stat_result,
     ) -> None:
-        source = os.open(name, _descriptor_flags(directory=False), dir_fd=descriptor)
+        source = _opened_listed_entry(name, descriptor, directory=False)
         try:
             if not _same_opened_object(info, os.fstat(source)):
                 raise CorpusChanged("corpus source changed before descriptor open")
@@ -1461,6 +1269,34 @@ def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     # compiled pages do not answer, or a per-source quota in the pool. Neither is
     # built, so the honest state is: kept, not indexed. See MEM-01 in
     # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
+
+
+def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
+    """True for a source the memory walk collected, false for one a code root holds.
+
+    `knowledge/` is this vault's noun. Another repository's tracked `knowledge/`
+    directory is one of its code roots, and `knowledge/mod.py` there is code. The
+    vault's own code roots never include it (`repository_index.selected_code_roots`).
+    See `docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md`.
+    """
+    path = PurePosixPath(relative_path)
+    if path.parts[:1] != ("knowledge",):
+        return False
+    return not any(path.is_relative_to(PurePosixPath(root)) for root in code_roots)
+
+
+def _walk_memory(discovery: _Discovery, vault: Path, policy: SnapshotPolicy) -> None:
+    """The knowledge tree belongs to the memory generation, not to the code one.
+
+    One checkout carries two generations — memory, which the active pointer names, and
+    code, which is only registered (`docs/research/2026-09-12-the-vault-is-a-repository-too.md`).
+    The code roots already exclude `knowledge`, but this walk added it back: the vault's
+    code generation of 2026-09-15 carried all 333 private pages, 28 % of its chunk tokens.
+    Research: `docs/research/2026-09-16-the-code-index-leaves-the-knowledge-alone.md`.
+    """
+    if policy.code_roots:
+        return
+    _walk_knowledge(discovery, vault)
 
 
 def _existing_path(vault: Path, relative: str) -> Path:
@@ -1508,7 +1344,7 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
         deadline=deadline,
         include_archives=policy.include_historical or policy.as_of is not None,
     )
-    _walk_knowledge(discovery, vault)
+    _walk_memory(discovery, vault, policy)
     _add_daily_paths(discovery, vault, policy, deadline)
     _add_code_roots(discovery, vault, policy, deadline)
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
@@ -2087,6 +1923,10 @@ TURN_MARKERS = (b"**user:**", b"**assistant:**")
 # A turn shorter than this stays with the turn before it: a bare "thanks" is
 # not a unit worth finding on its own.
 MIN_ROUND_BYTES = 160
+# The user's own turns earn a chunk far sooner: they carry the facts questions ask about.
+# Measured on LongMemEval 2026-09-16: of 896 evidence turns only 2 are shorter than this,
+# while 4 % of all user turns are — the bare acknowledgements, which still fold.
+MIN_USER_ROUND_BYTES = 48
 
 
 def _marker_offsets(content: bytes, marker: bytes, start: int, end: int) -> list[int]:
@@ -2110,23 +1950,47 @@ def _round_starts(content: bytes, start: int, end: int) -> list[int]:
     return sorted(offset for offset in offsets if _begins_a_line(content, offset, start))
 
 
-def _long_enough_cuts(cuts: list[int], start: int, end: int) -> list[int]:
-    """Only the cuts that begin a round of at least MIN_ROUND_BYTES.
+def _starts_a_user_turn(content: bytes, offset: int) -> bool:
+    return content.startswith(TURN_MARKERS[0], offset)
 
-    A short round folds into the one before it, and a short preamble — the
-    heading and its stamp — folds into the first round after it.
+
+def _round_bound(content: bytes, cut: int) -> int:
+    """How long a round must be to earn a chunk, by whose turn begins it."""
+    if _starts_a_user_turn(content, cut):
+        return MIN_USER_ROUND_BYTES
+    return MIN_ROUND_BYTES
+
+
+def _kept_cut(content: bytes, cut: int, following: int) -> bool:
+    """A stated fact begins a chunk; a bare acknowledgement folds into the round before.
+
+    A 91-character user turn used to end a 2 101-character chunk that began with an
+    assistant reply, and the fact it stated ranked 53rd. 91 % of the stand's evidence turns
+    are user turns, and the reader is handed the round either way. Research:
+    `docs/research/2026-09-16-a-user-turn-always-starts-its-own-chunk.md`.
     """
-    if cuts and cuts[0] - start < MIN_ROUND_BYTES:
-        cuts = cuts[1:]
-    bounds = [*cuts, end]
-    return [cut for cut, following in zip(cuts, bounds[1:]) if following - cut >= MIN_ROUND_BYTES]
+    return following - cut >= _round_bound(content, cut)
+
+
+def _without_short_preamble(cuts: list[int], start: int) -> list[int]:
+    """The heading and its stamp fold into the first round after them."""
+    if not cuts or cuts[0] - start >= MIN_ROUND_BYTES:
+        return cuts
+    return cuts[1:]
+
+
+def _long_enough_cuts(content: bytes, cuts: list[int], start: int, end: int) -> list[int]:
+    """The cuts that begin a round worth finding on its own."""
+    kept = _without_short_preamble(cuts, start)
+    bounds = [*kept, end]
+    return [cut for cut, following in zip(kept, bounds[1:]) if _kept_cut(content, cut, following)]
 
 
 def _round_spans(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
     """The span cut at every user turn, short rounds folded into the one before."""
     start, end, ancestry = span
     rounds: list[tuple[int, int, tuple[str, ...]]] = []
-    for cut in _long_enough_cuts(_round_starts(content, start, end), start, end):
+    for cut in _long_enough_cuts(content, _round_starts(content, start, end), start, end):
         rounds.append((start, cut, ancestry))
         start = cut
     rounds.append((start, end, ancestry))
@@ -2501,9 +2365,25 @@ def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str
     if candidate.content is not None:
         return candidate.content
     _verify_seal(candidate.seal)
-    content = read_stable_bytes(candidate.path, policy.max_file_bytes, label=label)
+    content = _sealed_source_bytes(candidate.path, policy.max_file_bytes, label)
     _verify_seal(candidate.seal)
     return content
+
+
+def _sealed_source_bytes(path: Path, max_bytes: int, label: str) -> bytes:
+    """A source read by path, where a file being written is a changed corpus.
+
+    This is the reader where directory descriptors are not available. The
+    descriptor walk already calls a file that moves under it `CorpusChanged`,
+    which is retried and then named; here the same event arrived as a bare
+    `PermissionError`, so the capture died on the first write and the refusal
+    blamed the repository's size. Research:
+    `docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md`.
+    """
+    try:
+        return read_stable_bytes(path, max_bytes, label=label)
+    except SourceChangedDuringRead as error:
+        raise CorpusChanged(f"corpus source changed during read: {path.name}") from error
 
 
 def _captured_record(
@@ -2726,122 +2606,6 @@ def collect_corpus(
         return _captured_after_retries(
             root, selected_policy, selected_deadline, cancelled
         )
-
-
-@dataclass(frozen=True, slots=True)
-class CorpusProbe:
-    """Hash-free identity of the corpus selection: what is there, and how new.
-
-    A probe answers two questions and no others: *has the selection changed at
-    all* (membership plus per-file size and modification time) and *when was the
-    corpus last written* (``newest_mtime_ns``). It never hashes and never
-    decides staleness — that stays with :func:`collect_corpus`, which is this
-    module's one definition of what a source is. It exists so a caller that
-    wants to know whether paying for a snapshot is worth it can ask for far
-    less than one.
-    """
-
-    entries: tuple[tuple[str, int, int], ...]
-    newest_mtime_ns: int
-
-    @property
-    def file_count(self) -> int:
-        return len(self.entries)
-
-
-def _probe_entry(candidate: _Candidate) -> tuple[str, int, int] | None:
-    """One (path, size, mtime) row, or nothing when the file just vanished."""
-    try:
-        info = _safe_info(candidate.path)
-    except (OSError, PermissionError):
-        return None
-    return (candidate.relative, info.st_size, info.st_mtime_ns)
-
-
-def _probe_rows(
-    candidates: tuple[_Candidate, ...], deadline: float
-) -> list[tuple[str, int, int]]:
-    rows = []
-    for candidate in candidates:
-        _check_deadline(deadline)
-        row = _probe_entry(candidate)
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
-def probe_corpus_identity(
-    vault: Path,
-    *,
-    daily_paths: Iterable[str | Path] = (),
-    code_roots: Iterable[str | Path] = (),
-    approved_code_roots: Iterable[str] = APPROVED_CODE_ROOTS,
-    include_historical: bool = False,
-    as_of: str | date | datetime | None = None,
-    max_files: int = MAX_CORPUS_FILES,
-    max_file_bytes: int = MAX_CORPUS_FILE_BYTES,
-    max_total_bytes: int = MAX_CORPUS_TOTAL_BYTES,
-    max_entries: int = MAX_CORPUS_INSPECTED_ENTRIES,
-    max_directories: int = MAX_CORPUS_DIRECTORIES,
-    max_depth: int = MAX_CORPUS_DEPTH,
-    deadline: float | None = None,
-    deadline_seconds: float | None = None,
-) -> CorpusProbe:
-    """Walk the corpus selection once and report identity without hashing.
-
-    Measured on this vault (831 candidate files, 21 MB) on 2026-08-28: 0.078 s
-    of CPU against 1.21 s for :func:`collect_corpus`, which additionally hashes,
-    parses front matter, chunks, and reads every file a second time to prove the
-    capture was coherent. The probe shares the selection walk with the collector
-    deliberately, so there is never a second answer to "what is a source".
-    """
-    root = Path(vault).resolve(strict=True)
-    selected_policy = _policy(
-        daily_paths=daily_paths,
-        code_roots=code_roots,
-        approved_code_roots=approved_code_roots,
-        include_historical=include_historical,
-        as_of=as_of,
-        max_files=max_files,
-        max_file_bytes=max_file_bytes,
-        max_total_bytes=max_total_bytes,
-        max_entries=max_entries,
-        max_directories=max_directories,
-        max_depth=max_depth,
-    )
-    selected_deadline = _deadline_value(deadline, deadline_seconds)
-    candidates = _discover(root, selected_policy, selected_deadline)
-    rows = _probe_rows(candidates, selected_deadline)
-    newest = max((row[2] for row in rows), default=0)
-    return CorpusProbe(entries=tuple(sorted(rows)), newest_mtime_ns=newest)
-
-
-def _override(value: object, fallback: object) -> object:
-    if value is None:
-        return fallback
-    return value
-
-
-def _snapshot_settings(
-    policy: SnapshotPolicy, values: Mapping[str, object]
-) -> dict[str, object]:
-    defaults = {
-        "daily_paths": policy.daily_paths,
-        "code_roots": policy.code_roots,
-        # Revalidation accepts exactly the roots the snapshot recorded, whatever
-        # allowlist produced them. A foreign repository's snapshot must be able
-        # to prove itself against its own policy, not against this vault's names.
-        "approved_code_roots": policy.code_roots,
-        "include_historical": policy.include_historical,
-        "as_of": policy.as_of,
-        "max_files": policy.max_files,
-        "max_file_bytes": policy.max_file_bytes,
-        "max_total_bytes": policy.max_total_bytes,
-        "max_entries": policy.max_entries,
-        "max_directories": policy.max_directories,
-        "max_depth": policy.max_depth,
-    }
-    return {key: _override(values.get(key), default) for key, default in defaults.items()}
 
 
 def validate_live_snapshot(
