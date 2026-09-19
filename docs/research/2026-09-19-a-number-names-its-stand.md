@@ -9,7 +9,6 @@ Files:
 `benchmark/report.md`,
 `tests/test_a_refusal_with_the_evidence_in_hand_is_a_measured_error.py`,
 `tests/test_quality_guards.py`,
-`docs/COMPARISON-2026-09-06.md`,
 `docs/COMPARISON-2026-09-07.md`,
 `docs/COMPARISON-2026-09-08.md`,
 `docs/COMPARISON-2026-09-13.md`,
@@ -34,8 +33,8 @@ the run they came from.
 On the recorded run of 2026-09-18, 26 of our 75 losses on the 470 answerable
 questions are refusals — the system declined a question that had an answer.
 Thirteen of those 26 had the gold string in the prompt word for word
-(`/home/user/.claude/jobs/80be9db9/tmp/WHY-WE-LAG-2026-09-19.md`, sections 2
-and 6, read against `cache/benchmarks/full-2026-09-18/`).
+(the owner's loss breakdown of 2026-09-19, sections 2 and 6, taken against
+`cache/benchmarks/full-2026-09-18/`).
 
 The scorer could not say so. `benchmark/longmemeval_judge.py::needs_judging`
 returns `False` for any row whose `status` is not `answered`, so a refusal is

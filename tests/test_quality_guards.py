@@ -771,6 +771,54 @@ def test_every_borrowed_number_says_where_it_came_from():
     )
 
 
+# ─── 8c. A dated comparison document names the run it quotes ────────
+
+# Six of our quantities were told two or three ways, and almost none of them was
+# a wrong number: they were correct measurements of different runs in documents
+# that never named the run. Chased to the artefacts on 2026-09-19, each figure
+# got either the run that produced it or a plain statement that the run is gone.
+# Two were outright wrong and were replaced, and one vendor's failed LoCoMo
+# reproduction was attributed to another vendor. This keeps all of that in place.
+# See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+_RECONCILED = (
+    ("docs/COMPARISON-2026-09-07.md", "это EverMemOS"),
+    ("docs/COMPARISON-2026-09-07.md", "longmemeval-fixed-n200-r{1,2,3}.json"),
+    ("docs/COMPARISON-2026-09-08.md", "second-look-n200-seed101-r1"),
+    ("docs/COMPARISON-2026-09-13.md", "артефактов этого прогона на диске нет"),
+    ("docs/COMPARISON-2026-09-13-memory.md", "этих артефактов на диске нет"),
+    ("docs/METRICS-2026-09-06.md", "прогона за этими тремя числами на диске нет"),
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "Это число не из"),
+    ("docs/REPORT-2026-09-12-what-works-now.md", "code-parity-v2-2026-09-12-run{1,2,3}.json"),
+    ("docs/research/2026-08-27-number-one-memory-market-research.md", "Поправка 2026-09-19"),
+)
+# Numbers that traced to nothing and were replaced by ones that do.
+_REPLACED = (
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "| токенов на вопрос | 12 099 |"),
+    ("docs/COMPARISON-2026-09-08.md", "| Токенов на вопрос | 13 400 |"),
+)
+
+
+def _unmarked(pairs) -> list[tuple[str, str]]:
+    return [pair for pair in pairs if pair[1] not in _read(pair[0])]
+
+
+def _still_there(pairs) -> list[tuple[str, str]]:
+    return [pair for pair in pairs if pair[1] in _read(pair[0])]
+
+
+def test_a_dated_comparison_names_the_run_it_quotes():
+    """A figure whose run is unnamed is a figure two documents can disagree about."""
+    unmarked = _unmarked(_RECONCILED)
+    replaced = _still_there(_REPLACED)
+
+    assert unmarked == [], (
+        f"these documents lost the 2026-09-19 reconciliation of their numbers: {unmarked}"
+    )
+    assert replaced == [], (
+        f"a number that traces to no artefact came back: {replaced}"
+    )
+
+
 # ─── 9. Lint check count in docs must match code ────────────────────
 
 def test_lint_check_count_matches_code():
