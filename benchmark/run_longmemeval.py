@@ -364,6 +364,35 @@ def _print_summary(report: dict) -> None:
         )
 
 
+def abstention_line(calibration: dict) -> str:
+    """The refusal decision in one line: every figure named, every share as seen/of.
+
+    A bare share is what let one run be quoted as two different numbers, so
+    nothing here is printed without the denominator it was taken over — the
+    same shape `_evidence_columns` uses. The first three figures are losses we
+    could win, the last two are the decision the other way round on the
+    questions whose right answer is silence.
+    """
+    return " ".join(
+        (
+            "abstention calibration:",
+            f"refused_of_answerable={calibration['refused']}/{calibration['answerable']}",
+            "refused_with_evidence_in_prompt="
+            f"{calibration['refused_with_evidence_in_prompt']}"
+            f"/{calibration['refused_evidence_measured']}",
+            "refused_with_gold_text_in_prompt="
+            f"{calibration['refused_with_gold_text_in_prompt']}"
+            f"/{calibration['refused_gold_text_applicable']}",
+            "refused_when_silence_expected="
+            f"{calibration['refused_when_silence_expected']}"
+            f"/{calibration['silence_expected']}",
+            "answered_when_silence_expected="
+            f"{calibration['answered_when_silence_expected']}"
+            f"/{calibration['silence_expected']}",
+        )
+    )
+
+
 def _pending_questions(sample: list[dict], done: dict[str, dict]) -> list[dict]:
     return [
         question for question in sample if str(question["question_id"]) not in done
@@ -431,11 +460,16 @@ def _published(scoped: list[dict], args) -> int:
     report["retrieval_coverage"] = longmemeval_coverage.aggregate(scoped)
     report["compile_evidence"] = longmemeval_coverage.compile_evidence(scoped)
     report["failure_split"] = longmemeval_coverage.failure_split(scoped)
+    # A refusal is a loss the accuracy cannot name and a win nobody else
+    # measures, depending on which question it was made on. Both directions,
+    # beside the accuracy. See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+    report["abstention_calibration"] = longmemeval_score.abstention_calibration(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"report: {_report_path(args)}")
     _print_summary(report)
+    print(abstention_line(report["abstention_calibration"]))
     reasons = degraded_reasons(report["retrieval_path"])
     _print_retrieval_path(report["retrieval_path"], reasons)
     return _exit_code(reasons)

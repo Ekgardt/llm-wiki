@@ -377,6 +377,16 @@ def _evidence_seen(row: dict) -> bool:
     return row.get("evidence_in_prompt") is True
 
 
+def _verbatim_gold_rows(rows: list[dict]) -> list[dict]:
+    """The rows whose gold is a span somebody said, so a prompt could carry it."""
+    return [row for row in rows if has_verbatim_gold(row)]
+
+
+def _evidence_measured(rows: list[dict]) -> list[dict]:
+    """The rows that recorded the dataset's evidence turns; runs before 2026-09-18 did not."""
+    return [row for row in rows if row.get("evidence_turns_labelled")]
+
+
 def _prompt_evidence(rows: list[dict]) -> dict:
     """What of the question's evidence reached the prompt the reader saw.
 
@@ -398,8 +408,8 @@ def _prompt_evidence(rows: list[dict]) -> dict:
     rather than zero. See `docs/research/2026-09-18-a-rubric-is-not-a-miss.md`.
     """
     prompted = _prompted(rows)
-    verbatim = [row for row in prompted if has_verbatim_gold(row)]
-    measured = [row for row in prompted if row.get("evidence_turns_labelled")]
+    verbatim = _verbatim_gold_rows(prompted)
+    measured = _evidence_measured(prompted)
     gold_seen = _count(verbatim, _gold_text_seen)
     evidence_seen = _count(measured, _evidence_seen)
     return {
@@ -410,6 +420,92 @@ def _prompt_evidence(rows: list[dict]) -> dict:
         "evidence_in_prompt": evidence_seen,
         "evidence_measured": len(measured),
         "evidence_in_prompt_share": _share(evidence_seen, len(measured)),
+    }
+
+
+# A refusal is a decision, and a decision has to be measured in both directions.
+#
+# `judge_accuracy` can only report a refusal as a wrong answer.
+# `longmemeval_judge.needs_judging` never sends one to the judge, so the
+# deterministic substring test stands in and scores the empty hypothesis zero.
+# The arithmetic is right — a refusal on a question that had an answer is a loss
+# — but until now no field anywhere said how many of the losses were refusals,
+# or whether those refusals had the evidence in front of them. Measured on the
+# recorded run of 2026-09-18: 26 of the 75 losses on the 470 answerable
+# questions are refusals, and 13 of those had the gold string in the prompt word
+# for word. `longmemeval_coverage.failure_split` cannot see them either, because
+# it counts rows the judge called wrong and a refusal has no judge verdict.
+#
+# The other direction has no published competitor number at all: on the 30
+# questions whose right answer is silence we are silent 26 times, and a system
+# that answered everything would turn those 26 into 26 inventions.
+#
+# Nothing here reads a judge verdict, so the section says the same thing in the
+# report written before the judge pass and in the one written after.
+# See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+def _graded_rows(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if not is_ungraded(row)]
+
+
+def _silence_expected(rows: list[dict]) -> list[dict]:
+    """The questions whose right answer is silence; their gold is an explanation."""
+    return [row for row in rows if _gold_is_an_explanation(row)]
+
+
+def _answerable(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if not _gold_is_an_explanation(row)]
+
+
+def _refused(rows: list[dict]) -> list[dict]:
+    return [row for row in rows if declined_to_answer(row)]
+
+
+def _answered(row: dict) -> bool:
+    return row.get("status") == "answered"
+
+
+def _refusal_evidence(refused: list[dict]) -> dict:
+    """What the refusing reader had in front of it, each over its own denominator.
+
+    A refusal that never built a prompt — retrieval returned nothing to read —
+    falls out of both denominators rather than counting as evidence it did not
+    have.
+    """
+    prompted = _prompted(refused)
+    measured = _evidence_measured(prompted)
+    verbatim = _verbatim_gold_rows(prompted)
+    return {
+        "refused_with_evidence_in_prompt": _count(measured, _evidence_seen),
+        "refused_evidence_measured": len(measured),
+        "refused_with_gold_text_in_prompt": _count(verbatim, _gold_text_seen),
+        "refused_gold_text_applicable": len(verbatim),
+    }
+
+
+def _silence_calibration(rows: list[dict]) -> dict:
+    """The refusal decision on the questions that ask for silence, both ways.
+
+    Refused and answered are counted apart rather than one subtracted from the
+    other: a row that failed a gate without either answering or declining is
+    neither, and naming it as the opposite error would be an invention.
+    """
+    return {
+        "silence_expected": len(rows),
+        "refused_when_silence_expected": _count(rows, declined_to_answer),
+        "answered_when_silence_expected": _count(rows, _answered),
+    }
+
+
+def abstention_calibration(rows: list[dict]) -> dict:
+    """Both directions of the refusal decision, each over the rows it applies to."""
+    graded = _graded_rows(rows)
+    answerable = _answerable(graded)
+    refused = _refused(answerable)
+    return {
+        "answerable": len(answerable),
+        "refused": len(refused),
+        **_refusal_evidence(refused),
+        **_silence_calibration(_silence_expected(graded)),
     }
 
 
