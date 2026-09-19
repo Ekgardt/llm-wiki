@@ -3100,16 +3100,90 @@ def _visible_order(
     display_meta: Mapping[str, Mapping[str, Any]],
     exact_query: str,
 ) -> tuple[RetrievalCandidate, ...]:
-    """The order a caller sees: distinct pages, episodes by lane score, the named file first.
+    """The order a caller sees: distinct pages, episodes by lane score, one source's share.
 
-    The promotion is the last step because the two before it know nothing of
+    The quota comes after the lane score and not before it, because the lane
+    sort replaces whatever order it was given for every episodic position: on a
+    corpus that is all episodes — every LongMemEval run — a quota applied
+    earlier leaves no trace at all.
+
+    The promotion is the last step because the steps before it know nothing of
     it: page diversity put a named daily file behind every compiled page, and
     the lane score then re-sorted it among the episodes, so a file asked for by
     its date was no longer the answer and the mode no longer said `EXACT`.
     Research: `docs/research/2026-09-17-a-named-file-stays-first.md`.
     """
     ordered = _evidence_ordered(_page_diverse(candidates), display_meta)
-    return _promote_exact_filename(ordered, exact_query)
+    return _promote_exact_filename(_source_quota(ordered), exact_query)
+
+
+# How many chunks of one source keep their place while another source in the
+# pool has none. Two is a compromise between two measurements that disagree,
+# and it is one constant so the next full run can measure 2 against 3:
+# a cap of two per session measured all-turns@12 0.566 against 0.698 for plain
+# relevance order (189 questions, 2026-09-15), while the 500-question run of
+# 2026-09-18 measured 6.05 of the 12 slots going to 1.95 sessions on the
+# multi-session questions that lose, with 1.3 needed sessions getting none.
+SOURCE_QUOTA = 2
+
+
+def _source_key(candidate: RetrievalCandidate) -> tuple[str, tuple[str, ...]]:
+    """The entry a chunk belongs to: its file and the heading it sits under.
+
+    The file alone is not the source. A daily file holds every session of its
+    day, so by path two sessions of one day are one source and a quota keyed on
+    the path would starve the second. This is the key the packer's own coverage
+    rule already uses (`query_memory._entry_key`).
+    """
+    return (candidate.relative_path, candidate.heading_path)
+
+
+def _place_in_quota(
+    candidate: RetrievalCandidate,
+    place: int,
+    kept: list[RetrievalCandidate],
+    deferred: list[RetrievalCandidate],
+) -> None:
+    """A chunk within its source's quota keeps its place; a later one waits."""
+    if place <= SOURCE_QUOTA:
+        kept.append(candidate)
+        return
+    deferred.append(candidate)
+
+
+def _source_quota(
+    candidates: Sequence[RetrievalCandidate],
+) -> tuple[RetrievalCandidate, ...]:
+    """At most two chunks of one source while another source has none.
+
+    The packer already spends its budget this way — `query_memory._shed_one`
+    drops the second span of a page already present before the only span of
+    another page, because a multi-session question needs a fact from each of
+    two sessions and spending both slots on one answers neither. The same rule
+    was never applied one step earlier, where the twelve candidates are chosen,
+    and that is where the 2026-09-18 run lost its multi-session questions.
+
+    Nothing is dropped. The chunks over the quota are deferred to the back of
+    the same list in their own order, and `_capped` applies the window after,
+    so this is a demotion and not a filter. Three properties follow from that
+    shape and each is pinned by a test:
+
+    * a pool holding one source is untouched — its deferred chunks follow the
+      kept ones immediately, which is the order it already had;
+    * a source's first chunk is never deferred, so an only chunk cannot lose
+      its place to the quota;
+    * a source's chunks keep their order relative to each other.
+
+    Research: `docs/research/2026-09-19-one-session-does-not-take-the-window.md`.
+    """
+    taken: dict[tuple[str, tuple[str, ...]], int] = {}
+    kept: list[RetrievalCandidate] = []
+    deferred: list[RetrievalCandidate] = []
+    for candidate in candidates:
+        key = _source_key(candidate)
+        taken[key] = taken.get(key, 0) + 1
+        _place_in_quota(candidate, taken[key], kept, deferred)
+    return tuple(kept + deferred)
 
 
 def _episodic_places(candidates: Sequence[RetrievalCandidate]) -> list[int]:
