@@ -6,11 +6,13 @@ import json
 import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1400,6 +1402,7 @@ _MERGEABLE_META_FIELDS = (
     "valid_to",
     "language",
     "source_id",
+    "span_sha256",
     *_GRAPH_META_FIELDS,
 )
 
@@ -1491,7 +1494,7 @@ def _new_candidate_meta(key: str, row: Mapping[str, Any]) -> dict[str, Any]:
             field: row.get(field)
             for field in ("title", "summary", "project", "timestamp", "authority",
                           "confidence", "status", "type", "valid_from", "valid_to",
-                          "language", "source_id")
+                          "language", "source_id", "span_sha256")
         }
     )
     meta["content"] = row.get("content") or row.get("summary")
@@ -3099,12 +3102,14 @@ def _visible_order(
     candidates: Sequence[RetrievalCandidate],
     display_meta: Mapping[str, Mapping[str, Any]],
     exact_query: str,
+    query: str,
+    limit: int | None,
 ) -> tuple[RetrievalCandidate, ...]:
-    """The order a caller sees: distinct pages, episodes by lane score, one source's share.
+    """The order a caller sees: distinct pages, episodes by lane score, the question covered.
 
-    The quota comes after the lane score and not before it, because the lane
+    Coverage comes after the lane score and not before it, because the lane
     sort replaces whatever order it was given for every episodic position: on a
-    corpus that is all episodes — every LongMemEval run — a quota applied
+    corpus that is all episodes — every LongMemEval run — a rule applied
     earlier leaves no trace at all.
 
     The promotion is the last step because the steps before it know nothing of
@@ -3114,98 +3119,402 @@ def _visible_order(
     Research: `docs/research/2026-09-17-a-named-file-stays-first.md`.
     """
     ordered = _evidence_ordered(_page_diverse(candidates), display_meta)
-    return _promote_exact_filename(_source_quota(ordered), exact_query)
+    covered = _cover_then_fill(ordered, display_meta, query, limit)
+    return _promote_exact_filename(covered, exact_query)
 
 
-# How many chunks of one source keep their place while another source in the
-# pool has none. Two is a compromise between two measurements that disagree,
-# and it is one constant so the next full run can measure 2 against 3:
-# a cap of two per session measured all-turns@12 0.566 against 0.698 for plain
-# relevance order (189 questions, 2026-09-15), while the 500-question run of
-# 2026-09-18 measured 6.05 of the 12 slots going to 1.95 sessions on the
-# multi-session questions that lose, with 1.3 needed sessions getting none.
-SOURCE_QUOTA = 2
+# --- The window covers the question first ------------------------------------
+#
+# Before the window is filled by the lane score it holds one chunk from every
+# source that covers a distinct part of the question. The parts are read from
+# the question text and the store only: its terms, the days and stretches of
+# days `temporal_anchor` wrote into it, the fact keys of each turn, and — when
+# the question counts or sums — one part per source that mentions the counted
+# kind, because a count needs every instance and each lives in its own session.
+# Selection is greedy maximum coverage over sources, which reaches at least
+# 1 - 1/e of the best choice (Nemhauser, Wolsey, Fisher 1978) and stops at zero
+# gain; then a compiled page pulls in the episodes and pages it names; then
+# the lane order fills the rest. This replaced the per-source quota of
+# 2026-09-19, which paid all-turns@12 on every question and gained on few.
+# Research: `docs/research/2026-09-22-the-window-covers-the-question-first.md`.
+
+SourceKey = tuple[str, tuple[str, ...]]
+Aspect = tuple[str, ...]
+
+_ISO_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _source_key(candidate: RetrievalCandidate) -> tuple[str, tuple[str, ...]]:
+def _source_key(candidate: RetrievalCandidate) -> SourceKey:
     """The entry a chunk belongs to: its file and the heading it sits under.
 
     The file alone is not the source. A daily file holds every session of its
-    day, so by path two sessions of one day are one source and a quota keyed on
+    day, so by path two sessions of one day are one source and a rule keyed on
     the path would starve the second. This is the key the packer's own coverage
     rule already uses (`query_memory._entry_key`).
     """
     return (candidate.relative_path, candidate.heading_path)
 
 
-def _quota_waits(place: int, starved: bool, waiting: bool) -> bool:
-    """Whether this chunk waits behind the rest of the list.
+@dataclass(frozen=True)
+class _Aspects:
+    """The parts of a question, read from its text and nothing else."""
 
-    Being over the quota only costs a chunk its place while a source of the
-    pool has no place at all. Once every source the pool holds has one, there
-    is nobody left to make room for and the quota stops binding: the rest of
-    the order is the lane score's, exactly as before this rule existed.
+    terms: frozenset[str]
+    day_runs: tuple[tuple[str, str], ...]
+    kind: str
 
-    The second half of the condition keeps a source from overtaking itself. A
-    source with a chunk already waiting keeps its later chunks behind it, or a
-    slot freed by demoting a source's third chunk could be spent on that same
-    source's eighth — a worse chunk in the place of a better one.
-    """
-    if place <= SOURCE_QUOTA:
+
+def _question_aspects(query: str) -> _Aspects:
+    """Terms minus the lexical leg's stopwords, stretches of days, the counted kind."""
+    from aggregation_pass import asks_to_aggregate, counted_kind
+    from search_memory import _QUERY_STOPWORDS
+
+    tokens = _query_terms(query)
+    days = _valid_days(tokens)
+    terms = frozenset(term for term in tokens if term not in _QUERY_STOPWORDS and term not in days)
+    kind = ""
+    if asks_to_aggregate(query):
+        kind = counted_kind(query)
+    return _Aspects(terms, _day_runs(days), kind)
+
+
+def _valid_days(tokens: frozenset[str]) -> frozenset[str]:
+    return frozenset(token for token in tokens if _ISO_DAY_RE.fullmatch(token) and _is_a_day(token))
+
+
+def _is_a_day(token: str) -> bool:
+    try:
+        date.fromisoformat(token)
+    except ValueError:
         return False
-    return starved or waiting
+    return True
 
 
-def _source_quota(
-    candidates: Sequence[RetrievalCandidate],
-) -> tuple[RetrievalCandidate, ...]:
-    """At most two chunks of one source *while* a source of the pool has none.
-
-    The packer already spends its budget this way — `query_memory._shed_one`
-    drops the second span of a page already present before the only span of
-    another page, because a multi-session question needs a fact from each of
-    two sessions and spending both slots on one answers neither. The same rule
-    was never applied one step earlier, where the twelve candidates are chosen,
-    and that is where the 2026-09-18 run lost its multi-session questions.
-
-    The condition is the whole rule, not a decoration on it. An unconditional
-    cap is the shape our own measurement of 2026-09-15 priced at all-turns@12
-    0.566 against 0.698 for plain relevance order, and it takes that price on
-    every question, including the ones where no source is starved at all. So a
-    chunk over the quota waits only while some source the pool holds has no
-    place yet. A source's first chunk is always kept, so having been seen and
-    having a place are the same thing, and the condition is exactly
-    `len(seen) < len(sources)`.
-
-    Nothing is dropped. The chunks over the quota are deferred to the back of
-    the same list in their own order, and `_capped` applies the window after,
-    so this is a demotion and not a filter. Four properties follow from that
-    shape and each is pinned by a test:
-
-    * a pool whose sources all already hold a place is untouched — nothing is
-      starved, so nothing is deferred;
-    * a pool holding one source is untouched, which is that property's
-      sharpest case;
-    * a source's first chunk is never deferred, so an only chunk cannot lose
-      its place to the quota;
-    * a source's chunks keep their order relative to each other.
-
-    Research: `docs/research/2026-09-19-one-session-does-not-take-the-window.md`.
-    """
-    sources = {_source_key(candidate) for candidate in candidates}
-    taken: dict[tuple[str, tuple[str, ...]], int] = {}
-    waiting: set[tuple[str, tuple[str, ...]]] = set()
-    kept: list[RetrievalCandidate] = []
-    deferred: list[RetrievalCandidate] = []
-    for candidate in candidates:
-        key = _source_key(candidate)
-        taken[key] = taken.get(key, 0) + 1
-        if _quota_waits(taken[key], len(taken) < len(sources), key in waiting):
-            waiting.add(key)
-            deferred.append(candidate)
+def _day_runs(days: frozenset[str]) -> tuple[tuple[str, str], ...]:
+    """Consecutive days are one stretch: a range the question named is one part of it."""
+    runs: list[tuple[str, str]] = []
+    for day in sorted(days):
+        if runs and _next_day(runs[-1][1]) == day:
+            runs[-1] = (runs[-1][0], day)
             continue
-        kept.append(candidate)
-    return tuple(kept + deferred)
+        runs.append((day, day))
+    return tuple(runs)
+
+
+def _next_day(day: str) -> str:
+    return (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+
+
+def _span_of(candidate: RetrievalCandidate, display_meta: Mapping[str, Mapping[str, Any]]) -> str:
+    info = display_meta.get(candidate.candidate_id) or {}
+    return str(info.get("span_sha256") or "")
+
+
+def _fact_keys_of(
+    candidates: Sequence[RetrievalCandidate], display_meta: Mapping[str, Mapping[str, Any]]
+) -> dict[str, str]:
+    """The pool's fact keys by turn span, from the store; none when it is absent or unreadable."""
+    spans = {_span_of(candidate, display_meta) for candidate in candidates}
+    spans.discard("")
+    if not spans:
+        return {}
+    from fact_keys import keys_for_spans, store_path
+    from memory_state import STATE_ROOT
+
+    try:
+        return keys_for_spans(store_path(STATE_ROOT), spans)
+    except (OSError, sqlite3.Error) as exc:
+        _name_dropped("fact_keys", exc)
+        return {}
+
+
+def _coverable_text(
+    candidate: RetrievalCandidate,
+    display_meta: Mapping[str, Mapping[str, Any]],
+    keys: Mapping[str, str],
+) -> str:
+    """What a chunk can cover with: its path (the day), its heading, its text, its keys."""
+    return " ".join(
+        (
+            candidate.relative_path,
+            " ".join(candidate.heading_path),
+            lane_score.candidate_text(candidate, display_meta),
+            keys.get(_span_of(candidate, display_meta), ""),
+        )
+    )
+
+
+def _kind_tokens(tokens: set[str], kind: str) -> frozenset[str]:
+    """The pool's tokens that name the counted kind, by the aggregation pass's own stem."""
+    if not kind:
+        return frozenset()
+    from aggregation_pass import blocking_key
+
+    return frozenset(token for token in tokens if blocking_key(token, kind) == kind)
+
+
+def _names_a_day_in(days: frozenset[str], first: str, last: str) -> bool:
+    return any(first <= day <= last for day in days)
+
+
+def _covered_aspects(
+    aspects: _Aspects, source: SourceKey, tokens: frozenset[str], kind_tokens: frozenset[str]
+) -> frozenset[Aspect]:
+    """The parts of the question one chunk covers."""
+    covered: set[Aspect] = {("term", term) for term in aspects.terms & tokens}
+    days = _valid_days(tokens)
+    covered.update(
+        ("days", first, last) for first, last in aspects.day_runs if _names_a_day_in(days, first, last)
+    )
+    if tokens & kind_tokens:
+        covered.add(("instance", source[0], *source[1]))
+    return frozenset(covered)
+
+
+def _coverage_sets(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    aspects: _Aspects,
+) -> dict[str, frozenset[Aspect]]:
+    keys = _fact_keys_of(candidates, display_meta)
+    tokens = {
+        candidate.candidate_id: _query_terms(_coverable_text(candidate, display_meta, keys))
+        for candidate in candidates
+    }
+    kind_tokens = _kind_tokens(set().union(*tokens.values()), aspects.kind)
+    return {
+        candidate.candidate_id: _covered_aspects(
+            aspects, _source_key(candidate), tokens[candidate.candidate_id], kind_tokens
+        )
+        for candidate in candidates
+    }
+
+
+def _grouped_by_source(
+    candidates: Sequence[RetrievalCandidate],
+) -> dict[SourceKey, list[RetrievalCandidate]]:
+    by_source: dict[SourceKey, list[RetrievalCandidate]] = {}
+    for candidate in candidates:
+        by_source.setdefault(_source_key(candidate), []).append(candidate)
+    return by_source
+
+
+class _Admission:
+    """What one selection has admitted so far, and what is still uncovered."""
+
+    def __init__(self, coverage: Mapping[str, frozenset[Aspect]], room: int) -> None:
+        self.coverage = coverage
+        self.room = room
+        self.uncovered: set[Aspect] = set().union(*coverage.values())
+        self.taken: set[SourceKey] = set()
+        self.admitted: list[RetrievalCandidate] = []
+
+    def admit(self, chunk: RetrievalCandidate) -> None:
+        self.admitted.append(chunk)
+        self.taken.add(_source_key(chunk))
+        self.uncovered -= self.coverage[chunk.candidate_id]
+        self.room -= 1
+
+    def gain(self, chunk: RetrievalCandidate) -> int:
+        return len(self.coverage[chunk.candidate_id] & self.uncovered)
+
+
+def _best_chunk(
+    chunks: Sequence[RetrievalCandidate], state: _Admission
+) -> tuple[int, RetrievalCandidate]:
+    """One source's chunk covering most of what is still uncovered; ties go to the lane-best."""
+    best = chunks[0]
+    gain = state.gain(best)
+    for chunk in chunks[1:]:
+        more = state.gain(chunk)
+        if more > gain:
+            best, gain = chunk, more
+    return gain, best
+
+
+def _best_source(
+    by_source: Mapping[SourceKey, Sequence[RetrievalCandidate]], state: _Admission
+) -> RetrievalCandidate | None:
+    """The chunk of the source with the largest gain, or None when no gain is left."""
+    gain, best = 0, None
+    for source, chunks in by_source.items():
+        if source in state.taken:
+            continue
+        more, chunk = _best_chunk(chunks, state)
+        if more > gain:
+            gain, best = more, chunk
+    return best
+
+
+def _greedy_cover(
+    by_source: Mapping[SourceKey, Sequence[RetrievalCandidate]], state: _Admission
+) -> None:
+    """Greedy maximum coverage: the source with the most uncovered parts, until none is left."""
+    while state.room > 0:
+        chunk = _best_source(by_source, state)
+        if chunk is None:
+            return
+        state.admit(chunk)
+
+
+def _referenced_blocks(text: str) -> frozenset[tuple[str, str]]:
+    """The (day, block) of every canonical evidence reference a page carries.
+
+    The `## Evidence` lines and the `## Claims` ledger of a compiled page both
+    name their source block this way (`compile_memory._evidence_lines`,
+    `_derived_claim`). The resolver's own pattern finds them; the resolver's
+    strict reader is not used because a chunk may cut a reference in half.
+    """
+    from evidence_resolver import _REF_RE
+
+    return frozenset((match["daily"], match["block"]) for match in _REF_RE.finditer(text))
+
+
+def _names_a_block(path: str, heading: str, blocks: frozenset[tuple[str, str]]) -> bool:
+    day = Path(path).stem
+    return any(day == named_day and f"[{block}]" in heading for named_day, block in blocks)
+
+
+def _points_at(source: SourceKey, blocks: frozenset[tuple[str, str]], pages: frozenset[str]) -> bool:
+    path, heading = source
+    if _is_episodic(path):
+        return _names_a_block(path, " ".join(heading), blocks)
+    return _page_name(path) in pages
+
+
+def _pointed_sources(
+    chunk: RetrievalCandidate,
+    display_meta: Mapping[str, Mapping[str, Any]],
+    by_source: Mapping[SourceKey, Sequence[RetrievalCandidate]],
+) -> list[SourceKey]:
+    """The pool's sources a compiled page names: its evidence blocks and its wikilinks."""
+    if _is_episodic(chunk.relative_path):
+        return []
+    from co_activation import links_in
+
+    text = lane_score.candidate_text(chunk, display_meta)
+    blocks = _referenced_blocks(text)
+    pages = frozenset(links_in(text))
+    return [source for source in by_source if _points_at(source, blocks, pages)]
+
+
+def _admit_pointed(
+    source: SourceKey,
+    by_source: Mapping[SourceKey, Sequence[RetrievalCandidate]],
+    state: _Admission,
+) -> None:
+    if state.room <= 0 or source in state.taken:
+        return
+    _gain, chunk = _best_chunk(by_source[source], state)
+    state.admit(chunk)
+
+
+def _complete_from_pages(
+    by_source: Mapping[SourceKey, Sequence[RetrievalCandidate]],
+    state: _Admission,
+    display_meta: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Index-driven completion: an admitted page pulls in the episodes and pages it names.
+
+    One hop, from the pages the coverage step admitted; what those pull in does
+    not pull further. Teyler & Rudy 2007: a partial cue that activates the index
+    retrieves the episode; the page is the index, its references the cue.
+    """
+    for chunk in list(state.admitted):
+        for source in _pointed_sources(chunk, display_meta, by_source):
+            _admit_pointed(source, by_source, state)
+
+
+def _may_displace(
+    chunk: RetrievalCandidate, admitted: frozenset[str], inside_count: Mapping[SourceKey, int]
+) -> bool:
+    if chunk.candidate_id in admitted:
+        return False
+    return inside_count.get(_source_key(chunk), 0) >= 2
+
+
+def _displaceable(
+    inside: Sequence[RetrievalCandidate], admitted: frozenset[str], wanted: int
+) -> list[RetrievalCandidate]:
+    """The last chunks of the window a pulled chunk may take the place of.
+
+    Never an admitted chunk, and never a source's only chunk in the window: a
+    chunk is displaced only while its source keeps another chunk inside.
+    """
+    inside_count: dict[SourceKey, int] = {}
+    for chunk in inside:
+        inside_count[_source_key(chunk)] = inside_count.get(_source_key(chunk), 0) + 1
+    chosen: list[RetrievalCandidate] = []
+    for chunk in reversed(inside):
+        if len(chosen) >= wanted:
+            break
+        if _may_displace(chunk, admitted, inside_count):
+            chosen.append(chunk)
+            inside_count[_source_key(chunk)] -= 1
+    return list(reversed(chosen))
+
+
+def _pulled_into_window(
+    candidates: Sequence[RetrievalCandidate], admitted: frozenset[str], limit: int
+) -> tuple[RetrievalCandidate, ...]:
+    """Admitted chunks outside the window take the places of its last displaceable chunks.
+
+    Admitted chunks already inside keep their place, the pulled ones come in
+    behind the kept ones in lane order, the displaced ones follow, and nothing
+    is dropped: `_capped` still cuts the window last. When more is admitted
+    than can be displaced, the lane-last of the pulled stay outside.
+    """
+    inside, outside = list(candidates[:limit]), list(candidates[limit:])
+    displaced = _displaceable(inside, admitted, len(_only(outside, admitted)))
+    pulled = _only(outside, admitted)[: len(displaced)]
+    if not pulled:
+        return tuple(candidates)
+    moved = _ids_of([*pulled, *displaced])
+    return tuple([*_without(inside, moved), *pulled, *displaced, *_without(outside, moved)])
+
+
+def _ids_of(chunks: Sequence[RetrievalCandidate]) -> frozenset[str]:
+    return frozenset(chunk.candidate_id for chunk in chunks)
+
+
+def _only(chunks: Sequence[RetrievalCandidate], ids: frozenset[str]) -> list[RetrievalCandidate]:
+    return [chunk for chunk in chunks if chunk.candidate_id in ids]
+
+
+def _without(chunks: Sequence[RetrievalCandidate], ids: frozenset[str]) -> list[RetrievalCandidate]:
+    return [chunk for chunk in chunks if chunk.candidate_id not in ids]
+
+
+def _fits_the_window(candidates: Sequence[RetrievalCandidate], limit: int | None) -> bool:
+    """No window, or a pool no larger than it: there is nothing to make room for."""
+    if limit is None or int(limit) <= 0:
+        return True
+    return len(candidates) <= int(limit)
+
+
+def _cover_then_fill(
+    candidates: Sequence[RetrievalCandidate],
+    display_meta: Mapping[str, Mapping[str, Any]],
+    query: str,
+    limit: int | None,
+) -> tuple[RetrievalCandidate, ...]:
+    """One chunk from every source that covers a distinct part of the question, then the fill.
+
+    Four properties, each pinned by a test: a pool holding one source comes out
+    unchanged; a pool that fits the window comes out unchanged; a source's only
+    chunk inside the window is never displaced; a source's chunks keep their
+    order, except the one chunk admitted for coverage, which is the lane-best
+    whenever the lane-best covers as much.
+    """
+    if _fits_the_window(candidates, limit):
+        return tuple(candidates)
+    by_source = _grouped_by_source(candidates)
+    if len(by_source) < 2:
+        return tuple(candidates)
+    state = _Admission(_coverage_sets(candidates, display_meta, _question_aspects(query)), int(limit))
+    _greedy_cover(by_source, state)
+    _complete_from_pages(by_source, state, display_meta)
+    return _pulled_into_window(candidates, _ids_of(state.admitted), int(limit))
 
 
 def _episodic_places(candidates: Sequence[RetrievalCandidate]) -> list[int]:
@@ -3506,8 +3815,11 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
     candidates, display_meta = _partial_candidates(progress, signals)
     exact_query = _exact_query(progress.analysis)
     candidates = _promote_exact_filename(candidates, exact_query)
+    visible = _visible_order(
+        candidates, display_meta, exact_query, progress.analysis.query, progress.limit
+    )
     return RetrievalResult(
-        candidates=_capped(_visible_order(candidates, display_meta, exact_query), progress.limit),
+        candidates=_capped(visible, progress.limit),
         trace=_retrieval_trace(
             requested=progress.requested,
             effective=effective,
@@ -3618,7 +3930,10 @@ def _executed_plan(
     candidates = _promote_exact_filename(candidates, exact_query)
     progress.candidates = candidates
     _check_stopped(deadline_monotonic, cancelled)
-    candidates = _capped(_visible_order(candidates, display_meta, exact_query), progress.limit)
+    visible = _visible_order(
+        candidates, display_meta, exact_query, progress.analysis.query, progress.limit
+    )
+    candidates = _capped(visible, progress.limit)
 
     return RetrievalResult(
         candidates=candidates,
