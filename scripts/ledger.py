@@ -584,6 +584,26 @@ def _artifact_of(catalog: object, active: object) -> Path | None:
     return artifact
 
 
+def _default_state_root(state_root: Path | None) -> Path:
+    if state_root is not None:
+        return state_root
+    from memory_state import STATE_ROOT
+
+    return STATE_ROOT
+
+
+def _read_active_generation(state_root: Path | None, reader: Callable) -> object:
+    """`reader(connection)` over the active generation's search artifact, read-only."""
+    artifact = active_generation_search(_default_state_root(state_root))
+    if artifact is None:
+        return None
+    connection = sqlite3.connect(f"{artifact.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    try:
+        return reader(connection)
+    finally:
+        connection.close()
+
+
 def count_in_active_generation(
     kind: str, window: tuple[str, str] | None = None, state_root: Path | None = None
 ) -> LedgerCount | None:
@@ -591,18 +611,16 @@ def count_in_active_generation(
 
     This is the reader's call: no provider, no token, one read-only SQLite query.
     """
-    if state_root is None:
-        from memory_state import STATE_ROOT
+    return _read_active_generation(state_root, lambda connection: count(connection, kind, window))
 
-        state_root = STATE_ROOT
-    artifact = active_generation_search(state_root)
-    if artifact is None:
-        return None
-    connection = sqlite3.connect(f"{artifact.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
-    try:
-        return count(connection, kind, window)
-    finally:
-        connection.close()
+
+def sum_in_active_generation(
+    kind: str, window: tuple[str, str] | None = None, state_root: Path | None = None
+) -> float | None:
+    """`sum_quantities` over the active generation, for "how much in total"; None without a ledger."""
+    return _read_active_generation(
+        state_root, lambda connection: sum_quantities(connection, kind, window)
+    )
 
 
 # --- the recurrence gate -----------------------------------------------------

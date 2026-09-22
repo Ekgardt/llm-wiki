@@ -107,7 +107,9 @@ def test_the_keying_call_posts_records_and_the_generation_carries_them(tmp_path:
     built = _built(tmp_path, vault, snapshot)
     counted = ledger.count_in_active_generation("bikes", state_root=state)
 
-    assert (keyed, built.activated) == (2, True)
+    summed = ledger.sum_in_active_generation("bikes", state_root=state)
+
+    assert (keyed, built.activated, summed) == (2, True, 0.0)
     assert (counted.records, counted.things, counted.events, counted.tier) == (2, 2, 2, ledger.PROBABLE)
     assert {pointer.day for pointer in counted.pointers} == {"2023-03-10", "2023-03-20"}
 
