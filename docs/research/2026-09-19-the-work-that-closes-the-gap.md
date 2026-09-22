@@ -5,7 +5,7 @@ product stops losing the questions it loses, measured rather than argued.
 
 ## What the measurement says (the starting point)
 
-From `/home/user/.claude/jobs/80be9db9/tmp/WHY-WE-LAG-2026-09-19.md`, computed over the 500
+From the scratch analysis `WHY-WE-LAG-2026-09-19.md` (the job's temporary directory, not tracked), computed over the 500
 recorded rows of `cache/benchmarks/full-2026-09-18/`:
 
 - 75 losses on 470 answerable questions: 26 refusals with the evidence in hand, 23 reader
