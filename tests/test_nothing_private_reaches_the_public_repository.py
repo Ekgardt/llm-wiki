@@ -171,8 +171,8 @@ def _other_project_slugs() -> set[str]:
 def _named_slugs(text: str, slugs: set[str]) -> set[str]:
     """The slugs this text names as a token — not as two words inside a longer phrase.
 
-    `\\b` counts a hyphen as a boundary, so a project called `refusal-names` matched the
-    prose in `...-a-refusal-names-its-component-...`. A leak names a project in a path, in
+    `\\b` counts a hyphen as a boundary, so a two-word project slug matched the same two
+    words inside a hyphenated note title. A leak names a project in a path, in
     quotes or after a space. See
     `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
     """
@@ -415,9 +415,9 @@ def test_a_slug_is_named_as_a_token_and_not_as_two_words_of_a_phrase() -> None:
 
     See `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
     """
-    slugs = {"refusal-names"}
-    leaks = ("knowledge/projects/refusal-names/state.md", 'the "refusal-names" project', "refusal-names.md")
-    phrase = "docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md"
+    slugs = {"paint-walls"}
+    leaks = ("knowledge/projects/paint-walls/state.md", 'the "paint-walls" project', "paint-walls.md")
+    phrase = "docs/research/2026-09-18-how-to-paint-walls-without-a-ladder.md"
 
     assert [_named_slugs(text, slugs) for text in leaks] == [slugs] * len(leaks)
     assert _named_slugs(phrase, slugs) == set()
