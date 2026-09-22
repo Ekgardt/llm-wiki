@@ -21,8 +21,11 @@ import refusal_pass  # noqa: E402
 from corpus_snapshot import collect_corpus  # noqa: E402
 from query_memory import grounded_qa  # noqa: E402
 
+# The racket page names little of the question: since 2026-09-22 a refusal on
+# evidence that already covers the question is read again rather than searched
+# for (`evidence_sufficiency`), and this test is about the second search's merge.
 NOTES = {
-    "racket.md": "I have been practising with my new tennis racket all week.",
+    "racket.md": "I have been practising with it all week.",
     "shop.md": "I bought the tennis racket at the sports store downtown on Monday.",
     "club.md": "The tennis club downtown opens at nine on weekdays.",
 }

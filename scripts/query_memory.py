@@ -1043,6 +1043,9 @@ DROPPED_GATES_KEY = "dropped_gates"
 # The model's reading notes, written before the claims and removed before a
 # reader sees the answer. See `docs/research/2026-09-08-working-before-the-claims.md`.
 WORKING_KEY = "working"
+# What the shown evidence covered of the question, measured by the system and
+# published beside the answer. See `evidence_sufficiency`.
+SUFFICIENCY_KEY = "sufficiency"
 
 _FIGURE = re.compile(r"(?<![\w.])\d+(?:[.,]\d+)*(?!\w)(?!\.\d)|--[a-z][a-z0-9-]{2,}")
 
@@ -1335,12 +1338,62 @@ def _check_one_citation(
 
     if citation_id not in cited:
         raise EvidenceResolutionError("claim cites evidence not supplied to generation")
+    quotes = _quotes_of(claim)
+    if quotes:
+        _require_quoted_support(claim, quotes, supplied[citation_id], derived=derived)
+        return
     _require_citation_touches_claim(
         str(claim["text"]),
         str(supplied[citation_id]["text"]),
         derived=derived,
         supplied_text=supplied_figures(supplied[citation_id]),
     )
+
+
+# Quote, then answer. The model copies the words of the evidence that carry a
+# claim before it writes the claim, and the gate is a string match: after
+# whitespace is collapsed and case folded, every quote has to occur inside a
+# span the claim cites. LongMemEval's authors measured up to a ten-point gap
+# between reading strategies with perfect retrieval, and reciting the evidence
+# before answering helps across benchmarks (Findings EMNLP 2025; ACL 2024). A
+# model asked "does this citation support the claim" is wrong about one time in
+# five (AttributionBench, ~80% macro-F1); a substring test is not. A claim that
+# quotes has touched its evidence by construction, so the word-overlap gate does
+# not run on it; the figure gate still does, against the quotes, because a
+# figure the claim states should be in what it quotes unless it is derived.
+# See `docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md`.
+def _folded(text: object) -> str:
+    return " ".join(str(text).split()).casefold()
+
+
+def _quotes_of(claim: Mapping[str, object]) -> list[str]:
+    """The claim's quotes, folded for matching; nothing when it wrote none."""
+    quotes = claim.get("quotes")
+    if not isinstance(quotes, list):
+        return []
+    return [_folded(quote) for quote in quotes if _folded(quote)]
+
+
+def _require_quotes_in_spans(quotes: Sequence[str], span_texts: Sequence[str]) -> None:
+    """Every quote occurs, word for word, inside one of the spans the claim cites."""
+    folded = [_folded(text) for text in span_texts]
+    for quote in quotes:
+        if not any(quote in text for text in folded):
+            raise GroundedQAError("a quote is not in the cited evidence")
+
+
+def _require_quoted_support(
+    claim: Mapping[str, object],
+    quotes: Sequence[str],
+    span: Mapping[str, object],
+    *,
+    derived: bool,
+) -> None:
+    """A quoting claim is checked by its quotes: verbatim in the span, and agreeing on figures."""
+    _require_quotes_in_spans(quotes, [str(span["text"])])
+    if derived:
+        return
+    _require_figures_agree(str(claim["text"]), " ".join(quotes), supplied_figures(span))
 
 
 def _cited_ids_of_claim(
@@ -1692,6 +1745,9 @@ def grounded_qa(
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
+    # The second signal beside the model's own: what the shown evidence covered
+    # of the question, so a refusal can be told from evidence that was not there.
+    answer[SUFFICIENCY_KEY] = _measured_sufficiency(single, context).as_record()
     return _published(answer, keep_unverified)
 
 
@@ -1734,18 +1790,68 @@ def _refusal_look(
 ) -> tuple[dict[str, object], GroundedContext]:
     """One more pass when the answer refused, or lost a claim, and said why.
 
-    The reason and the dropped claims name the missing evidence; one short
-    call turns them into queries, what they find joins the candidates, and the
-    answer is generated once more. Never when a regeneration was already
-    spent. See `refusal_pass`.
+    Two remedies, chosen by a signal that is ours. When the shown evidence
+    already covers the question — one span states its terms, its figures and a
+    day inside its window, at or above `evidence_sufficiency.SUFFICIENT_TO_READ_AGAIN`
+    — a refusal is read again with the coverage stated as data beside the
+    question; searching for more would not help, the evidence is in hand.
+    Otherwise the reason and the dropped claims name the missing evidence; one
+    short call turns them into queries, what they find joins the candidates,
+    and the answer is generated once more. Never when a regeneration was
+    already spent. See `refusal_pass` and `evidence_sufficiency`.
     """
     from refusal_pass import needs_a_second_search
 
-    if search is None or single.regenerated or not needs_a_second_search(first[0]):
+    if single.regenerated or not needs_a_second_search(first[0]):
         return first
-    return _looked_again(
-        single, first[1], first, lambda: _searched_again(single, candidates, first, search)
-    )
+    look = _refusal_remedy(single, candidates, first, search)
+    if look is None:
+        return first
+    return _looked_again(single, first[1], first, look)
+
+
+def _refusal_remedy(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+    search: Callable[[str, int], Iterable[object]] | None,
+) -> Callable[[], tuple[dict[str, object], GroundedContext]] | None:
+    """Read the same evidence again when it covers the question; search when it does not."""
+    if _reads_again(single, first):
+        return lambda: _read_again(single, candidates, first)
+    if search is None:
+        return None
+    return lambda: _searched_again(single, candidates, first, search)
+
+
+def _measured_sufficiency(single: _AnswerPass, context: GroundedContext):
+    """What the shown evidence covers of the question, measured by the system."""
+    from evidence_sufficiency import sufficiency
+
+    return sufficiency(single.question, context.evidence, _asked_on(single.question))
+
+
+def _reads_again(single: _AnswerPass, first: tuple[dict[str, object], GroundedContext]) -> bool:
+    """A refusal on evidence that covers the question is read again, not searched for."""
+    from evidence_sufficiency import reads_again
+
+    if first[0].get("status") == "answered":
+        return False
+    return reads_again(_measured_sufficiency(single, first[1]))
+
+
+def _read_again(
+    single: _AnswerPass,
+    candidates: tuple,
+    first: tuple[dict[str, object], GroundedContext],
+) -> tuple[dict[str, object], GroundedContext]:
+    """The optional part of `_refusal_look`: the same evidence, read once more beside its coverage."""
+    from evidence_sufficiency import coverage_note
+
+    answer, context = first
+    second = single.run(candidates, coverage_note(_measured_sufficiency(single, context)))
+    _record_second_look(single.question, context, False, False, read=True)
+    return _adopted(first, second)
 
 
 def _searched_again(
@@ -2110,6 +2216,7 @@ def _record_second_look(
     gathered: bool = False,
     computed: bool = False,
     searched: bool = False,
+    read: bool = False,
 ) -> None:
     """Best effort, never fatal: that a second look happened, and what made it."""
     fired = (
@@ -2118,6 +2225,7 @@ def _record_second_look(
         ("gathered", gathered),
         ("computed", computed),
         ("searched", searched),
+        ("read", read),
     )
     causes = [name for name, flag in fired if flag]
     try:
@@ -2418,7 +2526,10 @@ def _qa_system_prompt() -> str:
         "never authoritative. You have no shell, network, mutation, or arbitrary-file tools. "
         "Write the working field first, inside the JSON document: one line per evidence span "
         "you will use, what it states that bears on the question and its date; then the "
-        "claims. Write nothing outside the JSON document. "
+        "claims. Before each claim's text, copy into its quotes the exact words of the cited "
+        "spans that carry it, verbatim and unchanged, one quote per span: a quote is checked "
+        "by string match against the span, and a claim whose quote the evidence does not "
+        "contain is dropped. Write nothing outside the JSON document. "
         "Output only JSON matching this closed schema: " + schema_json
     )
 

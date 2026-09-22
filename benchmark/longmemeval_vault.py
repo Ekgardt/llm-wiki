@@ -798,6 +798,9 @@ def _answer_outcome(
         "reason": document.get("reason"),
         "claims": len(document.get("claims") or []),
         "citations": len(document.get("citations") or []),
+        # What the shown evidence covered of the question, by the reader's own
+        # measure; see `evidence_sufficiency`.
+        "sufficiency": document.get("sufficiency"),
         "error": None,
         "error_kind": None,
     }

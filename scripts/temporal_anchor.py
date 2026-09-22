@@ -26,10 +26,11 @@ years are left alone — "two months ago" has no single correct answer — and s
 everything below a day. "Last night", "this morning", "a few hours ago" are
 exactly where a model's sense of elapsed time fails, and they are not resolved.
 
-A phrase that names a stretch of days rather than one — "last week" — is kept as
-a stretch, by `spans`, and only widens a search. It is never written into an
-entry as a dated fact, because the day inside the week is precisely what the
-user did not say. See `docs/research/2026-09-17-last-week-is-a-week.md`.
+A phrase that names a stretch of days rather than one — "last week", "last
+weekend" — is kept as a stretch, by `spans`, and only widens a search. It is
+never written into an entry as a dated fact, because the day inside the stretch
+is precisely what the user did not say. See
+`docs/research/2026-09-17-last-week-is-a-week.md`.
 
 **Only the user's turns.** A model will write "last night" for an hour ago. The
 arithmetic here is ours and the anchor is certain, so nothing depends on a
@@ -78,6 +79,7 @@ _AGO_RE = re.compile(
     re.IGNORECASE,
 )
 _LAST_WEEK_RE = re.compile(r"\blast week\b", re.IGNORECASE)
+_LAST_WEEKEND_RE = re.compile(r"\b(?:last|this past) weekend\b", re.IGNORECASE)
 
 # A cap, because an entry is bounded and a footer that grows with the text is a
 # second body. Ten distinct dates is far more than any real entry carries.
@@ -160,11 +162,31 @@ def _last_week_spans(text: str, anchor: date) -> list[tuple[str, tuple[date, dat
     return [(match.group(0).casefold(), span) for match in _LAST_WEEK_RE.finditer(text)]
 
 
+def _last_weekend_span(anchor: date) -> tuple[date, date]:
+    """The Saturday and Sunday before the anchor's own Monday.
+
+    Asked on a weekday, "last weekend" is the weekend just gone; asked on a
+    Saturday or Sunday it is the one before, because the current weekend is
+    "this weekend". Two of the 26 refusals on the recorded run of 2026-09-18
+    were "last weekend" questions the resolver did not resolve, so the reader
+    computed the day itself from the evidence's own words and refused a
+    question dated four days later. See
+    `docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md`.
+    """
+    saturday = anchor - timedelta(days=anchor.weekday() + 2)
+    return saturday, saturday + timedelta(days=1)
+
+
+def _last_weekend_spans(text: str, anchor: date) -> list[tuple[str, tuple[date, date]]]:
+    span = _last_weekend_span(anchor)
+    return [(match.group(0).casefold(), span) for match in _LAST_WEEKEND_RE.finditer(text)]
+
+
 _FINDERS = (_plain_hits, _weekday_hits, _ago_hits)
 # Expressions that name a stretch of days rather than one. Read by the query side
 # only: a span is not the unambiguous single date this module is allowed to write
 # into an entry, so no dated line is ever produced for one.
-_SPAN_FINDERS = (_last_week_spans,)
+_SPAN_FINDERS = (_last_week_spans, _last_weekend_spans)
 
 
 # Multiline, because an entry begins with its heading: a turn marker opens a
