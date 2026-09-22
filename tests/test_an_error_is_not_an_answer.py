@@ -73,6 +73,10 @@ class _Store:
     def note_asked(self, turns) -> None:
         self.noted.extend(turn.span_sha256 for turn in turns)
 
+    def post(self, records) -> int:
+        """The ledger side of the store; a covered turn without records posts nothing."""
+        return len(records)
+
 
 def test_a_turn_the_reply_did_not_cover_is_not_marked_keyed():
     import fact_keys

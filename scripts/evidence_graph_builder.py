@@ -985,6 +985,7 @@ def _generation_search_artifact(
         deadline=deadline,
         cancelled=cancelled,
         keys=_nightly_keys(state_root),
+        ledger_rows=_nightly_ledger(state_root),
     )
 
 
@@ -999,6 +1000,20 @@ def _nightly_keys(state_root: Path | None) -> dict[str, str]:
     import fact_keys
 
     return fact_keys.keys_by_span(fact_keys.store_path(state_root))
+
+
+def _nightly_ledger(state_root: Path | None) -> list[tuple[object, ...]] | None:
+    """The ledger records the nightly pass posted, carried as one table of the artifact.
+
+    None without a state root: a build that cannot see the store carries no
+    ledger, and a reader then says so instead of counting zero. Research:
+    `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+    """
+    if state_root is None:
+        return None
+    import fact_keys
+
+    return fact_keys.ledger_rows(fact_keys.store_path(state_root))
 
 
 def _vector_reuse_source(

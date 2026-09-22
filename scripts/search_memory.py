@@ -438,8 +438,16 @@ def _write_generation_fts(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> None:
-    """Schema, metadata and every chunk, verified before the caller publishes."""
+    """Schema, metadata and every chunk, verified before the caller publishes.
+
+    `ledger_rows` is the nightly ledger of things and events, carried as one more
+    table of this artifact (`ledger.write_table`) so a count is made by code over
+    every record, sealed by the artifact's own digest; None means the build
+    carried no ledger and a reader finds no table. Research:
+    `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+    """
     database.execute("PRAGMA journal_mode=DELETE")
     database.execute("PRAGMA synchronous=FULL")
     database.executescript(_GENERATION_FTS_DDL)
@@ -457,9 +465,20 @@ def _write_generation_fts(
         "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(23)) + ")",
         rows(),
     )
+    _write_generation_ledger(database, ledger_rows)
     database.commit()
     if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         raise ValueError("generation FTS integrity check failed")
+
+
+def _write_generation_ledger(
+    database: sqlite3.Connection, ledger_rows: Sequence[tuple[object, ...]] | None
+) -> None:
+    if ledger_rows is None:
+        return
+    import ledger
+
+    ledger.write_table(database, ledger_rows)
 
 
 def _stop_reached(
@@ -497,6 +516,7 @@ def _built_fts_artifact(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> dict[str, object]:
     """Write the artifact under a temporary name, then publish it atomically."""
     state = {"stopped": False, "complete": False}
@@ -509,7 +529,12 @@ def _built_fts_artifact(
         with closing(sqlite3.connect(temporary)) as database:
             database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
             _write_generation_fts(
-                database, snapshot, deadline=deadline, cancelled=cancelled, keys=keys
+                database,
+                snapshot,
+                deadline=deadline,
+                cancelled=cancelled,
+                keys=keys,
+                ledger_rows=ledger_rows,
             )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
@@ -540,12 +565,14 @@ def build_generation_fts(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> dict[str, object]:
     """Build one immutable generation-local FTS5 artifact from captured chunks.
 
     `keys` carries the nightly fact keys per turn span; they are indexed beside the chunk
     and never returned to a reader. Research:
     `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    `ledger_rows` carries the nightly ledger of things and events as one more table.
     """
     _require_buildable_snapshot(snapshot, deadline, cancelled)
     directory = _generation_directory(generation_directory)
@@ -561,6 +588,7 @@ def build_generation_fts(
         deadline=deadline,
         cancelled=cancelled,
         keys=keys,
+        ledger_rows=ledger_rows,
     )
 
 

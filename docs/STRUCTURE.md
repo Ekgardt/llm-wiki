@@ -85,9 +85,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │       ├── source-manifest.json
 │   │       ├── incremental-manifest.json optional reuse/invalidation record
 │   │       ├── evidence.sqlite3
-│   │       ├── search.sqlite3
+│   │       ├── search.sqlite3          FTS5 chunks + keys; holds the `ledger` table
 │   │       ├── vectors.npy             optional
 │   │       └── vectors.json            optional
+│   ├── fact-keys/keys.sqlite3       nightly fact keys and ledger records, copied into the next build
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
@@ -372,6 +373,23 @@ Evidence Graph and FTS artifacts are both built from that exact immutable
 `CorpusSnapshot`; live membership and hashes are recaptured immediately before
 publication.
 
+`search.sqlite3` also carries the **ledger of things and events** (approved
+2026-09-22): one table, `ledger`, whose rows are posted by the nightly fact-keys
+call into `cache/fact-keys/keys.sqlite3` — kind, canonical thing, event, day,
+quantity, whether the user said it and dated it, and the pointer to the source
+bytes — and copied into the artifact at build time exactly as the keys are. Each
+row is posted once under a digest of its fields and pointer; two rows of one thing
+within 30 days are one event unless a stated quantity contradicts; a count is made
+by code over every row (`scripts/ledger.py: count`, `reconcile`), never by a model
+over retrieved chunks, and costs no provider call. The table is sealed by the
+artifact's digest, disposable and derived like the rest of the generation; an
+artifact built before the table existed carries none and a reader answers "no
+ledger", not zero. A thing seen on two or more days opens the recurrence gate: its
+entity page under `knowledge/notes/ledger-<kind>-<thing>.md` is created or extended
+with dated pointer lines by code, never rewritten by a model. Decision:
+`knowledge/notes/ledger-of-things-and-events-decision.md`; research:
+`docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+
 Publication is complete or absent. The builder writes and fsyncs every required
 artifact, validates canonical manifests, repository scope, artifact hashes, SQLite
 integrity, graph evidence spans, FTS content, and the final directory seal, then
@@ -621,7 +639,7 @@ cache/evidence-graph/generations/<generation-id>/
 ├── source-manifest.json
 ├── incremental-manifest.json    optional; present for incremental builds
 ├── evidence.sqlite3
-├── search.sqlite3
+├── search.sqlite3                the FTS chunks with their keys, and the `ledger` table
 ├── vectors.npy
 └── vectors.json
 ```

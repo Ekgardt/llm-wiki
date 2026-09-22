@@ -38,6 +38,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **A ledger of things and events, posted once and counted by code.** The
+  nightly fact-keys call now also returns, per user turn, the things the person
+  names and the dated events about them; `scripts/ledger.py` posts each record
+  once under a digest of its fields and source pointer, merges two records of one
+  thing within 30 days into one event unless a stated quantity contradicts (the
+  CDC's case de-duplication rule, decided field by field as Fellegi–Sunter), and
+  `count` answers "how many" over every record of a kind with a tier —
+  "confirmed" when every record is the user's own dated words, "probable"
+  otherwise — and the pointers; `reconcile` flags a reader's number the ledger
+  does not hold. The rows ride into the generation as a `ledger` table of
+  `search.sqlite3`, disposable like the rest of it; a generation built before the
+  table carries none and the reader is told so. A thing seen on two or more days
+  opens the recurrence gate and its entity page is extended with dated pointer
+  lines by code, never rewritten by a model. Zero provider calls at question
+  time. Approved 2026-09-22; see `docs/STRUCTURE.md` and
+  `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
 - **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
   records all of them on `694991b`: the parity stand at 16 of 16 against the
   other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the

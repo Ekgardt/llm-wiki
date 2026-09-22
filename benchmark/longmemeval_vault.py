@@ -310,8 +310,17 @@ def build_generation(
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
         "keyed_turns": keyed,
+        # The ledger records the keying posted; they ride into the generation
+        # with the keys, and `ledger.count` reads them there at question time.
+        "ledger_records": _ledger_records(state),
     }
     return snapshot, info
+
+
+def _ledger_records(state: Path) -> int:
+    import fact_keys
+
+    return len(fact_keys.ledger_rows(fact_keys.store_path(state)))
 
 
 FACT_KEYS_ENV = "LLMWIKI_BENCH_FACT_KEYS"
