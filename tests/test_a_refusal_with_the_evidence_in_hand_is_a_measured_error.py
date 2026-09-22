@@ -166,5 +166,6 @@ def test_the_printed_line_names_every_figure_and_its_denominator() -> None:
     assert line == (
         "abstention calibration: refused_of_answerable=2/2 "
         "refused_with_evidence_in_prompt=1/2 refused_with_gold_text_in_prompt=1/2 "
-        "refused_when_silence_expected=1/2 answered_when_silence_expected=1/2"
+        "refused_when_silence_expected=1/2 answered_when_silence_expected=1/2 "
+        "refused_when_twin=0/0 answered_when_twin=0/0 pairs_right=0/0"
     )

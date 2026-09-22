@@ -18,7 +18,15 @@ Mem0's published 93.4%; the research note carries that caveat.
 from __future__ import annotations
 
 import re
+import sys
 from collections import Counter
+from pathlib import Path
+
+BENCHMARK_DIR = Path(__file__).resolve().parent
+if str(BENCHMARK_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCHMARK_DIR))
+
+import longmemeval_data  # noqa: E402
 
 _ARTICLES = frozenset({"a", "an", "the"})
 _NON_ALNUM = re.compile(r"[^0-9a-zЀ-ӿ]+")
@@ -52,15 +60,25 @@ def gold_is_rubric(row: dict) -> bool:
     return str(row.get("category") or row.get("question_type")) in RUBRIC_CATEGORIES
 
 
+# The rows whose right answer is silence: the dataset's abstention questions,
+# and the stand's twins — answerable questions re-asked with their evidence
+# sessions removed, so refusing is right and answering is an invention.
+SILENCE_CATEGORIES = frozenset({"abstention", longmemeval_data.TWIN_CATEGORY})
+
+
+def silence_expected(row: dict) -> bool:
+    return bool(row.get("is_abstention")) or str(row.get("category")) in SILENCE_CATEGORIES
+
+
 def _gold_is_an_explanation(row: dict) -> bool:
     """An abstention's gold says why the question cannot be answered.
 
     The authors' template hands the judge "an unanswerable question, an
     explanation, and a response from a model"
     (`longmemeval_official.ABSTENTION`). Nobody in the sessions said that
-    sentence either.
+    sentence either; a twin's gold is empty for the same reason.
     """
-    return bool(row.get("is_abstention")) or str(row.get("category")) == "abstention"
+    return silence_expected(row)
 
 
 def has_verbatim_gold(row: dict) -> bool:
@@ -165,7 +183,7 @@ def _judge_accuracy_of(rows: list[dict]) -> float | None:
 
 def score_question(result: dict) -> dict:
     """Attach deterministic metrics to one per-question result record."""
-    if result.get("is_abstention"):
+    if silence_expected(result):
         return _scored_abstention(result)
     if gold_is_rubric(result):
         return _scored_rubric(result)
@@ -506,7 +524,63 @@ def abstention_calibration(rows: list[dict]) -> dict:
         "refused": len(refused),
         **_refusal_evidence(refused),
         **_silence_calibration(_silence_expected(graded)),
+        **twin_calibration(graded),
     }
+
+
+# A twin measures the other direction on the very same question: its evidence
+# sessions are gone from the haystack, so refusing is right (AgentAbstain's
+# paired accuracy; RESEARCH-B §5). A pair is right when the original was
+# answered correctly and the twin was refused. Each figure carries the
+# denominator it was taken over, as every line of this block does.
+# See `docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md`.
+def _is_twin(row: dict) -> bool:
+    return str(row.get("category")) == longmemeval_data.TWIN_CATEGORY
+
+
+def _row_is_correct(row: dict) -> bool:
+    """The judge's word where it spoke, the text score where it did not."""
+    verdict = row.get("judge_correct")
+    if isinstance(verdict, bool):
+        return verdict
+    return score_question(row).get("correct") is True
+
+
+def _pair_is_right(twin: dict, originals: dict[str, dict]) -> bool:
+    original = originals.get(longmemeval_data.original_of(str(twin.get("question_id"))))
+    return original is not None and _row_is_correct(original) and declined_to_answer(twin)
+
+
+def _originals(rows: list[dict]) -> dict[str, dict]:
+    return {str(row.get("question_id")): row for row in rows if not _is_twin(row)}
+
+
+def _has_original(twin: dict, originals: dict[str, dict]) -> bool:
+    return longmemeval_data.original_of(str(twin.get("question_id"))) in originals
+
+
+def _pair_figures(twins: list[dict], originals: dict[str, dict]) -> dict:
+    paired = [twin for twin in twins if _has_original(twin, originals)]
+    right = [twin for twin in paired if _pair_is_right(twin, originals)]
+    return {"pairs": len(paired), "pairs_right": len(right)}
+
+
+def twin_calibration(rows: list[dict]) -> dict:
+    twins = [row for row in rows if _is_twin(row)]
+    return {
+        "twins": len(twins),
+        "refused_when_twin": _count(twins, declined_to_answer),
+        "answered_when_twin": _count(twins, _answered),
+        **_pair_figures(twins, _originals(rows)),
+    }
+
+
+def split_calibration(rows: list[dict]) -> dict:
+    """The calibration on each half of the stand, so the decide half is read and never tuned on."""
+    halves: dict[str, list[dict]] = {longmemeval_data.TUNE: [], longmemeval_data.DECIDE: []}
+    for row in rows:
+        halves[longmemeval_data.split_of(str(row.get("question_id")))].append(row)
+    return {half: abstention_calibration(members) for half, members in halves.items()}
 
 
 def _category_report(rows: list[dict]) -> dict:

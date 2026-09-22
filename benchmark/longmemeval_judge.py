@@ -104,8 +104,8 @@ def _verdict_of(text: str | None) -> bool | None:
 
 
 def needs_judging(row: dict) -> bool:
-    """Only answered non-abstention rows need a judge; the rest are settled."""
-    if row.get("is_abstention") or row.get("error"):
+    """Only answered rows that had an answer need a judge; a silence-expected row is settled by its status."""
+    if longmemeval_score.silence_expected(row) or row.get("error"):
         return False
     return row.get("status") == "answered" and bool(row.get("hypothesis"))
 
