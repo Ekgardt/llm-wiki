@@ -3762,6 +3762,8 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "candidate_id": row["chunk_id"],
         "source_id": row["source_id"],
         "source_sha256": row["source_sha256"],
+        # The turn's own digest: the handle its fact keys are stored under.
+        "span_sha256": row["span_sha256"],
         "heading_ancestry": json.loads(row["heading_ancestry"]),
         "type": row["type"],
         "authority": authority,
@@ -3781,7 +3783,7 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
 _GENERATION_CHUNK_COLUMNS = (
     "chunk_id, chunk_order, source_id, source_path, source_sha256, "
     "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-    "valid_to, language, title, content"
+    "valid_to, language, title, content, span_sha256"
 )
 
 
@@ -4083,9 +4085,7 @@ def _vector_scored_rows(
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
             f"WHERE 1=1{filters} ORDER BY chunk_order",
             values,
         ).fetchall()

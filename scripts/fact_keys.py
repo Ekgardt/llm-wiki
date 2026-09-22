@@ -153,6 +153,51 @@ def keys_by_span(path: Path) -> dict[str, str]:
     return _joined_keys(rows)
 
 
+# How many spans one lookup names at a time; SQLite binds at most 999 variables.
+_SPAN_BATCH = 500
+
+
+def keys_for_spans(path: Path, spans: Iterable[str]) -> dict[str, str]:
+    """The keys of these turn spans only, joined per span; nothing when the store is absent.
+
+    Read at query time by the candidate selection, which asks for the pool's spans and
+    nothing else: a turn's keys say what it states in other words than the question,
+    so a turn covers a part of the question its text alone would not. Research:
+    `docs/research/2026-09-22-the-window-covers-the-question-first.md`.
+    """
+    wanted = _named_spans(spans)
+    if not _readable(path, wanted):
+        return {}
+    store = KeyStore(path)
+    try:
+        rows = _span_rows(store.connection, wanted)
+    finally:
+        store.close()
+    return _joined_keys(rows)
+
+
+def _named_spans(spans: Iterable[str]) -> list[str]:
+    return sorted({str(span) for span in spans if span})
+
+
+def _readable(path: Path, wanted: Sequence[str]) -> bool:
+    return bool(wanted) and path.exists()
+
+
+def _span_rows(connection: sqlite3.Connection, wanted: Sequence[str]) -> list[tuple[object, object]]:
+    rows: list[tuple[object, object]] = []
+    for start in range(0, len(wanted), _SPAN_BATCH):
+        batch = wanted[start : start + _SPAN_BATCH]
+        marks = ",".join("?" * len(batch))
+        rows.extend(
+            connection.execute(
+                f"SELECT span_sha256, key FROM keys WHERE span_sha256 IN ({marks}) ORDER BY id",
+                batch,
+            ).fetchall()
+        )
+    return rows
+
+
 def _joined_keys(rows: Iterable[tuple[object, object]]) -> dict[str, str]:
     by_span: dict[str, list[str]] = {}
     for span, key in rows:
