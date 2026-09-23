@@ -31,7 +31,8 @@ def test_only_the_memory_s_own_calls_are_removed(tmp_path: Path) -> None:
     vault.mkdir()
     projects = tmp_path / "projects"
     own_vault = _transcript(projects / "-vault" / "a.jsonl", "sdk-cli", str(vault))
-    own_temp = _transcript(projects / "-tmp-x" / "b.jsonl", "sdk-cli", tempfile.gettempdir() + "/llm-wiki-provider-x")
+    temp_dir = retirer._encoded(Path(tempfile.gettempdir())) + "-llm-wiki-provider-x"
+    own_temp = _transcript(projects / temp_dir / "b.jsonl", "sdk-cli", tempfile.gettempdir() + "/llm-wiki-provider-x")
     foreign = _transcript(projects / "-elsewhere" / "c.jsonl", "sdk-cli", "/srv/elsewhere")
     held = _transcript(projects / "-vault" / "d.jsonl", "cli", str(vault))
     unreadable = projects / "-vault" / "e.jsonl"
@@ -39,7 +40,8 @@ def test_only_the_memory_s_own_calls_are_removed(tmp_path: Path) -> None:
 
     removed, emptied = retirer.retire(projects, vault)
 
-    # the temporary directory's project folder is emptied and goes; the vault's keeps its held session
+    # the temporary directory's project folder (named as the CLI spells it) is emptied and goes;
+    # the vault's keeps its held session
     assert (removed, emptied) == (2, 1)
     assert [p.exists() for p in (own_vault, own_temp, foreign, held, unreadable)] == [False, False, True, True, True]
     assert not own_temp.parent.exists() and held.parent.exists()

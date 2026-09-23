@@ -37,10 +37,19 @@ def projects_directory() -> Path:
     return base / "projects"
 
 
+def _raw_roots(vault_root: Path) -> tuple[Path, ...]:
+    return (Path(vault_root), Path(tempfile.gettempdir()), Path.home() / ".claude" / "jobs")
+
+
 def own_call_roots(vault_root: Path) -> tuple[Path, ...]:
     """Where the memory runs its calls from; a transcript from elsewhere is not ours."""
-    jobs = Path.home() / ".claude" / "jobs"
-    return (Path(vault_root).resolve(), Path(tempfile.gettempdir()).resolve(), jobs)
+    return tuple(_resolved(root) for root in _raw_roots(vault_root))
+
+
+def root_spellings(vault_root: Path) -> tuple[Path, ...]:
+    """Every way a root is written: as given and resolved (macOS `/var` is `/private/var`)."""
+    candidates = [c for root in _raw_roots(vault_root) for c in (root, _resolved(root))]
+    return tuple(dict.fromkeys(candidates))
 
 
 def _decoded(line: str) -> dict:
@@ -96,10 +105,10 @@ def _encoded(root: Path) -> str:
     return re.sub(r"[\\/:.]", "-", str(root))
 
 
-def _own_empty_directory(directory: Path, roots: tuple[Path, ...]) -> bool:
+def _own_empty_directory(directory: Path, spellings: tuple[Path, ...]) -> bool:
     if not directory.is_dir() or any(directory.iterdir()):
         return False
-    return any(directory.name.startswith(_encoded(root)) for root in roots)
+    return any(directory.name.startswith(_encoded(root)) for root in spellings)
 
 
 def _bounded_transcripts(projects: Path, deadline: float) -> list[Path]:
@@ -119,8 +128,8 @@ def _remove_own_transcripts(projects: Path, roots: tuple[Path, ...]) -> int:
     return len(own)
 
 
-def _remove_emptied_directories(projects: Path, roots: tuple[Path, ...]) -> int:
-    emptied = [d for d in sorted(projects.iterdir()) if _own_empty_directory(d, roots)]
+def _remove_emptied_directories(projects: Path, spellings: tuple[Path, ...]) -> int:
+    emptied = [d for d in sorted(projects.iterdir()) if _own_empty_directory(d, spellings)]
     for directory in emptied:
         directory.rmdir()
     return len(emptied)
@@ -130,8 +139,8 @@ def retire(projects: Path, vault_root: Path) -> tuple[int, int]:
     """Remove the memory's own transcripts and its emptied project directories."""
     if not projects.is_dir():
         return 0, 0
-    roots = own_call_roots(vault_root)
-    return _remove_own_transcripts(projects, roots), _remove_emptied_directories(projects, roots)
+    removed = _remove_own_transcripts(projects, own_call_roots(vault_root))
+    return removed, _remove_emptied_directories(projects, root_spellings(vault_root))
 
 
 def main() -> int:
