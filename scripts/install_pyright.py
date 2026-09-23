@@ -2333,7 +2333,39 @@ def _existing_result(
         return None
     if kind != "directory":
         raise PyrightInstallError("pyright_existing_install_invalid")
-    return _existing_install_or_invalid(parent, root, deadline)
+    try:
+        return _existing_install_or_invalid(parent, root, deadline)
+    except PyrightInstallError as exc:
+        if not _predates_tree_digest(exc):
+            raise
+    _retire_pre_era_install(parent, root)
+    return None
+
+
+def _predates_tree_digest(error: BaseException) -> bool:
+    """Whether the install is invalid only because its receipt predates the tree digest."""
+    cause: BaseException | None = error
+    while cause is not None:
+        if str(cause) == "pyright_manifest_predates_tree_digest":
+            return True
+        cause = cause.__cause__
+    return False
+
+
+def _retire_pre_era_install(parent: _Handle, root: Path) -> None:
+    """Move a pre-era install aside so the pinned release installs fresh.
+
+    The installer is the documented repair for `pyright_manifest_predates_tree_digest`
+    and refused to run over exactly that install on the live vault of 2026-09-23.
+    The managed tree is disposable cache; the receipt is what cannot be trusted.
+    """
+    retired = f"{_profile.PYRIGHT_VERSION}.retired-{int(time.time())}"
+    if os.name == "nt":
+        os.rename(root, root.with_name(retired))
+        return
+    os.rename(
+        _profile.PYRIGHT_VERSION, retired, src_dir_fd=parent.value, dst_dir_fd=parent.value
+    )
 
 
 def _new_hashes():

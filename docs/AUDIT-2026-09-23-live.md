@@ -44,7 +44,9 @@ the owner's sign-off first (CLAUDE.md §0).
   named it. The product's own bound is 40 events × every project, which can exceed doctor's.
 - `transactions`: "Transaction state is healthy", `quarantined: 27`; the database holds 117
   quarantined rows (114 `precondition_failed` of 2026-09-06/07, 3 `dlp_content_blocked`) and the
-  scan reports `transaction_scan_truncated`. A truncated scan must not say "healthy".
+  scan reports `transaction_scan_truncated`. A truncated scan must not present its counts as
+  the whole truth (fixed: the message says they are lower bounds; the status stays `ok` by the
+  bounded-scan decision).
 - `hooks`: 08:57 "220 hook failure(s) … still happening"; 09:20 "220 … none recently" — the
   recency verdict flips inside an hour on the same trail.
 - `run_deletion`: always status `ok`; the adoption failure code sat in its `blockers`.
@@ -174,6 +176,15 @@ the owner's sign-off first (CLAUDE.md §0).
 - Calling `mcp_server._tool_recall` in a plain Python process: 21.2 s cold (model load), then
   "terminate called without an active exception" and a core dump at exit. `search_memory.py`
   and a bare reranker load exit 0. The server's own shutdown path is the one to check.
+
+### D1. The catch-up nightly of 09:29 failed on consolidation — Fixed (research note of the same day)
+- `logs/nightly-2026-09-23.md`: Step 1b `claude backend exceeded 90s and was stopped`;
+  `failures=1`. Consolidation used the provider client's 90 s default while the compile
+  gives the same provider 300 s. Now 300 s for consolidation too.
+
+### D2. `install_pyright.py` refuses to repair the install it is recommended for — Fixed
+- `pyright_existing_install_invalid <- pyright_manifest_predates_tree_digest`, exit 1. A
+  pre-era receipt now retires the directory and the pinned release installs fresh.
 
 ## What the owner decides
 1. B1 — take `journal.md` out of the memory generation (structure change).

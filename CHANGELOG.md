@@ -98,15 +98,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **A scheduled pass that fails before it starts is recorded as failed.** The
   nightly and weekly passes take their fence first; a refusal there exited 1
   and left `last_nightly_status = success` for six nights while session start
-  said nothing. Doctor also reports a truncated transaction scan as degraded
-  (counts are lower bounds), admits a `run/state.json` up to 4 MiB (the writer's
+  said nothing. Doctor also says when a transaction scan stopped at its row
+  bound (its counts are lower bounds), admits a `run/state.json` up to 4 MiB (the writer's
   own bound exceeds the old 256 KiB), and rebuilds the legacy index with the
   same page collector its freshness check uses, so the repair can succeed.
   Session start counts daily logs at the top level (receipts are not logs), the
   guard-rails block joins a wrapped one-sentence summary, a compile dry run moves
   no clock, pending checkpoint events older than 30 days of vault activity are
   dropped and noted, and the nightly retires LSP failure roots older than 14 days
-  beyond the newest 20 (`scripts/retire_lsp_evidence.py`).
+  beyond the newest 20 (`scripts/retire_lsp_evidence.py`). Session
+  consolidation gives its provider the compile's 300 s ceiling instead of the
+  client's 90 s default, and `install_pyright.py` reinstalls over a receipt that
+  predates the tree digest instead of refusing the repair it is recommended for.
   `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 - **A stray pre-adoption candidate no longer stops the memory in silence.** A
   pytest session whose state root resolved to the live vault left an empty

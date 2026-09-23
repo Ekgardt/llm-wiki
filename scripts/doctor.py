@@ -1765,17 +1765,20 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
 
 
 def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[str, str]:
-    """A scan that stopped at its row bound cannot call the state healthy.
+    """A scan that stopped at its row bound says so in the line a person reads.
 
     On 2026-09-23 the check said "healthy" with `quarantined: 27` while the
-    database held 117 quarantined rows and both scans were truncated.
+    database held 117 quarantined rows and both scans were truncated. Ordinary
+    growth past the read ceiling is not a health problem
+    (`tests/test_doctor_bounded_scan_truth.py`), so the status stays; the
+    message stops presenting a bounded count as the whole truth.
     """
     if status != "ok" or not details.get("truncated_scans"):
         return status, message
     return (
-        "degraded",
-        "Transaction scan stopped at its row bound; every count is a lower bound "
-        "and quarantined rows beyond it are not counted.",
+        "ok",
+        "Transaction state is healthy within the scanned rows; the scan stopped at "
+        "its row bound, so every count is a lower bound.",
     )
 
 

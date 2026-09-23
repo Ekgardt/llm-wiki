@@ -7,7 +7,8 @@ the same day.
 Files: `scripts/scheduled_nightly.py`, `scripts/scheduled_weekly.py`,
 `scripts/session_start_context.py`, `scripts/doctor.py`,
 `scripts/integration_adapter.py`, `scripts/compile_memory.py`, `scripts/build_guardrails.py`,
-`scripts/retire_lsp_evidence.py` (new),
+`scripts/retire_lsp_evidence.py` (new), `scripts/episode_consolidation.py`,
+`scripts/install_pyright.py`,
 `tests/test_the_rest_of_the_live_audit.py`, `CLAUDE.md`, `AGENTS.md`, `docs/STRUCTURE.md`,
 `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 
@@ -28,8 +29,9 @@ Files: `scripts/scheduled_nightly.py`, `scripts/scheduled_weekly.py`,
   six failed nights left no report, so every session printed "not measured" at the 0.1 s
   budget. With A2 the failed night is named; the budget stays as the suite pins it.
 - **A3 — doctor hid its own findings.** (a) `_transaction_result` said "healthy" while the
-  scan was truncated and 117 rows sat in quarantine: a truncated scan is now `degraded`
-  with a message that its counts are lower bounds. (b) `MAX_STATE_BYTES` was 256 KiB while
+  scan was truncated and 117 rows sat in quarantine. Growth past the read ceiling is not a
+  health problem (the 2026-09 bounded-scan decision keeps the status `ok`), so the status
+  stays and the message now says the counts are lower bounds of a scan that stopped. (b) `MAX_STATE_BYTES` was 256 KiB while
   the product's own writer allows 40 pending checkpoint items per project
   (`MAX_PENDING_CHECKPOINT_ITEMS`); 91 projects made 354 KiB and silenced the `scheduler`
   and `capture` checks. The bound is now 4 MiB, above what the writer can produce on any
@@ -67,6 +69,22 @@ Files: `scripts/scheduled_nightly.py`, `scripts/scheduled_weekly.py`,
   grow. The nightly now retires failure roots older than 14 days whose owner is not live,
   keeping the newest 20 as evidence; the sentence in CLAUDE.md/AGENTS.md says so. The
   pyright manifest is re-qualified with the documented `install_pyright.py`.
+
+## Found while verifying, the same day
+
+- **D1 — the catch-up nightly failed on consolidation.** The pass a session start spawned at
+  09:29 (the scheduler's run had failed) ended `failures=1`: Step 1b reported
+  `claude backend exceeded 90s and was stopped … the remaining providers were not tried;
+  consolidation provider returned nothing`. `episode_consolidation._call_provider` used the
+  client's 90 s default (`llm_client.DEFAULT_TIMEOUT_S`) while the compile gives the same
+  provider 300 s (`COMPILE_PROVIDER_CEILING_S`); one day's records were more than 90 s of
+  answer. Consolidation now runs under the same 300 s ceiling.
+- **D2 — the documented pyright repair refused to repair.** Doctor recommends
+  `install_pyright.py` for `pyright_manifest_predates_tree_digest`; the installer answered
+  `pyright_existing_install_invalid` caused by that very code and installed nothing, because
+  an existing directory is validated and never replaced. An install whose receipt predates the
+  tree digest is now moved aside (`<version>.retired-<epoch>`, disposable cache) and the
+  pinned release installs fresh; any other invalid install is still refused.
 
 ## Cost, by rule 4
 

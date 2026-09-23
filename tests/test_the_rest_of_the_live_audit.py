@@ -62,10 +62,11 @@ def test_a_pass_that_cannot_take_its_fence_records_the_failure(tmp_path, monkeyp
 # ---------------------------------------------------------------- A3 ----
 
 
-def test_a_truncated_transaction_scan_is_not_healthy() -> None:
+def test_a_truncated_transaction_scan_says_its_counts_are_lower_bounds() -> None:
+    """Growth past the read ceiling is not a health problem; a whole-truth claim is."""
     details = {"truncated_scans": ["transaction_scan_truncated"]}
     status, message = doctor._truncated_scan_verdict(details, "ok", "Transaction state is healthy.")
-    assert (status, "lower bound" in message) == ("degraded", True)
+    assert (status, "lower bound" in message) == ("ok", True)
 
 
 def test_a_complete_scan_keeps_its_verdict() -> None:
@@ -191,3 +192,48 @@ def test_young_evidence_is_kept_even_beyond_twenty(tmp_path) -> None:
     roots = [_failure_root(state_root, index, 2.0, now) for index in range(25)]
 
     assert (retire_lsp_evidence.retire(state_root, now), all(r.exists() for r in roots)) == (0, True)
+
+
+# ---------------------------------------------------------------- D1 ----
+
+
+def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> None:
+    import episode_consolidation
+    import llm_client
+
+    seen: list[int | None] = []
+
+    def fake_call(prompt, system_prompt, max_tokens=0):
+        seen.append(llm_client._CALL_CEILING_S)
+        return "ok"
+
+    monkeypatch.setattr(llm_client, "call_llm", fake_call)
+
+    assert (episode_consolidation._call_provider("records"), seen) == ("ok", [300])
+
+
+# ---------------------------------------------------------------- D2 ----
+
+
+def test_a_pre_era_pyright_receipt_is_retired_and_the_release_installs_fresh(tmp_path, monkeypatch) -> None:
+    import pyright_profile
+    from install_pyright import install_pyright
+    from reliable_memory import canonical_json_bytes
+
+    from tests.test_install_pyright import _artifact, _root
+
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    install_pyright(state_root=state_root, artifact=artifact.path)
+    root = _root(state_root)
+    manifest = root / "install-manifest.json"
+    receipt = json.loads(manifest.read_text(encoding="utf-8"))
+    receipt.pop("executed_tree_sha256")
+    assert set(receipt) == pyright_profile._MANIFEST_KEYS_BEFORE_TREE_DIGEST
+    manifest.write_bytes(canonical_json_bytes(receipt))
+
+    result = install_pyright(state_root=state_root, artifact=artifact.path)
+
+    retired = [p.name for p in root.parent.iterdir() if p.name.startswith("1.1.411.retired-")]
+    fresh = json.loads(manifest.read_text(encoding="utf-8"))
+    assert (result.version, len(retired), "executed_tree_sha256" in fresh) == ("1.1.411", 1, True)
