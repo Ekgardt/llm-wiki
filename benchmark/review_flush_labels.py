@@ -50,6 +50,10 @@ sys.path.insert(0, str(ROOT / "benchmark"))
 
 from run_flush_classification import load_corpus  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from session_evidence import render_transcript  # noqa: E402
+
 DEFAULT_CORPUS = ROOT / "benchmark/flush-classification-live.json"
 
 # Below this many reviewed cases a kappa is not reported at all; see the module
@@ -96,8 +100,15 @@ def default_verdicts_path(corpus_path: Path) -> Path:
 
 
 def excerpt(transcript: str) -> str:
-    """Head and tail of one session, bounded so the case fits on a screen."""
-    text = transcript.strip()
+    """Head and tail of one session as conversation, bounded to fit a screen.
+
+    The corpus holds the session's raw JSONL tail; a reviewer read 1200
+    characters of record metadata and no words of the conversation (the owner's
+    first run, 2026-09-23). The session-evidence renderer turns the lines into
+    the conversation verbatim, tool calls as one line each; anything that is
+    not JSONL is kept as it is.
+    """
+    text = (render_transcript(transcript) or transcript).strip()
     if len(text) <= HEAD_CHARS + TAIL_CHARS:
         return text
     omitted = len(text) - HEAD_CHARS - TAIL_CHARS

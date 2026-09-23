@@ -245,3 +245,24 @@ def test_the_verdict_sidecar_never_holds_session_text(tmp_path: Path):
     sidecar = review.default_verdicts_path(corpus)
     assert "rollback journal" not in sidecar.read_text(encoding="utf-8")
     assert sidecar.name == "flush-classification-live.review.jsonl"
+
+
+def test_the_excerpt_shows_the_conversation_not_the_record_metadata():
+    import json as _json
+
+    import review_flush_labels
+
+    lines = [
+        _json.dumps({"type": "attachment", "parentUuid": "p1", "cwd": "/home/x", "attachment": {"style": "Kratko"}}),
+        _json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "почини установщик"}]}}),
+        _json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "uv run pytest -q"}},
+            {"type": "text", "text": "Готово, тесты прошли."},
+        ]}}),
+    ]
+
+    shown = review_flush_labels.excerpt("\n".join(lines))
+
+    assert "почини установщик" in shown and "Готово, тесты прошли." in shown
+    assert "parentUuid" not in shown and "Kratko" not in shown
+    assert review_flush_labels.excerpt("plain text, not a transcript") == "plain text, not a transcript"
