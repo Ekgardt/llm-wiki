@@ -310,6 +310,21 @@ def _checkpoint_step() -> _Step:
     )
 
 
+def _own_calls_step() -> _Step:
+    """Retire the transcripts the memory's own provider calls left outside the vault.
+
+    `--no-session-persistence` stopped new ones on 2026-09-14; the 1 082 old ones
+    waited for a hand until 2026-09-23. Nothing the memory leaves behind is the
+    operator's chore. See `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
+    """
+    return _Step(
+        "Step 3e: retiring the memory's own call transcripts...",
+        "own_calls",
+        _script("retire_own_call_transcripts.py"),
+        60,
+    )
+
+
 def _lsp_evidence_step() -> _Step:
     """Retire LSP failure roots older than two weeks beyond the newest twenty.
 
@@ -372,6 +387,7 @@ def _post_compile_steps() -> list[_Step]:
         ),
         _checkpoint_step(),
         _lsp_evidence_step(),
+        _own_calls_step(),
         _Step(
             # The read path loads weights local-only; a cache that lacks the
             # two pinned models answers by words alone. Present files are not

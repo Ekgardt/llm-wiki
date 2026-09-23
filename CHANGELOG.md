@@ -147,6 +147,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The memory retires its own residue.** The nightly removes the transcripts the
+  memory's own provider calls left under `~/.claude/projects` before
+  `--no-session-persistence` (2026-09-14): `sdk-cli` records from the vault, the
+  temporary directory or the job directory, and the project directories they
+  emptied. A held session is never touched. The owner deleted 1 082 of them by
+  hand on 2026-09-23; that was the last time. See
+  `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
 - **The label review of `OPEN-034` is a command.** `benchmark/review_flush_labels.py`
   (written 2026-08-25 on an agent branch, ported 2026-09-23) walks the unreviewed
   cases of the classification corpus, hides the machine's label until the reviewer
