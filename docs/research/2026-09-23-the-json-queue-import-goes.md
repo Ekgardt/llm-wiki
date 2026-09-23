@@ -83,5 +83,5 @@ documented refusal that names the directory.
 
 - [Remove Dead Code — Refactoring catalog](https://refactoring.com/catalog/removeDeadCode.html) — fetched 2026-09-23.
 - `git merge-base --is-ancestor 299b34ac <tag>` over every tag; `git show v3.4.0:scripts/memory_queue.py` (the July record schema), 2026-09-23.
-- `scripts/repair_installed_memory.py --check|--apply` against a scratch state root holding one July record (`/home/user/.claude/jobs/80be9db9/tmp/upgrade/july_vault.py`), 2026-09-23.
+- `scripts/repair_installed_memory.py --check|--apply` against a scratch state root holding one July record (a scratch script under the job's temporary directory, not kept), 2026-09-23.
 - `run/` on the live vault (listing only), 2026-09-23.
