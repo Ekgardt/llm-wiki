@@ -324,7 +324,7 @@ def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monk
 
 def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
     """Issue #29: five generations, 1.05 GB, accumulated in one day with nothing removing them."""
-    assert _runs_after_with_apply("prune_generations", "search", "prune_generations.py") == (
+    assert _runs_after_with_apply("prune_generations", "backlinks", "prune_generations.py") == (
         True,
         "--apply",
         True,
@@ -448,7 +448,7 @@ def test_a_night_with_one_failing_step_names_it_and_records_the_failure(tmp_path
 _EXPECTED_REPORT_LINES = (
     "  lint: lint: 3 pages without frontmatter",
     "  lint: full output → logs/maintenance/",
-    "  search: ok search_memory.py",
+    "  backlinks: ok repair_backlinks.py",
     "=== Nightly pass complete (failures=1) ===",
 )
 
