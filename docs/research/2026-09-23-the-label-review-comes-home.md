@@ -68,3 +68,26 @@ a reason the tool cannot remove: seven held sessions are fewer than the thirty a
 needs, so no corpus worth reviewing exists on this machine yet. The 1 082 old
 transcripts are the memory's residue, not the owner's sessions, and may be deleted
 (the assistant's own attempt was refused by the host as transcript tampering).
+
+## Second addendum, 2026-09-23 evening: the corpus rebuilt and reviewed by the assistant
+
+Files: `benchmark/review_flush_labels.py`, `tests/test_review_flush_labels.py`,
+`docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md`.
+
+- The corpus was rebuilt with the builder that skips the memory's own calls: 40 cases,
+  all sessions of this job's subagents (transcripts under `~/.claude/projects` after the
+  owner's deletion held 7 top-level sessions and the subagent transcripts beneath
+  them). The judge model labelled 37 `major`, 2 `minor`, 1 `ok`.
+- The owner asked the assistant to do the review («делай разметку»). Every verdict now
+  names its reviewer (`--reviewer`, recorded per record), so an assistant's answers are
+  never read as the owner's; these are `claude-fable-5.1`, not human labels, and
+  `OPEN-034` still waits for a person.
+- Read as the tool shows them (head and tail of the rendered conversation, machine label
+  hidden), the assistant answered 21 `major`, 12 `minor`, 7 `ok`. Agreement with the
+  judge: Cohen's kappa 0.155 (slight). Confusion, judge → assistant: major→major 22,
+  major→minor 10, major→ok 5, minor→minor 1, minor→ok 1, ok→ok 1.
+- What that says, within its limits: on agent-report transcripts the judge answers
+  `major` almost always, although its prompt tells it to default to `ok`; fifteen of its
+  thirty-seven `major` verdicts were status reports with no decision or lesson in the
+  excerpt. Whether a person agrees with the assistant or with the judge is the open
+  question, and it is the only one that closes `OPEN-034`.
