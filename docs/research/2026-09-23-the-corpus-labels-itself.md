@@ -135,3 +135,12 @@ product now sends the third prompt. The recall gate (0.8, set on 2026-08-19 with
 real data) still fails at 0.714: the remaining misses each lose one term such as a
 run number or a short Russian phrase. That is the next thing to work on the prompt,
 and the stand now measures it on real sessions with no one labelling by hand.
+
+Second build with the final builder: 39 cases (1 skipped and named); rubric 36
+`major` / 3 `minor`; quote reading 28 `major` / 8 `minor` / 3 `ok`, none void; 29
+confirmed (28 `major`, 1 `minor`), 10 contested; readings' kappa 0.202. The final
+prompt on the 29 confirmed cases: tier accuracy 1.0, durable content recall 0.655,
+false promotion not measurable (no confirmed `ok` case: every held session of this
+day's subagents carried content). The recall gate fails; each miss loses one term.
+The rubric still leans `major` on rendered text (36 of 39); the quote reading is the
+brake on it, and the contested ten are where the brake bit.
