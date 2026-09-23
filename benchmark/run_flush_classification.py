@@ -31,7 +31,7 @@ from reliable_memory import validate_schema  # noqa: E402
 CORPUS = ROOT / "benchmark/flush-classification-v1.json"
 SCHEMAS = {
     "flush-classification/v1": ROOT / "benchmark/flush-classification-v1.schema.json",
-    "flush-classification/v2": ROOT / "benchmark/flush-classification-v2.schema.json",
+    "flush-classification/v3": ROOT / "benchmark/flush-classification-v3.schema.json",
 }
 MAX_TOKENS = 1500
 
@@ -72,20 +72,29 @@ def load_corpus(path: Path) -> dict:
     return corpus
 
 
-def label_state(corpus: dict) -> dict[str, object]:
-    """How much of this corpus a human has actually confirmed.
+def is_confirmed(case: dict) -> bool:
+    """A hand-written v1 case is confirmed; a built case says so itself."""
+    return case.get("label_status", "confirmed") == "confirmed"
 
-    A v1 corpus is hand-written and counts as reviewed. A corpus built from real
-    sessions carries model-produced labels until somebody says otherwise, and a
-    number measured against those is provisional — current practice calibrates a
-    judge against human labels rather than substituting one for the other.
+
+def confirmed_cases(corpus: dict) -> list[dict]:
+    return [case for case in corpus["cases"] if is_confirmed(case)]
+
+
+def label_state(corpus: dict) -> dict[str, object]:
+    """How many labels the metrics rest on, and how many they leave out.
+
+    A corpus built from real sessions is labelled by two automatic readings
+    (`build_flush_corpus.py`); a case they disagree on is contested, stays in
+    the corpus, and counts in no metric — the same rule the product applies to
+    a claim its evaluators disagree on. Nobody reviews labels by hand.
     """
     cases = corpus["cases"]
-    reviewed = sum(1 for case in cases if case.get("label_reviewed", True))
+    confirmed = len(confirmed_cases(corpus))
     return {
         "case_count": len(cases),
-        "reviewed_count": reviewed,
-        "provisional": reviewed < len(cases),
+        "confirmed_count": confirmed,
+        "contested_count": len(cases) - confirmed,
     }
 
 
@@ -151,11 +160,12 @@ def evaluate(metrics: dict[str, float], thresholds: dict[str, float]) -> dict[st
             metrics["false_promotion_rate"] <= thresholds["false_promotion_rate"]
         ),
     }
+    results["labelled"] = metrics["case_count"] > 0
     return {"metric_results": results, "passed": all(results.values())}
 
 
 def run(corpus: dict, adapter: Callable[[dict], str]) -> dict[str, object]:
-    outcomes = [score_case(case, adapter(case)) for case in corpus["cases"]]
+    outcomes = [score_case(case, adapter(case)) for case in confirmed_cases(corpus)]
     metrics = measure(outcomes)
     return {
         "corpus_id": corpus["corpus_id"],
@@ -192,11 +202,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {metrics[name]}")
         print(f"gates passed: {report['gates']['passed']}")
         labels = report["labels"]
-        if labels["provisional"]:
-            print(
-                f"labels: {labels['reviewed_count']}/{labels['case_count']} reviewed "
-                "— these numbers are provisional"
-            )
+        print(
+            f"labels: {labels['confirmed_count']} confirmed, "
+            f"{labels['contested_count']} contested and left out"
+        )
     return 0 if report["gates"]["passed"] else 1
 
 

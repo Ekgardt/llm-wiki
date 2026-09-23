@@ -62,5 +62,18 @@ def test_evidence_arriving_as_a_capture_intent_list_is_rendered():
     assert "trackedFileBackups" not in prompt
 
 
+def test_the_capture_path_sends_the_prompt_the_stand_measures():
+    """Until 2026-09-23 it sent three lines that never said what a tier meant."""
+    raw = _transcript([SAID])
+    evidence = [{"parts": [{"text": raw}], "role": "transcript"}]
+
+    prompt = flush_memory._capture_prompt({"event": "session_end", "evidence": evidence})
+
+    assert prompt == flush_memory.build_classification_prompt(
+        flush_memory._readable_evidence(raw), "session_end"
+    )
+    assert "FLUSH_MINOR  — contains only" in prompt
+
+
 def test_text_that_is_not_a_transcript_is_kept_as_it_stands():
     assert flush_memory._readable_evidence("just a note") == "just a note"

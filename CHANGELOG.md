@@ -8,6 +8,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
+  its verdict sidecar are gone: the owner does no manual labelling, and the two
+  automatic readings above replace the step it existed for. Corpus schema v2
+  (`label_reviewed`, `human_tier`) is refused; the only v2 corpus was the private
+  live one, rebuilt under v3 (2026-09-23).
 - **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
   reader (no writer since 2026-08-20, no file on the live vault), the
   positional `git_range` of `analyze_impact` (every caller names its
@@ -40,6 +45,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **One classification prompt.** The capture path sent three lines that named
+  `FLUSH_OK`, `FLUSH_MAJOR` and `FLUSH_MINOR` and never said what a tier meant,
+  while the measurement stand scored `build_classification_prompt`, which no
+  installed hook reached. The capture worker now sends that prompt with its
+  system prompt, so the stand measures what the product sends; the wire grammar
+  and its parser are unchanged. Measured on the same 21 confirmed real cases:
+  the short prompt named the tier right 0.857 of the time and kept 0.667 of the
+  marker terms; the rich prompt 0.905 and 0.476, because "be terse" dropped
+  terms; with one added sentence — keep names exactly as the transcript spells
+  them — 0.952 and 0.714 (2026-09-23).
 - **A fresh install builds its first generation.** `doctor` reports a missing
   generation as degraded and repairable instead of "legacy retrieval remains
   available", so the installer's `sync_memory.py --apply` builds it (measured:
@@ -154,11 +169,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   emptied. A held session is never touched. The owner deleted 1 082 of them by
   hand on 2026-09-23; that was the last time. See
   `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
-- **The label review of `OPEN-034` is a command.** `benchmark/review_flush_labels.py`
-  (written 2026-08-25 on an agent branch, ported 2026-09-23) walks the unreviewed
-  cases of the classification corpus, hides the machine's label until the reviewer
-  answers, records each verdict durably beside the corpus, and reports Cohen's kappa
-  once 30 cases are reviewed. See `docs/research/2026-09-23-the-label-review-comes-home.md`.
+- **The classification corpus labels itself.** `benchmark/build_flush_corpus.py`
+  labels each real session with two automatic readings that never see the
+  product's tier names: the rubric of 2026-08-23 and a new extractive reading that
+  must quote, verbatim, the one passage a reader would still need later — a quote
+  the transcript does not carry voids the reading. A case the readings agree on is
+  confirmed; one they disagree on is contested, stays in the corpus, and counts in
+  no metric, the rule the product applies to a claim its evaluators disagree on.
+  The stand reports confirmed and contested counts; nothing is "provisional until
+  a person reviews it". The corpus now carries the rendered, bounded conversation
+  the product classifies, not the raw host JSONL it stopped reading on 2026-09-06.
+  Schema v3 replaces v2. See `docs/research/2026-09-23-the-corpus-labels-itself.md`.
 
 ### Fixed
 
