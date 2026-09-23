@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 
 MAX_HOPS = 3
+# Largest page a graph query accepts; navigation answers accept 100.
 MAX_LIMIT = 200
+# Default row count of a graph query page; navigation answers default to 10.
 DEFAULT_LIMIT = 50
 MAX_QUERY_BYTES = 4096
 HOP_ROW_CEILING = 200

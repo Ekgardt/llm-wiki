@@ -67,6 +67,7 @@ from model_dlp import (  # noqa: E402
 
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
+# One member of an exported vault archive; installer archives allow 32 MiB per member.
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_MEMBER_NAME_BYTES = 4096

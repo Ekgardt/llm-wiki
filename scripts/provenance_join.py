@@ -18,6 +18,7 @@ import re
 import time
 from pathlib import Path
 
+# Graph locations joined into one provenance answer; the protocol reply bound is 10 000.
 MAX_LOCATIONS = 5
 MAX_PAGES = 8
 MAX_SOURCES_PER_PAGE = 6

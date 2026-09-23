@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
@@ -78,7 +79,8 @@ _CANDIDATE_ROW_TABLES = (
 )
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
-MAX_CONFIG_BYTES = 64 * 1024
+# The hook configuration is read under the bound the installer writes it with.
+MAX_CONFIG_BYTES = _hook_config.MAX_CONFIG_BYTES
 # Above what the state's own writer can produce: `integration_adapter` keeps at
 # most 40 pending checkpoint items per project, and 91 projects made 354 KiB on
 # 2026-09-23 — over the old 256 KiB, which silenced the scheduler and capture
@@ -87,6 +89,7 @@ MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_INDEX_PATHS = 10_000
 MAX_INDEX_DB_BYTES = 1024 * 1024 * 1024
+# A runtime lock file doctor reads (state and index locks); installer locks are bounded at 1 KiB.
 MAX_LOCK_BYTES = 4096
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
 MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
@@ -4321,7 +4324,7 @@ def _validated_generation_manifest(
         read_runtime_bytes(
             generation_path / "manifest.json",
             state_root,
-            max_bytes=MAX_MANIFEST_BYTES,
+            max_bytes=generation_catalog.MAX_MANIFEST_BYTES,
         )
     )
     if isinstance(diagnostic_value, dict):

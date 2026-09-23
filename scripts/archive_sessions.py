@@ -31,13 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
 from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
+from reliable_memory import DEFAULTS, sha256_bytes  # noqa: E402
 
 # How long a record stays in the active tree: the same ninety days the archive
 # contract already gives every other hot artifact. The observability write-ups
 # favour thirty, but consolidation reads yesterday while a person looking for
 # how something was decided reaches back weeks.
-DEFAULT_RETENTION_DAYS = 90
+DEFAULT_RETENTION_DAYS = DEFAULTS.archive_hot_days
 
 # One record is a redacted transcript; this vault's largest is a third of a
 # megabyte, and the bound refuses anything that is no longer a session record.

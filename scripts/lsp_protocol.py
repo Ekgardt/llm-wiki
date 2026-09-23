@@ -51,6 +51,7 @@ if os.name == "nt":
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_HEADER_BYTES = 8 * 1024
 MAX_PENDING_REQUESTS = 32
+# Locations one LSP reply may carry before it is refused as unbounded; the answer joiners keep 5.
 MAX_LOCATIONS = 10_000
 MAX_DIAGNOSTICS = 10_000
 MAX_HOVER_BYTES = 256 * 1024

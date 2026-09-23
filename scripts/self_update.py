@@ -28,6 +28,7 @@ else:  # pragma: no cover - 3.10 reads the same documents through tomli
 from secret_redact import describe_error
 
 FETCH_TIMEOUT_SECONDS = 120.0
+# One git call of the nightly update, which fetches over the network; the local-only git calls elsewhere allow 10-20 s.
 GIT_TIMEOUT_SECONDS = 60.0
 SYNC_TIMEOUT_SECONDS = 600.0
 # The project's baseline sync, as `sync_memory` runs it. Without `--inexact` an

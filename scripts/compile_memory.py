@@ -99,6 +99,7 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
+from rebuild_memory_index import MAX_INDEX_BYTES  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,
@@ -133,6 +134,7 @@ VALIDATION_RETRIES = 2
 
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
+# One daily log the compile reads; the evidence graph's source bound is 16 GiB.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_SOURCE_COUNT = 2_000
@@ -143,7 +145,6 @@ MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
-MAX_INDEX_BYTES = 4 * 1024 * 1024
 CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
     "properties"
 ]["claims"]["items"]

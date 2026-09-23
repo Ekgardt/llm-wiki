@@ -75,6 +75,7 @@ except Exception:  # noqa: BLE001
         """No-op stub — diagnostics must never break the capture hook."""
 
 from event_envelope import build_event_envelope  # noqa: E402
+from memory_state import HOOK_STATE_LOCK_TIMEOUT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
@@ -92,7 +93,6 @@ MIN_PROMPT_CHARS = 5
 MAX_PROMPT_PREVIEW = 140
 FLUSH_MESSAGE_INTERVAL = 20
 ADVISORY_REFRESH_INTERVAL = 10
-HOOK_STATE_LOCK_TIMEOUT = 0.1
 
 
 def _read_stdin() -> str:

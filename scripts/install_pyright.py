@@ -28,8 +28,17 @@ from pathlib import Path, PureWindowsPath
 
 import pyright_profile as _profile
 import windows_workspace as _windows_workspace
+from bounded_io import IO_CHUNK_BYTES
 from lsp_paths import managed_pyright_root
 from operational_ownership import process_start_identity as _process_start_identity
+from pinned_download import (
+    MAX_COMPRESSED_BYTES,
+    MAX_DECOMPRESSED_BYTES,
+    MAX_MEMBER_BYTES,
+    MAX_MEMBERS,
+    MAX_PATH_COMPONENTS,
+    NETWORK_TIMEOUT_SECONDS,
+)
 from pinned_download import open_pinned_url as _open_pinned_url
 from reliable_memory import (
     _set_owner_only,
@@ -42,24 +51,18 @@ from reliable_memory import (
 # attribute its tests replace. Research:
 # `docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md`.
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 120.0
-NETWORK_TIMEOUT_SECONDS = 30.0
 LOCK_POLL_SECONDS = 0.01
 LOCK_INITIALIZATION_GRACE_SECONDS = 10.0
-COPY_CHUNK_BYTES = 64 * 1024
-# Registry metadata reports 5,423 files and 19,284,989 unpacked bytes.
-MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
-MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024
-MAX_MEMBERS = 8192
+COPY_CHUNK_BYTES = IO_CHUNK_BYTES
 MAX_TOTAL_FILE_BYTES = 64 * 1024 * 1024
-MAX_MEMBER_BYTES = 32 * 1024 * 1024
 MAX_PATH_BYTES = 4096
 MAX_PATH_COMPONENT_BYTES = 255
-MAX_PATH_COMPONENTS = 64
 MAX_PAX_BYTES = 1024 * 1024
 MAX_PAX_FIELDS = 256
 MAX_EXTENDED_METADATA_BYTES = 16 * 1024 * 1024
 MAX_RUNTIME_PARENT_ENTRIES = 16_384
 MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024
+# The installer's own lock file; doctor's runtime locks allow 4 KiB.
 MAX_LOCK_BYTES = 1024
 
 _DARWIN_MNT_LOCAL = 0x00001000

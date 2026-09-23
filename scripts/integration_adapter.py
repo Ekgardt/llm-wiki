@@ -21,7 +21,7 @@ from typing import Any
 
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
-from memory_state import ROOT, STATE_ROOT, spawn_detached, update_state
+from memory_state import MAX_CAPTURE_INTENT_BYTES, ROOT, STATE_ROOT, spawn_detached, update_state
 from project_journal import (
     SESSION_START_RECOVERY_SECONDS,
     CheckpointDecision,
@@ -65,7 +65,6 @@ BACKLOG_STATE_LOCK_SECONDS = 10.0
 # A bound on the recovery itself, so an unattended pass can never hang on it.
 BACKLOG_DRAIN_SECONDS = 120.0
 
-MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_EVIDENCE_BYTES = 900 * 1024
 CAPTURE_HANDLER_VERSION = 1
 SOURCES = frozenset({"claude", "opencode", "codex"})

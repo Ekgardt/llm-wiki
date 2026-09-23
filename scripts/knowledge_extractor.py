@@ -15,6 +15,7 @@ from reliable_memory import canonical_json_bytes
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
 MAX_SOURCES = 10_000
+# Records one extraction may produce; `episode_consolidation.MAX_RECORDS` is a day's session records.
 MAX_RECORDS = 100_000
 
 # A wikilink lives on one line. Without the line breaks in the classes, `[[` in a

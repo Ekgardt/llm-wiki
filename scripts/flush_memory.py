@@ -46,6 +46,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from maybe_compile import spawn_compile_if_idle  # noqa: E402
 from memory_state import (  # noqa: E402
+    MAX_CAPTURE_INTENT_BYTES,
     ROOT,
     STATE_ROOT,
     file_hash,
@@ -60,7 +61,6 @@ MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.
 MAX_RECORD_CHARS = 4_000_000
-MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
 

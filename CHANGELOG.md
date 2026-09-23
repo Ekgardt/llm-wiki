@@ -15,6 +15,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **One limit, one place.** Fifteen numeric bounds that were copied into a
+  second module now have one owner each (the 64 KiB I/O chunk, the archive
+  installers' bounds, the extractors' bounds, the capture-intent bound, the
+  hook lock timeout, the index bound, the hook-configuration bound, the
+  generation-manifest bound, the ninety hot days); doctor reads the hook
+  configuration and a generation's manifest under the writers' own bounds
+  instead of smaller ones of its own. Every remaining name reused for a
+  different bound says what it bounds, and `tests/test_one_limit_one_place.py`
+  refuses a new copy. `docs/LIMITS-2026-09-23.md` lists every limit with no
+  recorded reason. `docs/research/2026-09-23-one-limit-one-place.md`.
 - **The memory generation carries a project's claim pages, not its journal.**
   On the live vault of 2026-09-23 `journal.md` was 94 % of the search index's
   bytes — one checkpoint event per chunk — and most of the reranker's time;

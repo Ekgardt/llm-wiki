@@ -9,13 +9,19 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource
-from knowledge_extractor import ExtractionResult, _evidence, _identifier, _node, _occurrence
+from knowledge_extractor import (
+    MAX_RECORDS,
+    MAX_SOURCES,
+    ExtractionResult,
+    _evidence,
+    _identifier,
+    _node,
+    _occurrence,
+)
 from project_journal import parse_journal_events
 from reliable_memory import canonical_json_bytes
 
 EXTRACTOR_VERSION = "project-extractor/v1"
-MAX_SOURCES = 10_000
-MAX_RECORDS = 100_000
 
 
 def _check_deadline(deadline: float | None, monotonic: Callable[[], float]) -> None:

@@ -14,8 +14,19 @@ import time
 import urllib.error
 import urllib.request
 
+from bounded_io import IO_CHUNK_BYTES
+
 NETWORK_TIMEOUT_SECONDS = 30.0
-CHUNK_BYTES = 64 * 1024
+CHUNK_BYTES = IO_CHUNK_BYTES
+# The bounds every pinned archive install shares (Pyright and the three other
+# managed servers). Pyright's registry metadata reports 5,423 files and
+# 19,284,989 unpacked bytes; the others are smaller.
+MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024
+MAX_MEMBERS = 8192
+# One archive member; an exported vault's members are bounded at 16 MiB.
+MAX_MEMBER_BYTES = 32 * 1024 * 1024
+MAX_PATH_COMPONENTS = 64
 
 
 class PinnedDownloadError(RuntimeError):

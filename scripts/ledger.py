@@ -56,6 +56,7 @@ LEDGER_TABLE = "ledger"
 SAME_EVENT_DAYS = 30
 MAX_KIND_CHARS = 40
 MAX_THING_CHARS = 120
+# One ledger event's text; a temporal anchor keeps up to 220 characters.
 MAX_EVENT_CHARS = 120
 MAX_RECORDS_PER_TURN = 8
 MAX_PAGES_PER_RUN = 20

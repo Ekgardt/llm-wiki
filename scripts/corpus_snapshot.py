@@ -44,6 +44,7 @@ MAX_CORPUS_DIRECTORIES = 5_000
 MAX_CORPUS_DEPTH = 16
 MAX_CORPUS_HEADINGS = 100_000
 MAX_CORPUS_CHUNKS = 100_000
+# Default wall-clock budget for one corpus collection (`collect_corpus`).
 DEFAULT_DEADLINE_SECONDS = 30.0
 
 # The claim pages of a project. The journal — one checkpoint event per line, the

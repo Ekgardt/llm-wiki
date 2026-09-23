@@ -47,6 +47,7 @@ TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 SKIP_NAMES = {"README.md", "index.md", "log.md"}
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+# `knowledge/index.md` as this module writes it and the compile reads it back.
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_PAGE_COUNT = 2_000
 MAX_TOTAL_PAGE_BYTES = 32 * 1024 * 1024
