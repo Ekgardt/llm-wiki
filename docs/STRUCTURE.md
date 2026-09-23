@@ -72,6 +72,9 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── archive/YYYY-MM/bag-…/   immutable uncompressed BagIt packages
 │   ├── notes/                       durable OKF pages (flat slugs)
 │   ├── projects/<slug>/             state.md projection + append-only journal.md
+│   │                                (only state.md/context.md join the corpus;
+│   │                                no slug for a directory inside the vault,
+│   │                                a platform temp entry, or $HOME — 2026-09-23)
 │   ├── raw/                         immutable sources
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates

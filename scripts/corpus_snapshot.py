@@ -46,7 +46,12 @@ MAX_CORPUS_HEADINGS = 100_000
 MAX_CORPUS_CHUNKS = 100_000
 DEFAULT_DEADLINE_SECONDS = 30.0
 
-PROJECT_FILES = frozenset({"state.md", "journal.md", "context.md"})
+# The claim pages of a project. The journal — one checkpoint event per line, the
+# event log no claim reader consults — is kept on disk, consolidated nightly and
+# greppable, but not indexed: on the live vault of 2026-09-23 it was 94 % of the
+# generation's bytes and most of the reranker's time. See
+# `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
+PROJECT_FILES = frozenset({"state.md", "context.md"})
 # What counts as a code-shaped path (provenance, repository policies). Not
 # what the vault's own generation indexes: that is `VAULT_CODE_ROOTS`.
 APPROVED_CODE_ROOTS = frozenset(

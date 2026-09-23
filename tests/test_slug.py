@@ -95,13 +95,13 @@ def test_path_hash_length():
 
 def test_slug_owns_empty_dir(tmp_path: Path):
     """Unused slug → free to take."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
     assert _slug_owns_dir("unused", Path("/any/project"), projects) is True
 
 
 def test_slug_owns_matching_root(tmp_path: Path):
-    projects = tmp_path / "projects"
+    projects = tmp_path / "vault" / "knowledge" / "projects"
     slug_dir = projects / "mine"
     slug_dir.mkdir(parents=True)
     project = tmp_path / "proj"
@@ -113,7 +113,7 @@ def test_slug_owns_matching_root(tmp_path: Path):
 
 
 def test_slug_owns_rejects_different_root(tmp_path: Path):
-    projects = tmp_path / "projects"
+    projects = tmp_path / "vault" / "knowledge" / "projects"
     slug_dir = projects / "shared"
     slug_dir.mkdir(parents=True)
     other = tmp_path / "other"
@@ -133,7 +133,7 @@ def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
     opening a collision hole where a second project could silently adopt
     a first project's state.md by having its Source section removed.
     """
-    projects = tmp_path / "projects"
+    projects = tmp_path / "vault" / "knowledge" / "projects"
     slug_dir = projects / "ambiguous"
     slug_dir.mkdir(parents=True)
     (slug_dir / "state.md").write_text(
@@ -147,8 +147,8 @@ def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
 
 def test_compute_slug_unique(tmp_path: Path):
     """Clean slug — base strategy wins."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
     proj = tmp_path / "unique"
     proj.mkdir()
     assert _compute_slug(proj, projects) == "unique"
@@ -156,8 +156,8 @@ def test_compute_slug_unique(tmp_path: Path):
 
 def test_compute_slug_collision_gets_parent_of_parent(tmp_path: Path):
     """Two projects with the same basename → second gets pop suffix."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
 
     # Project A owns "frontend"
     parent_a = tmp_path / "app-a"
@@ -185,8 +185,8 @@ def test_compute_slug_collision_gets_parent_of_parent(tmp_path: Path):
 
 def test_compute_slug_idempotent(tmp_path: Path):
     """Re-computing for the same project returns the same slug."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
     proj = tmp_path / "proj"
     proj.mkdir()
     slug_first = _compute_slug(proj, projects)
@@ -199,8 +199,8 @@ def test_compute_slug_idempotent(tmp_path: Path):
 
 
 def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_path: Path):
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
     project = tmp_path / "My Project"
     project.mkdir()
     template = Path(__file__).resolve().parent.parent / "knowledge/projects/_template/state.md"
@@ -221,8 +221,8 @@ def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_
 
 def test_compute_slug_hash_suffix_last_resort(tmp_path: Path):
     """If base, pop, git, and grandparent all collide, hash suffix kicks in."""
-    projects = tmp_path / "projects"
-    projects.mkdir()
+    projects = tmp_path / "vault" / "knowledge" / "projects"
+    projects.mkdir(parents=True)
 
     # Create a project dir with no git and no meaningful parents
     proj = tmp_path / "orphan"

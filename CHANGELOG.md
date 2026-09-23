@@ -15,6 +15,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The memory generation carries a project's claim pages, not its journal.**
+  On the live vault of 2026-09-23 `journal.md` was 94 % of the search index's
+  bytes — one checkpoint event per chunk — and most of the reranker's time;
+  the accepted 2026-09-10 decision already names `state.md`/`context.md` as the
+  claim pages and the journal as the event log. The journal stays on disk,
+  consolidated nightly and greppable, as session records do.
+- **A directory is a project only if the owner could be working in it.** The
+  slug rule refuses a directory inside the vault, a direct child of the
+  platform's temporary directory (what `mkdtemp` and the provider CLI make) and
+  the home directory, for every caller at once. The audit found 85 project
+  directories, minted for a benchmark run under `cache/`, a transaction under
+  `run/`, `/tmp`, the provider's temp directory, `$HOME` and the vault itself.
+  `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
+
 - **The navigation gate measures our share, not the machine.**
   `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
   `direct_pyright_p95_ms` — Pyright itself, which no change of ours can reach —

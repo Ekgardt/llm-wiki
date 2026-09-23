@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import traceback
 import unicodedata
 from datetime import datetime
@@ -167,17 +168,54 @@ def _sanitize(text: str) -> str:
     return portable_slug(s)
 
 
-def _require_not_the_vault(project_dir: Path, projects_dir: Path) -> None:
-    """The vault is never a project of its own.
+class NotAProject(ValueError):
+    """The directory is not one the owner could be working in.
+
+    A `ValueError`, so every caller that already catches one keeps its
+    behaviour: session start emits nothing, the journal path records nothing,
+    the tag hooks fall back to the folder name as a plain label.
+    """
+
+
+def _inside(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _is_platform_temp_entry(path: Path) -> bool:
+    """A direct child of the platform's temporary directory — what `mkdtemp` makes.
+
+    The provider CLI runs in `tempfile.TemporaryDirectory(prefix="llm-wiki-provider-")`
+    and a pytest session ran in `/tmp/tmp…`; both minted projects. Deeper trees
+    (pytest's own `tmp_path`) are deliberate structures and are left alone.
+    """
+    try:
+        return path.parent == Path(tempfile.gettempdir()).resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _require_project_candidate(project_dir: Path, projects_dir: Path) -> None:
+    """Refuse a directory that is not a project: the vault, its inside, temp, home.
 
     Hooks whose working directory is the vault — the installer's smoke, the
     nightly pass, an operator's `cd` — minted a project named after the vault
     and checkpointed into it; deleting that directory then blocked every later
-    checkpoint of the slug (issue #20). A vault has no handoff to project.
+    checkpoint of the slug (issue #20). The audit of 2026-09-23 found the same
+    class four more times: a benchmark run under `cache/`, a transaction
+    directory under `run/`, the provider's temp directory, the home directory.
+    See `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
     """
     vault = Path(projects_dir).resolve().parent.parent
-    if Path(project_dir).resolve() == vault:
-        raise ValueError("the vault root is not a project")
+    resolved = Path(project_dir).resolve()
+    refusals = (
+        (resolved == vault, "the vault root is not a project"),
+        (_inside(resolved, vault), "a directory inside the vault is not a project"),
+        (_is_platform_temp_entry(resolved), "a temporary directory is not a project"),
+        (_is_home_directory(resolved), "the home directory is not a project"),
+    )
+    for refused, message in refusals:
+        if refused:
+            raise NotAProject(message)
 
 
 def _base_slug(project_dir: Path) -> str:
@@ -309,7 +347,7 @@ def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     belongs to `project_dir` (same recorded Project root).
     """
     project_dir = owning_checkout(project_dir)
-    _require_not_the_vault(project_dir, projects_dir)
+    _require_project_candidate(project_dir, projects_dir)
     base = _base_slug(project_dir)
     for cand in _slug_candidates(project_dir, base)[:MAX_SLUG_CANDIDATES]:
         if _slug_owns_dir(cand, project_dir, projects_dir):
