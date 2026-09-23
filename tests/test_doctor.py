@@ -2106,10 +2106,10 @@ def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
 
 
 def test_oversized_state_is_bounded_and_reported(tmp_path):
-    from doctor import run_doctor
+    from doctor import MAX_STATE_BYTES, run_doctor
 
     root, state_root, home = _build_root(tmp_path)
-    (state_root / "run" / "state.json").write_bytes(b"x" * 300_000)
+    (state_root / "run" / "state.json").write_bytes(b"x" * (MAX_STATE_BYTES + 1))
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     scheduler = _check(report, "scheduler")

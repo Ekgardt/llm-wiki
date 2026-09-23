@@ -310,6 +310,20 @@ def _checkpoint_step() -> _Step:
     )
 
 
+def _lsp_evidence_step() -> _Step:
+    """Retire LSP failure roots older than two weeks beyond the newest twenty.
+
+    They were "left for the operator", who had no command for them: 80 roots on
+    2026-09-23. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
+    """
+    return _Step(
+        "Step 3c'': retiring old LSP failure evidence...",
+        "lsp_evidence",
+        _script("retire_lsp_evidence.py"),
+        60,
+    )
+
+
 def _post_compile_steps() -> list[_Step]:
     return [
         _Step(
@@ -363,6 +377,7 @@ def _post_compile_steps() -> list[_Step]:
             PRUNE_STEP_SECONDS,
         ),
         _checkpoint_step(),
+        _lsp_evidence_step(),
         _Step(
             # The read path loads weights local-only; a cache that lacks the
             # two pinned models answers by words alone. Present files are not
@@ -933,6 +948,24 @@ def record_scheduled_skip(today: str, reason: str) -> None:
         print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
 
 
+def record_scheduled_failure(today: str, exc: BaseException) -> None:
+    """A pass that failed before it started is still a failed pass.
+
+    The adoption refusal of 2026-09-17 was raised while taking the fence, so
+    the process exited 1 for six nights while `run/state.json` kept saying
+    `success`, and session start never named it. Recorded here the way the
+    pass records its own failures, so the health checks and session start read
+    one field. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
+    """
+    from secret_redact import describe_error_chain
+
+    print(f"scheduled_nightly: could not take the fence: {describe_error(exc)}", file=sys.stderr)
+    try:
+        _record_nightly_result(today, 1, error=describe_error_chain(exc))
+    except Exception as failure:  # noqa: BLE001 - the original error is what matters
+        print(f"scheduled_nightly: could not record failure: {failure}", file=sys.stderr)
+
+
 def main() -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -940,6 +973,9 @@ def main() -> int:
     except OperationalOwnershipError as exc:
         record_scheduled_skip(today, exc.code)
         return 0
+    except Exception as exc:
+        record_scheduled_failure(today, exc)
+        raise
     if fence is None:
         record_scheduled_skip(today, "maintenance_lock_held")
         return 0

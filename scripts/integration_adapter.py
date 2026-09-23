@@ -1778,6 +1778,7 @@ def _enqueue_pending_events(
 ) -> None:
     observed = _observed_event_ids(state, state_key)
     pending = state.setdefault("project_checkpoint_pending", {})
+    _expire_pending_events(pending)
     queue = pending.setdefault(slug, [])
     queued = {item.get("event_id") for item in queue}
     for pending_event in pending_events:
@@ -1785,6 +1786,76 @@ def _enqueue_pending_events(
         if event_id not in observed and event_id not in queued:
             queue.append(pending_event)
             queued.add(event_id)
+
+
+# A pending checkpoint event drains only when its project commits. A project
+# that never commits again — every directory the slug rule now refuses — kept
+# its events forever: 168 events for 91 projects, 232 KiB of `run/state.json`
+# on 2026-09-23. Thirty days is longer than any lease, retry or nightly gap.
+PENDING_EVENT_MAX_AGE = timedelta(days=30)
+
+
+def _pending_event_expired(item: Mapping[str, object], cutoff: datetime) -> bool:
+    try:
+        return datetime.fromisoformat(str(item.get("occurred_at"))) < cutoff
+    except ValueError:
+        return True
+
+
+def _newest_pending_instant(pending: Mapping[str, Sequence[Mapping[str, object]]]) -> datetime | None:
+    """The vault's own clock: the newest event any project still holds."""
+    instants = []
+    for queue in pending.values():
+        instants.extend(_parsed_instant(item) for item in queue)
+    return max((instant for instant in instants if instant is not None), default=None)
+
+
+def _parsed_instant(item: Mapping[str, object]) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(item.get("occurred_at")))
+    except ValueError:
+        return None
+
+
+def _expire_pending_events(pending: dict[str, list[dict[str, object]]]) -> None:
+    """Drop events older than the bound and say so in the failure trail.
+
+    Age is measured against the newest pending event, not the wall clock: a
+    vault that has been quiet is not one whose memory has expired.
+    """
+    newest = _newest_pending_instant(pending)
+    if newest is None:
+        return
+    cutoff = newest - PENDING_EVENT_MAX_AGE
+    for slug in list(pending):
+        _expire_one_queue(pending, slug, cutoff)
+
+
+def _expire_one_queue(
+    pending: dict[str, list[dict[str, object]]], slug: str, cutoff: datetime
+) -> None:
+    queue = pending[slug]
+    kept = [item for item in queue if not _pending_event_expired(item, cutoff)]
+    dropped = len(queue) - len(kept)
+    if dropped:
+        _note_expired_events(slug, dropped)
+    if kept:
+        pending[slug] = kept
+        return
+    pending.pop(slug, None)
+
+
+def _note_expired_events(slug: str, dropped: int) -> None:
+    try:
+        from capture_diagnostics import record_capture_failure
+
+        record_capture_failure(
+            "checkpoint_expired",
+            f"{dropped} pending checkpoint event(s) older than {PENDING_EVENT_MAX_AGE.days} days dropped",
+            slug=slug,
+        )
+    except Exception:  # noqa: BLE001 - the trail never breaks a hook
+        return
 
 
 def _bounded_checkpoint_error(error: BaseException) -> str:

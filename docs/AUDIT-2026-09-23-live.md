@@ -130,7 +130,7 @@ the owner's sign-off first (CLAUDE.md §0).
   `pyright_manifest_predates_tree_digest` (degraded, `install_pyright.py` recommended).
   Failure roots are "left for the operator", who has no command to retire them.
 
-### C3. Dead queue tasks keep no reason — Open
+### C3. Dead queue tasks keep no reason — Open (cause named 2026-09-23: the processor returns `False`, which carries no reason; exceptions already reach the trail)
 - `run/queue-v3.sqlite3`: 25 `flush` tasks `dead` after 8 attempts each (`processor_failed`),
   `result_reference = None`; `attempt_history` holds 225 failed attempts against 45 succeeded
   (last failure 2026-09-12). `source_failures`: 43 rows, 34 `RuntimeError` from `compile` on

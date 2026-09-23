@@ -79,7 +79,11 @@ _CANDIDATE_ROW_TABLES = (
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
-MAX_STATE_BYTES = 256 * 1024
+# Above what the state's own writer can produce: `integration_adapter` keeps at
+# most 40 pending checkpoint items per project, and 91 projects made 354 KiB on
+# 2026-09-23 — over the old 256 KiB, which silenced the scheduler and capture
+# checks exactly when they had something to say.
+MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_INDEX_PATHS = 10_000
 MAX_INDEX_DB_BYTES = 1024 * 1024 * 1024
@@ -1754,13 +1758,24 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     _append_state_deletion_codes(details, states)
     _append_live_deletion_codes(details)
     message = _transaction_message(states, problem, invalid_state, details)
-    return _result(
-        "transactions",
-        _transaction_status(
-            states, problem, invalid_state, details["quarantined_unresolved"]
-        ),
-        message,
-        details,
+    status = _transaction_status(
+        states, problem, invalid_state, details["quarantined_unresolved"]
+    )
+    return _result("transactions", *_truncated_scan_verdict(details, status, message), details)
+
+
+def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[str, str]:
+    """A scan that stopped at its row bound cannot call the state healthy.
+
+    On 2026-09-23 the check said "healthy" with `quarantined: 27` while the
+    database held 117 quarantined rows and both scans were truncated.
+    """
+    if status != "ok" or not details.get("truncated_scans"):
+        return status, message
+    return (
+        "degraded",
+        "Transaction scan stopped at its row bound; every count is a lower bound "
+        "and quarantined rows beyond it are not counted.",
     )
 
 
@@ -6670,7 +6685,12 @@ def _rebuild_index(
         search_memory.KNOWLEDGE_DIR = root / "knowledge" / "notes"
         search_memory.WIKI_DIR = search_memory.KNOWLEDGE_DIR
         notes = _contained_notes_directory(root)
-        pages = _rebuildable_pages(notes, deadline, cancelled)
+        # The same collector the freshness check uses, so the rebuilt index has
+        # the membership the check expects. A private `rglob` here collected
+        # 175 pages against the check's 170 and the repair failed every night.
+        pages = search_memory._collect_pages(  # noqa: SLF001
+            "all", knowledge_dir=notes, root=root, deadline=deadline
+        )
         _require_rebuild_continues(deadline, cancelled)
         search_memory._build_index(pages)  # noqa: SLF001
     finally:

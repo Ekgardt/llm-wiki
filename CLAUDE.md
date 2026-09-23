@@ -242,7 +242,8 @@ no longer requires the three to agree on a generation nonce or a pid. Controlled
 cleanup removes the lease after joining its heartbeat; abrupt death leaves it to
 expire, and starting a server sweeps sibling owner roots in `run/lsp/` whose records
 name only processes proven dead and which hold no `failure.json`; roots holding
-failure evidence are left for the operator. Second-fatal recovery completes
+failure evidence are kept as evidence, and the nightly retires those older than 14
+days beyond the newest 20 (`scripts/retire_lsp_evidence.py`, 2026-09-23). Second-fatal recovery completes
 without caller intervention. Incomplete startups enter a bounded module registry;
 Pyright sessions adopt returned cleanup owners into session-held normal-exit and
 caller-deadline retry, while unadopted owners stay registered. Windows lease refresh
