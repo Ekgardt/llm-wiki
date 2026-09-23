@@ -152,3 +152,22 @@ def test_an_unknown_schema_version_is_refused(tmp_path):
 
     with pytest.raises(ValueError, match="unknown corpus schema"):
         stand.load_corpus(path)
+
+
+def test_the_corpus_builder_skips_the_memory_s_own_provider_calls(tmp_path: Path) -> None:
+    """39 of the 40 live cases were `claude -p` calls of the classifier itself (2026-09-23)."""
+    import json as _json
+    import sys as _sys
+
+    benchmark = Path(__file__).resolve().parent.parent / "benchmark"
+    if str(benchmark) not in _sys.path:
+        _sys.path.insert(0, str(benchmark))
+    import build_flush_corpus
+
+    own = tmp_path / "a" / "own.jsonl"
+    held = tmp_path / "a" / "held.jsonl"
+    own.parent.mkdir()
+    own.write_text(_json.dumps({"type": "user", "entrypoint": "sdk-cli", "message": {"role": "user", "content": "x"}}) + "\n", encoding="utf-8")
+    held.write_text(_json.dumps({"type": "user", "entrypoint": "cli", "message": {"role": "user", "content": "y"}}) + "\n", encoding="utf-8")
+
+    assert build_flush_corpus._transcripts(tmp_path, 10) == [held]

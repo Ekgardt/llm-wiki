@@ -316,7 +316,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None, stream=None, write=None) -> int:
     args = parse_args(argv)
     stream = stream or sys.stdin
-    write = write or sys.stdout.write
+    write = write or _flushing_write
     corpus = load_corpus(args.corpus)
     verdicts = load_verdicts(args.verdicts)
     pending = select_cases(
@@ -326,6 +326,13 @@ def main(argv: list[str] | None = None, stream=None, write=None) -> int:
     review(pending, verdicts, args.verdicts, stream, write)
     _write_lines(write, summary_lines(corpus["cases"], verdicts))
     return 0
+
+
+def _flushing_write(text: str) -> None:
+    """The prompt has no newline; unflushed, it stayed in the buffer while the
+    reviewer waited for it (the owner's first run, 2026-09-23)."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
 
 
 def _write_lines(write, lines: list[str]) -> None:

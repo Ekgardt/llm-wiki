@@ -266,3 +266,23 @@ def test_the_excerpt_shows_the_conversation_not_the_record_metadata():
     assert "почини установщик" in shown and "Готово, тесты прошли." in shown
     assert "parentUuid" not in shown and "Kratko" not in shown
     assert review_flush_labels.excerpt("plain text, not a transcript") == "plain text, not a transcript"
+
+
+def test_the_prompt_is_flushed_before_the_answer_is_read(monkeypatch):
+    import io
+
+    import review_flush_labels
+
+    class _Out(io.StringIO):
+        flushes = 0
+
+        def flush(self):
+            self.flushes += 1
+            super().flush()
+
+    out = _Out()
+    monkeypatch.setattr(review_flush_labels.sys, "stdout", out)
+
+    review_flush_labels._flushing_write(review_flush_labels.PROMPT)
+
+    assert (out.getvalue(), out.flushes) == (review_flush_labels.PROMPT, 1)

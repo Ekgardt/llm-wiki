@@ -46,3 +46,25 @@ benchmark/review_flush_labels.py`, verdicts beside the corpus, private by
 
 - Bujang & Baharum 2017, DOI 10.2427/12267; Landis & Koch 1977, Biometrics 33:159–174.
 - `git cherry main <branch>` and `git ls-tree main` over the four branches, 2026-09-23.
+
+## Addendum, later on 2026-09-23: the corpus was the classifier's own calls
+
+Files: `benchmark/build_flush_corpus.py`, `benchmark/review_flush_labels.py`,
+`tests/test_flush_classification_benchmark.py`, `tests/test_review_flush_labels.py`,
+`docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md`.
+
+The owner's first review showed record metadata instead of words (fixed the same
+hour: the excerpt is rendered by `session_evidence.render_transcript`) and then, in 39
+of the 40 cases, the classifier's own prompt: the corpus of 2026-08-23 took the 40
+newest transcripts under `~/.claude/projects`, and until the `--no-session-persistence`
+fix of 2026-09-14 every memory call through `claude -p` left one (entry point
+`sdk-cli`). Counted 2026-09-23: 1 082 such transcripts (101 MB, newest 2026-09-17)
+against 7 sessions someone held. The three verdicts recorded are one real case and two
+of the classifier's own calls.
+
+Decisions: the builder skips a transcript whose first records name entry point
+`sdk-cli`; the prompt is flushed before the answer is read. `OPEN-034` stays open for
+a reason the tool cannot remove: seven held sessions are fewer than the thirty a kappa
+needs, so no corpus worth reviewing exists on this machine yet. The 1 082 old
+transcripts are the memory's residue, not the owner's sessions, and may be deleted
+(the assistant's own attempt was refused by the host as transcript tampering).
