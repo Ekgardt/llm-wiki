@@ -5,7 +5,7 @@ delegated the decision ("примени правило 2 и 4"), so this note do
 decides.
 
 Files: `scripts/corpus_snapshot.py`, `scripts/session_start_project_state.py`,
-`scripts/integration_adapter.py`, `tests/test_corpus_snapshot.py`, `tests/test_slug.py`,
+`tests/test_corpus_snapshot.py`, `tests/test_slug.py`, `tests/test_project_journal.py`,
 `tests/test_a_project_is_a_directory_the_owner_works_in.py`, `docs/STRUCTURE.md`,
 `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
 
@@ -14,8 +14,9 @@ Files: `scripts/corpus_snapshot.py`, `scripts/session_start_project_state.py`,
 - The live memory generation holds 4 846 chunks: 2 906 come from
   `knowledge/projects/*/journal.md` (9 381 780 bytes of one-event-per-line checkpoint JSON),
   984 from `state.md`/`context.md`, 956 from `knowledge/notes` (592 744 bytes). By bytes the
-  index is 94 % journal. A warm search on an idle machine takes 5.7–6.3 s, of which the
-  cross-encoder reranker takes 5.0–5.7 s over ten candidates.
+  index is 94 % journal. A warm search takes 2.38 s on an idle machine (5.7–6.3 s under
+  a load of 4), of which the cross-encoder reranker takes 2.2 s (5.0–5.7 s) over ten
+  candidates.
 - `corpus_snapshot._walk_knowledge` already refuses session records with a measurement:
   importing them "moved the vault stand from hit@5 0.7 to 0.0". Journals were admitted
   through `PROJECT_FILES` with no measurement. The accepted decision
@@ -59,9 +60,10 @@ Files: `scripts/corpus_snapshot.py`, `scripts/session_start_project_state.py`,
    `_compute_slug`, so every caller (session start, session end, prompt and tool capture,
    bootstrap, the journal path) agrees: a directory that is the vault or inside it, under
    the platform's temporary directory, or the home directory raises `NotAProject`
-   (a `ValueError`, so callers that already catch `ValueError` keep their behaviour). The
-   journal path additionally applies session start's marker rule: it creates no project for a
-   directory without a project marker, while an existing project keeps receiving checkpoints.
+   (a `ValueError`, so callers that already catch `ValueError` keep their behaviour).
+   Session start's marker rule is deliberately not extended to the journal path: every
+   observed junk class is covered by the three path rules, and a marker rule would change
+   what happens for the owner's own marker-less directories, which nothing measured.
 3. **Existing junk directories are not deleted by code.** They are the owner's files under
    `knowledge/projects/`; the audit lists their classes, and once journals leave the corpus
    their weight in retrieval is their `state.md` alone.
@@ -78,4 +80,19 @@ three path comparisons. No provider call, no new module, no new runtime director
 
 ## Measurement
 
-Filled in below once the scratch generation has been built and queried.
+Scratch generation built from the live knowledge with the new collector into a scratch
+state root (`build_scratch.py`, 122 s): 254 sources, 1 970 chunks, against the live
+generation's 333 sources and 4 846 chunks. The owner's 27 real questions were then run
+against each generation in turn after the build and a first, contended arm had finished,
+with nothing else of this session running; same code, same models, warm:
+
+- with journals (live generation): 2.38 s per question, reranker 2 203 ms, 11.22 of the 12
+  candidates are notes, 0.74 are journal chunks, best reranker score −8.50;
+- without journals (scratch generation): 1.87 s per question (−21 %), reranker 1 805 ms
+  (−18 %), 11.89 notes, 0 journal chunks, best reranker score −8.55.
+
+The 5.7–6.3 s figure in the audit was measured while a 4-process walk measurement was
+still running (load average 4.3 on 4 cores); the idle figure for the live generation is
+2.38 s. No gold exists on the live vault, so the reranker's best score is the only
+quality proxy, and it did not move. What moved: the index shrank by 59 % of its chunks
+and 9 MB of JSON, and no checkpoint event can take a candidate slot from a page.

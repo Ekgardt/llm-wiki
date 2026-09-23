@@ -57,7 +57,7 @@ the owner's sign-off first (CLAUDE.md §0).
 
 ## B. Corpus and retrieval
 
-### B1. 94 % of the search index is project-journal JSON — Decision
+### B1. 94 % of the search index is project-journal JSON — Decided and changed (`d4ccd7b4`)
 - Active generation `generation-18d5fd161ebe694b-f901256a`, `search.sqlite3`: 4 846 chunks —
   2 906 from `knowledge/projects/*/journal.md` (9 381 780 B), 984 from other project pages,
   956 from `knowledge/notes` (592 744 B). 2 021 chunks begin with `{`: canonical checkpoint
@@ -66,13 +66,15 @@ the owner's sign-off first (CLAUDE.md §0).
   they "take the corpus over" (hit@5 0.7 → 0.0); journals were admitted with no measurement,
   and the 2026-09-10 decision `claim-readers-do-not-scan-the-journal` says the journal is an
   event log no claim reader consults. The retrieval corpus consults it 2 906 times.
-- Cost: a warm search on an otherwise idle machine takes 5.7–6.3 s, of which the reranker
-  takes 5.0–5.7 s over ten candidates; journal chunks are near the 512-token bound each.
+- Cost: a warm search takes 2.38 s on an idle machine and 5.7–6.3 s under a load of 4 (the
+  first figure was measured while a walk measurement was running); the reranker takes
+  2.2 s of the 2.38 s over ten candidates. Without journals: 1.87 s and 1.8 s (−21 %,
+  −18 %), 1 970 chunks instead of 4 846 — see the research note of the same day.
 - Proposal: the memory generation carries `state.md`/`context.md` (the claim pages) and not
   `journal.md`; the journal stays authoritative on disk, greppable and consolidated nightly,
   exactly like session records. Measured before/after on the owner's 27 real questions.
 
-### B2. Any directory a tool runs in becomes a project — Decision
+### B2. Any directory a tool runs in becomes a project — Decided and changed (`d4ccd7b4`)
 - `knowledge/projects/` holds 85 directories. 49 are `agent-<hash>` (all 2026-08-26, before
   `owning_checkout` unwrapped agent worktrees). Since then, projects were minted for: a
   benchmark run directory under `cache/benchmarks/`, a transaction directory under
