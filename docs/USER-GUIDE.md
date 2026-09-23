@@ -615,7 +615,6 @@ force flag. Symlinks and empty directories are not written; the receipt counts t
 ### Queue migration and work
 
 ```bash
-uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py unblock <task-id>
@@ -624,9 +623,8 @@ uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --expor
 uv run python scripts/memory_queue.py restore --export <path>
 ```
 
-Run migration once to import legacy `run/queue/*.json` and `.processing` files.
-Migration aborts if it cannot exclude a live legacy owner and quarantines malformed
-source records. The queue is priority/FIFO and at least once, not exactly-once;
+A `run/queue/` directory left by a release before v4.0.0 (the file-per-task JSON
+queue) is refused and named by `doctor`, never imported. The queue is priority/FIFO and at least once, not exactly-once;
 handlers rely on stable operation IDs. Defaults are priority 0 in `-100..100`, a
 120-second lease with 40-second heartbeat, 8 attempts, 30/3600-second full-jitter
 retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.

@@ -17,6 +17,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
   queue migration stay, with the evidence and the plan for each in
   `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
+  per task under `run/queue/`; the importer, its marker, quarantine, lease
+  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
+  installers still created. Measured before removal: the installer's adoption
+  already refused such a vault and never ran the import. A `run/queue/` holding
+  records is now refused by the queue (`legacy_json_queue_unsupported`) and
+  named by `doctor`, which keeps `run/` from deletion while they exist. See
+  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
 
 ### Deprecated
 

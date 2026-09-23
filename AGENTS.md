@@ -454,7 +454,8 @@ contradiction checks, and playbook crystallization. Backend is
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → OpenAI → Ollama. If none available,
 the call is enqueued in `run/queue.sqlite3` and processed at the next active
-session. Legacy `run/queue/*.json` files are migration input only.
+session. A `run/queue/` directory left by a release before v4.0.0 is refused and
+named by `doctor`, never imported (2026-09-23).
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e.

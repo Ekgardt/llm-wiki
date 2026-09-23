@@ -62,9 +62,7 @@ _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
-_MAX_LEGACY_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_RUNTIME_ATTEMPTS = 100
-_MAX_MARKER_BYTES = 64
 _MAX_QUEUE_PAYLOAD_BYTES = 1024 * 1024
 _MAX_QUEUE_DEPTH = 32
 # One trail line per failed processor. The trail is read by a person at
@@ -2462,10 +2460,6 @@ class MigrationBusy(QueueOperationError):
     """Raised when migration cannot prove exclusive legacy ownership."""
 
 
-class LegacyBackendDisabled(QueueOperationError):
-    """Raised when a legacy writer is used after migration started."""
-
-
 class _InvalidArguments(Exception):
     pass
 
@@ -2545,14 +2539,6 @@ class QueueLease:
     created_at: datetime
     last_attempt_at: datetime | None
     prior_attempts: int
-
-
-@dataclass(frozen=True)
-class MigrationReceipt:
-    imported: int
-    quarantined: int
-    task_ids: tuple[str, ...]
-    codes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -12812,22 +12798,9 @@ def _pid_is_alive(pid: int) -> bool:
         return True
 
 
-def _migration_paths(state_root: Path) -> tuple[Path, Path, Path, Path]:
-    run_dir = Path(state_root).resolve() / "run"
-    return (
-        run_dir,
-        run_dir / "queue",
-        run_dir / "queue.sqlite3",
-        run_dir / "queue-migrated-v2",
-    )
-
-
-def _path_present(path: Path) -> bool:
-    return path.exists() or path.is_symlink()
-
-
 def _open_queue_ownership_db(state_root: Path) -> sqlite3.Connection:
-    run_dir, _legacy_dir, db_path, _marker = _migration_paths(state_root)
+    run_dir = Path(state_root).resolve() / "run"
+    db_path = run_dir / "queue.sqlite3"
     # Legacy queue ownership lives in the pre-adoption database itself, and the
     # adopted queue keeps its own `queue_ownership` under a different schema.
     # There is no adopted implementation of this registry, so say which path
@@ -13183,345 +13156,11 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
     return changed == 1
 
 
-def _marker_file_usable(marker: Path, metadata: os.stat_result) -> bool:
-    """The marker is a real, bounded, owner-only file and not a link."""
-    if marker.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-        return False
-    if metadata.st_size > _MAX_MARKER_BYTES:
-        return False
-    return _is_owner_only(marker)
-
-
-def _read_stable_marker(marker: Path, metadata: os.stat_result) -> bytes:
-    """The marker's bytes, read from the very file we measured."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(marker, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
-            raise QueueOperationError("migration_marker_invalid")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            raw = handle.read(_MAX_MARKER_BYTES + 1)
-        if _descriptor_identity(opened) != _descriptor_identity(os.fstat(descriptor)):
-            raise QueueOperationError("migration_marker_invalid")
-    finally:
-        os.close(descriptor)
-    return raw
-
-
-def _validate_migration_marker(marker: Path) -> None:
-    expected = canonical_json_bytes({"version": 2})
-    try:
-        metadata = marker.lstat()
-        if not _marker_file_usable(marker, metadata):
-            raise QueueOperationError("migration_marker_invalid")
-        if _read_stable_marker(marker, metadata) != expected:
-            raise QueueOperationError("migration_marker_invalid")
-    except QueueOperationError:
-        raise
-    except (OSError, ValueError):
-        raise QueueOperationError("migration_marker_invalid") from None
-
-
-def _check_legacy_source_metadata(metadata: os.stat_result, path: Path) -> None:
-    """Refuse anything that is not a plain, small, non-symlink file."""
-    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
-        raise QueueOperationError("legacy_source_unsafe")
-    if metadata.st_size > _MAX_LEGACY_RECORD_BYTES:
-        raise QueueOperationError("legacy_record_too_large")
-
-
-def _check_opened_legacy_source(
-    opened: os.stat_result, metadata: os.stat_result
-) -> None:
-    """Refuse a descriptor that is not the file the caller just checked."""
-    if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_LEGACY_RECORD_BYTES:
-        raise QueueOperationError("legacy_source_unsafe")
-    if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
-        raise QueueOperationError("legacy_source_changed")
-
-
-def _file_identity(status: os.stat_result) -> tuple[int, int, int, int]:
-    """What must not change underneath a file while it is being read."""
-    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
-
-
-def _read_legacy_descriptor(descriptor: int, opened: os.stat_result) -> bytes:
-    """The file's bytes, proved unchanged across the read."""
-    with os.fdopen(descriptor, "rb", closefd=False) as handle:
-        raw = handle.read(_MAX_LEGACY_RECORD_BYTES + 1)
-    if len(raw) > _MAX_LEGACY_RECORD_BYTES:
-        raise QueueOperationError("legacy_record_too_large")
-    if _file_identity(opened) != _file_identity(os.fstat(descriptor)):
-        raise QueueOperationError("legacy_source_changed")
-    return raw
-
-
-def _read_bounded_regular_nofollow(path: Path) -> bytes:
-    metadata = path.lstat()
-    _check_legacy_source_metadata(metadata, path)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        _check_opened_legacy_source(opened, metadata)
-        return _read_legacy_descriptor(descriptor, opened)
-    finally:
-        os.close(descriptor)
-
-
-def _legacy_lease_pid(record: object) -> int | None:
-    """The owning process a legacy record names, if it names a usable one."""
-    pid = record.get("lease_pid") if isinstance(record, dict) else None
-    if isinstance(pid, int) and pid > 0:
-        return pid
-    return None
-
-
-def _read_legacy_record(path: Path) -> tuple[bytes, object | None]:
-    """The file's bytes and the record they decode to, or None if they do not."""
-    raw = _read_bounded_regular_nofollow(path)
-    try:
-        return raw, json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return raw, None
-
-
-def _prove_processing_owner_is_dead(path: Path) -> None:
-    """Refuse migration unless this processing file's owner is provably gone."""
-    _, record = _read_legacy_record(path)
-    pid = _legacy_lease_pid(record)
-    if pid is None:
-        raise MigrationBusy("legacy_owner_unverifiable")
-    if _pid_is_alive(pid):
-        raise MigrationBusy("legacy_owner_live")
-
-
-def _prove_no_live_processing(legacy_dir: Path) -> None:
-    if not legacy_dir.exists():
-        return
-    for path in legacy_dir.glob("*.processing"):
-        _prove_processing_owner_is_dead(path)
-
-
-def _live_legacy_owner(path: Path, record: object) -> bool:
-    """Whether a `.processing` file still names a running owner."""
-    if path.suffix != ".processing":
-        return False
-    pid = _legacy_lease_pid(record)
-    return pid is not None and _pid_is_alive(pid)
-
-
-def _file_legacy_record(
-    path: Path,
-    raw: bytes,
-    record: object,
-    valid: list[tuple[Path, dict[str, object]]],
-    malformed: list[tuple[Path, bytes]],
-) -> None:
-    """Sort one scanned file into the valid or the malformed pile."""
-    if record is not None and _valid_legacy_record(record):
-        valid.append((path, record))
-        return
-    malformed.append((path, raw))
-
-
-def _scan_legacy_records(
-    legacy_dir: Path,
-) -> tuple[list[tuple[Path, dict[str, object]]], list[tuple[Path, bytes]]]:
-    valid: list[tuple[Path, dict[str, object]]] = []
-    malformed: list[tuple[Path, bytes]] = []
-    if not legacy_dir.exists():
-        return valid, malformed
-    paths = sorted((*legacy_dir.glob("*.json"), *legacy_dir.glob("*.processing")))
-    for path in paths:
-        raw, record = _read_legacy_record(path)
-        if _live_legacy_owner(path, record):
-            raise MigrationBusy("legacy_owner_live")
-        _file_legacy_record(path, raw, record, valid, malformed)
-    return valid, malformed
-
-
-def _valid_legacy_id(value: object) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value) is not None
-
-
-def _valid_legacy_attempts(value: object) -> bool:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return False
-    return value >= 0
-
-
-def _valid_legacy_body(record: Mapping[str, object]) -> bool:
-    """The record names a task type and carries an object payload."""
-    if not isinstance(record.get("type"), str) or not record["type"]:
-        return False
-    return isinstance(record.get("payload"), dict)
-
-
-def _valid_legacy_record(record: object) -> bool:
-    return (
-        isinstance(record, dict)
-        and _valid_legacy_id(record.get("id"))
-        and _valid_legacy_body(record)
-        and _valid_legacy_attempts(record.get("attempts", 0))
-        and _safe_legacy_timestamp(record.get("enqueued_at")) is not None
-    )
-
-
-def _safe_legacy_timestamp(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return _as_utc(datetime.fromisoformat(value))
-    except ValueError:
-        return None
-
-
-def _legacy_attempt_time(record: dict[str, object], source: Path) -> datetime | None:
-    """When the legacy record last ran; a processing file's lease wins."""
-    last_attempt = _safe_legacy_timestamp(record.get("last_attempt_at"))
-    if source.suffix != ".processing":
-        return last_attempt
-    return _safe_legacy_timestamp(record.get("lease_acquired_at")) or last_attempt
-
-
-def _legacy_task_state(attempts: int) -> tuple[str, str | None]:
-    """The state and error code a legacy record with this many attempts lands in."""
-    if attempts >= DEFAULTS.queue_max_attempts:
-        return "dead", "attempts_exhausted"
-    return "ready", None
-
-
-def _legacy_task_columns(
-    record: dict[str, object], source: Path
-) -> tuple[object, ...]:
-    """The task columns a legacy record imports into, in insert order."""
-    created = _safe_legacy_timestamp(record["enqueued_at"])
-    if created is None:
-        raise QueueOperationError("legacy_invalid")
-    last_attempt = _legacy_attempt_time(record, source)
-    attempts = int(record.get("attempts", 0))
-    payload_bytes = canonical_json_bytes(_redact_payload(dict(record["payload"])))
-    state, error_code = _legacy_task_state(attempts)
-    updated = _timestamp(last_attempt or created)
-    return (
-        str(record["type"]),
-        payload_bytes.decode("utf-8"),
-        sha256_bytes(payload_bytes),
-        state,
-        _timestamp(created),
-        updated,
-        updated,
-        attempts,
-        _timestamp(last_attempt) if last_attempt else None,
-        error_code,
-    )
-
-
-def _import_legacy_record(
-    queue: MemoryQueue, record: dict[str, object], source: Path
-) -> str:
-    expected = _legacy_task_columns(record, source)
-    with queue._connect() as connection, begin_immediate(connection):
-        connection.execute(
-            """INSERT OR IGNORE INTO tasks(
-                   id, kind, handler_version, payload_json, input_hash, state, priority,
-                   created_at, updated_at, available_at, attempts, last_attempt_at,
-                   error_code
-               ) VALUES (?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
-            (
-                record["id"],
-                *expected,
-            ),
-        )
-        stored = connection.execute(
-            """SELECT kind, payload_json, input_hash, state, created_at, updated_at,
-                      available_at, attempts, last_attempt_at, error_code
-               FROM tasks WHERE id=?""",
-            (record["id"],),
-        ).fetchone()
-        _require_imported_record(stored, expected)
-    return str(record["id"])
-
-
 # The columns of an imported task that never move again, by their position in
 # the select above: kind, payload_json, input_hash, created_at. The other six —
 # state, updated_at, available_at, attempts, last_attempt_at, error_code —
 # change the moment a worker claims the task.
 _LEGACY_IDENTITY_POSITIONS = (0, 1, 2, 4)
-
-
-def _legacy_identity(columns: Sequence[object]) -> tuple[object, ...]:
-    return tuple(columns[index] for index in _LEGACY_IDENTITY_POSITIONS)
-
-
-def _require_imported_record(
-    stored: sqlite3.Row | None, expected: tuple[object, ...]
-) -> None:
-    """This record's row, whether this run inserted it or a crashed one did.
-
-    A migration that died between the insert and the unlink imports the same
-    record again, and by then a worker may have leased it. Comparing what the
-    record owns — not what the queue has done since — is what makes the retry
-    idempotent instead of a permanent `legacy_import_conflict`. See
-    `docs/research/2026-09-18-an-import-that-already-happened-is-not-a-conflict.md`.
-    """
-    if stored is None:
-        raise QueueOperationError("legacy_import_conflict")
-    if _legacy_identity(tuple(stored)) != _legacy_identity(expected):
-        raise QueueOperationError("legacy_import_conflict")
-
-
-def _quarantine_legacy_record(
-    run_dir: Path, source: Path, raw: bytes, *, code: str = "legacy_invalid"
-) -> None:
-    quarantine = run_dir / "queue-quarantine"
-    quarantine.mkdir(parents=True, exist_ok=True)
-    _harden_owner_only(quarantine, 0o700)
-    digest = sha256_bytes(raw)
-    raw_name = f"{digest}.raw"
-    _write_durable_file(quarantine / raw_name, raw)
-    record = {
-        "code": code,
-        "raw_name": raw_name,
-        "source_name": source.name,
-        "source_sha256": digest,
-    }
-    source_digest = sha256_bytes(source.name.encode("utf-8"))[:16]
-    _write_durable_file(
-        quarantine / f"{digest}-{source_digest}.json", canonical_json_bytes(record)
-    )
-    fsync_directory(quarantine)
-
-
-def _quarantine_legacy_directory(run_dir: Path, legacy_dir: Path, *, code: str) -> int:
-    quarantined = 0
-    for source in sorted(legacy_dir.iterdir()):
-        raw = _read_bounded_regular_nofollow(source)
-        _quarantine_legacy_record(run_dir, source, raw, code=code)
-        source.unlink()
-        quarantined += 1
-    legacy_dir.rmdir()
-    fsync_directory(run_dir)
-    return quarantined
-
-
-def _post_marker_legacy_conflict(state_root: Path) -> None:
-    run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if not _path_present(marker) or not legacy_dir.exists():
-        return
-    owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
-    try:
-        if legacy_dir.exists():
-            _quarantine_legacy_directory(
-                run_dir, legacy_dir, code="legacy_backend_conflict"
-            )
-            raise LegacyBackendDisabled("legacy_backend_conflict")
-    finally:
-        _release_queue_owner(owner)
 
 
 def _write_durable_file(path: Path, data: bytes) -> None:
@@ -13555,6 +13194,11 @@ def _check_owner_file_metadata(
         raise QueueOperationError("export_verification_failed")
     if metadata.st_size > max_bytes or not _is_owner_only(path):
         raise QueueOperationError("export_verification_failed")
+
+
+def _file_identity(status: os.stat_result) -> tuple[int, int, int, int]:
+    """What must not change underneath a file while it is being read."""
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
 
 
 def _read_stable_descriptor(
@@ -13596,195 +13240,6 @@ def _cleanup_export_staging(parent: Path, export_name: str) -> None:
         _remove_export_staging(staging)
 
 
-def _commit_migration_marker(
-    lease: QueueOwnerLease, marker: Path, run_dir: Path
-) -> QueueOwnerLease:
-    now = _utc_now()
-    with closing(
-        _open_queue_ownership_db(lease.state_root)
-    ) as connection, begin_immediate(connection):
-        expires_at = _require_queue_owner(connection, lease, now, heartbeat=True)
-        try:
-            _write_durable_file(marker, canonical_json_bytes({"version": 2}))
-        except QueueOperationError:
-            if _path_present(marker):
-                _validate_migration_marker(marker)
-            raise
-        _validate_migration_marker(marker)
-        fsync_directory(run_dir)
-    return replace(lease, expires_at=expires_at)
-
-
-@dataclass
-class _MigrationGuard:
-    """One migration's deadline, cancellation, and owner heartbeat."""
-
-    deadline: float
-    cancelled: Callable[[], bool] | None
-    owner: QueueOwnerLease | None = None
-
-    def check(self) -> None:
-        if time.monotonic() >= self.deadline or bool(
-            self.cancelled and self.cancelled()
-        ):
-            raise TimeoutError("queue migration cancelled or deadline reached")
-
-    def beat(self) -> None:
-        self.owner = _heartbeat_queue_owner(self.owner)
-
-
-def _migration_already_done(marker: Path, state_root: Path) -> bool:
-    """A valid marker means it ran; a legacy directory beside it is a conflict."""
-    if not _path_present(marker):
-        return False
-    _validate_migration_marker(marker)
-    _post_marker_legacy_conflict(state_root)
-    return True
-
-
-def _single_migration_input(run_dir: Path, legacy_dir: Path) -> list[Path]:
-    """At most one staged migration, and never one beside a live legacy dir."""
-    inputs = sorted(run_dir.glob("queue-migration-*"))
-    if inputs and legacy_dir.exists():
-        raise MigrationBusy("legacy_migration_conflict")
-    if len(inputs) > 1:
-        raise MigrationBusy("legacy_migration_conflict")
-    return inputs
-
-
-def _migration_input(run_dir: Path, legacy_dir: Path) -> Path | None:
-    """The directory this migration consumes, claimed exactly once."""
-    inputs = _single_migration_input(run_dir, legacy_dir)
-    if inputs:
-        return inputs[0]
-    if not legacy_dir.exists():
-        return None
-    claimed = run_dir / f"queue-migration-{uuid.uuid4().hex}"
-    legacy_dir.replace(claimed)
-    fsync_directory(run_dir)
-    return claimed
-
-
-def _scanned_legacy_records(migration_input: Path | None):
-    """The readable and the malformed legacy records, or nothing to migrate."""
-    if migration_input is None:
-        return [], []
-    return _scan_legacy_records(migration_input)
-
-
-def _import_legacy_records(
-    state_root: Path, valid: list[tuple[Path, object]], guard: _MigrationGuard
-) -> list[str]:
-    """Import every readable legacy record, keeping the owner alive as we go."""
-    if not valid:
-        return []
-    queue = MemoryQueue(Path(state_root))
-    imported: list[str] = []
-    for source, record in valid:
-        guard.check()
-        imported.append(_import_legacy_record(queue, record, source))
-        source.unlink()
-        guard.beat()
-    return imported
-
-
-def _quarantine_legacy_records(
-    run_dir: Path, malformed: list[tuple[Path, bytes]], guard: _MigrationGuard
-) -> None:
-    """Keep every unreadable record as evidence rather than dropping it."""
-    for source, raw in malformed:
-        guard.check()
-        _quarantine_legacy_record(run_dir, source, raw)
-        source.unlink(missing_ok=True)
-        guard.beat()
-
-
-def _retire_migration_input(migration_input: Path | None, run_dir: Path) -> None:
-    """Remove the consumed input directory, durably."""
-    if migration_input is None:
-        return
-    fsync_directory(migration_input)
-    migration_input.rmdir()
-    fsync_directory(run_dir)
-
-
-def _refuse_live_legacy_dir(run_dir: Path, legacy_dir: Path) -> None:
-    """A legacy directory that reappeared mid-migration stops it."""
-    if not legacy_dir.exists():
-        return
-    _quarantine_legacy_directory(run_dir, legacy_dir, code="legacy_backend_conflict")
-    raise LegacyBackendDisabled("legacy_backend_conflict")
-
-
-def _run_migration(
-    guard: _MigrationGuard,
-    state_root: Path,
-    run_dir: Path,
-    legacy_dir: Path,
-    marker: Path,
-) -> MigrationReceipt:
-    """Consume the staged legacy records, then commit the migration marker."""
-    migration_input = _migration_input(run_dir, legacy_dir)
-    guard.beat()
-    guard.check()
-    valid, malformed = _scanned_legacy_records(migration_input)
-    guard.beat()
-    imported = _import_legacy_records(state_root, valid, guard)
-    _quarantine_legacy_records(run_dir, malformed, guard)
-    _retire_migration_input(migration_input, run_dir)
-    guard.beat()
-    _refuse_live_legacy_dir(run_dir, legacy_dir)
-    guard.owner = _commit_migration_marker(guard.owner, marker, run_dir)
-    codes = ("legacy_invalid",) if malformed else ()
-    return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
-
-
-def migrate_legacy_queue(
-    state_root: Path,
-    *,
-    deadline: float = float("inf"),
-    cancelled: Callable[[], bool] | None = None,
-) -> MigrationReceipt:
-    guard = _MigrationGuard(deadline, cancelled)
-    guard.check()
-    run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if _migration_already_done(marker, state_root):
-        return MigrationReceipt(0, 0, (), ())
-    guard.owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
-    legacy_owner: QueueOwnerLease | None = None
-    try:
-        guard.check()
-        if _migration_already_done(marker, state_root):
-            return MigrationReceipt(0, 0, (), ())
-        legacy_owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
-        guard.beat()
-        guard.check()
-        _prove_no_live_processing(legacy_dir)
-        guard.beat()
-        guard.check()
-        return _run_migration(guard, state_root, run_dir, legacy_dir, marker)
-    finally:
-        if legacy_owner is not None:
-            _release_queue_owner(legacy_owner)
-        _release_queue_owner(guard.owner)
-
-
-def _ensure_sqlite_enabled() -> None:
-    state_root = _state_root()
-    # Adoption retired the v2 backend and left a tombstone where it stood, so
-    # there is no legacy queue left to migrate and nothing to open for one.
-    from markdown_transaction import _reliability_v3_records_present
-
-    if _reliability_v3_records_present(state_root):
-        return
-    marker = _migration_paths(state_root)[3]
-    if not _path_present(marker):
-        migrate_legacy_queue(state_root)
-    else:
-        _validate_migration_marker(marker)
-        _post_marker_legacy_conflict(state_root)
-
-
 def _vault_root() -> Path:
     """The vault this process belongs to, resolved the way writers resolve it."""
     return Path(
@@ -13798,7 +13253,6 @@ def _queue(
     retry_base_seconds: int = DEFAULTS.retry_base_seconds,
     retry_cap_seconds: int = DEFAULTS.retry_cap_seconds,
 ) -> MemoryQueue | _QueueV3CandidateReader:
-    _ensure_sqlite_enabled()
     return active_or_legacy_memory_queue(
         _vault_root(),
         _state_root(),
@@ -13844,10 +13298,39 @@ class QueueRetryPolicy(NamedTuple):
     retry_cap_seconds: int = DEFAULTS.retry_cap_seconds
 
 
+def _json_queue_entries(state_root: Path) -> int:
+    """Entries under `run/queue/`, the file-per-task queue of v3.3.0–v3.4.0.
+
+    An unreadable directory or a symlink counts as one: unknown is not empty.
+    """
+    directory = Path(state_root) / "run" / "queue"
+    if directory.is_symlink():
+        return 1
+    if not directory.is_dir():
+        return 0
+    try:
+        with os.scandir(directory) as entries:
+            return sum(1 for _ in entries)
+    except OSError:
+        return 1
+
+
+def _require_no_json_queue(state_root: Path) -> None:
+    """Records of the JSON queue are refused, never imported or dropped.
+
+    No release since v4.0.0 wrote that queue and, since 2026-09-23, none reads
+    it; the installer's adoption refuses on the same directory. See
+    `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+    """
+    if _json_queue_entries(state_root):
+        raise QueueOperationError("legacy_json_queue_unsupported")
+
+
 def _legacy_memory_queue(
     state_root: Path, policy: QueueRetryPolicy | None
 ) -> MemoryQueue:
     """The pre-adoption queue, given the caller's bounds only if it named any."""
+    _require_no_json_queue(state_root)
     if policy is None:
         return MemoryQueue(state_root)
     return MemoryQueue(
@@ -15732,7 +15215,6 @@ def _build_cli_parser() -> _RedactedArgumentParser:
             "cancel",
             "redrive",
             "unblock",
-            "migrate",
             "purge",
             "restore",
             "quarantine-corrupt",
@@ -15811,23 +15293,6 @@ def _cli_work(args, parser) -> int:
     print(json.dumps({"counts": counts}, sort_keys=True))
     if summary.failed or summary.dead or summary.remaining_eligible:
         return 1
-    return 0
-
-
-def _cli_migrate(_args, _parser) -> int:
-    receipt = migrate_legacy_queue(_state_root())
-    print(
-        json.dumps(
-            {
-                "codes": list(receipt.codes),
-                "counts": {
-                    "imported": receipt.imported,
-                    "quarantined": receipt.quarantined,
-                },
-            },
-            sort_keys=True,
-        )
-    )
     return 0
 
 
@@ -15959,7 +15424,6 @@ _CLI_COMMANDS = {
     "list": _cli_list,
     "status": _cli_status,
     "work": _cli_work,
-    "migrate": _cli_migrate,
     "quarantine-corrupt": _cli_quarantine_corrupt,
     "purge-corrupt": _cli_purge_corrupt,
     "cancel": _cli_cancel,

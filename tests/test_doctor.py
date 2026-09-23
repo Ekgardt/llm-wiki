@@ -207,18 +207,6 @@ def test_doctor_accepts_active_graph_v2_without_code_capture(tmp_path: Path) -> 
     assert _check(report, "generation")["status"] == "ok"
 
 
-def _write_lease(path: Path, *, pid: int | None, acquired_at: str) -> None:
-    task = {
-        "id": path.stem,
-        "attempts": 0,
-        "payload": {"secret": "never report"},
-        "lease_acquired_at": acquired_at,
-    }
-    if pid is not None:
-        task.update(lease_pid=pid, lease_token="token-123")
-    path.write_text(json.dumps(task), encoding="utf-8")
-
-
 def _write_lock(path: Path, *, pid: int, acquired_at: str) -> None:
     path.write_text(
         json.dumps(
@@ -275,7 +263,7 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         root / "scripts",
         root / "integrations" / "claude-code",
         root / "integrations" / "codex",
-        state_root / "run" / "queue",
+        state_root / "run",
         state_root / "logs",
         state_root / "cache",
         home,
@@ -585,33 +573,29 @@ def test_read_only_missing_runtime_does_not_create_it(tmp_path):
     assert not state_root.exists()
 
 
-def test_queue_reports_counts_without_payloads(tmp_path):
+def test_queue_counts_retained_json_records_without_reading_them(tmp_path):
+    """The JSON queue of v3.3.0–v3.4.0 is counted and named, never read (2026-09-23)."""
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
     queue = state_root / "run" / "queue"
+    queue.mkdir()
     secret = "TOP-SECRET-QUEUE-PAYLOAD"
     (queue / "pending.json").write_text(
         json.dumps({"attempts": 1, "payload": {"prompt": secret}}), encoding="utf-8"
     )
-    (queue / "failed.json").write_text(
-        json.dumps({"attempts": 5, "payload": {"prompt": secret}}), encoding="utf-8"
-    )
-    lease = queue / "stuck.processing"
-    lease.write_text(secret, encoding="utf-8")
-    old = datetime.now(timezone.utc) - timedelta(minutes=20)
-    os.utime(lease, (old.timestamp(), old.timestamp()))
+    (queue / "stuck.processing").write_text(secret, encoding="utf-8")
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     check = _check(report, "queue")
 
     assert (
         check["status"],
-        check["details"]["pending"],
-        check["details"]["permanently_failed"],
-        check["details"]["stale_leases"],
+        check["details"]["legacy_retained"],
+        "legacy_queue_retained" in check["details"]["deletion_codes"],
+        "run/queue" in check["message"],
         secret in json.dumps(report),
-    ) == ("error", 2, 1, 1, False)
+    ) == ("degraded", 2, True, True, False)
 
 
 def test_index_missing_stale_and_fresh_states(tmp_path):
@@ -1350,125 +1334,6 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     doctor._release_maintenance_owner(coordinator, lease)
 
 
-def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "legacy.processing"
-    _write_lease(
-        lease,
-        pid=None,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-
-    report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert lease.exists()
-    assert not (state_root / "run" / "queue-migrated-v2").exists()
-    assert _check(report, "queue")["details"]["migration"] == "pending"
-
-
-def test_stale_lease_with_active_owner_is_never_recovered(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "active.processing"
-    _write_lease(
-        lease,
-        pid=os.getpid(),
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-
-    run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert lease.exists()
-    assert not lease.with_suffix(".json").exists()
-
-
-def test_stale_lease_with_dead_owner_is_recovered(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert not lease.exists()
-    assert any((state_root / "run" / "queue-quarantine").iterdir())
-    assert any(item["action"] == "recover_stale_lease" for item in report["repaired"])
-
-
-def test_lease_recovery_never_clobbers_target_appearing_concurrently(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "race.processing"
-    target = lease.with_suffix(".json")
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-
-    def target_appears(source, destination, **kwargs):
-        Path(destination).write_text("new task", encoding="utf-8")
-        raise FileExistsError
-
-    monkeypatch.setattr(doctor.os, "link", target_appears)
-
-    doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert not lease.exists()
-    assert not target.exists()
-    assert any((state_root / "run" / "queue-quarantine").iterdir())
-
-
-def _recovered_leases(reports) -> int:
-    return sum(
-        item.get("count", 0)
-        for report in reports
-        for item in report["repaired"]
-        if item["action"] == "recover_stale_lease"
-    )
-
-
-def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: pid == os.getpid())
-
-    def repair():
-        return doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        reports = list(pool.map(lambda _: repair(), range(2)))
-
-    assert (
-        _recovered_leases(reports),
-        lease.exists(),
-        (state_root / "run" / "queue-migrated-v2").exists(),
-    ) == (1, False, True)
-
-
 def test_repair_never_mutates_personal_markdown(tmp_path, monkeypatch):
     import doctor
 
@@ -1727,15 +1592,16 @@ def test_queue_ignores_symlink_entries_without_following_payload(tmp_path):
     root, state_root, home = _build_root(tmp_path)
     external = tmp_path / "outside.json"
     external.write_text('{"payload":"OUTSIDE-SECRET"}', encoding="utf-8")
+    (state_root / "run" / "queue").mkdir()
     link = state_root / "run" / "queue" / "linked.json"
     _symlink_or_skip(link, external)
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     queue = _check(report, "queue")
 
-    assert queue["status"] == "degraded"
-    assert queue["details"]["unsafe_entries"] == 1
-    assert queue["details"]["pending"] == 0
+    assert queue["status"] == "error"
+    assert queue["details"]["artifact_error"] is True
+    assert queue["details"]["legacy_retained"] == 1
     assert "OUTSIDE-SECRET" not in json.dumps(report)
 
 
@@ -2039,51 +1905,12 @@ def test_stale_lock_takeover_aborts_when_opened_file_identity_changes(tmp_path, 
     assert lock.exists()
 
 
-@pytest.mark.parametrize("active", [True, False])
-def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    queue = state_root / "run" / "queue"
-    lease = queue / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    lock = queue / ".doctor-recovery.lock"
-    _write_lock(
-        lock,
-        pid=os.getpid() if active else 888888,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_pid_alive",
-        lambda pid: active if pid in {os.getpid(), 888888} else False,
-    )
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-    check = _check(report, "queue")
-
-    observed = (
-        lease.exists(),
-        check["details"].get("repair_deferred") is True,
-        "deferred" in check["message"].lower(),
-        (state_root / "run" / "queue-migrated-v2").exists(),
-        lock.exists(),
-    )
-    deferred = (True, True, True, False, True)
-    recovered = (False, False, False, True, False)
-    assert observed == (deferred if active else recovered), check
-
-
 def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
     queue = state_root / "run" / "queue"
+    queue.mkdir()
     for number in range(250):
         (queue / f"{number:04}.json").write_bytes(b"x" * 70_000)
 
@@ -2099,8 +1926,8 @@ def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
 
     assert (
         elapsed < 0.5,
-        details["truncated"],
-        details["scanned"] <= 200,
+        details["artifact_truncated"],
+        details["legacy_retained"] <= 200,
         _check(report, "queue")["status"],
     ) == (True, True, True, "degraded")
 

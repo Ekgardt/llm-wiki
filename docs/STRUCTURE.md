@@ -123,8 +123,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── ready/<00-ff>/<id>.json   indexed intents awaiting terminal outcome
 │   ├── reliability-v3-migration.json approved resumable cutover manifest
 │   ├── reliability-v3-adopted.json   approved complete cutover evidence
-│   ├── queue/                        legacy migration input only
-│   ├── queue-migrated-v2             migration completion marker
+│   ├── queue/                        JSON queue of v3.3.0–v3.4.0: refused, never imported
+│   ├── queue-migrated-v2             marker of earlier releases, read by nothing
 │   ├── state.json                    automation + compile receipts
 │   ├── lsp/<owner-nonce>/             bounded LSP process scratch
 │   │   ├── owner.json                 immutable create-only owner evidence
@@ -710,8 +710,8 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
   holds bounded live process scratch created by the
   owning LSP lifecycle. Its `lease.json` is a bounded mutable live
   lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
-  `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
-  migration input only. The approved audit-closure target adds `run/install/` for
+  `owner.json` and `failure.json`. Existing `run/queue/*.json` is refused and
+  named, never imported (2026-09-23). The approved audit-closure target adds `run/install/` for
   manifest-owned install, rollback, scheduler, and external-preimage state.
 - `cache/cognee/` — retired disposable legacy cache. It has no supported reader and
   is never removed automatically.
