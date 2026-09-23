@@ -125,6 +125,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A barrier proves concurrency; a stopwatch measured the machine.** The
+  three parallel version probes of `detect_code_tools` were asserted to finish
+  under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run
+  35857662331) with nothing wrong. They now meet at one `threading.Barrier`,
+  which a sequential probe would break. See
+  `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
 - **A dead task names its reason.** Every exception a processor raised became
   the one code `processor_failed`; on the live vault 225 failed attempts of 25
   dead `flush` tasks said only that, while the failure trail held the actual
