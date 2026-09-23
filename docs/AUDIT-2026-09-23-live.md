@@ -184,7 +184,8 @@ the owner's sign-off first (CLAUDE.md §0).
 
 ### D2. `install_pyright.py` refuses to repair the install it is recommended for — Fixed
 - `pyright_existing_install_invalid <- pyright_manifest_predates_tree_digest`, exit 1. A
-  pre-era receipt now retires the directory and the pinned release installs fresh.
+  pre-era receipt now removes the directory and the pinned release installs fresh; the
+  re-validation of a valid install no longer reads `dist/typeshed-fallback/` as a file.
 
 ## What the owner decides
 1. B1 — take `journal.md` out of the memory generation (structure change).

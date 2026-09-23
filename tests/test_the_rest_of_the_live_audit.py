@@ -234,6 +234,35 @@ def test_a_pre_era_pyright_receipt_is_retired_and_the_release_installs_fresh(tmp
 
     result = install_pyright(state_root=state_root, artifact=artifact.path)
 
-    retired = [p.name for p in root.parent.iterdir() if p.name.startswith("1.1.411.retired-")]
+    siblings = sorted(p.name for p in root.parent.iterdir() if not p.name.startswith("."))
     fresh = json.loads(manifest.read_text(encoding="utf-8"))
-    assert (result.version, len(retired), "executed_tree_sha256" in fresh) == ("1.1.411", 1, True)
+    assert (result.version, siblings, "executed_tree_sha256" in fresh) == ("1.1.411", ["1.1.411"], True)
+
+
+def test_a_directory_under_dist_does_not_invalidate_a_valid_install(tmp_path, monkeypatch) -> None:
+    """pyright ships `dist/typeshed-fallback/`; re-validation read it as a file."""
+    import tarfile
+
+    from install_pyright import install_pyright
+
+    from tests.code_kernel_helpers import (
+        PyrightTarEntry,
+        _default_pyright_entries,
+        create_pyright_install_artifact,
+        use_pyright_install_artifact_identity,
+    )
+
+    server = b"synthetic pyright language server\n"
+    entries = (
+        *_default_pyright_entries(None, server, True, True),
+        PyrightTarEntry("package/dist/typeshed-fallback/", b"", tarfile.DIRTYPE),
+        PyrightTarEntry("package/dist/typeshed-fallback/builtins.pyi", b"class object: ...\n"),
+    )
+    artifact = create_pyright_install_artifact(tmp_path / "pyright.tgz", entries=entries)
+    use_pyright_install_artifact_identity(monkeypatch, artifact)
+    state_root = tmp_path / "state"
+
+    first = install_pyright(state_root=state_root, artifact=artifact.path)
+    second = install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert (first.manifest_sha256 == second.manifest_sha256, second.version) == (True, "1.1.411")

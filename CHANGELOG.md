@@ -109,7 +109,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   beyond the newest 20 (`scripts/retire_lsp_evidence.py`). Session
   consolidation gives its provider the compile's 300 s ceiling instead of the
   client's 90 s default, and `install_pyright.py` reinstalls over a receipt that
-  predates the tree digest instead of refusing the repair it is recommended for.
+  predates the tree digest instead of refusing the repair it is recommended for,
+  and re-validates an installed tree by its files only (pyright ships
+  `dist/typeshed-fallback/` as a directory, which every re-run had read as a file).
   `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 - **A stray pre-adoption candidate no longer stops the memory in silence.** A
   pytest session whose state root resolved to the live vault left an empty

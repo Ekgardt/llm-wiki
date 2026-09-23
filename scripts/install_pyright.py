@@ -15,6 +15,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import stat
 import sys
 import tarfile
@@ -2167,10 +2168,13 @@ def _recorded_server_digest(server_raw: bytes, validated: dict[str, object]) -> 
 def _executed_tree_snapshots(
     snapshots: dict[str, _ExistingEntry],
 ) -> tuple[tuple[str, _ExistingEntry], ...]:
+    # Files only, as `record_executed` keeps at install time: pyright ships
+    # `dist/typeshed-fallback/` as a directory, and reading it as a member made
+    # every re-validation of a valid install answer "expected a regular file".
     rows = tuple(
         (relative, entry)
         for relative, entry in sorted(snapshots.items())
-        if _is_executed_tree_relative(relative)
+        if _is_executed_tree_relative(relative) and entry.kind == "file"
     )
     if len(rows) > _profile.MAX_EXECUTED_TREE_FILES:
         raise PyrightInstallError("pyright_existing_install_invalid")
@@ -2353,19 +2357,16 @@ def _predates_tree_digest(error: BaseException) -> bool:
 
 
 def _retire_pre_era_install(parent: _Handle, root: Path) -> None:
-    """Move a pre-era install aside so the pinned release installs fresh.
+    """Remove a pre-era install so the pinned release installs fresh.
 
     The installer is the documented repair for `pyright_manifest_predates_tree_digest`
     and refused to run over exactly that install on the live vault of 2026-09-23.
-    The managed tree is disposable cache; the receipt is what cannot be trusted.
+    The managed tree is disposable cache and its receipt is what cannot be trusted,
+    so nothing is kept: a renamed copy left beside the root made the parent's
+    listing refuse the fresh install ("expected a regular file").
     """
-    retired = f"{_profile.PYRIGHT_VERSION}.retired-{int(time.time())}"
-    if os.name == "nt":
-        os.rename(root, root.with_name(retired))
-        return
-    os.rename(
-        _profile.PYRIGHT_VERSION, retired, src_dir_fd=parent.value, dst_dir_fd=parent.value
-    )
+    del parent
+    shutil.rmtree(root)
 
 
 def _new_hashes():

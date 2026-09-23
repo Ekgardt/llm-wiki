@@ -83,8 +83,14 @@ Files: `scripts/scheduled_nightly.py`, `scripts/scheduled_weekly.py`,
   `install_pyright.py` for `pyright_manifest_predates_tree_digest`; the installer answered
   `pyright_existing_install_invalid` caused by that very code and installed nothing, because
   an existing directory is validated and never replaced. An install whose receipt predates the
-  tree digest is now moved aside (`<version>.retired-<epoch>`, disposable cache) and the
-  pinned release installs fresh; any other invalid install is still refused.
+  tree digest is now removed (disposable cache; a copy left beside the root made the parent's
+  listing refuse the fresh install) and the pinned release installs fresh; any other invalid
+  install is still refused. Running the installer over the fresh install then failed the
+  same way with `PermissionError: expected a regular file`: the on-disk re-validation of the
+  executed tree read every entry under `package/dist` as a file, and pyright 1.1.411 ships
+  `dist/typeshed-fallback/` as a directory (897 directories, 5 423 files in the package).
+  Install time records only files (`record_executed`), so re-validation now digests files
+  only, and a second run over a valid install answers with the same receipt.
 
 ## Cost, by rule 4
 
