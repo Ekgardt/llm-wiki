@@ -41,6 +41,27 @@ os.environ.setdefault("LLMWIKI_NO_ENCODER_WARMUP", "1")
 _USE_EXTERNAL_STATE = os.environ.get(
     "LLM_WIKI_TEST_USE_EXTERNAL_STATE", ""
 ).lower() in {"1", "true", "yes"}
+
+
+def _external_state_root_problem(state_root: Path, vault_root: Path) -> str | None:
+    """Why an external state root may not be used: it is the vault, or inside it.
+
+    This checkout is the owner's live vault, and a pytest session whose state
+    root resolved here left a stray coordinator candidate in `run/` on
+    2026-09-17 that refused every Markdown writer for six days. See
+    `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+    """
+    resolved = state_root.resolve()
+    vault = vault_root.resolve()
+    if resolved != vault and vault not in resolved.parents:
+        return None
+    return (
+        f"LLM_WIKI_STATE_ROOT={resolved} is the vault {vault} or inside it; a test "
+        "session there writes into the live run/. Point LLM_WIKI_STATE_ROOT outside "
+        "the checkout."
+    )
+
+
 _EARLY_STATE_ROOT: Path | None = None
 if not _USE_EXTERNAL_STATE:
     # Set this before pytest imports test modules; those imports may load
@@ -48,7 +69,11 @@ if not _USE_EXTERNAL_STATE:
     _EARLY_STATE_ROOT = Path(tempfile.mkdtemp(prefix="llm-wiki-test-state-"))
     os.environ["LLM_WIKI_STATE_ROOT"] = str(_EARLY_STATE_ROOT)
 else:
-    os.environ.setdefault("LLM_WIKI_STATE_ROOT", str(VAULT_ROOT))
+    _problem = _external_state_root_problem(
+        Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(VAULT_ROOT))), VAULT_ROOT
+    )
+    if _problem is not None:
+        raise pytest.UsageError(_problem)
 
 # 2. Isolated state root OUTSIDE the vault for hermetic tests (production
 #    runtime lives inside the vault under gitignored cache/logs/run/, but
@@ -188,7 +213,24 @@ os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")
 # the test it happened in. One short append per test costs nothing and survives a
 # kill. Research:
 # docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
-_PROGRESS_FILE = os.environ.get("LLM_WIKI_TEST_PROGRESS_FILE")
+def _arm_progress_file(path: str | None) -> str | None:
+    """The progress path with its directory in place, or None when there is none.
+
+    The workflow names a file under `pytest-timings/`, a directory nothing
+    creates before pytest writes the junit file at session end; every append
+    before that raised `FileNotFoundError` into the `except OSError` below, so
+    the Windows shard that died on 2026-09-23 left no line. One `mkdir` here.
+    """
+    if not path:
+        return None
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return path
+
+
+_PROGRESS_FILE = _arm_progress_file(os.environ.get("LLM_WIKI_TEST_PROGRESS_FILE"))
 
 
 def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001

@@ -81,6 +81,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A stray pre-adoption candidate no longer stops the memory in silence.** A
+  pytest session whose state root resolved to the live vault left an empty
+  `run/markdown-transactions-v3.candidate.sqlite3` there on 2026-09-17; the
+  adoption boundary refused every capture, checkpoint and compile for six days
+  while doctor named only the symptoms. Doctor now has an `adoption` check that
+  reports the refusal as an error with its cause and the stray path, and
+  `--repair` moves an empty, ownerless candidate to `run/coordinator-quarantine/`
+  (retained evidence, never deleted) once no adoption is in flight. The test
+  harness refuses an external state root that is the vault or inside it, and
+  the per-test progress file gets its directory before the first test.
+  `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+
 - **A repeated append no longer hashes the file it only has to find.** The
   2026-09-18 presence check read and digested the whole daily log outside any
   lock, so under eighteen concurrent writers it refused with `transaction

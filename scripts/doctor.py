@@ -57,6 +57,25 @@ VALID_REPAIR_ACTIONS = frozenset(
     {"runtime", "transactions", "queue", "indexes", "archives", "generations"}
 )
 RUNTIME_DIRECTORIES = ("run", "logs", "cache")
+# A stray pre-adoption candidate is moved here by `--repair`, never deleted; the
+# directory is retained evidence for the `run/` deletion contract like
+# `run/queue-quarantine`. See
+# `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+COORDINATOR_QUARANTINE = "run/coordinator-quarantine"
+COORDINATOR_CANDIDATE = "run/markdown-transactions-v3.candidate.sqlite3"
+QUEUE_CANDIDATE = "run/queue-v3.candidate.sqlite3"
+# Every row-bearing coordinator table except `maintenance_owners`, whose rows
+# are judged by expiry instead.
+_CANDIDATE_ROW_TABLES = (
+    "transaction",
+    "operation",
+    "intent_fences",
+    "project_leases",
+    "writer_owners",
+    "project_checkpoints",
+    "blackboard_claims",
+    "capture_binding_projections",
+)
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
@@ -370,6 +389,7 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
         "legacy_malformed": 0,
         "results_retained": 0,
         "queue_quarantined": 0,
+        "coordinator_quarantined": 0,
         "artifact_error": False,
         "artifact_truncated": False,
         "deletion_codes": [],
@@ -387,6 +407,7 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     for key, relative in (
         ("results_retained", "run/queue-results"),
         ("queue_quarantined", "run/queue-quarantine"),
+        ("coordinator_quarantined", COORDINATOR_QUARANTINE),
     ):
         _count_queue_artifact_directory(
             state_root, relative, key, deadline, details
@@ -430,6 +451,7 @@ def _append_queue_artifact_codes(details: dict) -> None:
         ("legacy_malformed", "legacy_queue_malformed"),
         ("results_retained", "queue_result_retained"),
         ("queue_quarantined", "queue_quarantine_retained"),
+        ("coordinator_quarantined", "coordinator_quarantine_retained"),
     ):
         if details[key]:
             details["deletion_codes"].append(code)
@@ -8673,11 +8695,134 @@ def _release_unentered_maintenance(
         )
 
 
+def _stray_candidates(state_root: Path) -> list[str]:
+    """The pre-adoption candidate paths that still exist, by their plain names."""
+    return [
+        relative
+        for relative in (COORDINATOR_CANDIDATE, QUEUE_CANDIDATE)
+        if _safe_kind(state_root / relative, state_root)[0] != "missing"
+    ]
+
+
+def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
+    message = f"Every Markdown writer is refused: {cause}."
+    if strays:
+        message += " Stray candidate: " + ", ".join(strays) + "."
+    return message + " Repair: `uv run python scripts/doctor.py --repair`."
+
+
+def _adoption_check(root: Path, state_root: Path) -> dict:
+    """Whether the adoption boundary admits writers at all; an error names why.
+
+    Every capture, checkpoint and compile passes `require_reliability_v3_adopted`
+    first, and for six days on the owner's vault it refused them all while doctor
+    reported only the symptoms. This reads two small records and `lstat`s two
+    paths, so no bound on `run/state.json` can hide it.
+    """
+    from installed_memory_repair import (
+        ReliabilityV3ValidationError,
+        require_reliability_v3_adopted,
+    )
+    from markdown_transaction import _reliability_v3_records_present
+    from secret_redact import describe_error_chain
+
+    if not _reliability_v3_records_present(state_root):
+        message = "Reliability V3 is not adopted here; writers use the legacy path."
+        return _result("adoption", "ok", message, {"adopted": False})
+    strays = _stray_candidates(state_root)
+    details: dict[str, Any] = {"adopted": True, "stray_candidates": strays}
+    try:
+        require_reliability_v3_adopted(root=root, state_root=state_root)
+    except ReliabilityV3ValidationError as exc:
+        details.update(code=exc.code, cause=describe_error_chain(exc))
+        message = _adoption_refusal_message(exc.code, details["cause"], strays)
+        return _result("adoption", "error", message, details)
+    return _result("adoption", "ok", "The adoption record admits writers.", details)
+
+
+def _candidate_rows_held(database: sqlite3.Connection) -> str | None:
+    """The first table that still holds a row, or None when all are empty."""
+    for table in _CANDIDATE_ROW_TABLES:
+        held = database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+        if held is not None:
+            return f"holds a row in {table}"
+    return None
+
+
+def _live_maintenance_owner(database: sqlite3.Connection, now: datetime) -> str | None:
+    from operational_ownership import _parse_timestamp
+
+    for row in database.execute("SELECT actor_id, expires_at FROM maintenance_owners"):
+        if _parse_timestamp(row[1]) > now:
+            return f"maintenance owner {row[0]} is live until {row[1]}"
+    return None
+
+
+def _candidate_content_reason(state_root: Path, candidate: Path, now: datetime) -> str | None:
+    """Why the candidate's contents forbid retiring it, or None when it is empty."""
+    from markdown_transaction import _COORDINATOR_V3_CONTRACT
+
+    with closing(
+        reliable_memory.open_readonly_operational_db(
+            candidate,
+            state_root,
+            max_bytes=MAX_OPERATIONAL_DB_BYTES,
+            contract=_COORDINATOR_V3_CONTRACT,
+        )
+    ) as database:
+        return _candidate_rows_held(database) or _live_maintenance_owner(database, now)
+
+
+def _stray_candidate_retention_reason(
+    state_root: Path, candidate: Path, now: datetime
+) -> str | None:
+    """Why the candidate must stay: an adoption in flight, or content it still holds."""
+    from installed_memory_repair import _operation_artifacts
+
+    if _safe_kind(state_root / "run" / "reliability-v3-adopted.json", state_root)[0] != "regular":
+        return "no complete adoption record"
+    artifacts, _truncated = _operation_artifacts(state_root / "run")
+    if artifacts:
+        return "an adoption operation is in flight: " + ", ".join(sorted(artifacts))
+    try:
+        return _candidate_content_reason(state_root, candidate, now)
+    except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+        return f"its contents could not be read: {describe_error(exc)}"
+
+
+def _retire_stray_candidate(context: _RepairContext) -> None:
+    """Move an empty, ownerless pre-adoption coordinator candidate out of the way.
+
+    It runs before the maintenance owner is taken because while the stray exists
+    no owner can be taken at all. The file is renamed, never deleted.
+    """
+    candidate = context.state_path / COORDINATOR_CANDIDATE
+    if _safe_kind(candidate, context.state_path)[0] != "regular":
+        return
+    reason = _stray_candidate_retention_reason(
+        context.state_path, candidate, context.generated_at
+    )
+    if reason is not None:
+        context.repair_errors.setdefault("runtime", []).append(
+            f"Stray candidate kept: {reason}"
+        )
+        return
+    stamp = context.generated_at.strftime("%Y%m%dT%H%M%SZ")
+    destination = context.state_path / COORDINATOR_QUARANTINE / f"{stamp}-{candidate.name}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    candidate.rename(destination)
+    context.repaired.append(
+        {"action": "retire_stray_candidate", "path": destination.relative_to(context.state_path).as_posix()}
+    )
+
+
 def _run_repairs(context: _RepairContext) -> None:
     """Run every selected repair under one maintenance owner."""
     maintenance: tuple[Any, dict[str, object]] | None = None
     guard_entered = False
     try:
+        if "runtime" in context.selected_repairs:
+            _retire_stray_candidate(context)
         maintenance = _acquire_maintenance_owner(
             context.root_path, context.state_path, context.generated_at
         )
@@ -8777,6 +8922,7 @@ def _collect_checks(
     checks = [
         _environment_check(root_path, state_path),
         _runtime_check(state_path),
+        _adoption_check(root_path, state_path),
         _filesystem_check(state_path, deadline),
         _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
         _queue_check(state_path, generated_at, deadline),
