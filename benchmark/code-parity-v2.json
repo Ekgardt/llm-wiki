@@ -453,7 +453,8 @@
           "scripts/search_memory.py (def _generation_consumption_seal)"
         ],
         "must": [
-          "_manifest_seal"
+          "_manifest_seal",
+          "_generation_consumption_seal"
         ],
         "must_not": [
           "fuse_rrf"

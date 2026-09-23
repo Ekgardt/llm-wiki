@@ -30,7 +30,6 @@ WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC"}
 # alone, where the flag does not exist and nothing is translated anyway.
 POSIX_ONLY_WRITERS = frozenset(
     {
-        ("doctor.py", "_open_existing_lock"),
         ("lsp_process.py", "_publish_record_posix"),
         ("lsp_process.py", "_publish_lease_posix"),
     }
