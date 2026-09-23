@@ -25,7 +25,7 @@ the owner's sign-off first (CLAUDE.md §0).
   `adoption ok`; `compile_memory.py --dry-run` exit 0; project journals written again at 09:29.
 - Research: `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
 
-### A2. The nightly and weekly passes failed silently — Open
+### A2. The nightly and weekly passes failed silently — Fixed 2026-09-23 (`scheduled_nightly.record_scheduled_failure`: a failure before the fence is recorded in `run/state.json`, and the session-start block and doctor's `scheduler` check name it)
 - `journalctl --user -u llm-wiki-nightly.service`: exit 1 every night 2026-09-18 → 09-23 at
   `take_scheduled_fence` with the A1 refusal; `llm-wiki-weekly.service` failed 2026-09-20 the
   same way. `run/state.json` still says `last_nightly_status = success` (2026-09-17).
@@ -36,7 +36,7 @@ the owner's sign-off first (CLAUDE.md §0).
   (`last_nightly_status = failed`, the exception's head) and the session-start block must name
   it. Doctor's `scheduler` check reads that state, so it names it too.
 
-### A3. Doctor hid the diagnosis — partly Fixed (A1 check), rest Open
+### A3. Doctor hid the diagnosis — partly Fixed 2026-09-23 (A1 `adoption` check; the state bound is 4 MiB; a truncated scan says its counts are lower bounds); the hooks recency flip and `run_deletion`'s status stay Open
 - `run/state.json` is 354 509 B against doctor's 262 144-B bound, so the `scheduler` and
   `capture` checks report "could not be fully checked" instead of their findings. The file is
   large because `project_checkpoint_pending` holds 168 events for 91 projects (232 569 B) —
@@ -51,7 +51,7 @@ the owner's sign-off first (CLAUDE.md §0).
   recency verdict flips inside an hour on the same trail.
 - `run_deletion`: always status `ok`; the adoption failure code sat in its `blockers`.
 
-### A4. The session-start health block never measures — Open
+### A4. The session-start health block never measures — Fixed 2026-09-23 (the block reads the nightly's `logs/doctor-report.json`, at most 36 hours old, and says when it was measured; nothing is measured at session start)
 - `logs/session-start-last.txt`: "Health was not measured: 10 of 19 checks did not run inside
   the 0.1s budget" — every session. A budget no check set can meet reports nothing; the block
   costs tokens and carries no information. Either raise the budget to what the cheap checks
@@ -93,7 +93,7 @@ the owner's sign-off first (CLAUDE.md §0).
   under the vault, under `/tmp`, or outside any repository maps to no project; existing junk
   directories are listed for the owner to retire (they are the owner's files).
 
-### B3. The legacy FTS index can never be repaired — Open
+### B3. The legacy FTS index can never be repaired — Fixed 2026-09-23 (one collector, `search_memory._collect_pages`, for the rebuild and the freshness check)
 - `doctor --repair` 09:20: "Index repair failed: rebuilt index did not validate as fresh";
   `run/state.json` says `last_index_rebuild_ok = True`. The rebuild collects 175 pages
   (`doctor._rebuildable_pages`, `rglob`), the freshness check collects 170
@@ -120,13 +120,13 @@ the owner's sign-off first (CLAUDE.md §0).
 
 ## C. Runtime hygiene
 
-### C1. 4.0 GB of generations, 12 never activated — Open
+### C1. 4.0 GB of generations, 12 never activated — Fixed 2026-09-23 (the nightly's `repository_index.py retire` removes the generations of gone or unmarked checkouts and all but the newest two of a live one; the vault's own code generation is registered and never activated by design)
 - `cache/evidence-graph/generations`: 15 directories, 99 MB–434 MB each, 4.0 GB. The nightly's
   `prune_generations` reports `12 pending activation` and removes only superseded ones; the
   pending ones are code generations of agent worktrees registered on 2026-09-14/15 and never
   activated. Nothing ever removes a registered-never-activated generation.
 
-### C2. 80 LSP failure roots retained, pyright degraded — Open
+### C2. 80 LSP failure roots retained, pyright degraded — Fixed 2026-09-23 (`scripts/retire_lsp_evidence.py` in the nightly keeps the newest 20 failure roots and none older than 14 days; `install_pyright.py` retires a pre-era install and reinstalls)
 - `run/lsp/`: 80 owner roots with `failure.json` `process_exited` (40 on 2026-09-13, 20 on
   09-14, 20 on 09-15). Doctor: "LSP runtime owners are bounded" (ok) and
   `pyright_manifest_predates_tree_digest` (degraded, `install_pyright.py` recommended).
@@ -139,7 +139,7 @@ the owner's sign-off first (CLAUDE.md §0).
   August logs. Neither table stores the exception text; the operator cannot learn why five
   attempts fail for every one that succeeds.
 
-### C4. `run/state.json` as an unbounded ledger — Open
+### C4. `run/state.json` as an unbounded ledger — Fixed 2026-09-23 (pending checkpoint events older than 30 days of vault activity expire and are counted as `checkpoint_expired` in the failure trail; junk projects no longer mint a slug, B2)
 - 354 509 B, 36 keys; `project_checkpoint_pending` 232 569 B, `codex_heartbeats` 4 506 B.
   Pending events drain only on a successful checkpoint of the same project, so junk projects
   (B2) keep theirs forever, and the file crosses doctor's bound (A3).
@@ -150,7 +150,7 @@ the owner's sign-off first (CLAUDE.md §0).
   `78a729ea` (2026-08-22) while `95b02427` runs; the install record does not describe the
   running code.
 
-### C6. The session-start block misinforms — Open
+### C6. The session-start block misinforms — Fixed 2026-09-23 (daily logs are counted at the top level only; a dry run moves no clock; a guard rail is rendered with its continuation lines)
 - "346 daily logs": `_count_md(DAILY_DIR)` recurses into `receipts/` (320 files). "82 active
   projects": counts the junk of B2. The guard-rails block prints a truncated rule ("a daily log
   larger than the compile input budget should be").
