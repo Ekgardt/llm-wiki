@@ -182,14 +182,14 @@ consumers fall back honestly to legacy retrieval or bounded live extraction.
 Three local tiers share the same Markdown corpus:
 
 ### Base retrieval tier (no optional search extras)
-1. **BM25 (weight=2.0)**: SQLite FTS5 full-text search. Title boost (5x exact), filename boost (10x match short-circuit).
+1. **BM25 (weight=2.0)**: SQLite FTS5 over the active evidence generation; without one, a bounded direct read of Markdown marked `no_active_generation`. Title boost (5x exact), filename boost (10x match short-circuit).
 2. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 No embedding model, vector cache, or optional package is required in this tier.
 
 ### Optional semantic tier (`uv sync --extra semantic`)
-1. **BM25 (weight=2.0)**: SQLite FTS5.
-2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small. Vectors are cached in `vectors.npy` with `vectors_meta.json` metadata.
+1. **BM25 (weight=2.0)**: SQLite FTS5 over the generation.
+2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small over the generation's `vectors.npy` (with `vectors.json` beside it).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
@@ -293,9 +293,9 @@ Provider fallback has a distinct cache key; unknown provider/model identity disa
 persistent cache hits.
 
 Queue delivery is at least once, never exactly-once. Leases and acknowledgements are
-fenced; handlers use stable operation IDs for idempotent side effects. Legacy JSON
-tasks migrate once to the rollback-journal `run/queue.sqlite3`; malformed sources are
-quarantined, and migration aborts if a legacy owner cannot be excluded. Workers are
+fenced; handlers use stable operation IDs for idempotent side effects. The JSON
+queue of releases before v4.0.0 is not imported: a `run/queue/` holding records is
+refused and named by `doctor`. Workers are
 short-lived and bounded, not a persistent daemon. Terminal purge is manual and
 export-first. A source failure, retained task/result, or live owner remains visible
 and blocks unsafe cleanup.

@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
+  reader (no writer since 2026-08-20, no file on the live vault), the
+  positional `git_range` of `analyze_impact` (every caller names its
+  endpoints), and the readers for incremental-manifest versions v1–v4 (every
+  generation on the live vault is v5; a fresh install builds v5). A parent
+  whose manifest cannot be read is now rebuilt in full instead of failing the
+  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
+  queue migration stay, with the evidence and the plan for each in
+  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
+  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
+  are read and written by nothing: their builders, readers, swap lock and
+  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
+  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
+  a hundred functions with them. On the live vault the legacy index answered
+  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
+  it by design until now. The evidence generation is the only index: without
+  one a search reads Markdown directly, bounded by its deadline, and every
+  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
+  the generation and `--status` names it. See
+  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
+- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
+  per task under `run/queue/`; the importer, its marker, quarantine, lease
+  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
+  installers still created. Measured before removal: the installer's adoption
+  already refused such a vault and never ran the import. A `run/queue/` holding
+  records is now refused by the queue (`legacy_json_queue_unsupported`) and
+  named by `doctor`, which keeps `run/` from deletion while they exist. See
+  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+
+### Changed
+
+- **A fresh install builds its first generation.** `doctor` reports a missing
+  generation as degraded and repairable instead of "legacy retrieval remains
+  available", so the installer's `sync_memory.py --apply` builds it (measured:
+  48.9 s for the live vault's 189 pages with vectors, into a scratch state
+  root), `doctor --rebuild-generation` builds it on demand, and a
+  generation reason (`generation_corrupt`, …) is reported ahead of the
+  Markdown read's `no_active_generation` when both apply.
+
 ### Deprecated
 
 - **`compile_memory.py --all`.** It has never changed anything: every daily log
@@ -14,6 +56,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   prints one line saying it does nothing and will be removed.
 
 ### Changed
+
+- **One limit, one place.** Fifteen numeric bounds that were copied into a
+  second module now have one owner each (the 64 KiB I/O chunk, the archive
+  installers' bounds, the extractors' bounds, the capture-intent bound, the
+  hook lock timeout, the index bound, the hook-configuration bound, the
+  generation-manifest bound, the ninety hot days); doctor reads the hook
+  configuration and a generation's manifest under the writers' own bounds
+  instead of smaller ones of its own. Every remaining name reused for a
+  different bound says what it bounds, and `tests/test_one_limit_one_place.py`
+  refuses a new copy. `docs/LIMITS-2026-09-23.md` lists every limit with no
+  recorded reason. `docs/research/2026-09-23-one-limit-one-place.md`.
+- **The memory generation carries a project's claim pages, not its journal.**
+  On the live vault of 2026-09-23 `journal.md` was 94 % of the search index's
+  bytes — one checkpoint event per chunk — and most of the reranker's time;
+  the accepted 2026-09-10 decision already names `state.md`/`context.md` as the
+  claim pages and the journal as the event log. The journal stays on disk,
+  consolidated nightly and greppable, as session records do.
+- **A directory is a project only if the owner could be working in it.** The
+  slug rule refuses a directory inside the vault, a direct child of the
+  platform's temporary directory (what `mkdtemp` and the provider CLI make) and
+  the home directory, for every caller at once. The audit found 85 project
+  directories, minted for a benchmark run under `cache/`, a transaction under
+  `run/`, `/tmp`, the provider's temp directory, `$HOME` and the vault itself.
+  `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
 
 - **The navigation gate measures our share, not the machine.**
   `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
@@ -38,6 +104,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **A ledger of things and events, posted once and counted by code.** The
+  nightly fact-keys call now also returns, per user turn, the things the person
+  names and the dated events about them; `scripts/ledger.py` posts each record
+  once under a digest of its fields and source pointer, merges two records of one
+  thing within 30 days into one event unless a stated quantity contradicts (the
+  CDC's case de-duplication rule, decided field by field as Fellegi–Sunter), and
+  `count` answers "how many" over every record of a kind with a tier —
+  "confirmed" when every record is the user's own dated words, "probable"
+  otherwise — and the pointers; `reconcile` flags a reader's number the ledger
+  does not hold. The rows ride into the generation as a `ledger` table of
+  `search.sqlite3`, disposable like the rest of it; a generation built before the
+  table carries none and the reader is told so. A thing seen on two or more days
+  opens the recurrence gate and its entity page is extended with dated pointer
+  lines by code, never rewritten by a model. Zero provider calls at question
+  time. Approved 2026-09-22; see `docs/STRUCTURE.md` and
+  `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
 - **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
   records all of them on `694991b`: the parity stand at 16 of 16 against the
   other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the
@@ -64,6 +146,57 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
 ### Fixed
+
+- **A barrier proves concurrency; a stopwatch measured the machine.** The
+  three parallel version probes of `detect_code_tools` were asserted to finish
+  under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run
+  35857662331) with nothing wrong. They now meet at one `threading.Barrier`,
+  which a sequential probe would break. See
+  `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
+- **A dead task names its reason.** Every exception a processor raised became
+  the one code `processor_failed`; on the live vault 225 failed attempts of 25
+  dead `flush` tasks said only that, while the failure trail held the actual
+  reason (`intent_fence_lost`) for seven of them. A failed attempt now carries
+  a queue error's own code, or `processor_failed:<reason>` naming the
+  exception's type or its code-shaped message, bounded to the column's 64
+  bytes and never the message text. See
+  `docs/research/2026-09-23-a-dead-task-names-its-reason.md`.
+- **A scheduled pass that fails before it starts is recorded as failed.** The
+  nightly and weekly passes take their fence first; a refusal there exited 1
+  and left `last_nightly_status = success` for six nights while session start
+  said nothing. Doctor also says when a transaction scan stopped at its row
+  bound (its counts are lower bounds), admits a `run/state.json` up to 4 MiB (the writer's
+  own bound exceeds the old 256 KiB), and rebuilds the legacy index with the
+  same page collector its freshness check uses, so the repair can succeed.
+  Session start counts daily logs at the top level (receipts are not logs), the
+  guard-rails block joins a wrapped one-sentence summary, a compile dry run moves
+  no clock, pending checkpoint events older than 30 days of vault activity are
+  dropped and noted, and the nightly retires LSP failure roots older than 14 days
+  beyond the newest 20 (`scripts/retire_lsp_evidence.py`). Session
+  consolidation gives its provider the compile's 300 s ceiling instead of the
+  client's 90 s default, and `install_pyright.py` reinstalls over a receipt that
+  predates the tree digest instead of refusing the repair it is recommended for,
+  and re-validates an installed tree by its files only (pyright ships
+  `dist/typeshed-fallback/` as a directory, which every re-run had read as a file).
+  `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
+- **A stray pre-adoption candidate no longer stops the memory in silence.** A
+  pytest session whose state root resolved to the live vault left an empty
+  `run/markdown-transactions-v3.candidate.sqlite3` there on 2026-09-17; the
+  adoption boundary refused every capture, checkpoint and compile for six days
+  while doctor named only the symptoms. Doctor now has an `adoption` check that
+  reports the refusal as an error with its cause and the stray path, and
+  `--repair` moves an empty, ownerless candidate to `run/coordinator-quarantine/`
+  (retained evidence, never deleted) once no adoption is in flight. The test
+  harness refuses an external state root that is the vault or inside it, and
+  the per-test progress file gets its directory before the first test.
+  `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+
+- **A repeated append no longer hashes the file it only has to find.** The
+  2026-09-18 presence check read and digested the whole daily log outside any
+  lock, so under eighteen concurrent writers it refused with `transaction
+  target changed while hashing` and a line already on disk was reported as a
+  failed capture (one red job on `main` after PR 36). Presence is now one
+  `lstat`. `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
 
 - **A timing ratio under a tenth of a second measured the machine.** Five ratio
   gates used a 0.05 s floor and a sixth derived one from the process clock tick;

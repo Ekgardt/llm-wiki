@@ -444,12 +444,20 @@ def _already_consolidated(vault: Path, state: dict, day: str) -> bool:
     return recorded == record_set_digest(vault, day)
 
 
-def _call_provider(prompt: str) -> str | None:
-    from llm_client import call_llm
+# The same bound the compile gives its provider calls (`COMPILE_PROVIDER_CEILING_S`).
+# Under the client's 90 s default the catch-up pass of 2026-09-23 stopped the
+# provider mid-answer on one day's records and the whole night counted as
+# failed. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
+CONSOLIDATION_PROVIDER_CEILING_S = 300
 
-    return call_llm(
-        prompt, CONSOLIDATION_SYSTEM_PROMPT, max_tokens=CONSOLIDATION_MAX_TOKENS
-    )
+
+def _call_provider(prompt: str) -> str | None:
+    from llm_client import call_ceiling, call_llm
+
+    with call_ceiling(CONSOLIDATION_PROVIDER_CEILING_S):
+        return call_llm(
+            prompt, CONSOLIDATION_SYSTEM_PROMPT, max_tokens=CONSOLIDATION_MAX_TOKENS
+        )
 
 
 def _write_block(day: str, lessons: list[Lesson], moment: datetime, key: str) -> Path:

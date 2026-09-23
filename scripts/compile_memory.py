@@ -99,6 +99,7 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
+from rebuild_memory_index import MAX_INDEX_BYTES  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,
@@ -133,6 +134,7 @@ VALIDATION_RETRIES = 2
 
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
+# One daily log the compile reads; the evidence graph's source bound is 16 GiB.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_SOURCE_COUNT = 2_000
@@ -143,7 +145,6 @@ MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
-MAX_INDEX_BYTES = 4 * 1024 * 1024
 CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
     "properties"
 ]["claims"]["items"]
@@ -3955,6 +3956,31 @@ def _unchanged_since_last_compile(
     return compiled_hashes.get(key) == digest and path == DAILY_DIR / key
 
 
+def _mark_started_unless_dry(args: argparse.Namespace) -> None:
+    """A dry run writes nothing, so it moves no clock either.
+
+    On 2026-09-23 a `--dry-run` rewrote `last_compile_started_at`/`finished_at`
+    and outcome `nothing` over the last real compile's record.
+    """
+    if getattr(args, "dry_run", False):
+        return
+    _mark_started(args.trigger)
+
+
+def _mark_error_unless_dry(args: argparse.Namespace, error: BaseException) -> None:
+    if getattr(args, "dry_run", False):
+        return
+    _mark_finished(args.trigger, "error", f"{type(error).__name__}: {error}")
+
+
+def _mark_ok_unless_dry(
+    args: argparse.Namespace, *, outcomes: Sequence[BatchOutcome] = ()
+) -> None:
+    if getattr(args, "dry_run", False):
+        return
+    _mark_finished(args.trigger, "ok", outcomes=outcomes)
+
+
 def _mark_started(trigger: str) -> None:
     started_iso = datetime.now().isoformat(timespec="seconds")
 
@@ -4151,12 +4177,12 @@ def _compile_under_lock(
         print(f"compile_memory: not running: {refusal}", file=sys.stderr)
         _mark_refused(args.trigger, refusal)
         return 1
-    _mark_started(args.trigger)
+    _mark_started_unless_dry(args)
     try:
         with call_ceiling(COMPILE_PROVIDER_CEILING_S):
             return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
-        _mark_finished(args.trigger, "error", f"{type(e).__name__}: {e}")
+        _mark_error_unless_dry(args, e)
         raise
     finally:
         _release_compile_lock(lock_token)
@@ -4235,7 +4261,7 @@ def _run(
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
-        _mark_finished(args.trigger, "ok")
+        _mark_ok_unless_dry(args)
         return 0
 
     _announce_compile(args, dailies)
@@ -4260,7 +4286,7 @@ def _run(
             return done.status
         outcomes.append(done)
     _require_compile_active(deadline, cancelled)
-    _mark_finished(args.trigger, "ok", outcomes=outcomes)
+    _mark_ok_unless_dry(args, outcomes=outcomes)
     print(f"compile_memory: done: {_outcome_sentence(outcomes)}.")
     return 0
 

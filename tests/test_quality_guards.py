@@ -633,7 +633,6 @@ _STAGE_TWO_GUIDE_COMMANDS = (
     "markdown_transaction.py recover",
     "markdown_transaction.py undo <transaction-id>",
     "markdown_transaction.py prune --retention-days 30",
-    "memory_queue.py migrate",
     "memory_queue.py redrive <task-id>",
     "memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
     "archive_daily.py --commit --hot-days 90",
@@ -689,6 +688,134 @@ def test_readme_recall_at_10_agentmemory():
     # cells[0] = LLM Wiki (allowed to have a %); rest are competitors.
     if not report_has_recall10:
         _assert_no_competitor_percentage(cells[1:])
+
+
+# ─── 8b. benchmark/report.md borrows no number without its source ───
+
+# The table published `Zep | 94.7% (LoCoMo)` and `Mem0 | 91.6% (LoCoMo)` under a
+# column headed `Recall@5`, beside our own BM25 retrieval recall. Both are
+# end-to-end answer-accuracy claims on a dataset we have never run, and fetched
+# 2026-09-19 neither survives its source: mem0.ai reports Mem0 LoCoMo 92.5 and
+# Zep LoCoMo 80.32%, and Zep's own blog reports 94.8% on DMR without mentioning
+# LoCoMo. The two agentmemory rows were real but cited nothing and mixed two
+# corpora into one row. So the table carries one metric, one dataset and one
+# openable source per row, and this guard keeps it that way.
+# See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+_BORROWED_HEADING = "## Context only: numbers published by other projects"
+_BORROWED_COLUMNS = ["System", "Metric", "Value", "Dataset", "Source"]
+_REPORT_REQUIRED = (
+    "Retired 2026-09-10",
+    "run_benchmark.py",
+    "A number with no source does not belong in this table",
+)
+
+
+def _table_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("|")]
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def _borrowed_table(report: str) -> list[list[str]]:
+    """The borrowed-number table as rows of cells, or nothing if it is gone."""
+    if _BORROWED_HEADING not in report:
+        return []
+    section = report.split(_BORROWED_HEADING, 1)[1].split("\n## ", 1)[0]
+    return [_table_cells(line) for line in _table_lines(section)]
+
+
+def _source_is_reachable(source: str) -> bool:
+    if source.startswith("http"):
+        return True
+    return (ROOT / source).exists()
+
+
+def _row_is_sourced(cells: list[str]) -> bool:
+    if len(cells) != len(_BORROWED_COLUMNS):
+        return False
+    if not all(cells):
+        return False
+    return _source_is_reachable(cells[-1])
+
+
+def _unsourced(rows: list[list[str]]) -> list[list[str]]:
+    return [cells for cells in rows if not _row_is_sourced(cells)]
+
+
+def _system_tables(report: str) -> list[str]:
+    """Every table row in the file whose first cell names a system, not a metric."""
+    return [line for line in _table_lines(report) if _table_cells(line)[0] == "System"]
+
+
+def test_every_borrowed_number_says_where_it_came_from():
+    """One metric, one dataset and one openable source per borrowed row — or no row."""
+    report = _read("benchmark/report.md")
+    table = _borrowed_table(report)
+    unsourced = _unsourced(table[2:])
+
+    assert _missing(_REPORT_REQUIRED, report) == []
+    assert table[:2] == [_BORROWED_COLUMNS, ["---"] * len(_BORROWED_COLUMNS)], (
+        f"benchmark/report.md borrowed-number table must have the columns "
+        f"{_BORROWED_COLUMNS}; found {table[:1]}"
+    )
+    assert len(_system_tables(report)) == 1, (
+        "benchmark/report.md has a second table of systems outside the sourced "
+        "one; a borrowed number belongs in the table that carries its source"
+    )
+    assert unsourced == [], (
+        f"benchmark/report.md rows missing a metric, a dataset or a reachable "
+        f"source: {unsourced}"
+    )
+
+
+# ─── 8c. A dated comparison document names the run it quotes ────────
+
+# Six of our quantities were told two or three ways, and almost none of them was
+# a wrong number: they were correct measurements of different runs in documents
+# that never named the run. Chased to the artefacts on 2026-09-19, each figure
+# got either the run that produced it or a plain statement that the run is gone.
+# Two were outright wrong and were replaced, and one vendor's failed LoCoMo
+# reproduction was attributed to another vendor. This keeps all of that in place.
+# See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+_RECONCILED = (
+    ("docs/COMPARISON-2026-09-07.md", "это EverMemOS"),
+    ("docs/COMPARISON-2026-09-07.md", "longmemeval-fixed-n200-r{1,2,3}.json"),
+    ("docs/COMPARISON-2026-09-08.md", "second-look-n200-seed101-r1"),
+    ("docs/COMPARISON-2026-09-13.md", "артефактов этого прогона на диске нет"),
+    ("docs/COMPARISON-2026-09-13-memory.md", "этих артефактов на диске нет"),
+    ("docs/METRICS-2026-09-06.md", "прогона за этими тремя числами на диске нет"),
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "Это число не из"),
+    ("docs/REPORT-2026-09-12-what-works-now.md", "code-parity-v2-2026-09-12-run{1,2,3}.json"),
+    ("docs/research/2026-08-27-number-one-memory-market-research.md", "Поправка 2026-09-19"),
+)
+# Numbers that traced to nothing and were replaced by ones that do.
+_REPLACED = (
+    ("docs/PLAN-to-beat-them-2026-09-07.md", "| токенов на вопрос | 12 099 |"),
+    ("docs/COMPARISON-2026-09-08.md", "| Токенов на вопрос | 13 400 |"),
+)
+
+
+def _unmarked(pairs) -> list[tuple[str, str]]:
+    return [pair for pair in pairs if pair[1] not in _read(pair[0])]
+
+
+def _still_there(pairs) -> list[tuple[str, str]]:
+    return [pair for pair in pairs if pair[1] in _read(pair[0])]
+
+
+def test_a_dated_comparison_names_the_run_it_quotes():
+    """A figure whose run is unnamed is a figure two documents can disagree about."""
+    unmarked = _unmarked(_RECONCILED)
+    replaced = _still_there(_REPLACED)
+
+    assert unmarked == [], (
+        f"these documents lost the 2026-09-19 reconciliation of their numbers: {unmarked}"
+    )
+    assert replaced == [], (
+        f"a number that traces to no artefact came back: {replaced}"
+    )
 
 
 # ─── 9. Lint check count in docs must match code ────────────────────

@@ -42,7 +42,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
-from bounded_io import read_stable_bytes
+from bounded_io import IO_CHUNK_BYTES, read_stable_bytes
 from go_source_build import SourceBuildError
 from lsp_identity import (
     INSTALL_MANIFEST_NAME,
@@ -58,7 +58,15 @@ from operational_ownership import (
     current_process_identity,
     process_identity_state,
 )
-from pinned_download import PinnedDownloadError, download_pinned
+from pinned_download import (
+    MAX_COMPRESSED_BYTES,
+    MAX_DECOMPRESSED_BYTES,
+    MAX_MEMBER_BYTES,
+    MAX_MEMBERS,
+    MAX_PATH_COMPONENTS,
+    PinnedDownloadError,
+    download_pinned,
+)
 from reliable_memory import canonical_json_bytes
 
 # One budget for the whole install, not one per socket. The Rust profile pulls
@@ -67,14 +75,10 @@ from reliable_memory import canonical_json_bytes
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 1800.0
 LOCK_POLL_SECONDS = 0.05
 MAX_LOCK_BYTES = 1024
+# A managed server's install receipt; doctor's archive manifests allow 256 KiB, a generation's 1 MiB.
 MAX_MANIFEST_BYTES = 16 * 1024
-COPY_CHUNK_BYTES = 64 * 1024
+COPY_CHUNK_BYTES = IO_CHUNK_BYTES
 
-MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
-MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024
-MAX_MEMBERS = 8192
-MAX_MEMBER_BYTES = 32 * 1024 * 1024
-MAX_PATH_COMPONENTS = 64
 # One unpacked file, for a digest: `rust-analyzer` is ~90 MB and
 # `librustc_driver` is larger, so this is the per-profile member ceiling, not
 # the module-wide one.

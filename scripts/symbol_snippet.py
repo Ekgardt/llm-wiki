@@ -21,7 +21,9 @@ from pathlib import Path
 
 from path_coverage import _current_sha, _freshness, contained_scope
 
+# Definitions a snippet answer names; the protocol reply bound is 10 000.
 MAX_LOCATIONS = 5
+# One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
 MAX_SNIPPET_LINES = 120
 MAX_NAME_MATCHES = 200

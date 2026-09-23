@@ -131,8 +131,7 @@ def _retired(fm_text: str) -> bool:
 
 
 def _states_a_rule(content: str) -> bool:
-    summary = _extract(content, SUMMARY_RE) or ""
-    return _RULE_WORDS.search(summary) is not None
+    return _RULE_WORDS.search(_summary_of(content)) is not None
 
 
 def _in_scope(page_project: str | None, project: str | None) -> bool:
@@ -159,11 +158,10 @@ def _clipped(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
 def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
     md = ROOT / relative
     title_m = H1_RE.search(content)
-    summary_m = SUMMARY_RE.search(content)
     return {
         "type": page_type,
         "title": title_m.group(1).strip() if title_m else md.stem,
-        "summary": _clipped(summary_m.group(1).strip() if summary_m else ""),
+        "summary": _clipped(_summary_of(content)),
         "source": "knowledge",
         "path": md.relative_to(ROOT).as_posix(),
         "authority": _extract(content, AUTHORITY_RE) or "inferred",
@@ -200,6 +198,23 @@ def _feedback_in_scope(candidate: dict, project: str | None) -> bool:
 def _extract(text: str, pattern: re.Pattern) -> str | None:
     m = pattern.search(text)
     return m.group(1).strip() if m else None
+
+
+def _summary_of(content: str) -> str:
+    """The one-sentence summary with its wrapped continuation lines joined.
+
+    Markdown joins a paragraph's lines (CommonMark 0.31.2 §4.8); the block
+    printed a summary cut at its first line for every session on 2026-09-23.
+    """
+    match = SUMMARY_RE.search(content)
+    if not match:
+        return ""
+    parts = [match.group(1).strip()]
+    for line in content[match.end():].splitlines()[1:]:
+        if not line.strip() or line.lstrip().startswith(("#", "-", "*", ">")):
+            break
+        parts.append(line.strip())
+    return " ".join(parts)
 
 
 _RULE_LABELS = {

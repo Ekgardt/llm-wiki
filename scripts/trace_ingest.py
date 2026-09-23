@@ -48,6 +48,9 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bounded_io import IO_CHUNK_BYTES
+from evidence_graph import MAX_NODE_FILTER
+
 TRACE_SCHEMA = "execution-trace/v1"
 STORE_SCHEMA_VERSION = "execution-traces/v1"
 
@@ -70,11 +73,6 @@ MAX_CALL_COUNT = 2**31 - 1
 # `code_graph.UNRESOLVED_CALLER_LIMIT`, and for the same reason: the count
 # stays exact above it, so a cut list still states how much it is missing.
 MAX_TRACE_CALLERS = 200
-# Node-id filter bound, mirroring `evidence_graph.MAX_NODE_FILTER`: this
-# repository's worst same-name collision is `__init__` at 296, and 512 stays
-# under the historic SQLite 999 host-parameter floor.
-MAX_NODE_FILTER = 512
-IO_CHUNK_BYTES = 64 * 1024
 
 _FRAME_KEYS = frozenset({"path", "line", "name"})
 _RECORD_KEYS = frozenset({"caller", "callee", "count"})

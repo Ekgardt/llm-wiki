@@ -155,6 +155,6 @@ def test_the_nightly_fetches_missing_weights_after_its_index_work():
 
     labels = [step.label for step in scheduled_nightly._post_compile_steps()]
 
-    assert labels.index("models") > labels.index("search")
+    assert labels.index("models") > labels.index("lint")
     step = next(step for step in scheduled_nightly._post_compile_steps() if step.label == "models")
     assert step.command[-1].endswith("install_models.py")

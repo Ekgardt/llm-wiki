@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 
 from reliable_memory import canonical_json_bytes, fsync_directory, validate_schema
 
+# One install-control record (`run/install/*.json`); a session record allows 8 MiB.
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_PREIMAGE_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_PREIMAGE_BYTES = 16 * 1024 * 1024

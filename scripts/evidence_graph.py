@@ -17,6 +17,7 @@ from enum import Enum, unique
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
+from bounded_io import IO_CHUNK_BYTES
 from graph_storable import (  # noqa: F401 - the writer's rules, shared with its readers
     MAX_IDENTITY_KEY_CHARS,
     storable_identity_key,
@@ -49,6 +50,7 @@ class GraphSchema(str, Enum):
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
+# Traversal depth the graph reader follows; impact answers stop at 8.
 MAX_DEPTH = 32
 MAX_EDGE_TYPES = 64
 # Node-id filter bound for `edges()`. Sized from measurement, not taste: on this
@@ -70,7 +72,6 @@ MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
-IO_CHUNK_BYTES = 64 * 1024
 
 _SHA256 = frozenset("0123456789abcdef")
 _NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")

@@ -16,7 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 DEFAULT_KINDS = ("class", "function", "method")
+# Largest row count a symbol search accepts; `graph_query` accepts 200.
 MAX_LIMIT = 100
+# Default row count of a symbol search; `graph_query` pages 50 by default.
 DEFAULT_LIMIT = 10
 
 

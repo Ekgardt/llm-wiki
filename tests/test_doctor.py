@@ -12,13 +12,12 @@ import sys
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
@@ -207,18 +206,6 @@ def test_doctor_accepts_active_graph_v2_without_code_capture(tmp_path: Path) -> 
     assert _check(report, "generation")["status"] == "ok"
 
 
-def _write_lease(path: Path, *, pid: int | None, acquired_at: str) -> None:
-    task = {
-        "id": path.stem,
-        "attempts": 0,
-        "payload": {"secret": "never report"},
-        "lease_acquired_at": acquired_at,
-    }
-    if pid is not None:
-        task.update(lease_pid=pid, lease_token="token-123")
-    path.write_text(json.dumps(task), encoding="utf-8")
-
-
 def _write_lock(path: Path, *, pid: int, acquired_at: str) -> None:
     path.write_text(
         json.dumps(
@@ -275,7 +262,7 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         root / "scripts",
         root / "integrations" / "claude-code",
         root / "integrations" / "codex",
-        state_root / "run" / "queue",
+        state_root / "run",
         state_root / "logs",
         state_root / "cache",
         home,
@@ -348,11 +335,8 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         json.dumps({"last_nightly_date": "2026-07-13", "last_nightly_status": "success"}),
         encoding="utf-8",
     )
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
-    os.utime(index, (now.timestamp(), now.timestamp()))
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
 
@@ -364,13 +348,13 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     assert _check_ids(report) == {
         "environment",
         "runtime",
+        "adoption",
         "filesystem",
         "transactions",
         "queue",
         "archives",
         "claims",
         "generation",
-        "index",
         "scheduler",
         "capture",
         "models",
@@ -584,58 +568,29 @@ def test_read_only_missing_runtime_does_not_create_it(tmp_path):
     assert not state_root.exists()
 
 
-def test_queue_reports_counts_without_payloads(tmp_path):
+def test_queue_counts_retained_json_records_without_reading_them(tmp_path):
+    """The JSON queue of v3.3.0–v3.4.0 is counted and named, never read (2026-09-23)."""
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
     queue = state_root / "run" / "queue"
+    queue.mkdir()
     secret = "TOP-SECRET-QUEUE-PAYLOAD"
     (queue / "pending.json").write_text(
         json.dumps({"attempts": 1, "payload": {"prompt": secret}}), encoding="utf-8"
     )
-    (queue / "failed.json").write_text(
-        json.dumps({"attempts": 5, "payload": {"prompt": secret}}), encoding="utf-8"
-    )
-    lease = queue / "stuck.processing"
-    lease.write_text(secret, encoding="utf-8")
-    old = datetime.now(timezone.utc) - timedelta(minutes=20)
-    os.utime(lease, (old.timestamp(), old.timestamp()))
+    (queue / "stuck.processing").write_text(secret, encoding="utf-8")
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     check = _check(report, "queue")
 
     assert (
         check["status"],
-        check["details"]["pending"],
-        check["details"]["permanently_failed"],
-        check["details"]["stale_leases"],
+        check["details"]["legacy_retained"],
+        "legacy_queue_retained" in check["details"]["deletion_codes"],
+        "run/queue" in check["message"],
         secret in json.dumps(report),
-    ) == ("error", 2, 1, 1, False)
-
-
-def test_index_missing_stale_and_fresh_states(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-    missing = _check(
-        run_doctor(root=root, state_root=state_root, home=home, now=now), "index"
-    )
-
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
-    old = now - timedelta(days=2)
-    os.utime(index, (old.timestamp(), old.timestamp()))
-    stale = _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")
-    assert (missing["status"], stale["status"], stale["details"]["freshness"]) == (
-        "degraded",
-        "degraded",
-        "stale",
-    )
-
-    os.utime(index, (now.timestamp(), now.timestamp()))
-    fresh = _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")
-    assert (fresh["status"], fresh["details"]["freshness"]) == ("ok", "fresh")
+    ) == ("degraded", 2, True, True, False)
 
 
 @pytest.mark.parametrize(
@@ -1182,13 +1137,6 @@ def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
 
     root, _, home = _build_root(tmp_path)
     state_root = tmp_path / "new-state"
-    rebuilt = []
-
-    def rebuild(root, state, **kwargs):
-        rebuilt.append(state)
-        _create_index(state / "cache" / "index.sqlite")
-
-    monkeypatch.setattr(doctor, "_rebuild_index", rebuild)
 
     first = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
     after_first = _snapshot(state_root)
@@ -1199,8 +1147,7 @@ def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
         _did(first, "create_runtime_directory"),
         second["repaired"],
         set(_snapshot(state_root)) == set(after_first),
-        len(rebuilt),
-    ) == (True, True, [], True, 1)
+    ) == (True, True, [], True)
 
 
 def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path):
@@ -1349,125 +1296,6 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     doctor._release_maintenance_owner(coordinator, lease)
 
 
-def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "legacy.processing"
-    _write_lease(
-        lease,
-        pid=None,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-
-    report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert lease.exists()
-    assert not (state_root / "run" / "queue-migrated-v2").exists()
-    assert _check(report, "queue")["details"]["migration"] == "pending"
-
-
-def test_stale_lease_with_active_owner_is_never_recovered(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "active.processing"
-    _write_lease(
-        lease,
-        pid=os.getpid(),
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-
-    run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert lease.exists()
-    assert not lease.with_suffix(".json").exists()
-
-
-def test_stale_lease_with_dead_owner_is_recovered(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert not lease.exists()
-    assert any((state_root / "run" / "queue-quarantine").iterdir())
-    assert any(item["action"] == "recover_stale_lease" for item in report["repaired"])
-
-
-def test_lease_recovery_never_clobbers_target_appearing_concurrently(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "race.processing"
-    target = lease.with_suffix(".json")
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-
-    def target_appears(source, destination, **kwargs):
-        Path(destination).write_text("new task", encoding="utf-8")
-        raise FileExistsError
-
-    monkeypatch.setattr(doctor.os, "link", target_appears)
-
-    doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert not lease.exists()
-    assert not target.exists()
-    assert any((state_root / "run" / "queue-quarantine").iterdir())
-
-
-def _recovered_leases(reports) -> int:
-    return sum(
-        item.get("count", 0)
-        for report in reports
-        for item in report["repaired"]
-        if item["action"] == "recover_stale_lease"
-    )
-
-
-def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    lease = state_root / "run" / "queue" / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: pid == os.getpid())
-
-    def repair():
-        return doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        reports = list(pool.map(lambda _: repair(), range(2)))
-
-    assert (
-        _recovered_leases(reports),
-        lease.exists(),
-        (state_root / "run" / "queue-migrated-v2").exists(),
-    ) == (1, False, True)
-
-
 def test_repair_never_mutates_personal_markdown(tmp_path, monkeypatch):
     import doctor
 
@@ -1475,72 +1303,10 @@ def test_repair_never_mutates_personal_markdown(tmp_path, monkeypatch):
     personal = root / "knowledge" / "notes" / "private.md"
     personal.write_text("private durable knowledge", encoding="utf-8")
     before = personal.read_bytes()
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state: None)
 
     doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
     assert personal.read_bytes() == before
-
-
-def test_failed_index_repair_preserves_existing_index(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    index.write_bytes(b"valid-index")
-    old = datetime.now(timezone.utc) - timedelta(days=2)
-    os.utime(index, (old.timestamp(), old.timestamp()))
-    monkeypatch.setattr(
-        doctor, "_rebuild_index", lambda root, state: (_ for _ in ()).throw(RuntimeError("failed"))
-    )
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert index.read_bytes() == b"valid-index"
-    assert report["overall_status"] in {"degraded", "error"}
-    assert not any(item["action"] == "rebuild_index" for item in report["repaired"])
-
-
-def test_failed_index_repair_is_attributed_only_to_index(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    monkeypatch.setattr(
-        doctor,
-        "_rebuild_index",
-        lambda root, state, **kwargs: (_ for _ in ()).throw(RuntimeError("failed")),
-    )
-
-    report = doctor.run_doctor(
-        root=root,
-        state_root=state_root,
-        home=home,
-        repair=True,
-        time_budget_seconds=30,
-    )
-    runtime = _check(report, "runtime")
-    queue = _check(report, "queue")
-    index = _check(report, "index")
-
-    assert (
-        index["status"],
-        index["details"]["repair_errors"],
-        "repair_errors" in runtime["details"],
-        "repair_errors" in queue["details"],
-    ) == ("error", ["Index repair failed: RuntimeError: failed"], False, False)
-
-
-def test_index_repair_that_produces_no_index_is_reported_as_index_error(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state, **kwargs: None)
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-    index = _check(report, "index")
-
-    assert index["status"] == "error"
-    assert index["details"]["repair_errors"] == ["Index repair failed: index was not created"]
 
 
 def test_degraded_summary_is_empty_for_healthy_and_bounded(tmp_path):
@@ -1555,7 +1321,7 @@ def test_degraded_summary_is_empty_for_healthy_and_bounded(tmp_path):
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     summary = degraded_summary(report)
-    assert "index" in summary
+    assert "generation" in summary
     assert "scheduler" not in summary
     assert len(summary) <= 600
 
@@ -1653,17 +1419,18 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     second_return_code = doctor.main(budgeted)
     second_report = json.loads(capsys.readouterr().out)
 
-    assert (first_return_code, bool(first_report["repaired"]), first_report["overall_status"]) == (
-        0,
-        True,
-        "ok",
-    )
+    # A fresh vault has no generation until the installer's sync or the nightly
+    # builds one (2026-09-23): `--repair` leaves that one honest degradation and
+    # names it, and the second run finds nothing left to repair.
+    degraded = {check["id"] for check in first_report["checks"] if check["status"] != "ok"}
+    assert (bool(first_report["repaired"]), degraded <= {"generation", "models", "scheduler"}) == (True, True)
+    assert not any(check["status"] == "error" for check in first_report["checks"])
     assert (
         second_return_code,
         second_report["overall_status"],
         second_report["repaired"],
         set(_snapshot(state_root)) == set(after_first),
-    ) == (0, "ok", [], True)
+    ) == (first_return_code, first_report["overall_status"], [], True)
 
 
 def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, monkeypatch):
@@ -1682,13 +1449,6 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, 
     def reject_external(*args, **kwargs):
         raise AssertionError("repair attempted an external operation")
 
-    def local_rebuild(root_path, state_path, **kwargs):
-        _create_index(
-            state_path / "cache" / "index.sqlite",
-            ["knowledge/notes/private.md"],
-        )
-
-    monkeypatch.setattr(doctor, "_rebuild_index", local_rebuild)
     monkeypatch.setattr(urllib.request, "urlopen", reject_external)
     monkeypatch.setattr(socket, "create_connection", reject_external)
 
@@ -1726,15 +1486,16 @@ def test_queue_ignores_symlink_entries_without_following_payload(tmp_path):
     root, state_root, home = _build_root(tmp_path)
     external = tmp_path / "outside.json"
     external.write_text('{"payload":"OUTSIDE-SECRET"}', encoding="utf-8")
+    (state_root / "run" / "queue").mkdir()
     link = state_root / "run" / "queue" / "linked.json"
     _symlink_or_skip(link, external)
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     queue = _check(report, "queue")
 
-    assert queue["status"] == "degraded"
-    assert queue["details"]["unsafe_entries"] == 1
-    assert queue["details"]["pending"] == 0
+    assert queue["status"] == "error"
+    assert queue["details"]["artifact_error"] is True
+    assert queue["details"]["legacy_retained"] == 1
     assert "OUTSIDE-SECRET" not in json.dumps(report)
 
 
@@ -1750,339 +1511,12 @@ def _index_verdicts(index, contents, root, state_root, home) -> list:
     return verdicts
 
 
-def test_index_rejects_zero_byte_corrupt_and_wrong_schema(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    written = _index_verdicts(index, (b"", b"not sqlite"), root, state_root, home)
-    index.unlink()
-    connection = sqlite3.connect(index)
-    connection.execute("CREATE TABLE other(value TEXT)")
-    connection.close()
-    check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
-
-    assert written == [("error", "corrupt"), ("error", "corrupt")]
-    assert (check["status"], check["details"]["freshness"]) == ("error", "corrupt")
-
-
-def test_repair_never_replaces_corrupt_regular_index(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    corrupt = b"corrupt-index-bytes-that-must-be-preserved"
-    index.write_bytes(corrupt)
-    rebuild_calls = []
-    monkeypatch.setattr(
-        doctor,
-        "_rebuild_index",
-        lambda *args: rebuild_calls.append(args),
-    )
-    clock = iter([0.0])
-    monkeypatch.setattr(doctor.time, "monotonic", lambda: next(clock, 6.0))
-
-    report = doctor.run_doctor(
-        root=root,
-        state_root=state_root,
-        home=home,
-        repair=True,
-        time_budget_seconds=30,
-    )
-    check = _check(report, "index")
-
-    assert (
-        check["status"],
-        check["details"]["freshness"],
-        check["details"]["repairable"],
-    ) == ("error", "corrupt", False)
-    assert (rebuild_calls, index.read_bytes(), _did(report, "rebuild_index")) == (
-        [],
-        corrupt,
-        False,
-    )
-
-
-def test_index_validates_manifest_against_indexed_paths(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index, ["knowledge/notes/one.md"], manifest=True)
-    manifest = index.parent / ".paths-manifest"
-    manifest.write_text(json.dumps(["knowledge/notes/two.md"]), encoding="utf-8")
-
-    check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
-
-    assert check["status"] == "degraded"
-    assert check["details"]["freshness"] == "stale"
-    assert check["details"]["source_rebuild_required"] is True
-
-
-def test_index_symlink_is_rejected_and_external_target_untouched(tmp_path):
-    from doctor import run_doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    external = tmp_path / "outside.sqlite"
-    _create_index(external)
-    link = state_root / "cache" / "index.sqlite"
-    _symlink_or_skip(link, external)
-    before = external.read_bytes()
-
-    report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    assert _check(report, "index")["status"] == "error", _check(report, "index")
-    assert external.read_bytes() == before
-
-
-def test_rebuild_collects_only_safe_regular_markdown(tmp_path, monkeypatch):
-    import doctor
-    import search_memory
-
-    root, state_root, _ = _build_root(tmp_path)
-    notes = root / "knowledge" / "notes"
-    safe = notes / "safe.md"
-    safe.write_text("# Safe", encoding="utf-8")
-    external = tmp_path / "outside.md"
-    external.write_text("# Secret", encoding="utf-8")
-    _symlink_or_skip(notes / "linked.md", external)
-    captured = []
-    monkeypatch.setattr(search_memory, "_build_index", lambda pages: captured.extend(pages))
-
-    doctor._rebuild_index(root, state_root)
-
-    assert captured == [safe]
-
-
-def test_rebuild_rejects_symlinked_knowledge_ancestor(tmp_path, monkeypatch):
-    import shutil
-
-    import doctor
-    import search_memory
-
-    root, state_root, _ = _build_root(tmp_path)
-    external = tmp_path / "outside-knowledge"
-    (external / "notes").mkdir(parents=True)
-    (external / "notes" / "secret.md").write_text("# Secret", encoding="utf-8")
-    shutil.rmtree(root / "knowledge")
-    _symlink_or_skip(root / "knowledge", external, directory=True)
-    captured = []
-    monkeypatch.setattr(search_memory, "_build_index", lambda pages: captured.extend(pages))
-
-    with pytest.raises(OSError, match="unsafe knowledge"):
-        doctor._rebuild_index(root, state_root)
-
-    assert captured == []
-
-
-def test_rebuild_that_does_not_change_stale_index_is_not_success(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
-    old = datetime.now(timezone.utc) - timedelta(days=2)
-    os.utime(index, (old.timestamp(), old.timestamp()))
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state: None)
-
-    report = doctor.run_doctor(
-        root=root,
-        state_root=state_root,
-        home=home,
-        repair=True,
-        time_budget_seconds=30,
-    )
-
-    assert not any(item["action"] == "rebuild_index" for item in report["repaired"])
-    assert _check(report, "index")["status"] == "error"
-
-
-def test_existing_index_rebuild_lock_defers_without_touching_live_index(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
-    old = datetime.now(timezone.utc) - timedelta(days=2)
-    os.utime(index, (old.timestamp(), old.timestamp()))
-    before = index.read_bytes()
-    _write_lock(
-        state_root / "cache" / ".doctor-index.lock",
-        pid=os.getpid(),
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    called = []
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda *args: called.append(True))
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-
-    check = _check(report, "index")
-    assert (called, index.read_bytes() == before) == ([], True)
-    assert (
-        check["status"],
-        check["details"].get("repair_deferred"),
-        "deferred" in check["message"].lower(),
-    ) == ("degraded", True, True), check
-
-
-def test_dead_index_rebuild_lock_is_reclaimed(tmp_path, monkeypatch):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    lock = state_root / "cache" / ".doctor-index.lock"
-    _write_lock(
-        lock,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-    monkeypatch.setattr(
-        doctor,
-        "_rebuild_index",
-        lambda root, state, **kwargs: _create_index(state / "cache" / "index.sqlite"),
-    )
-    clock = iter([0.0])
-    monkeypatch.setattr(doctor.time, "monotonic", lambda: next(clock, 6.0))
-
-    report = doctor.run_doctor(
-        root=root,
-        state_root=state_root,
-        home=home,
-        repair=True,
-        time_budget_seconds=30,
-    )
-
-    assert not lock.exists()
-    assert any(item["action"] == "rebuild_index" for item in report["repaired"])
-    assert _check(report, "index")["status"] == "ok"
-
-
-def test_concurrent_stale_lock_reclaimers_cannot_both_acquire(tmp_path, monkeypatch):
-    import threading
-
-    import doctor
-
-    queue = tmp_path / "queue"
-    queue.mkdir()
-    lock = queue / ".doctor-recovery.lock"
-    now = datetime.now(timezone.utc)
-    _write_lock(
-        lock,
-        pid=999999,
-        acquired_at=(now - timedelta(hours=1)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-    real_os_lock = doctor._lock_file_nonblocking
-    first_locked = threading.Event()
-    release_first = threading.Event()
-    control_lock = threading.Lock()
-    first = True
-
-    def controlled_os_lock(fd):
-        nonlocal first
-        acquired = real_os_lock(fd)
-        with control_lock:
-            pause = acquired and first
-            if pause:
-                first = False
-        if pause:
-            first_locked.set()
-            assert release_first.wait(timeout=SHORT_TIMEOUT)
-        return acquired
-
-    monkeypatch.setattr(doctor, "_lock_file_nonblocking", controlled_os_lock)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first_future = pool.submit(doctor._acquire_lock, lock, queue, now)
-        assert first_locked.wait(timeout=SHORT_TIMEOUT)
-        second_future = pool.submit(doctor._acquire_lock, lock, queue, now)
-        second_token = second_future.result(timeout=SHORT_TIMEOUT)
-        release_first.set()
-        first_token = first_future.result(timeout=SHORT_TIMEOUT)
-
-    assert sum(token is not None for token in (first_token, second_token)) == 1
-    token = first_token or second_token
-    doctor._release_lock(lock, queue, token)
-
-
-def test_stale_lock_takeover_aborts_when_opened_file_identity_changes(tmp_path, monkeypatch):
-    import doctor
-
-    queue = tmp_path / "queue"
-    queue.mkdir()
-    lock = queue / ".doctor-recovery.lock"
-    now = datetime.now(timezone.utc)
-    _write_lock(
-        lock,
-        pid=999999,
-        acquired_at=(now - timedelta(hours=1)).isoformat(),
-    )
-    replacement = queue / "replacement.lock"
-    _write_lock(
-        replacement,
-        pid=888888,
-        acquired_at=(now - timedelta(hours=1)).isoformat(),
-    )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
-    real_stat = doctor.os.stat
-
-    def replaced_path_identity(path, *args, **kwargs):
-        if Path(path) == lock and kwargs.get("follow_symlinks") is False:
-            return replacement.lstat()
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(doctor.os, "stat", replaced_path_identity)
-
-    token = doctor._acquire_lock(lock, queue, now)
-
-    assert token is None
-    assert lock.exists()
-
-
-@pytest.mark.parametrize("active", [True, False])
-def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
-    import doctor
-
-    root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-    queue = state_root / "run" / "queue"
-    lease = queue / "dead.processing"
-    _write_lease(
-        lease,
-        pid=999999,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    lock = queue / ".doctor-recovery.lock"
-    _write_lock(
-        lock,
-        pid=os.getpid() if active else 888888,
-        acquired_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
-    )
-    monkeypatch.setattr(
-        doctor,
-        "_pid_alive",
-        lambda pid: active if pid in {os.getpid(), 888888} else False,
-    )
-
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
-    check = _check(report, "queue")
-
-    observed = (
-        lease.exists(),
-        check["details"].get("repair_deferred") is True,
-        "deferred" in check["message"].lower(),
-        (state_root / "run" / "queue-migrated-v2").exists(),
-        lock.exists(),
-    )
-    deferred = (True, True, True, False, True)
-    recovered = (False, False, False, True, False)
-    assert observed == (deferred if active else recovered), check
-
-
 def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)
     queue = state_root / "run" / "queue"
+    queue.mkdir()
     for number in range(250):
         (queue / f"{number:04}.json").write_bytes(b"x" * 70_000)
 
@@ -2098,41 +1532,23 @@ def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
 
     assert (
         elapsed < 0.5,
-        details["truncated"],
-        details["scanned"] <= 200,
+        details["artifact_truncated"],
+        details["legacy_retained"] <= 200,
         _check(report, "queue")["status"],
     ) == (True, True, True, "degraded")
 
 
 def test_oversized_state_is_bounded_and_reported(tmp_path):
-    from doctor import run_doctor
+    from doctor import MAX_STATE_BYTES, run_doctor
 
     root, state_root, home = _build_root(tmp_path)
-    (state_root / "run" / "state.json").write_bytes(b"x" * 300_000)
+    (state_root / "run" / "state.json").write_bytes(b"x" * (MAX_STATE_BYTES + 1))
 
     report = run_doctor(root=root, state_root=state_root, home=home)
     scheduler = _check(report, "scheduler")
 
     assert scheduler["status"] == "degraded"
     assert scheduler["details"]["state_error"] == "oversized"
-
-
-def test_index_check_honors_expired_deadline(tmp_path):
-    import doctor
-
-    _, state_root, _ = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
-
-    started = time.perf_counter()
-    check = doctor._index_check(
-        state_root,
-        datetime.now(timezone.utc),
-        deadline=time.monotonic() - 1,
-    )
-
-    assert time.perf_counter() - started < 0.2
-    assert check["status"] == "degraded"
-    assert check["details"]["budget_exhausted"] is True
 
 
 def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(tmp_path, monkeypatch):
@@ -2175,7 +1591,6 @@ def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
     from doctor import degraded_summary, run_doctor
 
     root, state_root, home = _build_root(tmp_path)
-    _create_index(state_root / "cache" / "index.sqlite")
 
     report = run_doctor(
         root=root,
@@ -2183,41 +1598,12 @@ def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
         home=home,
         time_budget_seconds=0,
     )
-    index = _check(report, "index")
+    generation = _check(report, "generation")
 
-    assert index["status"] == "degraded"
-    assert index["details"]["budget_exhausted"] is True
+    assert generation["status"] == "degraded"
+    assert generation["details"]["budget_exhausted"] is True
     assert report["overall_status"] != "ok"
-    assert "index" in degraded_summary(report)
-
-
-def test_locked_index_returns_bounded_as_degraded(tmp_path):
-    """The wait for a lock is bounded, so the check returns instead of blocking."""
-    import doctor
-
-    _, state_root, _ = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
-    writer = sqlite3.connect(index, timeout=0)
-    writer.execute("BEGIN EXCLUSIVE")
-    try:
-        started = time.perf_counter()
-        check = doctor._index_check(
-            state_root,
-            datetime.now(timezone.utc),
-            deadline=time.monotonic() + 0.2,
-        )
-        elapsed = time.perf_counter() - started
-    finally:
-        writer.rollback()
-        writer.close()
-
-    # The holder only releases after this call returns, so any finite time
-    # proves the wait was bounded. The exact figure is the machine's, not ours;
-    # the chosen wait itself is covered by the _read_busy_ms unit test.
-    assert elapsed < 30
-    assert check["status"] == "degraded"
-    assert check["details"]["database_busy"] is True
+    assert degraded_summary(report)
 
 
 def test_the_read_wait_survives_a_budgetless_deadline():
@@ -2228,89 +1614,6 @@ def test_the_read_wait_survives_a_budgetless_deadline():
     assert doctor._read_busy_ms(None) == doctor.READ_BUSY_MS
     assert doctor._read_busy_ms(time.monotonic() - 1) == 0
     assert 0 < doctor._read_busy_ms(time.monotonic() + 0.1) <= doctor.READ_BUSY_MS
-
-
-def test_a_brief_commit_lock_does_not_make_a_healthy_index_look_busy(
-    tmp_path, monkeypatch
-):
-    """A millisecond commit is normal; only a stuck database is worth reporting."""
-    import doctor
-
-    # The shipped wait is 250 ms; a loaded CI runner can hold a 50 ms lock for
-    # longer than that, so the wait itself is what this test exercises.
-    monkeypatch.setattr(doctor, "READ_BUSY_MS", 30_000)
-    _, state_root, _ = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index)
-    locked = threading.Event()
-    released = threading.Event()
-
-    def hold_briefly() -> None:
-        writer = sqlite3.connect(index, isolation_level=None)
-        try:
-            writer.execute("BEGIN EXCLUSIVE")
-            locked.set()
-            time.sleep(0.05)
-            writer.execute("ROLLBACK")
-        finally:
-            writer.close()
-        released.set()
-
-    worker = threading.Thread(target=hold_briefly)
-    worker.start()
-    try:
-        assert locked.wait(SHORT_TIMEOUT)
-        check = doctor._index_check(
-            state_root,
-            datetime.now(timezone.utc),
-            deadline=time.monotonic() + 120.0,
-        )
-    finally:
-        worker.join()
-
-    assert released.is_set()
-    assert check["details"].get("database_busy") is not True
-
-
-def test_indexed_path_scan_detects_bounded_overflow(tmp_path, monkeypatch):
-    import doctor
-
-    _, state_root, _ = _build_root(tmp_path)
-    monkeypatch.setattr(doctor, "MAX_INDEX_PATHS", 10)
-    _create_index(
-        state_root / "cache" / "index.sqlite",
-        [f"knowledge/notes/{number}.md" for number in range(11)],
-    )
-
-    check = doctor._index_check(
-        state_root,
-        datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
-    )
-
-    assert check["status"] == "degraded"
-    assert check["details"]["path_limit_exceeded"] is True
-
-
-def test_fts_shadow_corruption_is_not_reported_ok(tmp_path):
-    import doctor
-
-    _, state_root, _ = _build_root(tmp_path)
-    index = state_root / "cache" / "index.sqlite"
-    _create_index(index, ["knowledge/notes/one.md"])
-    connection = sqlite3.connect(index)
-    connection.execute("DROP TABLE pages_idx")
-    connection.commit()
-    connection.close()
-
-    check = doctor._index_check(
-        state_root,
-        datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
-    )
-
-    assert check["status"] == "error"
-    assert check["details"]["freshness"] == "corrupt"
 
 
 def test_unrelated_installed_configs_are_not_false_positives(tmp_path):

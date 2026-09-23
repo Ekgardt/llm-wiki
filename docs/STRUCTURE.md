@@ -72,6 +72,9 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── archive/YYYY-MM/bag-…/   immutable uncompressed BagIt packages
 │   ├── notes/                       durable OKF pages (flat slugs)
 │   ├── projects/<slug>/             state.md projection + append-only journal.md
+│   │                                (only state.md/context.md join the corpus;
+│   │                                no slug for a directory inside the vault,
+│   │                                a platform temp entry, or $HOME — 2026-09-23)
 │   ├── raw/                         immutable sources
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
@@ -85,9 +88,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │       ├── source-manifest.json
 │   │       ├── incremental-manifest.json optional reuse/invalidation record
 │   │       ├── evidence.sqlite3
-│   │       ├── search.sqlite3
+│   │       ├── search.sqlite3          FTS5 chunks + keys; holds the `ledger` table
 │   │       ├── vectors.npy             optional
 │   │       └── vectors.json            optional
+│   ├── fact-keys/keys.sqlite3       nightly fact keys and ledger records, copied into the next build
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
@@ -98,11 +102,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
 │   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
 │   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
-│   ├── access_log.jsonl             legacy bounded read-only access history
-│   ├── code_tools.json               v4.0: atomic code-tool capability manifest
-│   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
-│   ├── vectors_meta.json            v4.0: vector metadata (paths, titles — no vectors)
-│   └── index.sqlite                 FTS5 search index
+│   └── code_tools.json               v4.0: atomic code-tool capability manifest
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
 │   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
@@ -120,8 +120,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── ready/<00-ff>/<id>.json   indexed intents awaiting terminal outcome
 │   ├── reliability-v3-migration.json approved resumable cutover manifest
 │   ├── reliability-v3-adopted.json   approved complete cutover evidence
-│   ├── queue/                        legacy migration input only
-│   ├── queue-migrated-v2             migration completion marker
+│   ├── queue/                        JSON queue of v3.3.0–v3.4.0: refused, never imported
+│   ├── queue-migrated-v2             marker of earlier releases, read by nothing
 │   ├── state.json                    automation + compile receipts
 │   ├── lsp/<owner-nonce>/             bounded LSP process scratch
 │   │   ├── owner.json                 immutable create-only owner evidence
@@ -372,6 +372,23 @@ Evidence Graph and FTS artifacts are both built from that exact immutable
 `CorpusSnapshot`; live membership and hashes are recaptured immediately before
 publication.
 
+`search.sqlite3` also carries the **ledger of things and events** (approved
+2026-09-22): one table, `ledger`, whose rows are posted by the nightly fact-keys
+call into `cache/fact-keys/keys.sqlite3` — kind, canonical thing, event, day,
+quantity, whether the user said it and dated it, and the pointer to the source
+bytes — and copied into the artifact at build time exactly as the keys are. Each
+row is posted once under a digest of its fields and pointer; two rows of one thing
+within 30 days are one event unless a stated quantity contradicts; a count is made
+by code over every row (`scripts/ledger.py: count`, `reconcile`), never by a model
+over retrieved chunks, and costs no provider call. The table is sealed by the
+artifact's digest, disposable and derived like the rest of the generation; an
+artifact built before the table existed carries none and a reader answers "no
+ledger", not zero. A thing seen on two or more days opens the recurrence gate: its
+entity page under `knowledge/notes/ledger-<kind>-<thing>.md` is created or extended
+with dated pointer lines by code, never rewritten by a model. Decision:
+`knowledge/notes/ledger-of-things-and-events-decision.md`; research:
+`docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+
 Publication is complete or absent. The builder writes and fsyncs every required
 artifact, validates canonical manifests, repository scope, artifact hashes, SQLite
 integrity, graph evidence spans, FTS content, and the final directory seal, then
@@ -588,8 +605,7 @@ or nonzero active state remains fail-closed.
   changes the requirement to publish a complete generation. POSIX collection is
   descriptor-authoritative; Windows reparse and identity checks are best effort.
   This adds no daemon or automatic legacy-cache removal.
-- `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
-  `vectors_meta.json` (metadata),
+- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
   `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
   roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
@@ -597,8 +613,8 @@ or nonzero active state remains fail-closed.
   `scripts/install_language_server.py` are the only supported download/publish paths
   and `scripts/lsp_paths.py` derives them without directory creation.
   v4.0: `models/` (ML model cache),
-  legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
-  action cache), and `cache/claims.sqlite3` (derived claim index).
+  `cache/compile/` (validated compile-plan action cache), and `cache/claims.sqlite3`
+  (derived claim index).
 - `cache/code-hints/<checkout-hash>.sqlite3` — issue #24 C1: the classes,
   functions and methods of one foreign checkout's newest generation, with
   qualified name, first location and resolved in/out degree, exported once by
@@ -621,7 +637,7 @@ cache/evidence-graph/generations/<generation-id>/
 ├── source-manifest.json
 ├── incremental-manifest.json    optional; present for incremental builds
 ├── evidence.sqlite3
-├── search.sqlite3
+├── search.sqlite3                the FTS chunks with their keys, and the `ledger` table
 ├── vectors.npy
 └── vectors.json
 ```
@@ -633,8 +649,7 @@ cache/evidence-graph/generations/<generation-id>/
   It is not authoritative and contains query hashes rather than raw query or response
   content. Ingestion enforces a transactional row ceiling. Explicit bounded promotion
   records a per-page sequence watermark in the same recoverable Markdown mutation as
-  access counters, making retries idempotent. Legacy `access_log.jsonl` is stats-only
-  history and is never promoted automatically. Telemetry sits beside the catalog and
+  access counters, making retries idempotent. Telemetry sits beside the catalog and
   generations, never under `run/`.
   A v2 generation is immutable after activation and always contains the source
   manifest, Evidence Graph, and FTS snapshot. The incremental manifest is optional;
@@ -652,12 +667,16 @@ cache/evidence-graph/generations/<generation-id>/
   active generation. Recovery may register complete orphan generations without
   activating them. A corrupt active generation is replaced only by a revalidated
   same-scope prior generation from activation history/parent lineage.
-- Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
-  remain readable during migration. LanceDB was retired on 2026-09-07
-  (`knowledge/notes/retire-lancedb-decision.md`). They are disposable derived
-  caches retained as fallback, not members of a generation. They must not be removed
-  until installed-vault migration evidence makes that safe. The new reader switches
-  only after a validated generation is active.
+- The legacy FTS5 index (`cache/index.sqlite`, `cache/.paths-manifest`) and the legacy
+  vector cache (`cache/vectors.npy`, `cache/vectors_meta.json`) were retired on 2026-09-23:
+  the generation is the only index. A search with no active generation reads Markdown
+  directly, bounded by its deadline, and every such hit says `no_active_generation`; the
+  installer's sync builds the first generation (`doctor --rebuild-generation` on
+  demand), and the nightly refreshes it. Those files are read by nothing and may be deleted; nothing deletes them
+  automatically. LanceDB was retired on 2026-09-07: its table was never built on
+  the installed vault, its path was reachable only from the deadline-less legacy
+  search, and its index was keyed to a different embedder than the product's — see
+  `knowledge/notes/retire-lancedb-decision.md`.
 
 ### Evidence-cache migration and rollback
 
@@ -691,8 +710,8 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
   holds bounded live process scratch created by the
   owning LSP lifecycle. Its `lease.json` is a bounded mutable live
   lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
-  `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
-  migration input only. The approved audit-closure target adds `run/install/` for
+  `owner.json` and `failure.json`. Existing `run/queue/*.json` is refused and
+  named, never imported (2026-09-23). The approved audit-closure target adds `run/install/` for
   manifest-owned install, rollback, scheduler, and external-preimage state.
 - `cache/cognee/` — retired disposable legacy cache. It has no supported reader and
   is never removed automatically.

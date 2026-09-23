@@ -217,6 +217,10 @@ def main() -> int:
     except OperationalOwnershipError as exc:
         print(f"scheduled_weekly: maintenance already running ({exc.code}), skipping.", file=sys.stderr)
         return 0
+    except Exception as exc:
+        # The failure lands in the nightly's record: one field for both passes.
+        scheduled_nightly.record_scheduled_failure(datetime.now().strftime("%Y-%m-%d"), exc)
+        raise
     if fence is None:
         print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
         return 0

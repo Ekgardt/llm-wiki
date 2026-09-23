@@ -2119,7 +2119,10 @@ def test_the_vault_root_is_never_a_project(vault: Path) -> None:
 
     with pytest.raises(ValueError, match="vault root is not a project"):
         _compute_slug(vault, vault / "knowledge/projects")
-    assert _compute_slug(vault / "sub-project", vault / "knowledge/projects") == "sub-project"
+    # Since 2026-09-23 a directory inside the vault is refused too: a benchmark
+    # run under `cache/` and a transaction directory under `run/` had become projects.
+    with pytest.raises(ValueError, match="inside the vault is not a project"):
+        _compute_slug(vault / "sub-project", vault / "knowledge/projects")
 
 
 def _checkpoints(store: ProjectStore, count: int) -> None:

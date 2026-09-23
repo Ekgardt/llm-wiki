@@ -15,6 +15,7 @@ from pathlib import Path
 
 from sync_memory import _run_process_tree
 
+# Default wall-clock budget for one installer smoke run; distinct from the corpus collector's.
 DEFAULT_DEADLINE_SECONDS = 120.0
 MAX_CHILD_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 512

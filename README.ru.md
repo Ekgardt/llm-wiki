@@ -85,7 +85,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
 - **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера
 - **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
-- **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25, опциональные vectors + graph и многоязычный cross-encoder reranker, включённый по умолчанию, для hybrid retrieval
+- **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, FTS5 BM25 по evidence generation (до первой сборки — прямое чтение Markdown), опциональные vectors + graph и многоязычный cross-encoder reranker, включённый по умолчанию, для hybrid retrieval
 - **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа
 
 ### Проактивный интеллект
@@ -314,7 +314,6 @@ uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
-uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>

@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from integration_hook_config import MAX_CONFIG_BYTES  # one bound for the hook configuration
 from lsp_process_tree import ProcessTree
 
-MAX_CONFIG_BYTES = 2 * 1024 * 1024
 MAX_DEBUG_BYTES = 4 * 1024 * 1024
 DEBUG_TIMEOUT_SECONDS = 15.0
 PROFILE_START = "# >>> LLM-Wiki installer >>>"

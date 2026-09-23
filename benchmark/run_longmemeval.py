@@ -61,6 +61,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--list-only", action="store_true", help="print the sample and exit")
     parser.add_argument(
+        "--twins",
+        action="store_true",
+        help=(
+            "also ask each answerable question of the sample with its evidence sessions "
+            "removed from the haystack, where refusing is right; the report then carries "
+            "both refusal errors on the same questions"
+        ),
+    )
+    parser.add_argument(
         "--dataset",
         default=None,
         help=(
@@ -72,9 +81,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _run_suffix(args: argparse.Namespace) -> str:
+    """What the run measured beyond the sample, so two arms never share staging."""
+    marks = (("-retrieval", getattr(args, "retrieval_only", False)), ("-twins", getattr(args, "twins", False)))
+    return "".join(mark for mark, present in marks if present)
+
+
 def _run_tag(args: argparse.Namespace) -> str:
-    """The run's name; a retrieval-only run never shares staging with an answered one."""
-    suffix = "-retrieval" if getattr(args, "retrieval_only", False) else ""
+    """The run's name; a retrieval-only or twinned run never shares staging with a plain one."""
+    suffix = _run_suffix(args)
     if args.full:
         return f"full{suffix}"
     return f"n{args.sample}-seed{args.seed}{suffix}"
@@ -93,7 +108,10 @@ def _dataset(args: argparse.Namespace) -> list[dict]:
     path = Path(args.dataset)
     data = json.loads(path.read_text(encoding="utf-8"))
     longmemeval_data.require_dataset_shape(data)
-    return data
+    # A LoCoMo question names its evidence as `D7:19`; the stand reads session
+    # ids and `has_answer`, so without this line every coverage figure of the
+    # 2026-09-19 LoCoMo run read zero. See `longmemeval_data.labelled_by_evidence`.
+    return [longmemeval_data.labelled_by_evidence(question) for question in data]
 
 
 def _results_path(args: argparse.Namespace) -> Path:
@@ -124,6 +142,24 @@ def _sampled(args: argparse.Namespace, data: list[dict]) -> list[dict]:
     if args.full:
         return data
     return longmemeval_data.stratified_sample(data, args.sample, args.seed)
+
+
+def with_twins(sample: list[dict]) -> list[dict]:
+    """The sample, then one twin per question that has evidence sessions to remove.
+
+    Built where the question set is prepared, as an ordinary question with fewer
+    sessions: the worker and the vault builder need no hook. See
+    `longmemeval_data.twin_of`.
+    """
+    twins = (longmemeval_data.twin_of(question) for question in sample)
+    return [*sample, *(twin for twin in twins if twin is not None)]
+
+
+def _questions(args: argparse.Namespace, data: list[dict]) -> list[dict]:
+    sample = _sampled(args, data)
+    if not getattr(args, "twins", False):
+        return sample
+    return with_twins(sample)
 
 
 def _worker_command(question_file: Path, out_file: Path, args: argparse.Namespace) -> list[str]:
@@ -364,6 +400,40 @@ def _print_summary(report: dict) -> None:
         )
 
 
+def abstention_line(calibration: dict) -> str:
+    """The refusal decision in one line: every figure named, every share as seen/of.
+
+    A bare share is what let one run be quoted as two different numbers, so
+    nothing here is printed without the denominator it was taken over — the
+    same shape `_evidence_columns` uses. The first three figures are losses we
+    could win, the last two are the decision the other way round on the
+    questions whose right answer is silence.
+    """
+    return " ".join(
+        (
+            "abstention calibration:",
+            f"refused_of_answerable={calibration['refused']}/{calibration['answerable']}",
+            "refused_with_evidence_in_prompt="
+            f"{calibration['refused_with_evidence_in_prompt']}"
+            f"/{calibration['refused_evidence_measured']}",
+            "refused_with_gold_text_in_prompt="
+            f"{calibration['refused_with_gold_text_in_prompt']}"
+            f"/{calibration['refused_gold_text_applicable']}",
+            "refused_when_silence_expected="
+            f"{calibration['refused_when_silence_expected']}"
+            f"/{calibration['silence_expected']}",
+            "answered_when_silence_expected="
+            f"{calibration['answered_when_silence_expected']}"
+            f"/{calibration['silence_expected']}",
+            # The same decision on the twins: the question with its evidence
+            # removed, where silence is right, and the pair right on both sides.
+            f"refused_when_twin={calibration['refused_when_twin']}/{calibration['twins']}",
+            f"answered_when_twin={calibration['answered_when_twin']}/{calibration['twins']}",
+            f"pairs_right={calibration['pairs_right']}/{calibration['pairs']}",
+        )
+    )
+
+
 def _pending_questions(sample: list[dict], done: dict[str, dict]) -> list[dict]:
     return [
         question for question in sample if str(question["question_id"]) not in done
@@ -401,7 +471,7 @@ def _execute(pending: list[dict], staging: Path, results_path: Path, args) -> No
 def main() -> int:
     args = parse_args()
     data = _dataset(args)
-    sample = _sampled(args, data)
+    sample = _questions(args, data)
     if args.list_only:
         _list_sample(sample)
         return 0
@@ -431,11 +501,19 @@ def _published(scoped: list[dict], args) -> int:
     report["retrieval_coverage"] = longmemeval_coverage.aggregate(scoped)
     report["compile_evidence"] = longmemeval_coverage.compile_evidence(scoped)
     report["failure_split"] = longmemeval_coverage.failure_split(scoped)
+    # A refusal is a loss the accuracy cannot name and a win nobody else
+    # measures, depending on which question it was made on. Both directions,
+    # beside the accuracy. See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+    report["abstention_calibration"] = longmemeval_score.abstention_calibration(scoped)
+    # Each half of the stand on its own: a threshold is set on tune and read
+    # on decide, and a report that mixed them could be tuned on by accident.
+    report["splits"] = longmemeval_score.split_calibration(scoped)
     _report_path(args).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"report: {_report_path(args)}")
     _print_summary(report)
+    print(abstention_line(report["abstention_calibration"]))
     reasons = degraded_reasons(report["retrieval_path"])
     _print_retrieval_path(report["retrieval_path"], reasons)
     return _exit_code(reasons)

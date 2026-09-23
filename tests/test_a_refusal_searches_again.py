@@ -41,7 +41,10 @@ def vault(tmp_path: Path) -> Path:
     root = tmp_path / "vault"
     (root / "knowledge" / "notes").mkdir(parents=True)
     (root / "knowledge" / "daily").mkdir(parents=True)
-    _write_note(root, "racket.md", "I have been practising with my new tennis racket all week.")
+    # The first page names little of the question: since 2026-09-22 a refusal on
+    # evidence that already covers the question is read again rather than
+    # searched for (`evidence_sufficiency`), and these tests are about the search.
+    _write_note(root, "racket.md", "I have been practising with it all week.")
     _write_note(root, "shop.md", "I bought the tennis racket at the sports store downtown on Monday.")
     return root
 
@@ -124,10 +127,8 @@ def test_a_refusal_searches_for_what_its_reason_names_and_answers(vault: Path) -
 
     assert stand.queries == ["tennis racket bought store", "sports store downtown"]
     assert "no span states where it was bought" in stand.missing_prompts[0]
-    assert len(stand.answer_prompts) == 2
-    assert "shop.md" in stand.answer_prompts[1]
-    assert document["status"] == "answered"
-    assert "sports store downtown" in document["claims"][0]["text"]
+    assert (len(stand.answer_prompts), "shop.md" in stand.answer_prompts[1]) == (2, True)
+    assert (document["status"], "sports store downtown" in document["claims"][0]["text"]) == ("answered", True)
 
 
 def _unsupported_claim(prompt: str) -> str:

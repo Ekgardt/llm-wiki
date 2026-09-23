@@ -18,6 +18,7 @@ import ast
 from pathlib import Path
 
 MAX_FILES = 20
+# One source file re-read for fresh positions; a snippet reads at most 1 MiB.
 MAX_FILE_BYTES = 4 * 1024 * 1024
 _PATH_KEYS = ("file", "relative_path", "path")
 _NAME_KEYS = ("qualified_name", "name")

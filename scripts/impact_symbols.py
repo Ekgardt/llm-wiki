@@ -18,8 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 
 REACH_EDGE_TYPES = ("CALLS", "IMPORTS", "INHERITS")
+# Call-graph depth followed for affected symbols; the graph reader's traversal bound is 32.
 MAX_DEPTH = 8
 MAX_SEEDS = 50
+# Affected symbols one impact answer names; the graph reader's row bound is 10 000.
 MAX_ROWS = 200
 WALK_MAX_ROWS = 2_000
 WALK_MAX_WORK = 20_000

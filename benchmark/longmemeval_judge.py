@@ -104,8 +104,8 @@ def _verdict_of(text: str | None) -> bool | None:
 
 
 def needs_judging(row: dict) -> bool:
-    """Only answered non-abstention rows need a judge; the rest are settled."""
-    if row.get("is_abstention") or row.get("error"):
+    """Only answered rows that had an answer need a judge; a silence-expected row is settled by its status."""
+    if longmemeval_score.silence_expected(row) or row.get("error"):
         return False
     return row.get("status") == "answered" and bool(row.get("hypothesis"))
 
@@ -386,6 +386,12 @@ def _report_for(protocol: str, rows: list[dict]) -> dict:
         return {
             **_judge_accuracy(rows),
             "judge_unreadable": _unreadable(rows),
+            # A refusal is scored wrong here by construction — `needs_judging`
+            # never sends one to the judge, so the substring test stands in and
+            # reads an empty hypothesis as a miss. The verdict is right and
+            # invisible; this section is what makes it visible, on both sides of
+            # the decision. See `docs/research/2026-09-19-a-number-names-its-stand.md`.
+            "abstention_calibration": longmemeval_score.abstention_calibration(rows),
             "efficiency": efficiency(rows, protocol),
         }
     from longmemeval_official import official_accuracy

@@ -4080,12 +4080,13 @@ def _committed_append_or_rewrite(
     A committed record used to be answered with `committed` whatever had become
     of the file, so append, delete, append said "written" over a file that did
     not exist. A target that is gone took the block with it, so the next
-    candidate id writes again. Bytes that merely changed are not checked: a
-    daily log grows under every other writer, and that is not this block's
-    disappearance. See
-    `docs/research/2026-09-18-a-committed-append-still-needs-its-file.md`.
+    candidate id writes again. Bytes that merely changed are not checked, nor
+    even read: a daily log grows under every other writer, and that is not this
+    block's disappearance. See
+    `docs/research/2026-09-18-a-committed-append-still-needs-its-file.md` and
+    `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
     """
-    if coordinator._current_hash(relative) != ABSENT:
+    if coordinator._target_present(relative):
         return record
     return "advance"
 
@@ -8667,6 +8668,15 @@ class MarkdownCoordinator:
 
     def _current_hash(self, path: str) -> str:
         return self._hash_bounded_target(self._target(path))
+
+    def _target_present(self, path: str) -> bool:
+        """Whether a name is bound to a file, by `lstat` alone: no open, no read.
+
+        Presence is asked outside any lock about files other writers are growing;
+        a hash of a moving file refuses, presence of it must not. See
+        `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
+        """
+        return _lstat_or_none(self._target(path)) is not None
 
     def _check_preconditions(
         self,

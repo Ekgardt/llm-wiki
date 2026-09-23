@@ -34,21 +34,24 @@ def _dead_code_tasks() -> list[dict]:
     return [task for task in _tasks() if task["id"] in ("T06", "T07")]
 
 
-def _assert_empty_frontier_is_required(task: dict) -> None:
+def _assert_frontier_is_required(task: dict) -> None:
+    """A dead symbol's answer is the empty frontier; a live one's is its caller."""
     calls = task["llm_wiki_best"]
     must = stand._side_terms(task, calls, "must")
-    assert '"nodes": []' in must, task["id"]
+    frontier = '"nodes": []' if '"nodes": []' in must else task["gold"]["must"][1]
+    assert frontier in must, task["id"]
+    assert frontier != task["gold"]["must"][0], task["id"]
     assert stand._side_terms(task, calls, "must_not") == task["gold"]["must_not"]
     echo = '{{"nodes": [{{"name": "{}"}}]}}'.format(task["gold"]["must"][0])
     assert stand._grade_text(echo, must, []) == "partial"
 
 
-def test_the_dead_code_override_demands_an_empty_frontier_not_a_name_echo():
-    """T06/T07 via query mode: echoing the symbol must not earn the grade."""
+def test_the_dead_code_override_demands_a_frontier_not_a_name_echo():
+    """T06 (dead) and T07 (alive since 2026-09-23) via query mode: echoing the symbol earns nothing."""
     tasks = _dead_code_tasks()
     assert len(tasks) == 2
     for task in tasks:
-        _assert_empty_frontier_is_required(task)
+        _assert_frontier_is_required(task)
 
 
 def test_every_task_carries_hand_established_gold():

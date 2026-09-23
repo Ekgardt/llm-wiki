@@ -12,6 +12,14 @@ directories under `knowledge/projects/`. Any tracked page naming one of them,
 or carrying a home path or the owner's address, is a leak that no path rule
 would ever see.
 
+A home path has a second spelling. A code-navigation project is keyed by an
+absolute path with the separators turned into hyphens, so `/home/<account>/x`
+becomes `home-<account>-x` — no slash left for the path pattern to catch — and on
+2026-09-19 two such keys were quoted in a document to explain a benchmark
+result. That spelling is swept too, over documents and code; the recorded run
+artefacts that quote the key they actually queried are excluded by name, with
+the reason, below.
+
 This test fails closed. It reads what git actually tracks, not what the
 `.gitignore` intends.
 
@@ -69,6 +77,15 @@ PATTERN_FIXTURES = frozenset(
     {"tests/test_nothing_private_reaches_the_public_repository.py", "tests/test_structure.py"}
 )
 
+# A parity run records the code-navigation project it queried, and that project is
+# keyed by an absolute path, so 35 tracked artefacts carry the home-derived key in
+# about 2 580 places. They are a run's own output and already published; rewriting
+# them would falsify the record of what actually ran, which is the one thing a
+# recorded run is for. They are excluded by name, with the reason, so the check
+# below stays green today and still refuses the case that matters — a *document*
+# quoting a project key, which is how the name reached `docs/` on 2026-09-19.
+RUN_ARTEFACT_PREFIX = "benchmark/code-parity"
+
 
 def _tracked(prefix: str | None = None) -> list[Path]:
     arguments = ["git", "ls-files"] + ([prefix] if prefix else [])
@@ -102,9 +119,20 @@ def _text_of(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def _offenders(finder) -> dict[str, set[str]]:
+def _documents_and_code() -> list[Path]:
+    """Everything the sweep reads, minus the recorded runs that quote a project key."""
+    named = _tracked_text()
+    return [
+        path
+        for path in named
+        if not _repository_path(path).startswith(RUN_ARTEFACT_PREFIX)
+    ]
+
+
+def _offenders(finder, paths: list[Path] | None = None) -> dict[str, set[str]]:
     """Each tracked text file that carries something private, and what it carries."""
-    found = ((path, finder(_text_of(path))) for path in _tracked_text())
+    swept = _tracked_text() if paths is None else paths
+    found = ((path, finder(_text_of(path))) for path in swept)
     return {_repository_path(path): hit for path, hit in found if hit}
 
 
@@ -143,8 +171,8 @@ def _other_project_slugs() -> set[str]:
 def _named_slugs(text: str, slugs: set[str]) -> set[str]:
     """The slugs this text names as a token — not as two words inside a longer phrase.
 
-    `\\b` counts a hyphen as a boundary, so a project called `refusal-names` matched the
-    prose in `...-a-refusal-names-its-component-...`. A leak names a project in a path, in
+    `\\b` counts a hyphen as a boundary, so a two-word project slug matched the same two
+    words inside a hyphenated note title. A leak names a project in a path, in
     quotes or after a space. See
     `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
     """
@@ -153,6 +181,42 @@ def _named_slugs(text: str, slugs: set[str]) -> set[str]:
         for slug in slugs
         if re.search(rf"(?<![\w-]){re.escape(slug)}(?![\w-])", text)
     }
+
+
+# The same private string in its other spelling. A code-navigation project is
+# keyed by an absolute path with the separators turned into hyphens, so the home
+# directory arrives as `home-<account>-<vault>` and the account name travels into
+# any document that quotes a project key. The `/home/<account>/` pattern above
+# cannot see that form: there is no slash left in it. The prefix is derived from
+# this machine at run time and never written down here, for the same reason the
+# project slugs are — a private name listed in the tracked tree is the leak the
+# guard exists to prevent.
+def _home_project_prefix() -> str:
+    """The home directory spelled the way a path-keyed project name spells it."""
+    return "-".join(Path.home().resolve().parts[1:])
+
+
+def _names_with_prefix(text: str, prefix: str) -> set[str]:
+    """Project keys in this text that begin with that path prefix, as tokens.
+
+    The boundary is "not a letter, digit, underscore or hyphen", the rule
+    `_named_slugs` already uses: a hyphen is not a word boundary for a name, so
+    `\\b` would match the prefix inside an ordinary hyphenated phrase and every
+    dated note's file name would trip it. See
+    `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
+
+    A prefix of one short path segment says nothing and is not swept: on a
+    machine whose home is `/root` it would be the bare word `root`, and every
+    page saying "vault root" would read as a leak.
+    """
+    if len(prefix) <= 4 or "-" not in prefix:
+        return set()
+    pattern = rf"(?<![\w-]){re.escape(prefix)}(?:-[A-Za-z0-9_]+)*(?![\w-])"
+    return set(re.findall(pattern, text))
+
+
+def _home_project_names(text: str) -> set[str]:
+    return _names_with_prefix(text, _home_project_prefix())
 
 
 def _is_private(match: str) -> bool:
@@ -186,6 +250,63 @@ def test_no_tracked_file_carries_a_home_path_or_an_address() -> None:
     offenders = _offenders(_private_strings)
 
     assert not offenders, f"tracked files carry private strings: {offenders}"
+
+
+def test_no_tracked_document_carries_a_home_derived_project_name() -> None:
+    """The home path in the spelling the slash-pattern cannot see.
+
+    On 2026-09-19 a document explained a benchmark result by quoting the literal
+    project key of two code indexes, and each key spells the account name. The
+    recorded run artefacts keep theirs — they are the record of what ran — but no
+    document may.
+    """
+    offenders = _offenders(_home_project_names, _documents_and_code())
+
+    assert not offenders, f"tracked files carry a home-derived project name: {offenders}"
+
+
+def test_a_planted_home_derived_project_name_would_be_caught() -> None:
+    """The matcher, not this machine, so it runs the same in a clean checkout."""
+    found = [
+        _names_with_prefix("the index home-someone-vault-tasks was stale", "home-someone"),
+        _names_with_prefix('cbm_project was "home-someone-vault"', "home-someone"),
+        _names_with_prefix("project home-someone answered", "home-someone"),
+    ]
+
+    assert found == [{"home-someone-vault-tasks"}, {"home-someone-vault"}, {"home-someone"}]
+
+
+def test_a_home_prefix_inside_a_longer_phrase_is_not_a_match() -> None:
+    """Yesterday's lesson, applied to this name too.
+
+    See `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
+    """
+    phrase = "docs/research/2026-09-18-at-home-someone-asked-about-the-gate.md"
+
+    assert _names_with_prefix(phrase, "home-someone") == set()
+    assert _names_with_prefix("welcome-home-someone", "home-someone") == set()
+
+
+def test_a_prefix_too_short_to_be_a_name_is_not_swept() -> None:
+    """A home of `/root` would otherwise report every page saying "vault root"."""
+    assert _names_with_prefix("the vault root is here", "root") == set()
+    assert _names_with_prefix("a-b sits here", "a-b") == set()
+
+
+def _swept_for_project_names() -> set[str]:
+    return {_repository_path(path) for path in _documents_and_code()}
+
+
+def _recorded_runs_among(paths: set[str]) -> list[str]:
+    return sorted(path for path in paths if path.startswith(RUN_ARTEFACT_PREFIX))
+
+
+def test_the_recorded_runs_are_excluded_and_the_documents_are_not() -> None:
+    """The artefacts quote the key they queried; a document has no such excuse."""
+    swept = _swept_for_project_names()
+
+    assert "docs/REPORT-2026-09-12-what-works-now.md" in swept
+    assert _recorded_runs_among(swept) == []
 
 
 def test_the_check_reads_git_rather_than_the_ignore_file() -> None:
@@ -294,9 +415,9 @@ def test_a_slug_is_named_as_a_token_and_not_as_two_words_of_a_phrase() -> None:
 
     See `docs/research/2026-09-18-a-project-slug-is-a-name-not-a-phrase.md`.
     """
-    slugs = {"refusal-names"}
-    leaks = ("knowledge/projects/refusal-names/state.md", 'the "refusal-names" project', "refusal-names.md")
-    phrase = "docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md"
+    slugs = {"paint-walls"}
+    leaks = ("knowledge/projects/paint-walls/state.md", 'the "paint-walls" project', "paint-walls.md")
+    phrase = "docs/research/2026-09-18-how-to-paint-walls-without-a-ladder.md"
 
     assert [_named_slugs(text, slugs) for text in leaks] == [slugs] * len(leaks)
     assert _named_slugs(phrase, slugs) == set()

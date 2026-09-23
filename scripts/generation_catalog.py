@@ -19,6 +19,7 @@ from dataclasses import InitVar, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from bounded_io import IO_CHUNK_BYTES
 from reliable_memory import (
     canonical_json_bytes,
     fsync_directory,
@@ -155,6 +156,7 @@ if os.name == "nt":
     _rtl_nt_status_to_dos_error.argtypes = (ctypes.c_long,)
     _rtl_nt_status_to_dos_error.restype = wintypes.ULONG
 
+# A generation's `manifest.json`, the bound doctor reads it under too.
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ARTIFACTS = 1024
 # Absurdity ceilings for the sizes a manifest declares, not read bounds: a
@@ -167,7 +169,7 @@ MAX_GENERATION_CHILDREN = 4096
 MAX_CATALOG_BYTES = 256 * 1024 * 1024
 MAX_GENERATIONS = 1024
 MAX_ACTIVATION_HISTORY = 16384
-HASH_CHUNK_BYTES = 64 * 1024
+HASH_CHUNK_BYTES = IO_CHUNK_BYTES
 # A caller with a deadline gets whatever is left of it, capped here. A caller
 # without one waits out contention instead of surfacing `database is locked`:
 # two writers doing a compare-and-swap on a loaded machine can hold the write

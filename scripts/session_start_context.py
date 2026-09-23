@@ -40,6 +40,7 @@ from context_budget import (  # noqa: E402
     ContextItem,
 )
 from memory_state import (  # noqa: E402
+    HOOK_STATE_LOCK_TIMEOUT,
     REPORTS_DIR,
     ROOT,
     STATE_ROOT,
@@ -84,7 +85,6 @@ SECTION_PRIORITIES: dict[str, int] = {
 INDEX_KNOWLEDGE_SECTIONS = 3
 INDEX_MAX_CHARS = 1200
 DAILY_EXCERPT_LINES = 6
-HOOK_STATE_LOCK_TIMEOUT = 0.1
 RECOVERY_LIMIT_SECONDS = 0.1
 RECOVERY_MAX_TRANSACTIONS = 4
 MAX_TRANSACTION_DATABASE_BYTES = 64 * 1024 * 1024
@@ -546,13 +546,25 @@ def _load_state_safe() -> dict:
         return {}
 
 
+def _count_daily_logs() -> int:
+    """The top-level daily logs only: `receipts/` and `archive/` are not logs.
+
+    `_count_md` recurses, and on the live vault of 2026-09-23 it said "346 daily
+    logs" for 25 logs and 320 receipts.
+    """
+    if not DAILY_DIR.exists():
+        return 0
+    return sum(1 for path in DAILY_DIR.glob("*.md") if path.is_file() and path.name != "README.md")
+
+
 def _inventory_line() -> str:
     """Quick mental model of vault size."""
     return (
         f"- **Inventory**: {_count_md(KNOWLEDGE_DIR)} knowledge pages, "
-        f"{_count_md(DAILY_DIR)} daily logs, {_count_md(SKILLS_DIR)} skills, "
+        f"{_count_daily_logs()} daily logs, {_count_md(SKILLS_DIR)} skills, "
         f"{_count_md(GAPS_DIR)} gaps, {_count_active_projects()} active project(s)."
     )
+
 
 
 def _backlog_line(backlog_days: int) -> str:

@@ -17,6 +17,10 @@ _READ_CHUNK_BYTES = 64 * 1024
 # compile for three days. Research:
 # docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md
 MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
+# One read or hash step over any bounded file. It was defined six times under
+# five names before 2026-09-23; see
+# `docs/research/2026-09-23-one-limit-one-place.md`.
+IO_CHUNK_BYTES = 64 * 1024
 
 
 class SourceChangedDuringRead(PermissionError):

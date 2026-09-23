@@ -1818,22 +1818,27 @@ class TestCodeToolDetection:
     def test_external_version_probes_run_concurrently_with_short_timeouts(
         self, tmp_path, monkeypatch
     ):
+        """Three probes meet at one barrier; a sequential probe would wait alone and break it.
+
+        A stopwatch stood here (`elapsed < 0.35`) and measured the Windows runner:
+        0.60 s under four parallel shards on 2026-09-23, CI run 35857662331. See
+        `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
+        """
         seen = []
+        rendezvous = threading.Barrier(3, timeout=5)
         monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
         monkeypatch.setattr("code_graph.importlib.import_module", lambda name: object())
         monkeypatch.setattr("code_graph.shutil.which", lambda name: f"/bin/{name}")
 
-        def slow_probe(args, timeout=5):
+        def meeting_probe(args, timeout=5):
             seen.append(timeout)
-            time.sleep(0.15)
+            rendezvous.wait()
             return "1.0", None
 
-        monkeypatch.setattr("code_graph._probe_version", slow_probe)
-        started = time.monotonic()
+        monkeypatch.setattr("code_graph._probe_version", meeting_probe)
         detect_code_tools(tmp_path, cache_path=tmp_path / "tools.json")
-        elapsed = time.monotonic() - started
 
-        assert elapsed < 0.35
+        assert rendezvous.broken is False
         assert seen == [2, 2, 2]
 
     def test_concurrent_manifest_writers_leave_valid_file_and_no_temps(

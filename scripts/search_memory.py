@@ -30,7 +30,6 @@ import re
 import sqlite3
 import stat
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -52,7 +51,7 @@ from corpus_snapshot import (  # noqa: E402
     validate_live_snapshot,
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
-from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
+from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from page_status import current_status_sql, is_retired  # noqa: E402
 from provenance import trust_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
@@ -63,14 +62,6 @@ from reliable_memory import (  # noqa: E402
 )
 from secret_redact import redact_secrets  # noqa: E402
 
-INDEX_DIR = STATE_ROOT / "cache"
-INDEX_FILE = INDEX_DIR / "index.sqlite"
-INDEX_MANIFEST = INDEX_DIR / ".paths-manifest"
-VECTOR_NPY = INDEX_DIR / "vectors.npy"  # Binary numpy cache (memory-mapped, fast load)
-VECTOR_META = INDEX_DIR / "vectors_meta.json"  # Metadata without vectors (small JSON)
-
-_INDEX_SWAP_WAIT_SECONDS = 10.0
-_INDEX_SWAP_STALE_SECONDS = 30.0
 _INDEX_REPLACE_WAIT_SECONDS = 1.0
 MAX_SEARCHABLE_PAGES = 10_000
 MAX_SEARCH_ENTRIES = 20_000
@@ -132,10 +123,6 @@ GENERATION_METADATA_KEYS = frozenset(
 MAX_GENERATION_FTS_CHUNKS = 100_000
 GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-
-
-class LegacySearchUnavailable(RuntimeError):
-    """The derived SQLite index failed and direct Markdown found no match."""
 
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
@@ -438,8 +425,16 @@ def _write_generation_fts(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> None:
-    """Schema, metadata and every chunk, verified before the caller publishes."""
+    """Schema, metadata and every chunk, verified before the caller publishes.
+
+    `ledger_rows` is the nightly ledger of things and events, carried as one more
+    table of this artifact (`ledger.write_table`) so a count is made by code over
+    every record, sealed by the artifact's own digest; None means the build
+    carried no ledger and a reader finds no table. Research:
+    `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+    """
     database.execute("PRAGMA journal_mode=DELETE")
     database.execute("PRAGMA synchronous=FULL")
     database.executescript(_GENERATION_FTS_DDL)
@@ -457,9 +452,20 @@ def _write_generation_fts(
         "INSERT INTO chunks VALUES (" + ",".join("?" for _ in range(23)) + ")",
         rows(),
     )
+    _write_generation_ledger(database, ledger_rows)
     database.commit()
     if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         raise ValueError("generation FTS integrity check failed")
+
+
+def _write_generation_ledger(
+    database: sqlite3.Connection, ledger_rows: Sequence[tuple[object, ...]] | None
+) -> None:
+    if ledger_rows is None:
+        return
+    import ledger
+
+    ledger.write_table(database, ledger_rows)
 
 
 def _stop_reached(
@@ -497,6 +503,7 @@ def _built_fts_artifact(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> dict[str, object]:
     """Write the artifact under a temporary name, then publish it atomically."""
     state = {"stopped": False, "complete": False}
@@ -509,7 +516,12 @@ def _built_fts_artifact(
         with closing(sqlite3.connect(temporary)) as database:
             database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
             _write_generation_fts(
-                database, snapshot, deadline=deadline, cancelled=cancelled, keys=keys
+                database,
+                snapshot,
+                deadline=deadline,
+                cancelled=cancelled,
+                keys=keys,
+                ledger_rows=ledger_rows,
             )
         fsync_file(temporary)
         _check_generation_stop(deadline, cancelled)
@@ -540,12 +552,14 @@ def build_generation_fts(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     keys: Mapping[str, str] | None = None,
+    ledger_rows: Sequence[tuple[object, ...]] | None = None,
 ) -> dict[str, object]:
     """Build one immutable generation-local FTS5 artifact from captured chunks.
 
     `keys` carries the nightly fact keys per turn span; they are indexed beside the chunk
     and never returned to a reader. Research:
     `docs/research/2026-09-16-the-keys-are-indexed-beside-the-turn.md`.
+    `ledger_rows` carries the nightly ledger of things and events as one more table.
     """
     _require_buildable_snapshot(snapshot, deadline, cancelled)
     directory = _generation_directory(generation_directory)
@@ -561,6 +575,7 @@ def build_generation_fts(
         deadline=deadline,
         cancelled=cancelled,
         keys=keys,
+        ledger_rows=ledger_rows,
     )
 
 
@@ -1351,49 +1366,6 @@ def _check_legacy_stop(
         raise TimeoutError("legacy retrieval deadline reached")
 
 
-def _prefixed_for_query(texts: list[str], is_query: bool) -> list[str]:
-    """Both sides carry their E5 prefix; the model is trained to expect them."""
-    return prefixed_texts(texts, is_query)
-
-
-def _embed_texts(
-    texts: list[str],
-    is_query: bool = False,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> list[list[float]] | None:
-    """Embed a list of texts. Returns None if model unavailable.
-
-    Both sides carry an E5 prefix: questions are queries, pages are passages.
-    """
-    _check_legacy_stop(deadline, cancelled)
-    embedder = _get_embedder()
-    if not embedder:
-        return None
-    try:
-        texts = _prefixed_for_query(texts, is_query)
-        vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
-        _check_legacy_stop(deadline, cancelled)
-        return vectors.tolist()
-    except TimeoutError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - named, never silent
-        note_degradation("vector_encode", exc)
-        return None
-
-
-def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> list[float]:
-    """Compute cosine similarity between query and all documents."""
-    import numpy as np
-    q = np.array(query_vec)
-    docs = np.array(doc_vecs)
-    # Normalize
-    q_norm = q / (np.linalg.norm(q) + 1e-10)
-    docs_norm = docs / (np.linalg.norm(docs, axis=1, keepdims=True) + 1e-10)
-    return (docs_norm @ q_norm).tolist()
-
-
 class _PageWalkLimits:
     """Bounded traversal budget for one page collection."""
 
@@ -1603,7 +1575,6 @@ AUTHORITY_FIELD_RE = re.compile(
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
 
 
-
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
     title = fallback_stem
     summary = ""
@@ -1634,309 +1605,10 @@ _SEARCH_INDEX_MARKERS = (
 )
 
 
-def _index_schema_is_current(columns: tuple[str, ...], schema_sql: str) -> bool:
-    """The live index must have today's columns and today's FTS5 declaration."""
-    if columns != SEARCH_INDEX_COLUMNS:
-        return False
-    if _FTS5_TABLE_RE.search(schema_sql) is None:
-        return False
-    normalized = " ".join(schema_sql.casefold().split())
-    return all(marker in normalized for marker in _SEARCH_INDEX_MARKERS)
-
-
 def _deadline_timeout_options(deadline: float | None) -> dict[str, object]:
     if deadline is None:
         return {}
     return {"timeout": max(0.0, min(5.0, deadline - time.monotonic()))}
-
-
-def _schema_sql(schema_row: object) -> str:
-    if not schema_row or not isinstance(schema_row[0], str):
-        return ""
-    return schema_row[0]
-
-
-def _index_state(
-    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
-) -> tuple[tuple[str, ...], str, list[str]] | None:
-    """(columns, schema SQL, manifest paths) read from the live index."""
-    connect_options = _deadline_timeout_options(deadline)
-    with closing(sqlite3.connect(str(current_index), **connect_options)) as conn:
-        with _legacy_sqlite_guard(conn, deadline, cancelled):
-            columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(pages)"))
-            schema_row = conn.execute(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-                ("pages",),
-            ).fetchone()
-            manifest_row = conn.execute(
-                "SELECT value FROM index_metadata WHERE key = 'paths'"
-            ).fetchone()
-    if manifest_row is None:
-        return None
-    return columns, _schema_sql(schema_row), json.loads(manifest_row[0])
-
-
-def _any_page_newer_than(
-    pages: list[Path],
-    index_mtime: float,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    for page in pages:
-        _check_legacy_stop(deadline, cancelled)
-        try:
-            if page.stat().st_mtime > index_mtime:
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def _index_targets(root: Path | None, index_file: Path | None) -> tuple[Path, Path]:
-    return root or ROOT, index_file or INDEX_FILE
-
-
-def _needs_rebuild(
-    pages: list[Path],
-    *,
-    root: Path | None = None,
-    index_file: Path | None = None,
-    index_manifest: Path | None = None,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> bool:
-    """True when a page is newer than the index, or membership changed."""
-    _check_legacy_stop(deadline, cancelled)
-    source_root, current_index = _index_targets(root, index_file)
-    if not current_index.exists():
-        return True
-    if index_file is None and index_manifest is None:
-        with _index_swap_lock(deadline=deadline, cancelled=cancelled):
-            return _needs_rebuild(
-                pages,
-                root=source_root,
-                index_file=current_index,
-                index_manifest=INDEX_MANIFEST,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-    return _index_is_stale(pages, source_root, current_index, deadline, cancelled)
-
-
-def _readable_index_state(
-    current_index: Path, deadline: float | None, cancelled: Callable[[], bool] | None
-) -> tuple | None:
-    """An unreadable or malformed index is just another reason to rebuild."""
-    try:
-        return _index_state(current_index, deadline, cancelled)
-    except (sqlite3.Error, TypeError, ValueError):
-        return None
-
-
-def _index_is_stale(
-    pages: list[Path],
-    source_root: Path,
-    current_index: Path,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    state = _readable_index_state(current_index, deadline, cancelled)
-    if state is None:
-        return True
-    if _index_state_is_stale(state, pages, source_root, deadline, cancelled):
-        return True
-    _check_legacy_stop(deadline, cancelled)
-    return _any_page_newer_than(
-        pages, current_index.stat().st_mtime, deadline, cancelled
-    )
-
-
-def _index_state_is_stale(
-    state: tuple,
-    pages: list[Path],
-    source_root: Path,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    """What the stored index claims about its own schema and its sources."""
-    columns, schema_sql, manifest_paths = state
-    if not _index_schema_is_current(columns, schema_sql):
-        return True
-    # The manifest lives inside the SQLite candidate, so index and source
-    # membership become active through the same atomic file replacement.
-    _check_legacy_stop(deadline, cancelled)
-    current_paths = sorted(page.relative_to(source_root).as_posix() for page in pages)
-    return manifest_paths != current_paths
-
-
-def _is_transient_windows_access_error(error: OSError) -> bool:
-    return sys.platform == "win32" and isinstance(error, PermissionError) and (
-        getattr(error, "winerror", None) in {5, 32, 33}
-        or error.errno == 13
-    )
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
-
-
-def _write_lock_claim(lock_file: Path, payload: bytes) -> bool:
-    """Create the lock exclusively and write the claim, or report it is taken.
-
-    Binary: a Windows text-mode descriptor rewrites the claim's newlines.
-    """
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-    try:
-        descriptor = os.open(str(lock_file), flags, 0o600)
-    except FileExistsError:
-        return False
-    except PermissionError as error:
-        if not _is_transient_windows_access_error(error):
-            raise
-        return False
-    try:
-        os.write(descriptor, payload)
-    except BaseException:
-        os.close(descriptor)
-        _unlink_quietly(lock_file)
-        raise
-    os.close(descriptor)
-    return True
-
-
-def _lock_owner_alive(lock_file: Path) -> bool:
-    """A malformed or unreadable claim counts as abandoned."""
-    try:
-        owner = json.loads(lock_file.read_text(encoding="utf-8"))
-        owner_pid = owner.get("pid")
-        owner_token = owner.get("token")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return False
-    if not isinstance(owner_pid, int) or not isinstance(owner_token, str) or not owner_token:
-        return False
-    return bool(_is_pid_alive(owner_pid))
-
-
-def _lock_age_seconds(lock_file: Path) -> float:
-    try:
-        return time.time() - lock_file.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def _clear_stale_lock(lock_file: Path) -> bool:
-    """Remove a lock whose owner is gone; report whether it is now free."""
-    if _lock_age_seconds(lock_file) < _INDEX_SWAP_STALE_SECONDS:
-        return False
-    if _lock_owner_alive(lock_file):
-        return False
-    try:
-        lock_file.unlink()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def _acquire_index_swap_lock(
-    lock_file: Path,
-    payload: bytes,
-    *,
-    end: float,
-    poll: float,
-    cancelled: Callable[[], bool] | None,
-) -> None:
-    while True:
-        _check_legacy_stop(end, cancelled)
-        if _write_lock_claim(lock_file, payload):
-            return
-        if _clear_stale_lock(lock_file):
-            continue
-        _wait_before_lock_retry(lock_file, end=end, poll=poll, cancelled=cancelled)
-
-
-def _wait_before_lock_retry(
-    lock_file: Path,
-    *,
-    end: float,
-    poll: float,
-    cancelled: Callable[[], bool] | None,
-) -> None:
-    """Sleep until the next attempt, or give up when the deadline is spent."""
-    _check_legacy_stop(end, cancelled)
-    remaining = end - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
-    time.sleep(min(poll, remaining))
-    _check_legacy_stop(end, cancelled)
-
-
-def _release_index_swap_lock(lock_file: Path, token: str) -> None:
-    """Release only our own claim; another owner's lock is not ours to remove."""
-    try:
-        owner = json.loads(lock_file.read_text(encoding="utf-8"))
-        if owner.get("token") == token:
-            lock_file.unlink()
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-
-
-@contextmanager
-def _index_swap_lock(
-    timeout: float = _INDEX_SWAP_WAIT_SECONDS,
-    poll: float = 0.01,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> Iterator[None]:
-    """Serialize live-index swaps across processes with crash recovery."""
-    lock_file = INDEX_FILE.with_suffix(INDEX_FILE.suffix + ".swap.lock")
-    token = uuid.uuid4().hex
-    payload = json.dumps({"pid": os.getpid(), "token": token}).encode("utf-8")
-    end = time.monotonic() + timeout if deadline is None else deadline
-    _acquire_index_swap_lock(
-        lock_file, payload, end=end, poll=poll, cancelled=cancelled
-    )
-    try:
-        yield
-    finally:
-        _release_index_swap_lock(lock_file, token)
-
-
-def _replace_deadline(deadline: float | None) -> float:
-    if deadline is None:
-        return time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
-    return deadline
-
-
-def _replace_live_index(
-    tmp_file: Path,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> None:
-    end = _replace_deadline(deadline)
-    attempt = 0
-    while True:
-        _check_legacy_stop(end, cancelled)
-        try:
-            os.replace(str(tmp_file), str(INDEX_FILE))
-            return
-        except PermissionError as error:
-            if not _is_transient_windows_access_error(error):
-                raise
-            _check_legacy_stop(end, cancelled)
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                raise
-            delay = min(0.01 * (2 ** min(attempt, 4)), 0.1, remaining)
-            time.sleep(delay)
-            _check_legacy_stop(end, cancelled)
-            attempt += 1
 
 
 _SEARCH_INDEX_DDL = """
@@ -1951,163 +1623,6 @@ _SEARCH_INDEX_DDL = """
         tokenize = 'porter unicode61'
     )
     """
-
-
-def _create_index_schema(conn: sqlite3.Connection, manifest_paths: list[str]) -> None:
-    conn.execute(_SEARCH_INDEX_DDL)
-    conn.execute(
-        "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) "
-        "WITHOUT ROWID"
-    )
-    conn.execute(
-        "INSERT INTO index_metadata (key, value) VALUES ('paths', ?)",
-        (json.dumps(manifest_paths, separators=(",", ":")),),
-    )
-
-
-def _index_one_page(conn: sqlite3.Connection, page: Path) -> str | None:
-    """Insert one page and return the digest of the bytes that were indexed."""
-    try:
-        source = read_stable_bytes(page, MAX_PAGE_BYTES, label="search page")
-    except (OSError, ValueError):
-        return None
-    content = source.decode("utf-8", errors="ignore")
-    title, summary = _extract_title_and_summary(content, page.stem)
-    timestamp = (_extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or "")[:10]
-    conn.execute(
-        "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            page.relative_to(ROOT).as_posix(),
-            title,
-            summary,
-            _strip_frontmatter(content),
-            (_extract_frontmatter_field(content, PROJECT_FIELD_RE) or "").lower(),
-            timestamp,
-            page.stem.replace("-", " ").replace("_", " "),
-        ),
-    )
-    return hashlib.sha256(source).hexdigest()
-
-
-def _sources_unchanged(
-    source_digests: Mapping[Path, str],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    """A page edited while the index was building invalidates this build."""
-    for path, expected_digest in source_digests.items():
-        _check_legacy_stop(deadline, cancelled)
-        try:
-            current = read_stable_bytes(
-                path, MAX_PAGE_BYTES, label="search page publication"
-            )
-        except (OSError, ValueError):
-            return False
-        if hashlib.sha256(current).hexdigest() != expected_digest:
-            return False
-    return True
-
-
-def _build_index_candidate(
-    tmp_file: Path,
-    pages: list[Path],
-    manifest_paths: list[str],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> dict[Path, str]:
-    """Fill a fresh index file and report the digests it was built from."""
-    source_digests: dict[Path, str] = {}
-    conn = sqlite3.connect(str(tmp_file))
-    try:
-        _create_index_schema(conn, manifest_paths)
-        for page in pages:
-            _check_legacy_stop(deadline, cancelled)
-            digest = _index_one_page(conn, page)
-            if digest is not None:
-                source_digests[page] = digest
-        conn.commit()
-        _check_legacy_stop(deadline, cancelled)
-    finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001 - a close failure must not mask the build
-            pass
-    return source_digests
-
-
-def _publish_index_candidate(
-    tmp_file: Path,
-    source_digests: Mapping[Path, str],
-    manifest_paths: list[str],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> None:
-    """Builders work independently, then briefly serialise the atomic swap."""
-    with _index_swap_lock(deadline=deadline, cancelled=cancelled):
-        if not _sources_unchanged(source_digests, deadline, cancelled):
-            return
-        _replace_live_index(tmp_file, deadline=deadline, cancelled=cancelled)
-        try:
-            atomic_write(INDEX_MANIFEST, json.dumps(manifest_paths))
-        except OSError:
-            pass  # best-effort: the manifest inside the index is authoritative
-
-
-def _build_index(
-    pages: list[Path],
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> None:
-    """Build the FTS5 index from scratch into a temporary file, then swap it in.
-
-    Concurrent searches never see a partially built index or a window with no
-    index at all.
-    """
-    _check_legacy_stop(deadline, cancelled)
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    descriptor, tmp_name = tempfile.mkstemp(
-        prefix=f".{INDEX_FILE.name}.", suffix=".tmp", dir=INDEX_DIR
-    )
-    os.close(descriptor)
-    tmp_file = Path(tmp_name)
-    manifest_paths = sorted(page.relative_to(ROOT).as_posix() for page in pages)
-    try:
-        source_digests = _build_index_candidate(
-            tmp_file, pages, manifest_paths, deadline=deadline, cancelled=cancelled
-        )
-        _publish_index_candidate(
-            tmp_file,
-            source_digests,
-            manifest_paths,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    finally:
-        try:
-            tmp_file.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _page_trust_weight(path: str) -> float:
-    """Who said it and what the page is, read once from its frontmatter.
-
-    Both factors are the same table the generation and hybrid paths use, so a
-    page keeps its place in the order whichever path answered.
-    """
-    try:
-        p = ROOT / path if not Path(path).is_absolute() else Path(path)
-        content = p.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return 1.0
-    return trust_weight(
-        _extract_frontmatter_field(content, AUTHORITY_FIELD_RE),
-        _extract_frontmatter_field(content, PAGE_TYPE_FIELD_RE),
-    )
 
 
 def _valid_as_of(path: str, as_of: str) -> bool:
@@ -2185,22 +1700,6 @@ def _sqlite_stop_guard(
     finally:
         connection.set_progress_handler(None, 0)
     check(deadline, cancelled)
-
-
-@contextmanager
-def _legacy_sqlite_guard(
-    connection: sqlite3.Connection,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> Iterator[None]:
-    with _sqlite_stop_guard(
-        connection,
-        deadline,
-        cancelled,
-        check=_check_legacy_stop,
-        message="legacy SQLite work cancelled or deadline exceeded",
-    ):
-        yield
 
 
 @contextmanager
@@ -3652,64 +3151,6 @@ def _same_project(row_project: str, project: str | None) -> bool:
     return row_project.casefold() == project.casefold()
 
 
-def _title_boost(title: str, query_lower: str, query_words: set[str]) -> float:
-    """A title that is the query is the strongest lexical signal there is."""
-    title_lower = (title or "").lower().strip()
-    title_words = set(title_lower.split())
-    # Strongest match first. Every predicate is pure set arithmetic, so reading
-    # the whole ladder before choosing costs nothing and changes nothing.
-    ladder = (
-        (title_lower == query_lower, 5.0),
-        (_subset_or_empty(query_words, title_words), 3.0),
-        (_subset_or_empty(title_words, query_words), 2.0),
-    )
-    for matched, boost in ladder:
-        if matched:
-            return boost
-    return 1.0
-
-
-def _filename_boost(path: str, query_lower: str, query_words: set[str]) -> float:
-    slug = Path(path).stem.lower().replace("-", " ")
-    if slug == query_lower:
-        return 10.0
-    if query_words and query_words.issubset(set(slug.split())):
-        return 4.0
-    return 1.0
-
-
-def _project_boost(row_project: str, project: str | None) -> float:
-    if project and row_project and row_project.lower() == project.lower():
-        return 2.0
-    return 1.0
-
-
-def _notes_boost(path: str) -> float:
-    """knowledge/notes/ is the canonical durable tree; ties break toward it."""
-    if "knowledge/notes/" in path:
-        return 1.3
-    return 1.0
-
-
-def _boosted_lexical_score(
-    rank: float,
-    *,
-    path: str,
-    title: str,
-    row_project: str,
-    query_lower: str,
-    query_words: set[str],
-    project: str | None,
-) -> float:
-    """One lexical scoring ladder, shared by the generation and legacy paths."""
-    score = -rank
-    score *= _project_boost(row_project, project)
-    score *= _title_boost(title, query_lower, query_words)
-    score *= _filename_boost(path, query_lower, query_words)
-    score *= _notes_boost(path)
-    return score * _page_trust_weight(path)
-
-
 def apply_hard_filters(
     rows: list[dict],
     *,
@@ -3762,6 +3203,8 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         "candidate_id": row["chunk_id"],
         "source_id": row["source_id"],
         "source_sha256": row["source_sha256"],
+        # The turn's own digest: the handle its fact keys are stored under.
+        "span_sha256": row["span_sha256"],
         "heading_ancestry": json.loads(row["heading_ancestry"]),
         "type": row["type"],
         "authority": authority,
@@ -3781,7 +3224,7 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
 _GENERATION_CHUNK_COLUMNS = (
     "chunk_id, chunk_order, source_id, source_path, source_sha256, "
     "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-    "valid_to, language, title, content"
+    "valid_to, language, title, content, span_sha256"
 )
 
 
@@ -4083,9 +3526,7 @@ def _vector_scored_rows(
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
     with _generation_sqlite_guard(connection, deadline, cancelled):
         rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
             f"WHERE 1=1{filters} ORDER BY chunk_order",
             values,
         ).fetchall()
@@ -4245,7 +3686,6 @@ def search(
     query: str,
     scope: str = "all",
     limit: int = 10,
-    force_rebuild: bool = False,
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
@@ -4287,7 +3727,6 @@ def search(
         query,
         scope=scope,
         limit=limit,
-        force_rebuild=force_rebuild,
         project=project,
         since=since,
         as_of=as_of,
@@ -4307,138 +3746,6 @@ def search(
         cancelled=cancelled,
         trace_sink=trace_sink,
     )
-
-
-def _legacy_fetch_rows(
-    query: str,
-    *,
-    limit: int,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[tuple]:
-    """One bounded BM25 read from the legacy index."""
-    _check_legacy_stop(deadline, cancelled)
-    connect_timeout = 5.0
-    if deadline is not None:
-        connect_timeout = max(0.0, min(connect_timeout, deadline - time.monotonic()))
-    conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
-    try:
-        _check_legacy_stop(deadline, cancelled)
-        with _legacy_sqlite_guard(conn, deadline, cancelled):
-            return _legacy_bm25_rows(conn, query, limit)
-    finally:
-        conn.close()
-
-
-def _rebuilt_if_needed(
-    pages: list[Path],
-    needs_rebuild: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    if not needs_rebuild:
-        return True
-    return _rebuild_legacy_index(pages, deadline=deadline, cancelled=cancelled)
-
-
-def _fetched_rows_or_none(
-    query: str,
-    limit: int,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[tuple] | None:
-    try:
-        return _legacy_fetch_rows(
-            query, limit=limit, deadline=deadline, cancelled=cancelled
-        )
-    except sqlite3.DatabaseError:
-        return None
-
-
-def _legacy_rows_or_rebuild(
-    query: str,
-    pages: list[Path],
-    *,
-    limit: int,
-    needs_rebuild: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[tuple] | None:
-    """BM25 rows, rebuilding once if the index is missing or broken.
-
-    None means the index could not be read at all, and the caller reads
-    Markdown directly instead.
-    """
-    if not _rebuilt_if_needed(pages, needs_rebuild, deadline, cancelled):
-        return None
-    rows = _fetched_rows_or_none(query, limit, deadline, cancelled)
-    if rows is not None:
-        return rows
-    return _rows_after_second_rebuild(
-        query,
-        pages,
-        limit=limit,
-        needs_rebuild=needs_rebuild,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-
-
-def _rows_after_second_rebuild(
-    query: str,
-    pages: list[Path],
-    *,
-    limit: int,
-    needs_rebuild: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[tuple] | None:
-    """The one retry: rebuild once, then read again.
-
-    One rebuild per call — if the index was already rebuilt by the caller, a
-    broken read now means the index cannot be read at all.
-    """
-    if needs_rebuild or not _rebuild_legacy_index(
-        pages, deadline=deadline, cancelled=cancelled
-    ):
-        return None
-    return _fetched_rows_or_none(query, limit, deadline, cancelled)
-
-
-def _rebuild_legacy_index(
-    pages: list[Path],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    try:
-        if deadline is None and cancelled is None:
-            _build_index(pages)
-        else:
-            _build_index(pages, deadline=deadline, cancelled=cancelled)
-    except sqlite3.DatabaseError:
-        return False
-    return True
-
-
-def _legacy_index_needs_rebuild(
-    pages: list[Path],
-    *,
-    force_rebuild: bool,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> bool:
-    if force_rebuild:
-        return True
-    if deadline is None and cancelled is None:
-        return _needs_rebuild(pages)
-    return _needs_rebuild(pages, deadline=deadline, cancelled=cancelled)
-
-
-def _clipped_summary(summary: object) -> str:
-    if not summary:
-        return ""
-    return summary[:120]
 
 
 # The one directory whose file names are identities: pages live flat there, as
@@ -4461,61 +3768,6 @@ def legacy_candidate_id(path: object) -> str:
     if page.parent.as_posix() == _FLAT_NOTES_ROOT:
         return page.stem
     return page.with_suffix("").as_posix()
-
-
-def _legacy_hit(
-    path: object,
-    title: object,
-    summary: object,
-    project: str,
-    timestamp: str,
-    score: float,
-) -> dict:
-    return {
-        "path": path,
-        "title": title,
-        "summary": _clipped_summary(summary),
-        "score": score,
-        "bm25_score": score,
-        "project": project,
-        "timestamp": timestamp,
-        "candidate_id": legacy_candidate_id(path),
-        "generation": "legacy",
-    }
-
-
-def _legacy_hit_rows(
-    rows: list[tuple],
-    *,
-    query_lower: str,
-    query_words: set[str],
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict]:
-    hits: list[dict] = []
-    for row in rows:
-        _check_legacy_stop(deadline, cancelled)
-        path, title, summary, proj, timestamp, rank = row
-        row_project = proj or ""
-        row_timestamp = timestamp or ""
-        if _legacy_row_excluded(str(path), str(row_timestamp), since, as_of):
-            continue
-        score = _boosted_lexical_score(
-            rank,
-            path=path,
-            title=title,
-            row_project=row_project,
-            query_lower=query_lower,
-            query_words=query_words,
-            project=project,
-        )
-        hits.append(
-            _legacy_hit(path, title, summary, row_project, row_timestamp, score)
-        )
-    return hits
 
 
 class _PageRead(NamedTuple):
@@ -4733,99 +3985,6 @@ def _promoted_filename_first(hits: list[dict], normalized_stem: str) -> list[dic
     return [best, *(hit for hit in hits if hit["path"] != best["path"])]
 
 
-def _legacy_lexical_hits(
-    query: str,
-    *,
-    scope: str = "all",
-    limit: int = 10,
-    force_rebuild: bool = False,
-    project: str | None = None,
-    since: str | None = None,
-    as_of: str | None = None,
-    page_paths: list[Path] | None = None,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> list[dict]:
-    """Independent lexical backend used by retrieve() — no dense/graph fusion."""
-    _check_legacy_stop(deadline, cancelled)
-    # A blank query resolves no pages, and no pages is already the empty answer.
-    pages = [] if _blank_query(query) else _resolved_pages(page_paths, scope, deadline)
-    if not pages:
-        return []
-    rows = _legacy_rows_or_rebuild(
-        query,
-        pages,
-        limit=limit,
-        needs_rebuild=_legacy_index_needs_rebuild(
-            pages, force_rebuild=force_rebuild, deadline=deadline, cancelled=cancelled
-        ),
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    if rows is None:
-        return _direct_markdown_hits(
-            query,
-            pages,
-            limit=limit,
-            project=project,
-            since=since,
-            as_of=as_of,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    return _ranked_lexical_hits(
-        rows,
-        pages,
-        query,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-
-
-def _round_scores(hits: list[dict]) -> None:
-    for hit in hits:
-        hit["score"] = round(float(hit["score"]), 2)
-        hit["bm25_score"] = round(float(hit["bm25_score"]), 2)
-
-
-def _ranked_lexical_hits(
-    rows: list[tuple],
-    pages: list[Path],
-    query: str,
-    *,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict]:
-    """Score the matched rows, then let an exact filename match come first."""
-    query_lower = query.lower().strip()
-    hits = _legacy_hit_rows(
-        rows,
-        query_lower=query_lower,
-        query_words=set(query_lower.split()),
-        project=project,
-        since=since,
-        as_of=as_of,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    normalized_stem = _normalized_filename_stem(query)
-    hits = _with_exact_page(
-        hits, pages, normalized_stem, project=project, since=since, as_of=as_of
-    )
-    hits.sort(key=lambda hit: (-hit["score"], hit["path"]))
-    _round_scores(hits)
-    hits = _promoted_filename_first(hits, normalized_stem)
-    return hits[: max(limit * 3, limit)]
-
-
 def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]:
     haystack = f"{page.stem.replace('-', ' ')} {title} {summary} {body}".casefold()
     return set(re.findall(r"\w+", haystack))
@@ -4864,7 +4023,7 @@ def _direct_page_hit(
     score = round(_direct_match_score(page, read.title, read, query_terms), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
-        "fallback_reason": "legacy_sqlite_unavailable",
+        "fallback_reason": "no_active_generation",
         "partial": True,
     }
 
@@ -4883,9 +4042,7 @@ def _direct_markdown_hits(
     """Return bounded literal matches from authoritative Markdown only."""
     query_terms = set(re.findall(r"\w+", query.casefold()))
     if not query_terms:
-        raise LegacySearchUnavailable(
-            "legacy SQLite unavailable and direct Markdown search found no matching page"
-        )
+        return []
     results: list[dict] = []
     for page in pages:
         _check_legacy_stop(deadline, cancelled)
@@ -4899,67 +4056,10 @@ def _direct_markdown_hits(
         if hit is not None:
             results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
-    if not results:
-        raise LegacySearchUnavailable(
-            "legacy SQLite unavailable and direct Markdown search found no matching page"
-        )
     return results[: max(limit * 3, limit)]
 
 
-def _as_legacy_dense_row(item: Mapping[str, object], score_key: str) -> dict:
-    row = dict(item)
-    row["vector_score"] = row.get("vector_score", row.get(score_key))
-    row.setdefault("candidate_id", legacy_candidate_id(row.get("path")))
-    row["generation"] = "legacy"
-    return row
-
-
-def _numpy_dense_hits(
-    query: str,
-    pages: list[Path],
-    *,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict] | None:
-    try:
-        results = _vector_search(
-            query,
-            pages,
-            limit * 3,
-            project,
-            since,
-            as_of,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-    except TimeoutError:
-        raise
-    except Exception:  # noqa: BLE001 - no usable vectors is not an error
-        return None
-    if results is None:
-        return None
-    return [_as_legacy_dense_row(row, "score") for row in results]
-
-
-def _dense_backend_ready(query: str) -> bool:
-    if _blank_query(query):
-        return False
-    return _have_sentence_transformers()
-
-
-def _resolved_pages(
-    page_paths: list[Path] | None, scope: str, deadline: float | None
-) -> list[Path]:
-    if page_paths is not None:
-        return page_paths
-    return _collect_pages(scope, deadline=deadline or float("inf"))
-
-
-def _legacy_dense_hits(
+def markdown_hits(
     query: str,
     *,
     scope: str = "all",
@@ -4970,23 +4070,20 @@ def _legacy_dense_hits(
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> list[dict] | None:
-    """Independent dense backend used by retrieve() — returns None if unavailable.
+) -> list[dict]:
+    """The lexical signal when no generation is active: Markdown, read directly.
 
-    With an explicit `deadline` the leg is deferred before the model is
-    probed: it encodes on the caller's thread with no admission record. The
-    product path never passes one here — `retrieve_via_search_memory` runs
-    every optional stage without a deadline and bounds it in `_call_dense`
-    instead — so this guard reaches only direct callers
-    (docs/research/2026-09-10-a-deferred-dense-leg-says-deferred.md).
+    Every hit says `fallback_reason: no_active_generation`, so the answer is
+    reported partial; a page whose filename is the query is kept in front, and
+    an archived page of that name is recalled, labelled `retired`. Since
+    2026-09-23 this is the only fallback: the legacy FTS5 index is gone. See
+    `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
     """
     _check_legacy_stop(deadline, cancelled)
-    if deadline is not None or not _dense_backend_ready(query):
-        return None
+    if _blank_query(query):
+        return []
     pages = _resolved_pages(page_paths, scope, deadline)
-    if not pages:
-        return None
-    return _numpy_dense_hits(
+    hits = _direct_markdown_hits(
         query,
         pages,
         limit=limit,
@@ -4996,45 +4093,17 @@ def _legacy_dense_hits(
         deadline=deadline,
         cancelled=cancelled,
     )
+    normalized_stem = _normalized_filename_stem(query)
+    hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
+    return _promoted_filename_first(hits, normalized_stem)
 
 
-def _legacy_bm25_rows(
-    conn: sqlite3.Connection, query: str, limit: int
-) -> list[tuple[object, ...]]:
-    """Adaptive fetch: short queries match more pages, so ask for more."""
-    words = _query_terms(query)
-    fts_query = _fts_query(query)
-    multiplier = 5 if len(words) <= 3 else 3
-    return conn.execute(
-        """
-        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-        FROM pages
-        WHERE pages MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (fts_query, limit * multiplier),
-    ).fetchall()
-
-
-def _older_than_since(timestamp: str, since: str | None) -> bool:
-    if not since or not timestamp:
-        return False
-    return timestamp[:10] < since
-
-
-def _newer_than_as_of(timestamp: str, as_of: str) -> bool:
-    if not timestamp:
-        return False
-    return timestamp[:10] > as_of[:10]
-
-
-def _legacy_row_excluded(path: str, timestamp: str, since: str | None, as_of: str | None) -> bool:
-    if _older_than_since(timestamp, since):
-        return True
-    if not as_of:
-        return False
-    return _newer_than_as_of(timestamp, as_of) or not _valid_as_of(path, as_of)
+def _resolved_pages(
+    page_paths: list[Path] | None, scope: str, deadline: float | None
+) -> list[Path]:
+    if page_paths is not None:
+        return page_paths
+    return _collect_pages(scope, deadline=deadline or float("inf"))
 
 
 def _notes_first(row: dict) -> int:
@@ -5043,407 +4112,6 @@ def _notes_first(row: dict) -> int:
 
 
 _PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
-
-
-def _page_status(path: str) -> str:
-    """The page's own status, or "active" when it does not say."""
-    try:
-        page = ROOT / path if not Path(path).is_absolute() else Path(path)
-        content = page.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return "active"
-    status = _extract_frontmatter_field(content, _PAGE_STATUS_RE) or "active"
-    return status.strip().lower()
-
-
-def _legacy_vector_excluded(
-    path: str, timestamp: str, *, since: str | None, as_of: str | None
-) -> bool:
-    if _legacy_row_excluded(path, timestamp, since, as_of):
-        return True
-    if as_of:
-        return False
-    # Without an as-of date, a retired page is history.
-    return is_retired(_page_status(path))
-
-
-def _vector_cache_matrix(vectors_data: Mapping[str, object]) -> object | None:
-    """The cached matrix as an ndarray, or None when the cache is unusable."""
-    import numpy as np
-
-    vectors = vectors_data["vectors"]
-    if isinstance(vectors, list):
-        # Refuse list-converted caches; require ndarray/mmap.
-        return None
-    matrix = np.asarray(vectors)
-    if matrix.ndim != 2 or matrix.shape[0] != len(vectors_data["paths"]):
-        return None
-    return matrix
-
-
-def _query_vector_for(
-    query: str, matrix: object, *, deadline: float | None, cancelled
-) -> object | None:
-    import numpy as np
-
-    embedded = _embed_texts([query], is_query=True, deadline=deadline, cancelled=cancelled)
-    if not embedded:
-        return None
-    vector = np.asarray(embedded[0], dtype=np.float32)
-    if vector.shape[0] != matrix.shape[1] or not np.isfinite(vector).all():
-        return None
-    return vector
-
-
-def _vector_hit(
-    index: int,
-    similarity: float,
-    vectors_data: Mapping[str, object],
-    project: str | None,
-) -> dict:
-    path = vectors_data["paths"][index]
-    row_project = vectors_data["projects"][index]
-    score = round(float(similarity), 4)
-    if project and row_project and row_project.lower() == project.lower():
-        score = round(score * 1.5, 4)
-    return {
-        "path": path,
-        "title": vectors_data["titles"][index],
-        "summary": (vectors_data["summaries"][index] or "")[:120],
-        "score": score,
-        "project": row_project,
-        "timestamp": vectors_data["timestamps"][index],
-        "candidate_id": legacy_candidate_id(path),
-    }
-
-
-def _vector_hits(
-    similarities: list[float],
-    vectors_data: dict,
-    *,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict]:
-    results = []
-    for index, similarity in enumerate(similarities):
-        _check_legacy_stop(deadline, cancelled)
-        excluded = _legacy_vector_excluded(
-            vectors_data["paths"][index],
-            str(vectors_data["timestamps"][index] or ""),
-            since=since,
-            as_of=as_of,
-        )
-        if not excluded:
-            results.append(_vector_hit(index, similarity, vectors_data, project))
-    return results
-
-
-def _vector_search(
-    query: str,
-    pages: list[Path],
-    limit: int,
-    project: str | None = None,
-    since: str | None = None,
-    as_of: str | None = None,
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> list[dict] | None:
-    """Rank pages by cosine similarity against the cached page embeddings."""
-    _check_legacy_stop(deadline, cancelled)
-    cache = _vector_cache_for(pages, deadline=deadline, cancelled=cancelled)
-    if cache is None:
-        return None
-    vectors_data, matrix = cache
-    query_vector = _query_vector_for(
-        query, matrix, deadline=deadline, cancelled=cancelled
-    )
-    if query_vector is None:
-        return None
-    results = _vector_hits(
-        _cosine_similarity(query_vector, matrix),
-        vectors_data,
-        project=project,
-        since=since,
-        as_of=as_of,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    results.sort(key=lambda hit: (-hit["score"], hit["path"]))
-    return results[:limit]
-
-
-def _append_vector_document(documents: dict[str, list[str]], page: Path) -> None:
-    """One page's contribution to the parallel columns the vector cache stores."""
-    raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
-    content = raw.decode("utf-8", errors="ignore")
-    title, summary = _extract_title_and_summary(content, page.stem)
-    body = _strip_frontmatter(content)[:500]
-    project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-    timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-    documents["source_paths"].append(page.relative_to(ROOT).as_posix())
-    documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
-    documents["titles"].append(title)
-    documents["summaries"].append(summary)
-    documents["projects"].append(project.lower())
-    documents["timestamps"].append(timestamp[:10])
-    documents["texts"].append(f"{title}. {summary}. {body[:300]}")
-
-
-def _legacy_vector_documents(
-    pages: list[Path],
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, list[str]]:
-    documents = {
-        "source_paths": [],
-        "source_sha256": [],
-        "titles": [],
-        "summaries": [],
-        "projects": [],
-        "timestamps": [],
-        "texts": [],
-    }
-    ordered = sorted(
-        (page for page in pages if page.exists()),
-        key=lambda page: page.relative_to(ROOT).as_posix(),
-    )
-    for page in ordered:
-        _check_legacy_stop(deadline, cancelled)
-        _append_vector_document(documents, page)
-    return documents
-
-
-def _legacy_vector_source_membership(
-    pages: list[Path],
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> list[tuple[str, str]]:
-    live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
-    return list(zip(live["source_paths"], live["source_sha256"], strict=True))
-
-
-def _expected_vector_metadata(live: dict, vectors, finite: bool) -> dict:
-    """What the sidecar must say for the cached artifact to still be usable."""
-    return {
-        "schema_version": "legacy-vectors/v1",
-        "model_id": EMBEDDING_MODEL,
-        "model_revision": EMBEDDING_MODEL_REVISION,
-        "dimensions": EMBEDDING_DIM,
-        "source_paths": live["source_paths"],
-        "source_sha256": live["source_sha256"],
-        "titles": live["titles"],
-        "summaries": live["summaries"],
-        "projects": live["projects"],
-        "timestamps": live["timestamps"],
-        "dtype": str(vectors.dtype),
-        "shape": list(vectors.shape),
-        "finite": finite,
-        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
-    }
-
-
-def _matching_vector_block(vectors, count: int, finite: bool) -> bool:
-    import numpy as np
-
-    return (
-        vectors.ndim == 2
-        and vectors.shape == (count, EMBEDDING_DIM)
-        and vectors.dtype == np.dtype(np.float32)
-        and finite
-    )
-
-
-def _cached_vectors(
-    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
-) -> dict | None:
-    """Accept the cached artifact only when it still describes the live sources."""
-    try:
-        import numpy as np
-
-        cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
-        vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
-        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
-        finite = bool(np.isfinite(vectors).all())
-        expected = _expected_vector_metadata(live, vectors, finite)
-        count = len(live["source_paths"])
-        if cache_meta != expected or not _matching_vector_block(vectors, count, finite):
-            return None
-        return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
-    except TimeoutError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - named, never silent
-        note_degradation("vector_cache", exc)
-        return None
-
-
-def _load_or_build_vectors(
-    pages: list[Path],
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict | None:
-    """Load cached embeddings or build them fresh.
-
-    v4.0: Uses memory-mapped .npy format for vectors (instant load) +
-    small .json for metadata. Existing artifacts are accepted only when every
-    metadata value still matches the configured model and live source bytes.
-    """
-    # Try .npy format (fast, memory-mapped). Never convert mmap to a Python list.
-    _check_legacy_stop(deadline, cancelled)
-    if VECTOR_NPY.exists() and VECTOR_META.exists():
-        return _cached_vectors(pages, deadline, cancelled)
-    return _build_vectors(pages, deadline=deadline, cancelled=cancelled)
-
-
-def _build_vectors(
-    pages: list[Path],
-    *,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict | None:
-    """Build embeddings for all pages. Returns None if model unavailable."""
-    _check_legacy_stop(deadline, cancelled)
-    embedder = _get_embedder()
-    if not embedder:
-        return None
-
-    INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    documents = _live_documents_and_texts(pages, deadline, cancelled)
-    if documents is None:
-        return None
-    live, texts_list = documents
-    return _persisted_page_vectors(embedder, live, texts_list, deadline, cancelled)
-
-
-def _vector_cache_for(
-    pages: list[Path],
-    *,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> tuple | None:
-    """The cached page vectors and their matrix, or None when unusable."""
-    vectors_data = _load_or_build_vectors(pages, deadline=deadline, cancelled=cancelled)
-    if not vectors_data:
-        return None
-    matrix = _vector_cache_matrix(vectors_data)
-    if matrix is None:
-        return None
-    return (vectors_data, matrix)
-
-
-def _persisted_page_vectors(
-    embedder: object,
-    live: dict,
-    texts_list: list,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> dict | None:
-    """Encode, persist, and describe the page vectors, or None on any failure."""
-    vectors = _encoded_page_vectors(embedder, texts_list, deadline, cancelled)
-    if vectors is None:
-        return None
-    metadata = _persisted_vector_metadata(vectors, live)
-    if metadata is None:
-        return None
-    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
-
-
-def _live_documents_and_texts(
-    pages: list[Path], deadline: float | None, cancelled: Callable[[], bool] | None
-) -> tuple[dict, list[str]] | None:
-    """The live page set plus the texts to embed, or None when there is none."""
-    try:
-        live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
-    except (OSError, ValueError):
-        return None
-    texts_list = live.pop("texts")
-    if not texts_list:
-        return None
-    return live, texts_list
-
-
-def _usable_vector_block(vectors, count: int) -> bool:
-    import numpy as np
-
-    return (
-        vectors.ndim == 2
-        and vectors.shape == (count, EMBEDDING_DIM)
-        and vectors.dtype.kind in "fiu"
-        and bool(np.isfinite(vectors).all())
-    )
-
-
-def _encoded_page_vectors(
-    embedder,
-    texts: list[str],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-):
-    """Encode the page texts, or None when the model output is unusable."""
-    try:
-        import numpy as np
-
-        vectors = np.asarray(
-            embedder.encode(
-                _prefixed_for_query(texts, False),
-                show_progress_bar=False,
-                convert_to_numpy=True,
-            )
-        )
-        _check_legacy_stop(deadline, cancelled)
-    except TimeoutError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - named, never silent
-        note_degradation("vector_encode", exc)
-        return None
-    if not _usable_vector_block(vectors, len(texts)):
-        return None
-    return np.ascontiguousarray(vectors, dtype=np.float32)
-
-
-def _legacy_vector_metadata(vectors, live: dict) -> dict:
-    """Describes the .npy that was just written, so a reader can verify it."""
-    import numpy as np
-
-    return {
-        "schema_version": "legacy-vectors/v1",
-        "model_id": EMBEDDING_MODEL,
-        "model_revision": EMBEDDING_MODEL_REVISION,
-        "dimensions": EMBEDDING_DIM,
-        **live,
-        "dtype": str(vectors.dtype),
-        "shape": list(vectors.shape),
-        "finite": bool(np.isfinite(vectors).all()),
-        "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")["sha256"],
-    }
-
-
-def _persisted_vector_metadata(vectors, live: dict) -> dict | None:
-    """Save vectors as binary .npy (memory-mapped, fast load) plus small JSON."""
-    try:
-        import numpy as np
-
-        INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        np.save(str(VECTOR_NPY), vectors, allow_pickle=False)
-        metadata = _legacy_vector_metadata(vectors, live)
-        atomic_write(
-            VECTOR_META,
-            json.dumps(
-                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ),
-        )
-    except TimeoutError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - named, never silent
-        note_degradation("vector_persist", exc)
-        return None
-    return metadata
 
 
 def main() -> int:
@@ -5497,8 +4165,10 @@ def main() -> int:
         action="store_true",
         help="Kept for compatibility: the CLI already skips the reranker",
     )
-    p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
-    p.add_argument("--status", action="store_true", help="Show index stats")
+    p.add_argument(
+        "--rebuild", action="store_true", help="Rebuild the evidence generation the search reads"
+    )
+    p.add_argument("--status", action="store_true", help="Show what the search reads")
     p.add_argument("--stdin", action="store_true", help="Read query from stdin (injection-safe)")
     args = p.parse_args()
 
@@ -5510,8 +4180,8 @@ def main() -> int:
 def _run_cli_command(args: argparse.Namespace) -> int:
     """The one mode the arguments asked for, in the order they take priority."""
     modes = (
-        (args.status, lambda: _print_index_status()),
-        (args.rebuild, lambda: _rebuild_index_cli(args.scope)),
+        (args.status, _print_status),
+        (args.rebuild, _rebuild_generation_cli),
         (not args.query, _print_cli_usage),
     )
     for chosen, run in modes:
@@ -5526,11 +4196,11 @@ def _print_cli_usage() -> int:
 
 
 def _active_generation_line() -> str:
-    """What the search reads first: the active generation, or the legacy fallback."""
+    """What the search reads: the active generation, else Markdown directly."""
     catalog = _active_generation_catalog()
     manifest = None if catalog is None else catalog.get_active()
     if not isinstance(manifest, dict):
-        return "Active generation: none (search falls back to the legacy index)"
+        return "Active generation: none (search reads Markdown directly; run --rebuild)"
     return (
         f"Active generation: {manifest.get('generation_id')} "
         f"({manifest.get('extractor_version')}, vectors {manifest.get('vector_state')}, "
@@ -5538,54 +4208,37 @@ def _active_generation_line() -> str:
     )
 
 
-def _print_index_status() -> int:
-    # The generation is what an answer reads first; the legacy index is the
-    # fallback. Research: docs/research/2026-09-10-the-status-names-what-the-search-reads.md
+def _print_status() -> int:
+    """The generation the search reads and the pages it would index."""
     print(_active_generation_line())
-    pages = _collect_pages("all")
-    if not INDEX_FILE.exists():
-        print(f"Index: not built ({len(pages)} pages would be indexed)")
-        return 0
-    conn = sqlite3.connect(f"{INDEX_FILE.resolve().as_uri()}?mode=ro", uri=True)
-    try:
-        count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
-    finally:
-        conn.close()
-    print(f"Index: {INDEX_FILE}")
-    print(f"  Pages indexed: {count}")
-    print(f"  Pages on disk: {len(pages)}")
-    print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
-    print(f"  Needs rebuild: {_needs_rebuild(pages)}")
+    print(f"Pages on disk: {len(_collect_pages('all'))}")
     return 0
 
 
-def _rebuild_index_cli(scope: str) -> int:
-    pages = _collect_pages(scope)
-    print("Rebuilding the legacy index only; the generation is built by doctor.py --repair")
-    print(f"Rebuilding index with {len(pages)} pages...")
-    t0 = time.time()
-    _build_index(pages)
-    print(f"Done in {time.time() - t0:.2f}s")
-    return 0
+def _rebuild_generation_cli() -> int:
+    """Rebuild the evidence generation under the maintenance fence: the one index."""
+    import doctor
+
+    result = doctor.run_generation_maintenance(ROOT, STATE_ROOT, force_rebuild=True)
+    status = str(result.get("status"))
+    print(f"Generation rebuild: {status} (id={result.get('generation_id') or 'none'})")
+    if result.get("reason"):
+        print(f"  reason: {result['reason']}")
+    return 0 if status in {"built", "current"} else 1
 
 
 def _run_cli_search(args: argparse.Namespace) -> int:
     t0 = time.time()
-    try:
-        results = search(
-            args.query, args.scope, args.limit,
-            force_rebuild=args.rebuild,
-            project=args.project,
-            since=args.since,
-            as_of=args.as_of,
-            semantic=args.semantic,
-            profile=args.profile,
-            graph=not args.no_graph,
-            rerank=args.rerank and not args.no_rerank,
-        )
-    except LegacySearchUnavailable as error:
-        print(f"search_memory: {error}", file=sys.stderr)
-        return 2
+    results = search(
+        args.query, args.scope, args.limit,
+        project=args.project,
+        since=args.since,
+        as_of=args.as_of,
+        semantic=args.semantic,
+        profile=args.profile,
+        graph=not args.no_graph,
+        rerank=args.rerank and not args.no_rerank,
+    )
     elapsed = time.time() - t0
 
     if not results:

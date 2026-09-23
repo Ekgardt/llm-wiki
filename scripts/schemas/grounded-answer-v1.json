@@ -32,6 +32,16 @@
           "citation_ids"
         ],
         "properties": {
+          "quotes": {
+            "description": "Written before the text: the exact words of the cited spans that carry this claim, copied verbatim and unchanged, one entry per span. Each quote is checked by string match against the span it cites; a claim with a quote the evidence does not contain is dropped.",
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            }
+          },
           "text": {
             "type": "string",
             "minLength": 1,

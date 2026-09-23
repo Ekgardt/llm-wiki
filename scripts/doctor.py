@@ -26,6 +26,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
@@ -49,21 +50,44 @@ except ModuleNotFoundError:  # Python 3.11+ does not install the backport
 
 SCHEMA_VERSION = "1.0"
 INDEX_FRESH_SECONDS = 24 * 60 * 60
-STALE_LEASE_SECONDS = 10 * 60
-PERMANENT_FAILURE_ATTEMPTS = 5
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
 VALID_REPAIR_ACTIONS = frozenset(
     {"runtime", "transactions", "queue", "indexes", "archives", "generations"}
 )
 RUNTIME_DIRECTORIES = ("run", "logs", "cache")
+# A stray pre-adoption candidate is moved here by `--repair`, never deleted; the
+# directory is retained evidence for the `run/` deletion contract like
+# `run/queue-quarantine`. See
+# `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+COORDINATOR_QUARANTINE = "run/coordinator-quarantine"
+COORDINATOR_CANDIDATE = "run/markdown-transactions-v3.candidate.sqlite3"
+QUEUE_CANDIDATE = "run/queue-v3.candidate.sqlite3"
+# Every row-bearing coordinator table except `maintenance_owners`, whose rows
+# are judged by expiry instead.
+_CANDIDATE_ROW_TABLES = (
+    "transaction",
+    "operation",
+    "intent_fences",
+    "project_leases",
+    "writer_owners",
+    "project_checkpoints",
+    "blackboard_claims",
+    "capture_binding_projections",
+)
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
-MAX_CONFIG_BYTES = 64 * 1024
-MAX_STATE_BYTES = 256 * 1024
+# The hook configuration is read under the bound the installer writes it with.
+MAX_CONFIG_BYTES = _hook_config.MAX_CONFIG_BYTES
+# Above what the state's own writer can produce: `integration_adapter` keeps at
+# most 40 pending checkpoint items per project, and 91 projects made 354 KiB on
+# 2026-09-23 — over the old 256 KiB, which silenced the scheduler and capture
+# checks exactly when they had something to say.
+MAX_STATE_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_INDEX_PATHS = 10_000
 MAX_INDEX_DB_BYTES = 1024 * 1024 * 1024
+# A runtime lock file doctor reads (state and index locks); installer locks are bounded at 1 KiB.
 MAX_LOCK_BYTES = 4096
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
 MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
@@ -337,39 +361,12 @@ def _read_bounded_json(
         return None, "invalid"
 
 
-def _lease_state(task: dict, now: datetime) -> tuple[bool, bool]:
-    return _lease_is_stale(task, now), _lease_is_owned(task)
-
-
-def _lease_is_stale(task: dict, now: datetime) -> bool:
-    try:
-        acquired = _aware_timestamp(str(task.get("lease_acquired_at", "")))
-    except (TypeError, ValueError):
-        return True
-    return (now - acquired).total_seconds() > STALE_LEASE_SECONDS
-
-
-def _aware_timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(_iso_text(value))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _lease_is_owned(task: dict) -> bool:
-    pid = task.get("lease_pid")
-    token = task.get("lease_token")
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    return isinstance(token, str) and bool(token)
-
-
 def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     details: dict[str, Any] = {
         "legacy_retained": 0,
-        "legacy_malformed": 0,
         "results_retained": 0,
         "queue_quarantined": 0,
+        "coordinator_quarantined": 0,
         "artifact_error": False,
         "artifact_truncated": False,
         "deletion_codes": [],
@@ -383,10 +380,11 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     )
     details["artifact_truncated"] |= truncated
     details["artifact_error"] |= error
-    _count_legacy_queue_entries(entries, legacy, deadline, details)
+    _count_legacy_queue_entries(entries, state_root, details)
     for key, relative in (
         ("results_retained", "run/queue-results"),
         ("queue_quarantined", "run/queue-quarantine"),
+        ("coordinator_quarantined", COORDINATOR_QUARANTINE),
     ):
         _count_queue_artifact_directory(
             state_root, relative, key, deadline, details
@@ -396,16 +394,16 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
 
 
 def _count_legacy_queue_entries(
-    entries: list[Path], legacy: Path, deadline: float, details: dict
+    entries: list[Path], state_root: Path, details: dict
 ) -> None:
-    for path in entries:
-        if path.suffix not in {".json", ".processing"}:
-            details["artifact_error"] = True
-            continue
-        details["legacy_retained"] += 1
-        _value, problem = _read_bounded_json(path, legacy, deadline=deadline)
-        if problem:
-            details["legacy_malformed"] += 1
+    """Entries of the JSON queue of v3.3.0–v3.4.0: counted and kept, never read.
+
+    No release imports them since 2026-09-23; each one keeps `run/` from deletion,
+    and one that is not a regular file leaves the state unknown.
+    """
+    details["legacy_retained"] += len(entries)
+    if _any_irregular_entry(entries, state_root):
+        details["artifact_error"] = True
 
 
 def _count_queue_artifact_directory(
@@ -427,9 +425,9 @@ def _count_queue_artifact_directory(
 def _append_queue_artifact_codes(details: dict) -> None:
     for key, code in (
         ("legacy_retained", "legacy_queue_retained"),
-        ("legacy_malformed", "legacy_queue_malformed"),
         ("results_retained", "queue_result_retained"),
         ("queue_quarantined", "queue_quarantine_retained"),
+        ("coordinator_quarantined", "coordinator_quarantine_retained"),
     ):
         if details[key]:
             details["deletion_codes"].append(code)
@@ -444,130 +442,6 @@ def _unreadable_queue_result(state_root: Path, deadline: float, message: str) ->
     return _result("queue", "error", message, details)
 
 
-def _new_queue_counts() -> dict:
-    return {
-        "pending": 0,
-        "permanently_failed": 0,
-        "stale_leases": 0,
-        "ownerless_leases": 0,
-        "unsafe_entries": 0,
-        "oversized_entries": 0,
-        "scanned": 0,
-        "truncated": False,
-    }
-
-
-def _count_stale_processing(entry: os.DirEntry, now: datetime, counts: dict) -> None:
-    try:
-        modified = entry.stat(follow_symlinks=False).st_mtime
-    except OSError:
-        counts["unsafe_entries"] += 1
-        return
-    if now.timestamp() - modified <= STALE_LEASE_SECONDS:
-        return
-    counts["stale_leases"] += 1
-    counts["ownerless_leases"] += 1
-
-
-def _count_problem_entry(
-    entry: os.DirEntry, problem: str, now: datetime, counts: dict
-) -> None:
-    counts["unsafe_entries"] += problem == "unsafe"
-    counts["oversized_entries"] += problem == "oversized"
-    counts["truncated"] = counts["truncated"] or problem == "oversized"
-    if problem == "invalid" and entry.name.endswith(".json"):
-        counts["permanently_failed"] += 1
-        return
-    if entry.name.endswith(".processing"):
-        _count_stale_processing(entry, now, counts)
-
-
-def _count_pending_task(task: dict, counts: dict) -> None:
-    counts["pending"] += 1
-    try:
-        attempts = int(task.get("attempts", 0))
-    except (ValueError, TypeError):
-        counts["permanently_failed"] += 1
-        return
-    counts["permanently_failed"] += attempts >= PERMANENT_FAILURE_ATTEMPTS
-
-
-def _scan_queue_entry(
-    entry: os.DirEntry, queue: Path, now: datetime, counts: dict
-) -> None:
-    task, problem = _read_bounded_json(Path(entry.path), queue)
-    if problem:
-        _count_problem_entry(entry, problem, now, counts)
-        return
-    if entry.name.endswith(".json"):
-        _count_pending_task(task, counts)
-        return
-    stale, owned = _lease_state(task, now)
-    counts["stale_leases"] += stale
-    counts["ownerless_leases"] += stale and not owned
-
-
-def _queue_entry_of_interest(entry: os.DirEntry) -> bool:
-    return entry.name.endswith(".json") or entry.name.endswith(".processing")
-
-
-def _scan_queue_entries(
-    entries, queue: Path, now: datetime, deadline: float, counts: dict
-) -> None:
-    for entry in entries:
-        if counts["scanned"] >= MAX_QUEUE_FILES or time.monotonic() >= deadline:
-            counts["truncated"] = True
-            return
-        counts["scanned"] += 1
-        if _queue_entry_of_interest(entry):
-            _scan_queue_entry(entry, queue, now, counts)
-
-
-def _scan_legacy_queue(
-    state_root: Path, now: datetime, deadline: float, counts: dict
-) -> None:
-    queue = state_root / "run" / "queue"
-    kind, _ = _safe_kind(queue, state_root)
-    if kind == "missing":
-        return
-    if kind != "directory":
-        counts["unsafe_entries"] += 1
-        return
-    try:
-        with os.scandir(queue) as entries:
-            _scan_queue_entries(entries, queue, now, deadline, counts)
-    except OSError:
-        counts["unsafe_entries"] += 1
-
-
-def _legacy_queue_degraded(counts: dict) -> bool:
-    return any(
-        counts[key]
-        for key in (
-            "pending",
-            "stale_leases",
-            "unsafe_entries",
-            "oversized_entries",
-            "truncated",
-        )
-    )
-
-
-def _legacy_queue_status(counts: dict) -> tuple[str, str]:
-    if counts["permanently_failed"]:
-        return (
-            "error",
-            f"Queue has {counts['permanently_failed']} permanently failed task(s).",
-        )
-    if _legacy_queue_degraded(counts):
-        return (
-            "degraded",
-            f"Queue has {counts['pending']} pending task(s) and "
-            f"{counts['stale_leases']} stale lease(s).",
-        )
-    return "ok", "Queue has no pending or stale work."
-
-
 def _adjusted_queue_status(status: str, artifacts: dict) -> str:
     if not artifacts["deletion_codes"]:
         return status
@@ -576,13 +450,24 @@ def _adjusted_queue_status(status: str, artifacts: dict) -> str:
     return "degraded" if status == "ok" else status
 
 
-def _legacy_queue_result(state_root: Path, now: datetime, deadline: float) -> dict:
-    counts = _new_queue_counts()
-    _scan_legacy_queue(state_root, now, deadline, counts)
-    details = dict(counts, read_error=False)
+def _json_queue_status(retained: int) -> tuple[str, str]:
+    if retained:
+        return "degraded", (
+            f"run/queue holds {retained} record(s) of the retired JSON queue; "
+            "this release does not import them."
+        )
+    return "ok", "Queue has no database yet and no retained work."
+
+
+def _legacy_queue_result(state_root: Path, deadline: float) -> dict:
+    """The queue check of a vault that has no queue database.
+
+    The JSON queue of v3.3.0–v3.4.0 is not imported since 2026-09-23: entries
+    under `run/queue/` are counted and named, never read.
+    """
     artifacts = _queue_artifact_state(state_root, deadline)
-    details.update(artifacts)
-    status, message = _legacy_queue_status(counts)
+    details = dict(artifacts, read_error=False)
+    status, message = _json_queue_status(artifacts["legacy_retained"])
     return _result("queue", _adjusted_queue_status(status, artifacts), message, details)
 
 
@@ -617,7 +502,7 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     unreadable = _unreadable_queue_reason(database_kind, database_path, state_root)
     if unreadable is not None:
         return _unreadable_queue_result(state_root, deadline, unreadable)
-    return _legacy_queue_result(state_root, now, deadline)
+    return _legacy_queue_result(state_root, deadline)
 
 
 def _read_busy_ms(deadline: float | None) -> int:
@@ -1732,13 +1617,27 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     _append_state_deletion_codes(details, states)
     _append_live_deletion_codes(details)
     message = _transaction_message(states, problem, invalid_state, details)
-    return _result(
-        "transactions",
-        _transaction_status(
-            states, problem, invalid_state, details["quarantined_unresolved"]
-        ),
-        message,
-        details,
+    status = _transaction_status(
+        states, problem, invalid_state, details["quarantined_unresolved"]
+    )
+    return _result("transactions", *_truncated_scan_verdict(details, status, message), details)
+
+
+def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[str, str]:
+    """A scan that stopped at its row bound says so in the line a person reads.
+
+    On 2026-09-23 the check said "healthy" with `quarantined: 27` while the
+    database held 117 quarantined rows and both scans were truncated. Ordinary
+    growth past the read ceiling is not a health problem
+    (`tests/test_doctor_bounded_scan_truth.py`), so the status stays; the
+    message stops presenting a bounded count as the whole truth.
+    """
+    if status != "ok" or not details.get("truncated_scans"):
+        return status, message
+    return (
+        "ok",
+        "Transaction state is healthy within the scanned rows; the scan stopped at "
+        "its row bound, so every count is a lower bound.",
     )
 
 
@@ -1836,24 +1735,11 @@ def _empty_queue_details() -> tuple[dict, dict[str, int]]:
 def _record_queue_migration(state_root: Path, details: dict) -> None:
     from markdown_transaction import _reliability_v3_records_present
 
-    if _reliability_v3_records_present(state_root):
-        # Adoption retired the v2 queue and left a tombstone where it stood
-        # (`memory_queue` refuses to migrate one), so there is no legacy
-        # migration left to finish and the v2 marker proves nothing.
-        details["migration"] = "retired"
-        return
-    _record_v2_queue_marker(state_root, details)
-
-
-def _record_v2_queue_marker(state_root: Path, details: dict) -> None:
-    marker = state_root / "run" / "queue-migrated-v2"
-    marker_kind = _safe_kind(marker, state_root)[0]
-    details["migration"] = "complete" if marker_kind == "regular" else "pending"
-    if marker_kind not in {"missing", "regular"}:
-        details["read_error"] = True
-        details["deletion_codes"].append("queue_migration_state_unknown")
-    if marker_kind == "regular" and details["legacy_retained"]:
-        details["migration"] = "conflict"
+    # Adoption retired the v2 queue and left a tombstone where it stood; before
+    # adoption there is nothing to migrate either, since 2026-09-23 the JSON
+    # queue import went and the `queue-migrated-v2` marker is read by nothing.
+    adopted = _reliability_v3_records_present(state_root)
+    details["migration"] = "retired" if adopted else "none"
 
 
 def _valid_queue_error_code(error_code: object) -> bool:
@@ -2191,13 +2077,11 @@ def _queue_error_state(
 ) -> bool:
     if unknown_state or corrupt_metadata:
         return True
-    return bool(details["results_invalid"]) or details["migration"] == "conflict"
+    return bool(details["results_invalid"])
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    if states["ready"] or states["leased"] or states["blocked"]:
-        return True
-    return details["migration"] == "pending"
+    return bool(states["ready"] or states["leased"] or states["blocked"])
 
 
 def _queue_status(
@@ -4114,21 +3998,6 @@ def _lsp_runtime_check(
     return _lsp_result(owners, codes, unreadable=unreadable or scan_unreadable)
 
 
-def _index_deferred(message: str, detail: str) -> dict:
-    return _result(
-        "index",
-        "degraded",
-        message,
-        {
-            "exists": True,
-            "freshness": "unknown",
-            "age_seconds": None,
-            "repairable": False,
-            detail: True,
-        },
-    )
-
-
 def _generation_result(
     status: str,
     message: str,
@@ -4281,7 +4150,7 @@ def _validated_generation_manifest(
         read_runtime_bytes(
             generation_path / "manifest.json",
             state_root,
-            max_bytes=MAX_MANIFEST_BYTES,
+            max_bytes=generation_catalog.MAX_MANIFEST_BYTES,
         )
     )
     if isinstance(diagnostic_value, dict):
@@ -4674,9 +4543,12 @@ def _generation_check(
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
     kind, catalog_info = _safe_kind(catalog_path, state_root)
     if kind == "missing":
+        # Since 2026-09-23 there is no legacy index: until a generation is
+        # built, a search reads Markdown directly and says so. The installer's
+        # sync and `doctor --repair` build the first one from this verdict.
         return _generation_result(
-            "ok",
-            "Evidence generation has not been built; legacy retrieval remains available.",
+            "degraded",
+            "No evidence generation has been built; search reads Markdown directly until one is.",
             catalog="missing",
             freshness="missing",
             repairable=True,
@@ -4736,312 +4608,6 @@ def _generation_check(
             "Evidence generation catalog or active artifacts are invalid.",
             **state["invalid_details"],
         )
-
-
-class _ManifestState(NamedTuple):
-    state: str
-    matches: bool
-    deferred: dict | None
-
-
-class _IndexInspection(NamedTuple):
-    early: dict | None
-    manifest_state: str
-    manifest_matches: bool
-
-
-def _corrupt_index_result() -> dict:
-    return _result(
-        "index",
-        "error",
-        "FTS index is corrupt or unsafe.",
-        {
-            "exists": True,
-            "freshness": "corrupt",
-            "age_seconds": None,
-            "repairable": False,
-        },
-    )
-
-
-def _index_path_limit_result() -> dict:
-    return _result(
-        "index",
-        "degraded",
-        "FTS index path validation reached its safety limit.",
-        {
-            "exists": True,
-            "freshness": "unknown",
-            "age_seconds": None,
-            "repairable": False,
-            "path_limit_exceeded": True,
-        },
-    )
-
-
-def _unusable_index(kind: str, info) -> bool:
-    return kind != "regular" or info is None or info.st_size == 0
-
-
-def _unusable_index_state(kind: str, info, deadline: float) -> dict | None:
-    """The result for an index that is present but cannot be trusted or timed."""
-    if _unusable_index(kind, info):
-        return _corrupt_index_result()
-    if time.monotonic() >= deadline:
-        return _index_deferred(
-            "FTS index check exceeded its time budget.", "budget_exhausted"
-        )
-    return None
-
-
-def _index_artifact_state(kind: str, info, deadline: float) -> dict | None:
-    """The result to return when the index cannot be inspected at all."""
-    if kind == "missing":
-        return _result(
-            "index",
-            "degraded",
-            "FTS index is missing.",
-            {
-                "exists": False,
-                "freshness": "missing",
-                "age_seconds": None,
-                "repairable": True,
-            },
-        )
-    return _unusable_index_state(kind, info, deadline)
-
-
-def _require_index_schema(connection: sqlite3.Connection) -> None:
-    quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
-    if not quick_check or quick_check[0] != "ok":
-        raise sqlite3.DatabaseError("quick_check failed")
-    columns = {row[1] for row in connection.execute("PRAGMA table_info(pages)")}
-    if not INDEX_COLUMNS.issubset(columns):
-        raise sqlite3.DatabaseError("unexpected index schema")
-
-
-def _index_probe(index: Path, state_root: Path, deadline: float) -> list:
-    """The indexed paths, after proving the artifact answers a real query."""
-    connection = _readonly_database(
-        index,
-        state_root,
-        max_bytes=MAX_INDEX_DB_BYTES,
-        deadline=deadline,
-    )
-    try:
-        connection.set_progress_handler(
-            lambda: int(time.monotonic() >= deadline), 1000
-        )
-        _require_index_schema(connection)
-        connection.execute(
-            "SELECT rowid FROM pages WHERE pages MATCH ? LIMIT 1",
-            ("__doctor_integrity_probe__",),
-        ).fetchone()
-        cursor = connection.execute("SELECT path FROM pages")
-        return cursor.fetchmany(MAX_INDEX_PATHS + 1)
-    finally:
-        connection.close()
-
-
-def _valid_manifest_paths(manifest_error: object, manifest_paths: object) -> bool:
-    if manifest_error:
-        return False
-    return all(isinstance(item, str) for item in (manifest_paths or []))
-
-
-def _manifest_paths_state(
-    manifest_error: object, manifest_paths: object, indexed_paths: list[str]
-) -> _ManifestState:
-    """The manifest verdict, once the manifest itself has been read."""
-    if not _valid_manifest_paths(manifest_error, manifest_paths):
-        return _ManifestState("invalid", False, None)
-    if sorted(manifest_paths) != sorted(indexed_paths):
-        return _ManifestState("mismatch", False, None)
-    return _ManifestState("current", True, None)
-
-
-def _index_manifest_state(
-    manifest: Path, state_root: Path, indexed_paths: list[str], deadline: float
-) -> _ManifestState:
-    manifest_kind, _ = _safe_kind(manifest, state_root)
-    if manifest_kind == "missing":
-        return _ManifestState("missing", False, None)
-    manifest_paths, manifest_error = _read_bounded_json(
-        manifest,
-        state_root,
-        max_bytes=MAX_MANIFEST_BYTES,
-        expected_type=list,
-        deadline=deadline,
-    )
-    if manifest_error == "budget":
-        deferred = _index_deferred(
-            "FTS manifest check exceeded its time budget.", "budget_exhausted"
-        )
-        return _ManifestState("missing", False, deferred)
-    return _manifest_paths_state(manifest_error, manifest_paths, indexed_paths)
-
-
-def _inspect_index(
-    index: Path, state_root: Path, manifest: Path, deadline: float
-) -> _IndexInspection:
-    indexed_rows = _index_probe(index, state_root, deadline)
-    if len(indexed_rows) > MAX_INDEX_PATHS:
-        return _IndexInspection(_index_path_limit_result(), "missing", False)
-    indexed_paths = [row[0] for row in indexed_rows]
-    if any(not isinstance(item, str) for item in indexed_paths):
-        raise ValueError("invalid indexed path")
-    manifest_state = _index_manifest_state(
-        manifest, state_root, indexed_paths, deadline
-    )
-    return _IndexInspection(
-        manifest_state.deferred, manifest_state.state, manifest_state.matches
-    )
-
-
-def _operational_index_result(exc: sqlite3.OperationalError, deadline: float) -> dict:
-    lowered = str(exc).lower()
-    # A lock is a lock even when waiting for it used up the budget, and it
-    # is the more actionable of the two verdicts.
-    if "locked" in lowered or "busy" in lowered:
-        return _index_deferred("FTS index is busy.", "database_busy")
-    if time.monotonic() >= deadline or "interrupted" in lowered:
-        return _index_deferred(
-            "FTS index check exceeded its time budget.", "budget_exhausted"
-        )
-    return _corrupt_index_result()
-
-
-def _source_rebuild_required(
-    index: Path, state_root: Path, manifest: Path, root: Path | None, deadline: float
-) -> bool | None:
-    """None when the source freshness cannot be determined at all."""
-    source_root = Path(root or state_root)
-    try:
-        import search_memory
-
-        pages = search_memory._collect_pages(  # noqa: SLF001
-            "all",
-            knowledge_dir=source_root / "knowledge" / "notes",
-            root=source_root,
-            deadline=deadline,
-        )
-        return search_memory._needs_rebuild(  # noqa: SLF001
-            pages,
-            root=source_root,
-            index_file=index,
-            index_manifest=manifest,
-            deadline=deadline,
-        )
-    except (OSError, ValueError, sqlite3.Error):
-        return None
-
-
-def _index_timestamp(info) -> datetime | None:
-    try:
-        return datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
-    except (OSError, OverflowError, ValueError):
-        return None
-
-
-def _stale_source_index_result(age: int, manifest_state: str) -> dict:
-    return _result(
-        "index",
-        "degraded",
-        "FTS index is stale relative to searchable knowledge sources.",
-        {
-            "exists": True,
-            "freshness": "stale",
-            "age_seconds": age,
-            "repairable": True,
-            "source_rebuild_required": True,
-            "source_contract": "path-manifest+mtime",
-            "manifest": manifest_state,
-        },
-    )
-
-
-def _aged_index_result(age: int, manifest_state: str) -> dict:
-    fresh = age <= INDEX_FRESH_SECONDS
-    freshness = "fresh" if fresh else "stale"
-    return _result(
-        "index",
-        "ok" if fresh else "degraded",
-        "FTS index is fresh." if fresh else "FTS index is stale.",
-        {
-            "exists": True,
-            "freshness": freshness,
-            "age_seconds": age,
-            "repairable": not fresh,
-            "source_rebuild_required": False,
-            "source_contract": "path-manifest+mtime",
-            "manifest": manifest_state,
-        },
-    )
-
-
-def _index_age_result(age: int, rebuild_required: bool, inspection) -> dict:
-    """Stale when the sources moved or the manifest disagrees; aged otherwise."""
-    if rebuild_required or not inspection.manifest_matches:
-        return _stale_source_index_result(age, inspection.manifest_state)
-    return _aged_index_result(age, inspection.manifest_state)
-
-
-def _index_freshness_result(
-    index: Path,
-    state_root: Path,
-    manifest: Path,
-    info,
-    now: datetime,
-    deadline: float,
-    inspection: _IndexInspection,
-    root: Path | None,
-) -> dict:
-    rebuild_required = _source_rebuild_required(
-        index, state_root, manifest, root, deadline
-    )
-    if rebuild_required is None:
-        return _index_deferred(
-            "FTS source freshness could not be determined.",
-            "source_freshness_unknown",
-        )
-    timestamp = _index_timestamp(info)
-    if timestamp is None:
-        return _corrupt_index_result()
-    age = max(0, int((now - timestamp).total_seconds()))
-    return _index_age_result(age, rebuild_required, inspection)
-
-
-def _index_check(
-    state_root: Path,
-    now: datetime,
-    deadline: float = float("inf"),
-    *,
-    root: Path | None = None,
-) -> dict:
-    index = state_root / "cache" / "index.sqlite"
-    kind, info = _safe_kind(index, state_root)
-    unusable = _index_artifact_state(kind, info, deadline)
-    if unusable is not None:
-        return unusable
-    manifest = state_root / "cache" / ".paths-manifest"
-    try:
-        inspection = _inspect_index(index, state_root, manifest, deadline)
-    except sqlite3.OperationalError as exc:
-        return _operational_index_result(exc, deadline)
-    except (
-        OSError,
-        OverflowError,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-        sqlite3.Error,
-    ):
-        return _corrupt_index_result()
-    if inspection.early is not None:
-        return inspection.early
-    return _index_freshness_result(
-        index, state_root, manifest, info, now, deadline, inspection, root
-    )
 
 
 def state_size_hint(state_root: Path) -> str:
@@ -6248,419 +5814,6 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     return process_liveness.pid_alive(pid)
-
-
-def _lock_metadata(pid: int, token: str, now: datetime) -> bytes:
-    return json.dumps(
-        {
-            "lock_pid": pid,
-            "lock_token": token,
-            "lock_acquired_at": now.isoformat(),
-        }
-    ).encode("utf-8")
-
-
-def _create_owned_lock(path: Path, token: str, now: datetime) -> bool:
-    """Binary: the metadata written is the metadata a reader parses back."""
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-    try:
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError:
-        return False
-    try:
-        os.write(fd, _lock_metadata(os.getpid(), token, now))
-    except OSError:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
-    finally:
-        os.close(fd)
-    return True
-
-
-def _lock_file_nonblocking(fd: int) -> bool:
-    if sys.platform == "win32":
-        import msvcrt
-
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError:
-            return False
-    import fcntl
-
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
-
-
-def _unlock_file(fd: int) -> None:
-    if sys.platform == "win32":
-        import msvcrt
-
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-        return
-    import fcntl
-
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-
-
-def _lock_stat_usable(opened: os.stat_result) -> bool:
-    return stat.S_ISREG(opened.st_mode) and opened.st_size <= MAX_LOCK_BYTES
-
-
-def _read_lock_bytes(fd: int) -> bytes | None:
-    os.lseek(fd, 0, os.SEEK_SET)
-    raw = os.read(fd, MAX_LOCK_BYTES + 1)
-    return None if len(raw) > MAX_LOCK_BYTES else raw
-
-
-def _read_lock_fd(fd: int) -> tuple[dict | None, os.stat_result | None]:
-    try:
-        opened = os.fstat(fd)
-        if not _lock_stat_usable(opened):
-            return None, None
-        raw = _read_lock_bytes(fd)
-        if raw is None:
-            return None, None
-        value = json.loads(raw.decode("utf-8"))
-        return (value, opened) if isinstance(value, dict) else (None, None)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None, None
-
-
-def _create_windows_lock_handle(ctypes, path: Path):
-    """Open the lock file through the loader that keeps the error and the width.
-
-    `ctypes.windll` declares no argument types and keeps no last error, so the
-    handle was passed on as a C int. Research:
-    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
-    """
-    from markdown_transaction import _windows_kernel32
-
-    generic_read_write = 0x80000000 | 0x40000000
-    share_read_write_delete = 0x1 | 0x2 | 0x4
-    open_existing = 3
-    file_attribute_normal = 0x80
-    handle = _windows_kernel32().CreateFileW(
-        str(path),
-        generic_read_write,
-        share_read_write_delete,
-        None,
-        open_existing,
-        file_attribute_normal,
-        None,
-    )
-    return None if handle == ctypes.c_void_p(-1).value else handle
-
-
-def _open_windows_lock(path: Path) -> int | None:
-    import ctypes
-    import msvcrt
-
-    from markdown_transaction import _windows_kernel32
-
-    handle = _create_windows_lock_handle(ctypes, path)
-    if handle is None:
-        return None
-    try:
-        return msvcrt.open_osfhandle(handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
-    except OSError:
-        _windows_kernel32().CloseHandle(handle)
-        return None
-
-
-def _open_existing_lock(path: Path, root: Path) -> int | None:
-    if _safe_kind(path, root)[0] != "regular":
-        return None
-    if sys.platform == "win32":
-        return _open_windows_lock(path)
-    try:
-        return os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return None
-
-
-def _lock_acquired_at(existing: dict) -> datetime | None:
-    try:
-        acquired = datetime.fromisoformat(
-            _iso_text(existing.get("lock_acquired_at", ""))
-        )
-    except (TypeError, ValueError):
-        return None
-    if acquired.tzinfo is None:
-        acquired = acquired.replace(tzinfo=timezone.utc)
-    return acquired.astimezone(timezone.utc)
-
-
-def _dead_lock_pid(pid: object) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    return not _pid_alive(pid)
-
-
-def _known_lock_owner(existing: dict) -> str | None:
-    if not _dead_lock_pid(existing.get("lock_pid")):
-        return None
-    old_token = existing.get("lock_token")
-    if not isinstance(old_token, str) or not old_token:
-        return None
-    return old_token
-
-
-def _stale_lock_owner(existing: dict, now: datetime) -> str | None:
-    """The token of a lock whose owner is both timed out and gone."""
-    acquired = _lock_acquired_at(existing)
-    if acquired is None:
-        return None
-    if (now - acquired).total_seconds() <= LOCK_STALE_SECONDS:
-        return None
-    return _known_lock_owner(existing)
-
-
-def _lock_unchanged(fd: int, path: Path, old_token: str, opened_stat) -> bool:
-    current_value, current_opened_stat = _read_lock_fd(fd)
-    if current_value is None or current_opened_stat is None:
-        return False
-    if current_value.get("lock_token") != old_token:
-        return False
-    try:
-        current_path_stat = os.stat(path, follow_symlinks=False)
-    except OSError:
-        return False
-    return os.path.samestat(opened_stat, current_path_stat)
-
-
-def _remove_path_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
-
-
-def _replace_stale_lock(path: Path, token: str, now: datetime) -> str | None:
-    quarantine = path.with_name(f"{path.name}.stale-{token}")
-    try:
-        path.rename(quarantine)
-    except OSError:
-        return None
-    try:
-        if _create_owned_lock(path, token, now):
-            return token
-        return None
-    finally:
-        _remove_path_quietly(quarantine)
-
-
-def _readable_lock(existing: object, opened_stat: object) -> bool:
-    return existing is not None and opened_stat is not None
-
-
-def _replace_unchanged_stale_lock(
-    fd: int,
-    path: Path,
-    token: str,
-    now: datetime,
-    existing: object,
-    opened_stat: object,
-) -> str | None:
-    """Replace a stale lock only while it is still the one that was read."""
-    old_token = _stale_lock_owner(existing, now)
-    if old_token is None:
-        return None
-    if not _lock_unchanged(fd, path, old_token, opened_stat):
-        return None
-    return _replace_stale_lock(path, token, now)
-
-
-def _take_over_stale_lock(
-    fd: int, path: Path, token: str, now: datetime
-) -> str | None:
-    if not _lock_file_nonblocking(fd):
-        return None
-    existing, opened_stat = _read_lock_fd(fd)
-    if not _readable_lock(existing, opened_stat):
-        return None
-    return _replace_unchanged_stale_lock(fd, path, token, now, existing, opened_stat)
-
-
-def _acquire_lock(path: Path, root: Path, now: datetime) -> str | None:
-    token = secrets.token_hex(16)
-    if _create_owned_lock(path, token, now):
-        return token
-    fd = _open_existing_lock(path, root)
-    if fd is None:
-        return None
-    try:
-        return _take_over_stale_lock(fd, path, token, now)
-    finally:
-        _unlock_file(fd)
-        os.close(fd)
-
-
-def _release_lock(path: Path, root: Path, token: str) -> None:
-    current, problem = _read_bounded_json(path, root, max_bytes=MAX_LOCK_BYTES)
-    if not problem and current is not None and current.get("lock_token") == token:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-
-
-def _abandoned_lease(task: dict, now: datetime) -> bool:
-    """A lease is recoverable only when it expired and its owner is gone."""
-    stale, owned = _lease_state(task, now)
-    if not stale or not owned:
-        return False
-    return not _pid_alive(task.get("lease_pid"))
-
-
-def _restore_lease_as_task(lease: Path) -> bool:
-    try:
-        os.link(lease, lease.with_suffix(".json"), follow_symlinks=False)
-        lease.unlink()
-    except (FileExistsError, OSError):
-        return False
-    return True
-
-
-def _recoverable_lease(entry: os.DirEntry, queue: Path, now: datetime) -> Path | None:
-    if not entry.name.endswith(".processing"):
-        return None
-    lease = Path(entry.path)
-    task, problem = _read_bounded_json(lease, queue)
-    if problem or task is None or not _abandoned_lease(task, now):
-        return None
-    return lease
-
-
-def _recover_stale_leases(queue: Path, now: datetime) -> int:
-    recovered = 0
-    with os.scandir(queue) as entries:
-        for number, entry in enumerate(entries):
-            if number >= MAX_QUEUE_FILES:
-                return recovered
-            lease = _recoverable_lease(entry, queue, now)
-            if lease is not None and _restore_lease_as_task(lease):
-                recovered += 1
-    return recovered
-
-
-def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> bool:
-    queue = state_root / "run" / "queue"
-    kind = _safe_kind(queue, state_root)[0]
-    if kind == "missing":
-        return True
-    if kind != "directory":
-        raise OSError("unsafe queue directory")
-    return _recover_queue_leases(queue, now, repaired)
-
-
-def _recover_queue_leases(queue: Path, now: datetime, repaired: list[dict]) -> bool:
-    lock = queue / ".doctor-recovery.lock"
-    lock_token = _acquire_lock(lock, queue, now)
-    if lock_token is None:
-        return False
-    try:
-        recovered = _recover_stale_leases(queue, now)
-    finally:
-        _release_lock(lock, queue, lock_token)
-    if recovered:
-        repaired.append({"action": "recover_stale_lease", "count": recovered})
-    return True
-
-
-def _require_real_directory(component: Path) -> None:
-    try:
-        component_info = component.lstat()
-    except OSError as exc:
-        raise OSError("unsafe knowledge path") from exc
-    if stat.S_ISLNK(component_info.st_mode):
-        raise OSError("unsafe knowledge path")
-    if not stat.S_ISDIR(component_info.st_mode):
-        raise OSError("unsafe knowledge path")
-
-
-def _contained_notes_directory(root: Path) -> Path:
-    """The notes directory, proven to be a real directory inside the vault."""
-    knowledge_path = root / "knowledge"
-    notes_path = knowledge_path / "notes"
-    _require_real_directory(knowledge_path)
-    _require_real_directory(notes_path)
-    notes = notes_path.resolve()
-    try:
-        notes.relative_to(root.resolve())
-    except ValueError as exc:
-        raise OSError("unsafe knowledge path") from exc
-    return notes
-
-
-def _require_rebuild_continues(deadline: float, cancelled) -> None:
-    if _deadline_reached(deadline) or bool(cancelled and cancelled()):
-        raise TimeoutError("index rebuild cancelled or deadline reached")
-
-
-def _rebuildable_pages(notes: Path, deadline: float, cancelled) -> list[Path]:
-    pages = []
-    for page in sorted(notes.rglob("*.md")):
-        _require_rebuild_continues(deadline, cancelled)
-        if _safe_kind(page, notes)[0] == "regular":
-            pages.append(page)
-    return pages
-
-
-def _rebuild_index(
-    root: Path,
-    state_root: Path,
-    *,
-    deadline: float = float("inf"),
-    cancelled=None,
-) -> None:
-    import search_memory
-
-    previous = (
-        search_memory.ROOT,
-        search_memory.STATE_ROOT,
-        search_memory.INDEX_DIR,
-        search_memory.INDEX_FILE,
-        search_memory.INDEX_MANIFEST,
-        search_memory.KNOWLEDGE_DIR,
-        search_memory.WIKI_DIR,
-    )
-    try:
-        search_memory.ROOT = root
-        search_memory.STATE_ROOT = state_root
-        search_memory.INDEX_DIR = state_root / "cache"
-        search_memory.INDEX_FILE = search_memory.INDEX_DIR / "index.sqlite"
-        search_memory.INDEX_MANIFEST = search_memory.INDEX_DIR / ".paths-manifest"
-        search_memory.KNOWLEDGE_DIR = root / "knowledge" / "notes"
-        search_memory.WIKI_DIR = search_memory.KNOWLEDGE_DIR
-        notes = _contained_notes_directory(root)
-        pages = _rebuildable_pages(notes, deadline, cancelled)
-        _require_rebuild_continues(deadline, cancelled)
-        search_memory._build_index(pages)  # noqa: SLF001
-    finally:
-        (
-            search_memory.ROOT,
-            search_memory.STATE_ROOT,
-            search_memory.INDEX_DIR,
-            search_memory.INDEX_FILE,
-            search_memory.INDEX_MANIFEST,
-            search_memory.KNOWLEDGE_DIR,
-            search_memory.WIKI_DIR,
-        ) = previous
 
 
 def _ensure_maintenance_schema(database: sqlite3.Connection) -> None:
@@ -8293,7 +7446,7 @@ _DEFERRED_BY_ACTION = {
     "runtime": {"runtime"},
     "transactions": {"transactions"},
     "queue": {"queue"},
-    "indexes": {"index", "claims"},
+    "indexes": {"claims"},
     "archives": {"archives"},
     "generations": {"generation"},
 }
@@ -8406,65 +7559,13 @@ def _repair_transactions_action(
         )
 
 
-def _record_queue_migration_repair(
-    migration: Any, marker_existed: bool, context: _RepairContext
-) -> None:
-    if migration is None:
-        return
-    if marker_existed and not migration.imported and not migration.quarantined:
-        return
-    context.repaired.append(
-        {
-            "action": "migrate_queue",
-            "count": migration.imported + migration.quarantined,
-        }
-    )
-
-
-def _migrated_legacy_queue(
-    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
-):
-    """Migrate the legacy queue only when the legacy queue could be read."""
-    if not legacy_available:
-        return None
-    return guard.run(
-        migrate_legacy_queue,
-        context.state_path,
-        deadline=context.deadline,
-        cancelled=guard.cancelled,
-    )
-
-
-def _legacy_queue_migrated(
-    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
-) -> bool:
-    """Run the v2 migration where it is still owed; True when the marker stands."""
-    marker = context.state_path / "run" / "queue-migrated-v2"
-    marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
-    migration = _migrated_legacy_queue(
-        guard, context, migrate_legacy_queue, legacy_available
-    )
-    _record_queue_migration_repair(migration, marker_existed, context)
-    marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
-    return migration is not None or marker_valid
-
-
 def _repair_queue_action(guard: Any, context: _RepairContext) -> None:
-    """Repair the legacy queue, and stop when its migration could not finish."""
-    from markdown_transaction import _reliability_v3_records_present
-    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
+    """Open the queue this vault has, so a queue that cannot open is an error.
 
-    legacy_available = guard.run(
-        _repair_leases, context.state_path, context.generated_at, context.repaired
-    )
-    if not legacy_available:
-        context.repair_deferred.add("queue")
-    # Adoption retired the v2 queue; `migrate_legacy_queue` would construct it
-    # and abort on its tombstone. An adopted vault has no migration to finish
-    # and no marker to wait for (`memory_queue` applies the same rule).
-    if not _reliability_v3_records_present(context.state_path):
-        if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
-            return
+    The JSON queue lease repair and the v2 migration went on 2026-09-23.
+    """
+    from memory_queue import active_or_legacy_memory_queue
+
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the
@@ -8473,75 +7574,6 @@ def _repair_queue_action(guard: Any, context: _RepairContext) -> None:
     # "Runtime repair failed" with nothing repaired, on a vault where adoption
     # is in force, and the message named the fix.
     guard.run(active_or_legacy_memory_queue, context.root_path, context.state_path)
-
-
-def _index_repair_failure_message(index_after: dict) -> str:
-    if index_after["details"].get("freshness") == "missing":
-        return "Index repair failed: index was not created"
-    return "Index repair failed: rebuilt index did not validate as fresh"
-
-
-def _rebuild_and_verify_index(guard: Any, context: _RepairContext) -> None:
-    guard.run(
-        _rebuild_index,
-        context.root_path,
-        context.state_path,
-        deadline=context.deadline,
-        cancelled=guard.cancelled,
-    )
-    index_after = _index_check(
-        context.state_path,
-        context.generated_at,
-        context.deadline,
-        root=context.root_path,
-    )
-    if index_after["status"] == "ok":
-        context.repaired.append({"action": "rebuild_index"})
-        return
-    context.repair_errors.setdefault("index", []).append(
-        _index_repair_failure_message(index_after)
-    )
-
-
-def _repair_index_action(guard: Any, context: _RepairContext) -> None:
-    index_before = _index_check(
-        context.state_path,
-        context.generated_at,
-        context.deadline,
-        root=context.root_path,
-    )
-    if not _index_needs_repair(index_before):
-        return
-    index_lock = context.state_path / "cache" / ".doctor-index.lock"
-    lock_token = guard.run(
-        _acquire_lock,
-        index_lock,
-        context.state_path / "cache",
-        context.generated_at,
-    )
-    if lock_token is None:
-        context.repair_deferred.add("index")
-        return
-    _guarded_index_rebuild(guard, context, index_lock, lock_token)
-
-
-def _index_needs_repair(index_before: dict) -> bool:
-    if not index_before["details"].get("repairable"):
-        return False
-    return index_before["status"] != "ok"
-
-
-def _guarded_index_rebuild(guard: Any, context, index_lock: Path, lock_token) -> None:
-    try:
-        _rebuild_and_verify_index(guard, context)
-    except Exception as exc:  # noqa: BLE001
-        context.repair_errors.setdefault("index", []).append(
-            f"Index repair failed: {describe_error(exc)}"
-        )
-    finally:
-        guard.cleanup(
-            _release_lock, index_lock, context.state_path / "cache", lock_token
-        )
 
 
 def _repair_archives_action(guard: Any, context: _RepairContext) -> None:
@@ -8653,7 +7685,6 @@ def _repair_derived_actions(guard: Any, context: _RepairContext) -> None:
     # kill it, costing an attempt. See
     # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
     ordered = (
-        ("indexes", lambda: _repair_index_action(guard, context)),
         ("archives", lambda: _repair_archives_action(guard, context)),
         ("indexes", lambda: _repair_claims_action(guard, context)),
     )
@@ -8673,11 +7704,134 @@ def _release_unentered_maintenance(
         )
 
 
+def _stray_candidates(state_root: Path) -> list[str]:
+    """The pre-adoption candidate paths that still exist, by their plain names."""
+    return [
+        relative
+        for relative in (COORDINATOR_CANDIDATE, QUEUE_CANDIDATE)
+        if _safe_kind(state_root / relative, state_root)[0] != "missing"
+    ]
+
+
+def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
+    message = f"Every Markdown writer is refused: {cause}."
+    if strays:
+        message += " Stray candidate: " + ", ".join(strays) + "."
+    return message + " Repair: `uv run python scripts/doctor.py --repair`."
+
+
+def _adoption_check(root: Path, state_root: Path) -> dict:
+    """Whether the adoption boundary admits writers at all; an error names why.
+
+    Every capture, checkpoint and compile passes `require_reliability_v3_adopted`
+    first, and for six days on the owner's vault it refused them all while doctor
+    reported only the symptoms. This reads two small records and `lstat`s two
+    paths, so no bound on `run/state.json` can hide it.
+    """
+    from installed_memory_repair import (
+        ReliabilityV3ValidationError,
+        require_reliability_v3_adopted,
+    )
+    from markdown_transaction import _reliability_v3_records_present
+    from secret_redact import describe_error_chain
+
+    if not _reliability_v3_records_present(state_root):
+        message = "Reliability V3 is not adopted here; writers use the legacy path."
+        return _result("adoption", "ok", message, {"adopted": False})
+    strays = _stray_candidates(state_root)
+    details: dict[str, Any] = {"adopted": True, "stray_candidates": strays}
+    try:
+        require_reliability_v3_adopted(root=root, state_root=state_root)
+    except ReliabilityV3ValidationError as exc:
+        details.update(code=exc.code, cause=describe_error_chain(exc))
+        message = _adoption_refusal_message(exc.code, details["cause"], strays)
+        return _result("adoption", "error", message, details)
+    return _result("adoption", "ok", "The adoption record admits writers.", details)
+
+
+def _candidate_rows_held(database: sqlite3.Connection) -> str | None:
+    """The first table that still holds a row, or None when all are empty."""
+    for table in _CANDIDATE_ROW_TABLES:
+        held = database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+        if held is not None:
+            return f"holds a row in {table}"
+    return None
+
+
+def _live_maintenance_owner(database: sqlite3.Connection, now: datetime) -> str | None:
+    from operational_ownership import _parse_timestamp
+
+    for row in database.execute("SELECT actor_id, expires_at FROM maintenance_owners"):
+        if _parse_timestamp(row[1]) > now:
+            return f"maintenance owner {row[0]} is live until {row[1]}"
+    return None
+
+
+def _candidate_content_reason(state_root: Path, candidate: Path, now: datetime) -> str | None:
+    """Why the candidate's contents forbid retiring it, or None when it is empty."""
+    from markdown_transaction import _COORDINATOR_V3_CONTRACT
+
+    with closing(
+        reliable_memory.open_readonly_operational_db(
+            candidate,
+            state_root,
+            max_bytes=MAX_OPERATIONAL_DB_BYTES,
+            contract=_COORDINATOR_V3_CONTRACT,
+        )
+    ) as database:
+        return _candidate_rows_held(database) or _live_maintenance_owner(database, now)
+
+
+def _stray_candidate_retention_reason(
+    state_root: Path, candidate: Path, now: datetime
+) -> str | None:
+    """Why the candidate must stay: an adoption in flight, or content it still holds."""
+    from installed_memory_repair import _operation_artifacts
+
+    if _safe_kind(state_root / "run" / "reliability-v3-adopted.json", state_root)[0] != "regular":
+        return "no complete adoption record"
+    artifacts, _truncated = _operation_artifacts(state_root / "run")
+    if artifacts:
+        return "an adoption operation is in flight: " + ", ".join(sorted(artifacts))
+    try:
+        return _candidate_content_reason(state_root, candidate, now)
+    except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+        return f"its contents could not be read: {describe_error(exc)}"
+
+
+def _retire_stray_candidate(context: _RepairContext) -> None:
+    """Move an empty, ownerless pre-adoption coordinator candidate out of the way.
+
+    It runs before the maintenance owner is taken because while the stray exists
+    no owner can be taken at all. The file is renamed, never deleted.
+    """
+    candidate = context.state_path / COORDINATOR_CANDIDATE
+    if _safe_kind(candidate, context.state_path)[0] != "regular":
+        return
+    reason = _stray_candidate_retention_reason(
+        context.state_path, candidate, context.generated_at
+    )
+    if reason is not None:
+        context.repair_errors.setdefault("runtime", []).append(
+            f"Stray candidate kept: {reason}"
+        )
+        return
+    stamp = context.generated_at.strftime("%Y%m%dT%H%M%SZ")
+    destination = context.state_path / COORDINATOR_QUARANTINE / f"{stamp}-{candidate.name}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    candidate.rename(destination)
+    context.repaired.append(
+        {"action": "retire_stray_candidate", "path": destination.relative_to(context.state_path).as_posix()}
+    )
+
+
 def _run_repairs(context: _RepairContext) -> None:
     """Run every selected repair under one maintenance owner."""
     maintenance: tuple[Any, dict[str, object]] | None = None
     guard_entered = False
     try:
+        if "runtime" in context.selected_repairs:
+            _retire_stray_candidate(context)
         maintenance = _acquire_maintenance_owner(
             context.root_path, context.state_path, context.generated_at
         )
@@ -8715,12 +7869,6 @@ def _deferrable_checks(
     whatever the cheap checks did not need, and only it defers.
     """
     return (
-        (
-            "index",
-            lambda budget: _index_check(
-                state_path, generated_at, budget, root=root_path
-            ),
-        ),
         (
             "scheduler",
             lambda budget: _scheduler_check(
@@ -8777,6 +7925,7 @@ def _collect_checks(
     checks = [
         _environment_check(root_path, state_path),
         _runtime_check(state_path),
+        _adoption_check(root_path, state_path),
         _filesystem_check(state_path, deadline),
         _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
         _queue_check(state_path, generated_at, deadline),

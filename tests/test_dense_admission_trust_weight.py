@@ -32,7 +32,7 @@ _COLUMNS = (
     "chunk_id TEXT, chunk_order INTEGER, source_id TEXT, source_path TEXT, "
     "source_sha256 TEXT, heading_ancestry TEXT, type TEXT, project TEXT, "
     "authority TEXT, confidence TEXT, status TEXT, valid_from TEXT, "
-    "valid_to TEXT, language TEXT, title TEXT, content TEXT, rank REAL"
+    "valid_to TEXT, language TEXT, title TEXT, content TEXT, span_sha256 TEXT, rank REAL"
 )
 
 _COMMENTARY = "docs/research/2026-08-29-commentary.md"
@@ -57,6 +57,7 @@ def _row(order: int, path: str, page_type: str) -> tuple:
         "en",
         Path(path).stem,
         "body text",
+        "1" * 64,
         0.0,
     )
 
@@ -67,7 +68,7 @@ def connection() -> sqlite3.Connection:
     handle.row_factory = sqlite3.Row
     handle.execute(f"CREATE TABLE chunks ({_COLUMNS})")
     handle.executemany(
-        f"INSERT INTO chunks VALUES ({','.join('?' * 17)})",
+        f"INSERT INTO chunks VALUES ({','.join('?' * 18)})",
         (_row(0, _COMMENTARY, "doc"), _row(1, _DECISION, "decision")),
     )
     handle.commit()

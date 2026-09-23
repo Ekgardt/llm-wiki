@@ -194,10 +194,10 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | `doctor` | Exposes nine closed actions: `status`, queue inspect/cancel/redrive/dead-list, transaction recover/undo, archive status, and claim status. Mutation actions require `repair=true`. |
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
-output is used when the installed SDK supports it. The envelope still derives its
-top-level index timestamp from legacy `cache/index.sqlite`; per-component generation
-freshness in that envelope is **evidence pending**. Treat row-level generation and
-fallback fields as the current retrieval truth.
+output is used when the installed SDK supports it. The envelope's top-level
+`index_timestamp` is null and its freshness comes from the per-component generation
+fields; the legacy index it once read was retired on 2026-09-23. Treat row-level
+generation and fallback fields as the current retrieval truth.
 
 ## Repository indexes follow your worktrees
 
@@ -488,8 +488,8 @@ pending**. Use `doctor` for overall runtime health and inspect MCP retrieval row
 Migration is additive and non-destructive:
 
 1. Back up or commit authoritative Markdown and Git state as you normally would.
-2. Leave `cache/index.sqlite`, `cache/vectors.npy` and `cache/vectors_meta.json`
-   in place.
+2. `cache/index.sqlite`, `cache/vectors.npy` and `cache/vectors_meta.json` are read
+   by nothing since 2026-09-23; delete them or leave them.
 3. Build and validate a generation through the integrated builder/catalog API.
 4. Activate only with the expected active generation ID; a CAS mismatch means retry
    from a fresh snapshot, not overwrite.
@@ -615,7 +615,6 @@ force flag. Symlinks and empty directories are not written; the receipt counts t
 ### Queue migration and work
 
 ```bash
-uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py unblock <task-id>
@@ -624,9 +623,8 @@ uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --expor
 uv run python scripts/memory_queue.py restore --export <path>
 ```
 
-Run migration once to import legacy `run/queue/*.json` and `.processing` files.
-Migration aborts if it cannot exclude a live legacy owner and quarantines malformed
-source records. The queue is priority/FIFO and at least once, not exactly-once;
+A `run/queue/` directory left by a release before v4.0.0 (the file-per-task JSON
+queue) is refused and named by `doctor`, never imported. The queue is priority/FIFO and at least once, not exactly-once;
 handlers rely on stable operation IDs. Defaults are priority 0 in `-100..100`, a
 120-second lease with 40-second heartbeat, 8 attempts, 30/3600-second full-jitter
 retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.
@@ -768,10 +766,10 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 
 ### "Search returns nothing"
 - See what the search reads: `uv run python scripts/search_memory.py --status`
-  (the active generation, then the legacy index)
+  (the active generation; without one, Markdown directly)
 - Check health and rebuild the generation: `uv run python scripts/doctor.py`,
   then `uv run python scripts/doctor.py --repair`
-- `search_memory.py --rebuild` rebuilds only the legacy `cache/index.sqlite`
+- `search_memory.py --rebuild` rebuilds the evidence generation, the one index
 
 ### "Hook errors"
 - Check `logs/hook-errors.log` for captured exceptions

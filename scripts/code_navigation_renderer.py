@@ -14,7 +14,9 @@ from code_navigation import (
     Provenance,
 )
 
+# Default row count of a rendered navigation answer; `graph_query` pages 50 by default.
 DEFAULT_LIMIT = 10
+# Largest row count a rendered navigation answer accepts; `graph_query` accepts 200.
 MAX_LIMIT = 100
 MAX_ESTIMATED_TOKENS = 1_200
 _HOVER_BYTE_CEILING = 2048

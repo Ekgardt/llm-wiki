@@ -174,10 +174,13 @@ regenerable and does not change the existing `run/` deletion contract.
 No generation database belongs under `run/`; it remains operational state only.
 The design requires no persistent daemon.
 
-Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
-remain readable during migration. They are disposable derived caches, not members
-of a generation. They must not be removed until installed-vault migration evidence
-makes that safe. LanceDB was retired on 2026-09-07: its table was never built on
+The legacy FTS5 index (`cache/index.sqlite`, `cache/.paths-manifest`) and the legacy
+vector cache (`cache/vectors.npy`, `cache/vectors_meta.json`) were retired on 2026-09-23:
+the generation is the only index. A search with no active generation reads Markdown
+directly, bounded by its deadline, and every such hit says `no_active_generation`; the
+installer's sync builds the first generation (`doctor --rebuild-generation` on
+demand), and the nightly refreshes it. Those files are read by nothing and may be deleted; nothing deletes them
+automatically. LanceDB was retired on 2026-09-07: its table was never built on
 the installed vault, its path was reachable only from the deadline-less legacy
 search, and its index was keyed to a different embedder than the product's — see
 `knowledge/notes/retire-lancedb-decision.md`.
@@ -242,7 +245,8 @@ no longer requires the three to agree on a generation nonce or a pid. Controlled
 cleanup removes the lease after joining its heartbeat; abrupt death leaves it to
 expire, and starting a server sweeps sibling owner roots in `run/lsp/` whose records
 name only processes proven dead and which hold no `failure.json`; roots holding
-failure evidence are left for the operator. Second-fatal recovery completes
+failure evidence are kept as evidence, and the nightly retires those older than 14
+days beyond the newest 20 (`scripts/retire_lsp_evidence.py`, 2026-09-23). Second-fatal recovery completes
 without caller intervention. Incomplete startups enter a bounded module registry;
 Pyright sessions adopt returned cleanup owners into session-held normal-exit and
 caller-deadline retry, while unadopted owners stay registered. Windows lease refresh
@@ -453,7 +457,8 @@ contradiction checks, and playbook crystallization. Backend is
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → OpenAI → Ollama. If none available,
 the call is enqueued in `run/queue.sqlite3` and processed at the next active
-session. Legacy `run/queue/*.json` files are migration input only.
+session. A `run/queue/` directory left by a release before v4.0.0 is refused and
+named by `doctor`, never imported (2026-09-23).
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e.

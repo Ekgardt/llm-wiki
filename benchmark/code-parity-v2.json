@@ -446,14 +446,15 @@
     {
       "id": "T07",
       "kind": "find-dead-code",
-      "question": "Is _legacy_vector_source_membership (scripts/search_memory.py) dead code?",
+      "question": "Is _manifest_seal (scripts/search_memory.py) dead code?",
       "gold": {
         "citations": [
-          "scripts/search_memory.py (def _legacy_vector_source_membership)",
-          "zero references anywhere in the repository outside its def: grep -rn _legacy_vector_source_membership . on 2026-09-12 returns that one line"
+          "scripts/search_memory.py (def _manifest_seal)",
+          "scripts/search_memory.py (def _generation_consumption_seal)"
         ],
         "must": [
-          "_legacy_vector_source_membership"
+          "_manifest_seal",
+          "_generation_consumption_seal"
         ],
         "must_not": [
           "fuse_rrf"
@@ -463,9 +464,9 @@
         {
           "tool": "find_dead_code",
           "arguments": {
-            "symbol": "_legacy_vector_source_membership"
+            "symbol": "_manifest_seal"
           },
-          "note": "2026-09-12: this task replaces the one anchored on _search_backends, which the H1 deletion removed from the tree. The 2026-08-29 caveat still holds — 307 of 846 named candidates were cut from the delivered listing, so absence from it proves nothing; the anchor is the symbol."
+          "note": "2026-09-23: this task replaces the one anchored on _legacy_vector_source_membership, which left the tree with the legacy vector cache; the subject is now a live helper and the answer is its one caller. The 2026-09-12 note replaced _search_backends the same way. The 2026-08-29 caveat still holds — 307 of 846 named candidates were cut from the delivered listing, so absence from it proves nothing; the anchor is the symbol."
         }
       ],
       "llm_wiki_best": [
@@ -473,11 +474,11 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "query",
-            "query": "{\"start\": {\"name\": \"_legacy_vector_source_membership\"}, \"hops\": [], \"limit\": 10}"
+            "query": "{\"start\": {\"name\": \"_manifest_seal\"}, \"hops\": [], \"limit\": 10}"
           },
           "must": [
-            "_legacy_vector_source_membership",
-            "\"nodes\": []"
+            "_manifest_seal",
+            "_generation_consumption_seal"
           ],
           "must_not": [
             "fuse_rrf"
@@ -487,21 +488,21 @@
           "tool": "get_architecture",
           "arguments": {
             "mode": "query",
-            "query": "{\"start\": {\"name\": \"_legacy_vector_source_membership\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 10}"
+            "query": "{\"start\": {\"name\": \"_manifest_seal\"}, \"hops\": [{\"edge\": \"calls\", \"direction\": \"in\"}], \"limit\": 10}"
           },
-          "note": "the empty node list is the deadness evidence"
+          "note": "the caller in the node list is the liveness evidence"
         }
       ],
       "cbm": [
         {
           "tool": "trace_path",
           "arguments": {
-            "function_name": "_legacy_vector_source_membership",
+            "function_name": "_manifest_seal",
             "direction": "inbound",
             "depth": 1
           },
           "must": [
-            "callers_total: 0"
+            "_generation_consumption_seal"
           ],
           "must_not": []
         }
@@ -510,7 +511,7 @@
         {
           "tool": "find_usages",
           "arguments": {
-            "fqn": "_legacy_vector_source_membership"
+            "fqn": "_manifest_seal"
           }
         }
       ],
@@ -518,7 +519,7 @@
         {
           "tool": "find_referencing_symbols",
           "arguments": {
-            "name_path": "_legacy_vector_source_membership",
+            "name_path": "_manifest_seal",
             "relative_path": "scripts/search_memory.py"
           }
         }

@@ -14,6 +14,17 @@
   (`valid_at` / `expired_at` / `invalid_at`); заявляет 94.7% LoCoMo, 90.2%
   LongMemEval; +15 пунктов к Mem0 на темпоральных вопросах (63.8% против
   49.0% на GPT-4o).
+
+  **Поправка 2026-09-19: привязка обоих чисел LoCoMo к набору не подтверждается
+  источниками.** Блог самого Zep
+  (`https://blog.getzep.com/state-of-the-art-agent-memory/`, прочитан
+  2026-09-19) даёт 94.8% на **DMR** (Deep Memory Retrieval) и LoCoMo не
+  упоминает вовсе; блог Mem0
+  (`https://mem0.ai/blog/state-of-ai-agent-memory-2026`, прочитан 2026-09-19)
+  даёт Zep на LoCoMo 80.32%, а Mem0 на LoCoMo 92.5 — то есть и «91.6% LoCoMo»
+  выше сегодня ничем не подтверждено. Записи остаются как запись чужих заявок,
+  но опираться на них нельзя: обе строки из-за этого убраны из
+  `benchmark/report.md`. См. `docs/research/2026-09-19-a-number-names-its-stand.md`.
 - **Letta/MemGPT** — OS-уровневое управление памятью долгоживущих агентов.
 - **LangMem** — для стека LangChain/LangGraph. **Cognee** — local-first (мы
   его уже отставили как мост, но как конкурент жив).

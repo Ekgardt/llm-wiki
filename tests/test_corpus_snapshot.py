@@ -197,8 +197,9 @@ def test_projects_daily_and_code_are_explicitly_bounded_by_policy(vault: Path):
     write(vault / "scripts/app.py", "print('hello')\n")
 
     default = collect_corpus(vault)
+    # The journal is the event log, not a claim page: kept on disk, not indexed
+    # (`docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`).
     assert {source.record.relative_path for source in default.sources} == {
-        "knowledge/projects/demo/journal.md",
         "knowledge/projects/demo/state.md",
     }
 

@@ -407,7 +407,6 @@ if ($installerCreatedClone -or $ProtectPush) {
 Info "Setting environment variables..."
 
 New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
-New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
@@ -634,7 +633,9 @@ if ($adoptionPlan -eq "adopted") {
 # --- 8a. Bounded runtime sync -------------------------------------
 
 Info "Synchronizing runtime state and derived indexes..."
-uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply
+# The first generation is built here (the generation is the only index since
+# 2026-09-23); the sync gets fifteen minutes instead of its 30-second default.
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply --time-limit-seconds 900
 $syncExit = $LASTEXITCODE
 switch ($syncExit) {
     0 { Ok "Runtime state synchronized" }

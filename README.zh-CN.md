@@ -84,7 +84,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
 - **Typed-provenance 排序**——同一张权重表（`user` 1.35、`web` 1.1、`ai-derived` 1.0、`inferred` 0.8）在每条路径上乘以决定顺序的分数：BM25、融合 RRF 与重排序之后
 - **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
-- **本地检索模式**——小规模直接读取页面，始终可用的 SQLite FTS5 BM25、可选的 vectors + graph，以及默认开启的多语言 cross-encoder reranker 混合检索
+- **本地检索模式**——小规模直接读取页面，基于 evidence generation 的 FTS5 BM25（首次构建前直接读取 Markdown）、可选的 vectors + graph，以及默认开启的多语言 cross-encoder reranker 混合检索
 - **Grounded QA**——检索到的 source span 带有 citation ID、路径、source/span 哈希、revision 及 byte/line 范围；证据不足、冲突或超出时间范围时会拒答
 
 ### 主动智能
@@ -302,7 +302,6 @@ uv run python scripts/doctor.py --time-budget 60
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
-uv run python scripts/memory_queue.py migrate
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>

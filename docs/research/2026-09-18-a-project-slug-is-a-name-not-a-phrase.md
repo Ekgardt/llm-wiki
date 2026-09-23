@@ -7,10 +7,10 @@ merged into the vault's own checkout.
 
 - `tests/test_nothing_private_reaches_the_public_repository.py::test_no_tracked_file_names_another_project`
   takes the owner's other project names from the live vault's `knowledge/projects/` and
-  refuses any tracked file naming one. It matched `refusal-names` — a project the vault has
+  refuses any tracked file naming one. It matched a two-word project slug of the shape `<verb>-<noun>` — a project the vault has
   held since 2026-09-03 — inside four tracked files, in the file name
-  `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`.
-- Nothing private is there: the phrase is "a refusal names its component", split by the
+  a dated note's file name, where every word is joined by hyphens.
+- Nothing private is there: the slug's two words appear as ordinary prose in a note's title, split by the
   hyphens a dated note's name always uses. `\b` treats a hyphen as a boundary, so any project
   whose slug is two ordinary words matches ordinary prose written in slug form.
 - The guard only fails in the vault's own checkout, where those project directories exist, so

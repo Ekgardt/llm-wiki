@@ -40,6 +40,12 @@ from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 OWNER_NONCE = "a" * 32
+# A start that gives up at the startup wait ends near 10 s; the alternatives it
+# must be told apart from are the child's 30 s sleep and four serialised waits
+# (40 s). The old ceiling, the wait plus 0.75 s, measured the runner instead:
+# 10.9 s on a loaded Windows runner (CI run 35860367016, 2026-09-23). See
+# `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
+_STARTUP_CEILING_SECONDS = lsp_process._STARTUP_WAIT_SECONDS * 2
 
 # A barrier waits for another thread to reach a point; a hold keeps a lock taken
 # until the test says otherwise. Neither is the property under test, so both are
@@ -5727,7 +5733,7 @@ def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
                 _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
             )
 
-        assert time.monotonic() - started <= lsp_process._STARTUP_WAIT_SECONDS + 0.75
+        assert time.monotonic() - started <= _STARTUP_CEILING_SECONDS
         assert len(captured) == 1
         assert isinstance(raised.value.__cause__, RuntimeError)
         coordinator = captured[0]
@@ -6165,7 +6171,7 @@ def test_real_sleeping_child_startup_failure_is_cleaned_within_one_budget(
             owner_root=tmp_path / OWNER_NONCE,
         )
     elapsed = time.monotonic() - started
-    assert elapsed < lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    assert elapsed < _STARTUP_CEILING_SECONDS
     assert len(children) == 1
     assert children[0].poll() is not None
 
@@ -6233,7 +6239,7 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
     with pytest.raises(lsp_process.StartupCleanupError) as raised:
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
     elapsed = time.monotonic() - started
-    assert elapsed < lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    assert elapsed < _STARTUP_CEILING_SECONDS
     assert (owner / "failure.json").is_file()
     assert (owner / "owner.json").is_file()
     child.cleanup_allowed = True
@@ -7171,7 +7177,7 @@ def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
         results = list(pool.map(fail_start, range(20)))
 
     assert max(elapsed for elapsed, _owner in results) <= (
-        lsp_process._STARTUP_WAIT_SECONDS + 0.75
+        _STARTUP_CEILING_SECONDS
     )
     assert len(children) == 20
     assert all(child.poll() is not None for child in children)
@@ -7211,7 +7217,7 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
         results = list(pool.map(fail_start, range(4)))
 
     assert max(elapsed for elapsed, _owner in results) <= (
-        lsp_process._STARTUP_WAIT_SECONDS + 0.75
+        _STARTUP_CEILING_SECONDS
     )
     assert all(owner.is_dir() and not any(owner.iterdir()) for _elapsed, owner in results)
     for _elapsed, owner in results:
