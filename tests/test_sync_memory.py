@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -80,13 +79,6 @@ def _apply_knowledge_change(root, original, change: str) -> None:
     original.write_text("---\ntype: concept\n---\n# Modified\n", encoding="utf-8")
 
 
-def _damage_manifest(manifest, manifest_state: str) -> None:
-    if manifest_state == "missing":
-        manifest.unlink()
-        return
-    manifest.write_text("{not-json", encoding="utf-8")
-
-
 def _action(report, identifier: str) -> dict:
     return next(item for item in report["actions"] if item["id"] == identifier)
 
@@ -95,19 +87,8 @@ def _statuses(report) -> dict[str, str]:
     return {item["id"]: item["status"] for item in report["actions"]}
 
 
-def _assert_stale_index_action(report, apply: bool) -> None:
-    """Check mode reports the staleness; apply mode rebuilds it."""
-    action = _action(report, "indexes")
-    expected = "changed" if apply else "skipped"
-    assert action["status"] == expected, action
-    if apply:
-        return
-    details = action["details"]
-    assert (details["freshness"], details["source_rebuild_required"]) == ("stale", True)
-
-
 def _check_details(check_id: str, status: str) -> dict[str, object]:
-    if check_id != "index":
+    if check_id != "generation":
         return {}
     return {
         "freshness": "fresh" if status == "ok" else "missing",
@@ -134,7 +115,7 @@ def _doctor_report(
     integrations: str = "ok",
     transactions: str = "ok",
     queue: str = "ok",
-    index: str = "ok",
+    generation: str = "ok",
     overall: str = "ok",
 ) -> dict:
     statuses = {
@@ -144,7 +125,7 @@ def _doctor_report(
         "integrations": integrations,
         "transactions": transactions,
         "queue": queue,
-        "index": index,
+        "generation": generation,
     }
     return {
         "overall_status": overall,
@@ -217,27 +198,6 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
     ):
         (root / relative).write_text("{}\n", encoding="utf-8")
     return root, state, home
-
-
-def _create_index(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(path) as database:
-        database.execute(
-            "CREATE VIRTUAL TABLE pages USING fts5("
-            "path UNINDEXED, title, summary, body, project UNINDEXED, "
-            "timestamp UNINDEXED, slug)"
-        )
-
-
-def _build_fresh_search_index(sync_memory, root: Path, state: Path) -> None:
-    # The build took 5.7 s on a Windows runner on 2026-09-07 and a five-second
-    # budget reported it as an error; the budget is for a hang, not for speed.
-    result = sync_memory._run_index_builder(
-        root=root,
-        state_root=state,
-        timeout=60,
-    )
-    assert result["status"] == "changed"
 
 
 def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch):
@@ -528,7 +488,7 @@ def test_transaction_queue_and_index_freshness_states_are_independent(tmp_path, 
     monkeypatch.setattr(
         sync_memory.doctor,
         "run_doctor",
-        lambda **kwargs: _doctor_report(transactions="error", queue="degraded", index="degraded"),
+        lambda **kwargs: _doctor_report(transactions="error", queue="degraded", generation="degraded"),
     )
     monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
 
@@ -630,86 +590,6 @@ def test_apply_repairs_only_runtime_and_keeps_diagnostics_idempotent(tmp_path, m
     ]
     assert "changed" not in _statuses(second).values()
     assert doctor.repair_requests() == [{"runtime"}, {"runtime"}]
-
-
-def test_blocking_index_builder_is_killed_before_timeout_is_reported(
-    tmp_path, monkeypatch
-):
-    sync_memory = _load_sync_memory()
-    root, state, home = _build_vault(tmp_path)
-    marker = tmp_path / "late-writer"
-    builder = tmp_path / "blocking_index_builder.py"
-    builder.write_text(
-        "import os, time\n"
-        "from pathlib import Path\n"
-        # Three seconds, not 0.6: on a loaded Windows runner killing the tree
-        # took longer than the builder's nap, and the marker got written.
-        "time.sleep(3.0)\n"
-        "Path(os.environ['SYNC_TEST_MARKER']).write_text('alive')\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(sync_memory, "INDEX_BUILDER_SCRIPT", builder)
-    monkeypatch.setenv("SYNC_TEST_MARKER", str(marker))
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
-    monkeypatch.setattr(
-        sync_memory.doctor,
-        "run_doctor",
-        lambda **kwargs: _doctor_report(index="degraded"),
-    )
-
-    started = time.monotonic()
-    report = sync_memory.run_sync(
-        root=root,
-        state_root=state,
-        home=home,
-        apply=True,
-        time_limit_seconds=0.2,
-    )
-    elapsed = time.monotonic() - started
-    index = _action(report, "indexes")
-
-    # The claim is that the builder is killed rather than left to finish, which
-    # the marker checks below prove. The wall-clock bound only rules out waiting
-    # for the child, and killing a process tree is not instant on Windows.
-    assert (elapsed < 15, index["status"], index["details"]["timed_out"], marker.exists()) == (
-        True,
-        "error",
-        True,
-        False,
-    )
-    time.sleep(0.7)
-    assert not marker.exists()
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows process-tree behavior")
-def test_timed_out_index_builder_kills_descendant_process(tmp_path, monkeypatch):
-    sync_memory = _load_sync_memory()
-    marker = tmp_path / "descendant-writer"
-    child = tmp_path / "child.py"
-    parent = tmp_path / "parent.py"
-    child.write_text(
-        "import os, time\nfrom pathlib import Path\n"
-        "time.sleep(0.8)\nPath(os.environ['SYNC_TEST_MARKER']).write_text('alive')\n",
-        encoding="utf-8",
-    )
-    parent.write_text(
-        "import subprocess, sys, time\n"
-        f"subprocess.Popen([sys.executable, {str(child)!r}])\n"
-        "time.sleep(5)\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(sync_memory, "INDEX_BUILDER_SCRIPT", parent)
-    monkeypatch.setenv("SYNC_TEST_MARKER", str(marker))
-
-    result = sync_memory._run_index_builder(
-        root=tmp_path,
-        state_root=tmp_path,
-        timeout=0.2,
-    )
-
-    assert result["details"]["timed_out"] is True
-    time.sleep(1)
-    assert not marker.exists()
 
 
 def test_process_runner_uses_posix_session_and_killpg(monkeypatch):
@@ -920,89 +800,6 @@ def test_dependency_action_reports_expired_deadline_without_starting_uv(tmp_path
     assert result["details"]["timed_out"] is True
 
 
-def test_sync_index_builder_excludes_symlinked_outside_page(tmp_path, monkeypatch):
-    sync_memory = _load_sync_memory()
-    root, state, home = _build_vault(tmp_path)
-    outside = tmp_path / "outside-secret.md"
-    secret = "OUTSIDE-SYMLINK-SECRET"
-    outside.write_text(f"# Outside\n{secret}\n", encoding="utf-8")
-    link = root / "knowledge" / "notes" / "linked.md"
-    try:
-        link.symlink_to(outside)
-    except (OSError, NotImplementedError) as exc:
-        pytest.skip(f"file symlinks unavailable: {exc}")
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
-
-    report = sync_memory.run_sync(
-        root=root,
-        state_root=state,
-        home=home,
-        apply=True,
-        time_limit_seconds=120,
-    )
-
-    assert next(item for item in report["actions"] if item["id"] == "indexes")["status"] == "changed"
-    with sqlite3.connect(state / "cache" / "index.sqlite") as database:
-        rows = database.execute("SELECT path, body FROM pages").fetchall()
-    assert secret not in json.dumps(rows)
-    assert "knowledge/notes/linked.md" not in json.dumps(rows)
-
-
-@pytest.mark.parametrize("apply", [False, True], ids=["check", "apply"])
-@pytest.mark.parametrize("change", ["added", "removed", "modified"])
-def test_sync_detects_recent_knowledge_source_changes(
-    tmp_path, monkeypatch, apply, change
-):
-    sync_memory = _load_sync_memory()
-    root, state, home = _build_vault(tmp_path)
-    _build_fresh_search_index(sync_memory, root, state)
-    index = state / "cache" / "index.sqlite"
-    index_mtime = time.time() - 60
-    os.utime(index, (index_mtime, index_mtime))
-    original = root / "knowledge" / "notes" / "example.md"
-    _apply_knowledge_change(root, original, change)
-    knowledge = root / "knowledge"
-    before = _snapshot(knowledge)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
-
-    report = sync_memory.run_sync(
-        root=root,
-        state_root=state,
-        home=home,
-        apply=apply,
-        time_limit_seconds=120,
-    )
-
-    _assert_stale_index_action(report, apply)
-    assert _snapshot(knowledge) == before
-
-
-@pytest.mark.parametrize("apply", [False, True], ids=["check", "apply"])
-@pytest.mark.parametrize("manifest_state", ["missing", "invalid"])
-def test_sync_treats_missing_or_invalid_source_manifest_as_stale(
-    tmp_path, monkeypatch, apply, manifest_state
-):
-    sync_memory = _load_sync_memory()
-    root, state, home = _build_vault(tmp_path)
-    _build_fresh_search_index(sync_memory, root, state)
-    manifest = state / "cache" / ".paths-manifest"
-    _damage_manifest(manifest, manifest_state)
-    knowledge = root / "knowledge"
-    before = _snapshot(knowledge)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
-
-    report = sync_memory.run_sync(
-        root=root,
-        state_root=state,
-        home=home,
-        apply=apply,
-        time_limit_seconds=120,
-    )
-
-    _assert_stale_index_action(report, apply)
-    assert _snapshot(knowledge) == before
-
-
 def test_apply_is_bounded_by_explicit_action_limit(tmp_path, monkeypatch):
     sync_memory = _load_sync_memory()
     doctor_calls = []
@@ -1030,7 +827,6 @@ def test_apply_is_bounded_by_explicit_action_limit(tmp_path, monkeypatch):
 def test_apply_never_writes_under_read_only_knowledge_tree(tmp_path, monkeypatch):
     sync_memory = _load_sync_memory()
     root, state, home = _build_vault(tmp_path)
-    _create_index(state / "cache" / "index.sqlite")
     knowledge = root / "knowledge"
     before = _snapshot(knowledge)
     _set_tree_mode(knowledge, read_only=True)
@@ -1223,53 +1019,6 @@ $syncWarning = $false
         completed.stdout,
     ) == []
     assert "LLM-Wiki installed successfully" not in completed.stdout
-
-
-def test_sync_reports_legacy_change_separately_when_generation_is_deferred(
-    tmp_path, monkeypatch
-):
-    sync_memory = _load_sync_memory()
-    report = _doctor_report(index="degraded", overall="degraded")
-    report["checks"].append(
-        {
-            "id": "generation",
-            "status": "degraded",
-            "message": "generation is stale",
-            "details": {"freshness": "stale", "repairable": True},
-        }
-    )
-    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
-    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
-    monkeypatch.setattr(
-        sync_memory,
-        "_run_generation_builder",
-        lambda **kwargs: sync_memory._result(
-            "indexes",
-            "skipped",
-            "Evidence generation refresh was deferred; retry will rebuild from source.",
-            {"generation": "candidate", "partial": True, "reason": "time_limit"},
-        ),
-    )
-    monkeypatch.setattr(
-        sync_memory,
-        "_run_index_builder",
-        lambda **kwargs: sync_memory._result(
-            "indexes", "changed", "Derived search index was rebuilt.", {}
-        ),
-    )
-
-    result = sync_memory.run_sync(
-        root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True
-    )
-    indexes = _action(result, "indexes")
-
-    assert (
-        indexes["status"],
-        result["overall_status"],
-        indexes["details"]["legacy_index"],
-        indexes["details"]["generation_refresh"],
-    ) == ("skipped", "degraded", "changed", "skipped")
-    assert "synchronized" not in indexes["message"].casefold()
 
 
 def test_generation_timeout_does_not_claim_nonexistent_continuation(tmp_path, monkeypatch):

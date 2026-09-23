@@ -174,10 +174,13 @@ regenerable and does not change the existing `run/` deletion contract.
 No generation database belongs under `run/`; it remains operational state only.
 The design requires no persistent daemon.
 
-Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
-remain readable during migration. They are disposable derived caches, not members
-of a generation. They must not be removed until installed-vault migration evidence
-makes that safe. LanceDB was retired on 2026-09-07: its table was never built on
+The legacy FTS5 index (`cache/index.sqlite`, `cache/.paths-manifest`) and the legacy
+vector cache (`cache/vectors.npy`, `cache/vectors_meta.json`) were retired on 2026-09-23:
+the generation is the only index. A search with no active generation reads Markdown
+directly, bounded by its deadline, and every such hit says `no_active_generation`; the
+installer's sync builds the first generation (`doctor --rebuild-generation` on
+demand), and the nightly refreshes it. Those files are read by nothing and may be deleted; nothing deletes them
+automatically. LanceDB was retired on 2026-09-07: its table was never built on
 the installed vault, its path was reachable only from the deadline-less legacy
 search, and its index was keyed to a different embedder than the product's — see
 `knowledge/notes/retire-lancedb-decision.md`.

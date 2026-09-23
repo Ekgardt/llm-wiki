@@ -102,10 +102,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
 │   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
 │   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
-│   ├── code_tools.json               v4.0: atomic code-tool capability manifest
-│   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
-│   ├── vectors_meta.json            v4.0: vector metadata (paths, titles — no vectors)
-│   └── index.sqlite                 FTS5 search index
+│   └── code_tools.json               v4.0: atomic code-tool capability manifest
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
 │   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
@@ -608,8 +605,7 @@ or nonzero active state remains fail-closed.
   changes the requirement to publish a complete generation. POSIX collection is
   descriptor-authoritative; Windows reparse and identity checks are best effort.
   This adds no daemon or automatic legacy-cache removal.
-- `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
-  `vectors_meta.json` (metadata),
+- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
   `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
   roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
@@ -671,12 +667,16 @@ cache/evidence-graph/generations/<generation-id>/
   active generation. Recovery may register complete orphan generations without
   activating them. A corrupt active generation is replaced only by a revalidated
   same-scope prior generation from activation history/parent lineage.
-- Legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`
-  remain readable during migration. LanceDB was retired on 2026-09-07
-  (`knowledge/notes/retire-lancedb-decision.md`). They are disposable derived
-  caches retained as fallback, not members of a generation. They must not be removed
-  until installed-vault migration evidence makes that safe. The new reader switches
-  only after a validated generation is active.
+- The legacy FTS5 index (`cache/index.sqlite`, `cache/.paths-manifest`) and the legacy
+  vector cache (`cache/vectors.npy`, `cache/vectors_meta.json`) were retired on 2026-09-23:
+  the generation is the only index. A search with no active generation reads Markdown
+  directly, bounded by its deadline, and every such hit says `no_active_generation`; the
+  installer's sync builds the first generation (`doctor --rebuild-generation` on
+  demand), and the nightly refreshes it. Those files are read by nothing and may be deleted; nothing deletes them
+  automatically. LanceDB was retired on 2026-09-07: its table was never built on
+  the installed vault, its path was reachable only from the deadline-less legacy
+  search, and its index was keyed to a different embedder than the product's — see
+  `knowledge/notes/retire-lancedb-decision.md`.
 
 ### Evidence-cache migration and rollback
 

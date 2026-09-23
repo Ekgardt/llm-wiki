@@ -17,6 +17,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
   queue migration stay, with the evidence and the plan for each in
   `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
+  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
+  are read and written by nothing: their builders, readers, swap lock and
+  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
+  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
+  a hundred functions with them. On the live vault the legacy index answered
+  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
+  it by design until now. The evidence generation is the only index: without
+  one a search reads Markdown directly, bounded by its deadline, and every
+  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
+  the generation and `--status` names it. See
+  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
 - **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
   per task under `run/queue/`; the importer, its marker, quarantine, lease
   repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
@@ -25,6 +37,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   records is now refused by the queue (`legacy_json_queue_unsupported`) and
   named by `doctor`, which keeps `run/` from deletion while they exist. See
   `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+
+### Changed
+
+- **A fresh install builds its first generation.** `doctor` reports a missing
+  generation as degraded and repairable instead of "legacy retrieval remains
+  available", so the installer's `sync_memory.py --apply` builds it (measured:
+  48.9 s for the live vault's 189 pages with vectors, into a scratch state
+  root), `doctor --rebuild-generation` builds it on demand, and a
+  generation reason (`generation_corrupt`, …) is reported ahead of the
+  Markdown read's `no_active_generation` when both apply.
 
 ### Deprecated
 

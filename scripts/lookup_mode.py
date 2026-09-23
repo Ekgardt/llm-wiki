@@ -1,8 +1,8 @@
 """Print the recommended local retrieval mode for the current vault size.
 
   DIRECT  (< 50 wiki pages)    — read knowledge/index.md + target pages.
-  BASE    (50–300 wiki pages)  — use SQLite FTS5 BM25 when direct navigation
-                                  is ambiguous.
+  BASE    (50–300 wiki pages)  — use the evidence generation's BM25 when direct
+                                  navigation is ambiguous.
   HYBRID  (> 300 wiki pages)   — use BM25 + optional local vectors,
                                   graph neighbors, and reranking.
 
@@ -67,40 +67,25 @@ def tier_for(count: int) -> str:
 
 
 def index_status() -> dict:
-    """Inspect the local SQLite FTS5 index without opening it."""
-    for candidate in _index_candidates():
-        info = _index_info(candidate)
-        if info is not None:
-            return info
-    return {"available": False}
+    """The evidence generation the search reads, from the catalog, without a search.
 
-
-def _index_candidates() -> list[Path]:
-    import os
-
-    state_root_env = os.environ.get("LLM_WIKI_STATE_ROOT")
-    candidates: list[Path] = []
-    if state_root_env:
-        candidates.append(Path(state_root_env) / "cache" / "index.sqlite")
-    candidates.append(ROOT / "cache" / "index.sqlite")
-    return candidates
-
-
-def _index_info(candidate: Path) -> dict | None:
+    Since 2026-09-23 the generation is the only index; without one a search
+    reads Markdown directly (`docs/research/2026-09-23-the-generation-is-the-only-index.md`).
+    """
     try:
-        if not (candidate.exists() and candidate.is_file()):
-            return None
-        mtime = datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc)
-        age_h = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
-        return {
-            "available": True,
-            "index_path": str(candidate),
-            "index_size_mb": round(candidate.stat().st_size / (1024 * 1024), 2),
-            "index_age_hours": round(age_h, 1),
-            "index_stale": age_h > 24,
-        }
-    except OSError:
-        return None
+        import search_memory
+
+        catalog = search_memory._active_generation_catalog()
+        manifest = None if catalog is None else catalog.get_active()
+    except (ImportError, OSError, ValueError, RuntimeError):
+        return {"available": False}
+    if not isinstance(manifest, dict):
+        return {"available": False}
+    return {
+        "available": True,
+        "generation_id": manifest.get("generation_id"),
+        "vector_state": manifest.get("vector_state"),
+    }
 
 
 def main() -> int:
@@ -131,19 +116,10 @@ def _print_summary(count: int, tier: str, index: dict) -> None:
     print(f"Recommended tier: {tier}")
     print("Thresholds: DIRECT < 50  |  BASE 50–300  |  HYBRID > 300")
     if not index.get("available"):
-        print("FTS5 index not found; search_memory.py will build it on demand.")
+        print("No active evidence generation; search reads Markdown directly.")
+        print("Build one: uv run python scripts/search_memory.py --rebuild")
         return
-    _print_index(index, tier)
-
-
-def _print_index(index: dict, tier: str) -> None:
-    print(f"FTS5 index: {index.get('index_path')} ({index.get('index_size_mb')} MB)")
-    age_h = index.get("index_age_hours")
-    if age_h is not None:
-        stale = " [STALE >24h]" if index.get("index_stale") else ""
-        print(f"FTS5 index age: {age_h} hours{stale}")
-    if index.get("index_stale") and tier != "DIRECT":
-        print("Tip: run `search_memory.py --rebuild` before querying.")
+    print(f"Evidence generation: {index.get('generation_id')} (vectors {index.get('vector_state')})")
 
 
 if __name__ == "__main__":

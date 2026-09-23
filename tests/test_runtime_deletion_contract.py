@@ -1505,7 +1505,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     from tests.test_doctor import (
         _build_root,
         _create_claim_index,
-        _create_index,
+        _create_generation,
         _qualified_pyright_check,
     )
 
@@ -1522,10 +1522,8 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
         ),
         encoding="utf-8",
     )
-    index = state_root / "cache/index.sqlite"
-    _create_index(index)
     _create_claim_index(root, state_root)
-    os.utime(index, (now.timestamp(), now.timestamp()))
+    _create_generation(root, state_root)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -1539,7 +1537,6 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     assert checks["queue"]["status"] == "ok", checks["queue"]
     assert checks["run_deletion"]["status"] == "ok"
     assert checks["generation"]["status"] == "ok"
-    assert checks["generation"]["details"]["recommended_action"] == "rebuild_generation"
     # A legacy pair is a vault that has not adopted Reliability V3, and that
     # is the one finding here (issue #17): capture is disabled until it does.
     # Retention itself degrades nothing.

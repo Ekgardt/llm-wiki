@@ -75,7 +75,6 @@ def test_an_empty_json_queue_directory_is_not_a_refusal(tmp_path: Path) -> None:
 def test_doctor_repair_neither_imports_nor_marks_the_json_queue(tmp_path: Path, monkeypatch) -> None:
     root, state_root, home = _build_root(tmp_path)
     _json_queue(state_root, "legacy-1.json", "legacy-2.processing")
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state: None)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 

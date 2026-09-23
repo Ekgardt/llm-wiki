@@ -1,7 +1,6 @@
 """Review-blocker regressions for Task 11–13 retrieval contract."""
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -43,11 +42,6 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
-    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", tmp_path / "cache" / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", tmp_path / "cache" / "vectors_meta.json")
 
     class Catalog:
         generations_path = tmp_path / "generations"
@@ -94,9 +88,6 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
-    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
 
     # Force generation open path with seal flip after first check.
     seals = {"n": 0}
@@ -133,7 +124,6 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
 
     # Open generation fails connection → generation_unavailable path still retrieve.
     monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a, **_k: None)
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *_a, **_k: None)
 
     results = search_memory.search(
         "seal needle",
@@ -154,43 +144,6 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
         "generation_vectors_unavailable",
         "dense_unavailable",
     }
-
-
-def test_unbound_stale_generation_does_not_block_legacy_dense(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    class Catalog:
-        generations_path = tmp_path / "generations"
-
-        def get_active_for_repository(self, _repository_scope, **_kwargs):
-            return None
-
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_lexical_hits",
-        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_dense_hits",
-        lambda *_args, **_kwargs: [_hit("dense", "dense.md", 0.9)],
-    )
-
-    results = search_memory.search(
-        "stale needle",
-        catalog=Catalog(),
-        semantic=True,
-        graph=False,
-        rerank=False,
-        emit_telemetry=False,
-        profile="HYBRID",
-    )
-
-    assert {result["candidate_id"] for result in results} == {"local", "dense"}
-    assert results[0]["effective_mode"] == "HYBRID"
-    assert results[0]["signals_used"] == ["lexical", "dense"]
 
 
 def test_trace_includes_reranker_diagnostics(monkeypatch):
@@ -419,51 +372,5 @@ def test_semantic_false_keeps_base_even_when_dense_backend_present():
     assert called["dense"] == 0
     assert result.trace.effective_mode == "BASE"
     assert result.trace.signals_used == ("lexical",)
-
-
-def test_legacy_numpy_validation_rejects_bad_meta(tmp_path, monkeypatch):
-    np = pytest.importorskip("numpy")
-    import search_memory
-
-    vault = tmp_path / "vault"
-    notes = vault / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    page = notes / "p.md"
-    page.write_text("# P\nvector needle\n", encoding="utf-8")
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", cache / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", cache / ".paths-manifest")
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(search_memory, "_have_sentence_transformers", lambda: True)
-
-    # Wrong dimension meta should refuse dense.
-    np.save(cache / "vectors.npy", np.ones((1, 3), dtype=np.float32))
-    (cache / "vectors_meta.json").write_text(
-        json.dumps(
-            {
-                "paths": ["knowledge/notes/p.md"],
-                "titles": ["P"],
-                "summaries": ["vector needle"],
-                "projects": [""],
-                "timestamps": [""],
-                "model": "wrong-model",
-                "model_revision": "r0",
-                "dimensions": 99,
-                "source_sha256": ["0" * 64],
-            }
-        ),
-        encoding="utf-8",
-    )
-    hits = search_memory._legacy_dense_hits(
-        "vector needle", scope="all", limit=5, project=None, since=None, as_of=None
-    )
-    assert hits is None
 
 

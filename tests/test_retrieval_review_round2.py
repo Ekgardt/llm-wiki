@@ -1,8 +1,6 @@
 """Second-pass review blockers for retrieval orchestration."""
 from __future__ import annotations
 
-import hashlib
-import json
 import sys
 import threading
 import time
@@ -69,10 +67,9 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *a, **k: [_hit("a", "a.md", 1.0)],
     )
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *a, **k: dense())
 
     rows = retrieval.retrieve_via_search_memory(
         "what is auth?",
@@ -115,8 +112,7 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
         lambda *a, **k: [_hit("c1", "a.md", 0.9, chunk_id="c1")],
     )
     monkeypatch.setattr(search_memory, "_generation_artifact", lambda m, n: True)
-    monkeypatch.setattr(search_memory, "_legacy_lexical_hits", lambda *a, **k: [])
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *a, **k: None)
+    monkeypatch.setattr(search_memory, "markdown_hits", lambda *a, **k: [])
 
     class Catalog:
         generations_path = Path(".")
@@ -206,13 +202,8 @@ def test_wrong_repository_generation_cannot_contribute_any_signal(
     )
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_dense_hits",
-        lambda *_args, **_kwargs: [_hit("local", "local.md", 0.9)],
     )
     monkeypatch.setattr(graph_neighbors, "boost_graph_neighbors", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
@@ -300,7 +291,7 @@ def test_repository_retrieval_selects_scope_before_generic_active_repair(
     repository.mkdir()
     scope = resolve_repository_scope(repository)
     monkeypatch.setattr(search_memory, "ROOT", repository)
-    monkeypatch.setattr(search_memory, "_legacy_lexical_hits", lambda *_a, **_k: [])
+    monkeypatch.setattr(search_memory, "markdown_hits", lambda *_a, **_k: [])
 
     class Catalog:
         def get_active(self, **_kwargs):
@@ -430,7 +421,7 @@ def test_public_search_propagates_generation_stage_timeout(
     monkeypatch.setattr(retrieval, "expand_evidence_graph", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *_args, **_kwargs: pytest.fail("timeout must not become legacy fallback"),
     )
 
@@ -471,10 +462,7 @@ def test_public_search_rejects_expired_or_cancelled_request(stop):
         search_memory.search("needle", emit_telemetry=False, **options)
 
 
-@pytest.mark.parametrize("stage", ["lexical"])
-def test_public_search_threads_deadline_and_cancel_into_legacy_backends(
-    monkeypatch, stage
-):
+def test_public_search_threads_deadline_and_cancel_into_the_markdown_read(monkeypatch):
     import search_memory
 
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
@@ -486,21 +474,13 @@ def test_public_search_threads_deadline_and_cancel_into_legacy_backends(
     def lexical(*_args, deadline=None, cancelled=None, **_kwargs):
         assert deadline == test_deadline
         assert cancelled is test_cancelled
-        if stage == "lexical":
-            raise TimeoutError("legacy lexical deadline")
-        return [_hit("local", "local.md", 1.0)]
-
-    def dense(*_args, deadline=None, cancelled=None, **_kwargs):
-        assert deadline == test_deadline
-        assert cancelled is test_cancelled
-        raise TimeoutError("legacy dense deadline")
+        raise TimeoutError("markdown read deadline")
 
     test_deadline = deadline
     test_cancelled = cancelled
-    monkeypatch.setattr(search_memory, "_legacy_lexical_hits", lexical)
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", dense)
+    monkeypatch.setattr(search_memory, "markdown_hits", lexical)
 
-    with pytest.raises(TimeoutError, match=f"legacy {stage} deadline"):
+    with pytest.raises(TimeoutError, match="markdown read deadline"):
         search_memory.search(
             "needle",
             semantic=True,
@@ -513,35 +493,6 @@ def test_public_search_threads_deadline_and_cancel_into_legacy_backends(
         )
 
 
-def test_deadline_allows_hybrid_signals_when_dense_finishes_in_budget(monkeypatch):
-    import search_memory
-
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_lexical_hits",
-        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_dense_hits",
-        lambda *_args, **_kwargs: [_hit("dense", "dense.md", 0.9)],
-    )
-
-    rows = search_memory.search(
-        "needle",
-        semantic=True,
-        graph=False,
-        rerank=False,
-        emit_telemetry=False,
-        profile="HYBRID",
-        deadline_monotonic=time.monotonic() + 30,
-    )
-
-    assert {row["candidate_id"] for row in rows} == {"local", "dense"}
-    assert _mode_of(rows[0]) == ("HYBRID", "HYBRID", ["lexical", "dense"], None, False)
-
-
 def _mode_of(row: dict) -> tuple:
     return (
         row["requested_mode"],
@@ -550,53 +501,6 @@ def _mode_of(row: dict) -> tuple:
         row["fallback_reason"],
         row["partial"],
     )
-
-
-def test_hanging_dense_backend_falls_back_to_partial_base(monkeypatch):
-    import retrieval
-    import search_memory
-
-    release = threading.Event()
-    started = threading.Event()
-    monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.02)
-    monkeypatch.setattr(
-        retrieval,
-        "_OPTIONAL_STAGE_SLOTS",
-        threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
-    )
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(
-        search_memory,
-        "_legacy_lexical_hits",
-        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
-    )
-
-    def hanging(*_args, **_kwargs):
-        started.set()
-        release.wait()
-        return [_hit("dense", "dense.md", 0.9)]
-
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", hanging)
-    try:
-        rows = search_memory.search(
-            "needle",
-            semantic=True,
-            graph=False,
-            rerank=False,
-            emit_telemetry=False,
-            profile="HYBRID",
-            deadline_monotonic=time.monotonic() + 1,
-        )
-
-        assert started.is_set()
-        assert [row["candidate_id"] for row in rows] == ["local"]
-        assert (rows[0]["effective_mode"], rows[0]["fallback_reason"], rows[0]["partial"]) == (
-            "BASE",
-            "optional_stage_timeout",
-            True,
-        )
-    finally:
-        release.set()
 
 
 def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
@@ -724,7 +628,7 @@ def test_explicit_base_under_deadline_is_not_reported_as_fallback(monkeypatch):
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
     )
 
@@ -1016,48 +920,6 @@ def test_retrieve_raises_when_the_deadline_leaves_nothing_in_hand():
         )
 
 
-def test_legacy_numpy_requires_model_revision_and_source_hashes(tmp_path, monkeypatch):
-    np = pytest.importorskip("numpy")
-    import search_memory
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    (notes / "p.md").write_text("# P\nbody\n", encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", cache / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", cache / ".paths-manifest")
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
-    monkeypatch.setattr(search_memory, "_have_sentence_transformers", lambda: True)
-    np.save(cache / "vectors.npy", np.ones((1, 2), dtype=np.float32))
-    (cache / "vectors_meta.json").write_text(
-        json.dumps(
-            {
-                "paths": ["knowledge/notes/p.md"],
-                "titles": ["P"],
-                "summaries": ["body"],
-                "projects": [""],
-                "timestamps": [""],
-                "model": "m",
-                # missing model_revision and source_sha256
-                "dimensions": 2,
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert (
-        search_memory._legacy_dense_hits(
-            "body", scope="all", limit=5, project=None, since=None, as_of=None
-        )
-        is None
-    )
-
-
 @pytest.mark.parametrize(
     ("query", "profile"),
     [
@@ -1253,10 +1115,9 @@ def test_late_vector_seal_change_discards_generation_lexical(
     )
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *_args, **_kwargs: [_hit("legacy", "legacy.md", 1.0)],
     )
-    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *_args, **_kwargs: None)
 
     class Catalog:
         generations_path = Path(".")
@@ -1299,73 +1160,3 @@ def test_late_vector_seal_change_discards_generation_lexical(
     assert rows[0]["fallback_reason"] == "generation_seal_changed"
 
 
-def test_legacy_numpy_writer_and_loader_share_closed_contract(tmp_path, monkeypatch):
-    np = pytest.importorskip("numpy")
-    import search_memory
-
-    page = tmp_path / "knowledge" / "notes" / "p.md"
-    page.parent.mkdir(parents=True)
-    page.write_text("# P\nbody\n", encoding="utf-8")
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
-    monkeypatch.setattr(search_memory, "EMBEDDING_DIM", 2)
-    monkeypatch.setattr(search_memory, "EMBEDDING_MODEL_REVISION", "revision-1")
-
-    class Embedder:
-        def encode(self, texts, **_kwargs):
-            return np.ones((len(texts), 2), dtype=np.float32)
-
-    monkeypatch.setattr(search_memory, "_get_embedder", lambda: Embedder())
-    built = search_memory._build_vectors([page])
-    metadata = json.loads((cache / "vectors_meta.json").read_text(encoding="utf-8"))
-
-    assert isinstance(built["vectors"], np.ndarray)
-    expected = {
-        "model_id": search_memory.EMBEDDING_MODEL,
-        "model_revision": "revision-1",
-        "dimensions": 2,
-        "source_paths": ["knowledge/notes/p.md"],
-        "source_sha256": [hashlib.sha256(page.read_bytes()).hexdigest()],
-        "dtype": "float32",
-        "shape": [1, 2],
-        "finite": True,
-        "artifact_sha256": hashlib.sha256((cache / "vectors.npy").read_bytes()).hexdigest(),
-    }
-    assert {key: metadata[key] for key in expected} == expected
-
-    loaded = search_memory._load_or_build_vectors([page])
-    assert isinstance(loaded["vectors"], np.memmap)
-
-
-def test_legacy_numpy_loader_rejects_changed_live_source(tmp_path, monkeypatch):
-    np = pytest.importorskip("numpy")
-    import search_memory
-
-    page = tmp_path / "knowledge" / "notes" / "p.md"
-    page.parent.mkdir(parents=True)
-    page.write_text("# P\nbefore\n", encoding="utf-8")
-    cache = tmp_path / "cache"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
-    monkeypatch.setattr(search_memory, "EMBEDDING_DIM", 2)
-    monkeypatch.setattr(search_memory, "EMBEDDING_MODEL_REVISION", "revision-1")
-
-    class Embedder:
-        def encode(self, texts, **_kwargs):
-            return np.ones((len(texts), 2), dtype=np.float32)
-
-    monkeypatch.setattr(search_memory, "_get_embedder", lambda: Embedder())
-    assert search_memory._build_vectors([page]) is not None
-    page.write_text("# P\nafter with preserved metadata\n", encoding="utf-8")
-    monkeypatch.setattr(
-        search_memory,
-        "_build_vectors",
-        lambda _pages: pytest.fail("invalid cache must be unavailable, not silently rebuilt"),
-    )
-
-    assert search_memory._load_or_build_vectors([page]) is None
