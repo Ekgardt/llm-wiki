@@ -67,7 +67,7 @@ def test_an_absent_provider_states_an_hour_and_other_failures_state_nothing() ->
     other = flush_memory._capture_queue_failure(RuntimeError("x"))
 
     assert (absent.error_code, absent.retry_after) == ("provider_unavailable", 3600)
-    assert (other.error_code, other.retry_after) == ("processor_failed", None)
+    assert (other.error_code, other.retry_after) == ("processor_failed:x", None)
 
 
 def test_the_last_attempt_is_raised_as_a_loss_and_an_earlier_one_is_not() -> None:

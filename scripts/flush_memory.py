@@ -1692,16 +1692,17 @@ def _process_or_fail(
 
 
 def _capture_queue_failure(error: BaseException) -> object:
-    """What the queue is told: an absent provider states its wait, the rest do not.
+    """What the queue is told: an absent provider states its wait, the rest their code.
 
     The backoff is the queue's own. A stated wait of zero said nothing, whatever
-    the comment that used to stand here claimed.
+    the comment that used to stand here claimed. The code is the one
+    `processor_error_code` names, so a dead task says why (audit C3, 2026-09-23).
     """
-    from memory_queue import QueueFailure
+    from memory_queue import QueueFailure, processor_error_code
 
     if isinstance(error, CaptureProviderUnavailable):
         return QueueFailure("provider_unavailable", retry_after=PROVIDER_RETRY_SECONDS)
-    return QueueFailure("processor_failed")
+    return QueueFailure(processor_error_code(error))
 
 
 def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:

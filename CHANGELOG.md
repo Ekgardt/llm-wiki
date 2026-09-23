@@ -125,6 +125,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A dead task names its reason.** Every exception a processor raised became
+  the one code `processor_failed`; on the live vault 225 failed attempts of 25
+  dead `flush` tasks said only that, while the failure trail held the actual
+  reason (`intent_fence_lost`) for seven of them. A failed attempt now carries
+  a queue error's own code, or `processor_failed:<reason>` naming the
+  exception's type or its code-shaped message, bounded to the column's 64
+  bytes and never the message text. See
+  `docs/research/2026-09-23-a-dead-task-names-its-reason.md`.
 - **A scheduled pass that fails before it starts is recorded as failed.** The
   nightly and weekly passes take their fence first; a refusal there exited 1
   and left `last_nightly_status = success` for six nights while session start
