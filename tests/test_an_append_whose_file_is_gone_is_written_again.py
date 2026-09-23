@@ -82,3 +82,24 @@ def test_other_writers_appending_to_the_file_do_not_make_it_write_again(
     state = _append(coordinator, b"# header\n")
 
     assert (state, target.read_bytes()) == ("committed", b"# header\na later line\n")
+
+
+def _refuse_to_hash(target: Path) -> str:
+    raise ValueError(f"transaction target changed while hashing: {target}")
+
+
+def test_the_presence_check_never_hashes_the_file(tmp_path: Path, monkeypatch) -> None:
+    """Presence is asked outside any lock about a file other writers are growing.
+
+    A hash of a moving file refuses; presence of it must not, or one contended
+    read turns into a failed capture of a line that is already on disk (CI run
+    35441393584 on `main`).
+    """
+    coordinator = _coordinator(tmp_path)
+    target = coordinator.vault / _LOG
+    _append(coordinator, b"# header\n")
+    monkeypatch.setattr(coordinator, "_hash_bounded_target", _refuse_to_hash)
+
+    state = _append(coordinator, b"# header\n")
+
+    assert (state, target.read_bytes()) == ("committed", b"# header\n")

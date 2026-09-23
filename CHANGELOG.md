@@ -81,6 +81,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A repeated append no longer hashes the file it only has to find.** The
+  2026-09-18 presence check read and digested the whole daily log outside any
+  lock, so under eighteen concurrent writers it refused with `transaction
+  target changed while hashing` and a line already on disk was reported as a
+  failed capture (one red job on `main` after PR 36). Presence is now one
+  `lstat`. `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
+
 - **A timing ratio under a tenth of a second measured the machine.** Five ratio
   gates used a 0.05 s floor and a sixth derived one from the process clock tick;
   a macOS shard failed `0.0946 <= 0.0714` on a step whose quiet time is 22 ms,
