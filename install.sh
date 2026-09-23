@@ -748,7 +748,10 @@ esac
 
 info "Synchronizing runtime state and derived indexes..."
 SYNC_EXIT=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply || SYNC_EXIT=$?
+# The first generation is built here (the generation is the only index since
+# 2026-09-23): 48.9 s for 189 pages with vectors on the reference vault, so the
+# sync gets fifteen minutes instead of its 30-second default.
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply --time-limit-seconds 900 || SYNC_EXIT=$?
 case "$SYNC_EXIT" in
   0) ok "Runtime state synchronized" ;;
   1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;

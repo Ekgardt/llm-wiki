@@ -8,7 +8,6 @@ import math
 import os
 import signal
 import subprocess
-import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -31,7 +30,6 @@ DEFAULT_TIME_LIMIT_SECONDS = 30.0
 DEFAULT_ACTION_LIMIT = len(ACTIONS)
 DEPENDENCY_TIMEOUT_SECONDS = 30.0
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 2.0
-INDEX_BUILDER_SCRIPT = Path(__file__).resolve().with_name("search_memory.py")
 WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
 
@@ -390,88 +388,6 @@ def _run_process_tree(
 _INDEXES = "indexes"
 
 
-def _sharing_violation(completed: subprocess.CompletedProcess[str]) -> bool:
-    """A Windows sharing violation on the index file; retried, then deferred."""
-    if completed.returncode == 0:
-        return False
-    return "PermissionError" in completed.stderr or "WinError 5" in completed.stderr
-
-
-def _run_builder_with_retries(
-    command: list[str], root: Path, environment: dict, deadline: float
-) -> subprocess.CompletedProcess[str]:
-    """Up to three attempts; a sharing violation is retried after a short pause."""
-    completed = None
-    for attempt in range(3):
-        completed = _run_process_tree(
-            command,
-            cwd=root,
-            env=environment,
-            timeout=max(0.001, deadline - time.monotonic()),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-        )
-        if not _sharing_violation(completed) or attempt == 2:
-            return completed
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return completed
-        time.sleep(min(0.2, remaining))
-    return completed
-
-
-def _builder_timeout_result(exc: ProcessTreeTimeout) -> dict:
-    if exc.cleanup_error:
-        return _result(
-            _INDEXES,
-            "error",
-            "Index rebuild timed out; process cleanup was not verified.",
-            {"timed_out": True, "cleanup_error": exc.cleanup_error},
-        )
-    return _result(
-        _INDEXES,
-        "error",
-        "Index rebuild exceeded its time limit and was terminated.",
-        {"timed_out": True},
-    )
-
-
-def _builder_outcome(completed: subprocess.CompletedProcess[str]) -> dict:
-    if completed.returncode == 0:
-        return _result(_INDEXES, "changed", "Derived search index was rebuilt.", {})
-    if _sharing_violation(completed):
-        return _result(
-            _INDEXES,
-            "skipped",
-            "Index rebuild was deferred after a transient sharing violation.",
-            {"partial": True, "reason": "sharing_violation"},
-        )
-    return _result(_INDEXES, "error", "Index builder failed.", {"returncode": completed.returncode})
-
-
-def _run_index_builder(*, root: Path, state_root: Path, timeout: float) -> dict:
-    if timeout <= 0:
-        return _result(
-            _INDEXES,
-            "skipped",
-            "Index rebuild was not started because the sync time limit was reached.",
-            {"bounded": True},
-        )
-    environment = os.environ.copy()
-    environment.update(LLM_WIKI_ROOT=str(root), LLM_WIKI_STATE_ROOT=str(state_root))
-    command = [sys.executable, str(INDEX_BUILDER_SCRIPT), "--rebuild"]
-    try:
-        completed = _run_builder_with_retries(command, root, environment, time.monotonic() + timeout)
-    except ProcessTreeTimeout as exc:
-        return _builder_timeout_result(exc)
-    except OSError as exc:
-        return _result(
-            _INDEXES, "error", "Index builder could not be started.", {"error": type(exc).__name__}
-        )
-    return _builder_outcome(completed)
-
-
 def _run_generation_builder(
     *, root: Path, state_root: Path, timeout: float, max_sources: int
 ) -> dict:
@@ -545,8 +461,7 @@ def _unfailed_subset_status(statuses: set[str], repaired: bool) -> str:
 
 def _subset_details(checks: list[dict], report: dict) -> dict:
     details = dict(checks[0].get("details", {}))
-    if len(checks) > 1:
-        details["checks"] = {check["id"]: check["status"] for check in checks}
+    details["checks"] = {check["id"]: check["status"] for check in checks}
     if report.get("repaired"):
         details["repairs"] = report["repaired"]
     return details
@@ -560,68 +475,8 @@ def _doctor_subset_action(action_id: str, report: dict, check_ids: tuple[str, ..
     return _result(action_id, status, message, _subset_details(checks, report))
 
 
-def _refresh_status(statuses: set[str]) -> str:
-    for status in ("error", "skipped", "changed"):
-        if status in statuses:
-            return status
-    return "ok"
-
-
-def _refresh_message(status: str, legacy_index_refresh: dict | None) -> str:
-    if status == "skipped" and legacy_index_refresh is not None:
-        return "Legacy search index was rebuilt, but evidence generation refresh was deferred."
-    if status == "changed":
-        return "Evidence generation and legacy search index were refreshed."
-    return "Derived index synchronization requires attention."
-
-
-def _refresh_generation_id(refreshes: list[dict]) -> object:
-    for item in refreshes:
-        if "generation" in item["details"]:
-            return item["details"].get("generation")
-    return None
-
-
-def _refresh_partial(refreshes: list[dict]) -> bool:
-    return any(
-        item["details"].get("partial", False) or item["details"].get("timed_out", False)
-        for item in refreshes
-    )
-
-
-def _refresh_state(refresh: dict | None) -> str:
-    if refresh is None:
-        return "not_needed"
-    return refresh["status"]
-
-
-def _combined_index_action(
-    refreshes: list[dict], generation_refresh: dict | None, legacy_index_refresh: dict | None
-) -> dict:
-    status = _refresh_status({item["status"] for item in refreshes})
-    return _result(
-        _INDEXES,
-        status,
-        _refresh_message(status, legacy_index_refresh),
-        {
-            "generation": _refresh_generation_id(refreshes),
-            "partial": _refresh_partial(refreshes),
-            "generation_refresh": _refresh_state(generation_refresh),
-            "legacy_index": _refresh_state(legacy_index_refresh),
-            "actions": [item["status"] for item in refreshes],
-            "results": [item["details"] for item in refreshes],
-        },
-    )
-
-
 def _generation_reported(report: dict) -> bool:
     return any(check.get("id") == "generation" for check in report.get("checks", []))
-
-
-def _index_check_ids(generation_reported: bool) -> tuple[str, ...]:
-    if generation_reported:
-        return ("index", "generation")
-    return ("index",)
 
 
 def _repair_actions(apply: bool) -> set[str] | None:
@@ -725,42 +580,18 @@ class _SyncRun:
             max_sources=doctor.DEFAULT_GENERATION_SOURCE_LIMIT,
         )
 
-    def _index_refresh(self, *, validate: bool) -> dict:
-        """Rebuild the legacy index; alone, the rebuild is validated by a fresh doctor read."""
-        index_action = _run_index_builder(
-            root=self.root, state_root=self.state_root, timeout=self.remaining()
-        )
-        if index_action["status"] != "changed" or not validate:
-            return index_action
-        after = _doctor_subset_action(
-            _INDEXES, self.doctor_report(repair=False, refresh=True), ("index",)
-        )
-        if after["status"] != "ok":
-            return _result(
-                _INDEXES, "error", "Rebuilt index did not pass freshness validation.", after["details"]
-            )
-        return index_action
-
-    def _refreshes(self, report: dict, generation_reported: bool) -> tuple[dict | None, dict | None]:
-        """(generation refresh, legacy index refresh), each None when not needed."""
-        generation_refresh = None
-        if self._needs_refresh(_check_by_id(report, "generation"), generation_reported):
-            generation_refresh = self._generation_refresh()
-        index_refresh = None
-        if self._needs_refresh(_check_by_id(report, "index"), True):
-            index_refresh = self._index_refresh(validate=generation_refresh is None)
-        return generation_refresh, index_refresh
 
     def indexes_action(self) -> dict:
+        """Refresh the evidence generation when doctor says it is owed; it is the one index.
+
+        A missing generation is a degraded, repairable verdict since 2026-09-23,
+        so a fresh install builds its first generation here.
+        """
         report = self.doctor_report(repair=False)
         generation_reported = _generation_reported(report)
-        generation_refresh, index_refresh = self._refreshes(report, generation_reported)
-        refreshes = [item for item in (generation_refresh, index_refresh) if item is not None]
-        if not refreshes:
-            return _doctor_subset_action(_INDEXES, report, _index_check_ids(generation_reported))
-        if len(refreshes) == 1:
-            return refreshes[0]
-        return _combined_index_action(refreshes, generation_refresh, index_refresh)
+        if self._needs_refresh(_check_by_id(report, "generation"), generation_reported):
+            return self._generation_refresh()
+        return _doctor_subset_action(_INDEXES, report, ("generation",))
 
     def final_doctor_action(self) -> dict:
         report = self.doctor_report(repair=False, refresh=True)

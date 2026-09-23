@@ -339,12 +339,6 @@ def _post_compile_steps() -> list[_Step]:
             120,
         ),
         _Step(
-            "Step 3b: rebuilding FTS5 search index...",
-            "search",
-            _script("search_memory.py") + ["--rebuild"],
-            60,
-        ),
-        _Step(
             # Issue #24, section A: the timer half of the background refresh.
             # Every registered repository whose checkout still exists is looked
             # at and rebuilt incrementally only when its sources changed, each

@@ -81,22 +81,6 @@ def test_the_state_bound_admits_what_the_writer_can_produce() -> None:
 # ---------------------------------------------------------------- B3 ----
 
 
-def test_the_rebuilt_legacy_index_is_fresh_by_the_check_that_judges_it(tmp_path) -> None:
-    """The rebuild collected README.md, the check did not; membership never matched."""
-    root = tmp_path / "vault"
-    notes = root / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    (notes / "a-page.md").write_text("# A page\n\nSomething durable.\n", encoding="utf-8")
-    (notes / "README.md").write_text("# Notes\n\nEditorial.\n", encoding="utf-8")
-    state_root = tmp_path / "state"
-    (state_root / "cache").mkdir(parents=True)
-
-    doctor._rebuild_index(root, state_root)
-    verdict = doctor._index_check(state_root, datetime.now(timezone.utc), root=root)
-
-    assert (verdict["status"], verdict["details"]["source_rebuild_required"]) == ("ok", False)
-
-
 # ---------------------------------------------------------------- C4 ----
 
 

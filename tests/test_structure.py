@@ -185,10 +185,10 @@ def test_agents_md_and_claude_md_are_identical():
         "cache/index.sqlite",
         "cache/vectors.npy",
         "cache/vectors_meta.json",
-        "remain readable during migration",
-        "disposable derived caches",
-        "not members of a generation",
-        "installed-vault migration evidence",
+        "retired on 2026-09-23",
+        "the generation is the only index",
+        "reads Markdown directly",
+        "read by nothing",
     ):
         assert value in contract_words, f"agent contracts must document {value!r}"
 
@@ -539,10 +539,10 @@ GENERATION_STATEMENTS = (
     "cache/index.sqlite",
     "cache/vectors.npy",
     "cache/vectors_meta.json",
-    "remain readable during migration",
-    "disposable derived caches",
-    "not members of a generation",
-    "installed-vault migration evidence",
+    "retired on 2026-09-23",
+    "the generation is the only index",
+    "reads Markdown directly",
+    "read by nothing",
 )
 
 BROAD_ALLOWLIST_RULES = (

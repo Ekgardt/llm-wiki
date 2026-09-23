@@ -382,11 +382,6 @@ def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
-    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
-    monkeypatch.setattr(search_memory, "VECTOR_NPY", tmp_path / "cache" / "vectors.npy")
-    monkeypatch.setattr(search_memory, "VECTOR_META", tmp_path / "cache" / "vectors_meta.json")
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
 
     seen: dict[str, object] = {}

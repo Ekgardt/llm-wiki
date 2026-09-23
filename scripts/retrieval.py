@@ -2734,8 +2734,13 @@ def _reported_fallback(
     generation_fallback: str | None,
     legacy_fallback: str | None,
 ) -> str | None:
-    """One reason, in the order the operator needs to hear it."""
-    if legacy_fallback:
+    """One reason, in the order the operator needs to hear it.
+
+    The Markdown read says `no_active_generation` on every row; when a
+    generation existed and was refused, its reason is the one that explains
+    the answer, so it speaks first (2026-09-23).
+    """
+    if legacy_fallback and not generation_fallback:
         return legacy_fallback
     if _dense_reason_wins(trace_reason, dense_fallback):
         return str(dense_fallback)
@@ -4329,8 +4334,8 @@ def _optional_value(hard_deadline: bool, value: Any) -> Any:
     return value
 
 
-def _catalog_requested(catalog: Any, force_rebuild: bool, page_paths: Any) -> bool:
-    return catalog is not None and not force_rebuild and page_paths is None
+def _catalog_requested(catalog: Any, page_paths: Any) -> bool:
+    return catalog is not None and page_paths is None
 
 
 def _wants_vectors(wanted: Sequence[str], semantic: bool) -> bool:
@@ -4394,7 +4399,7 @@ def _generation_lexical_or_raise(
     stop: Mapping[str, Any],
     note: Callable[[str], None],
 ) -> Sequence[Mapping[str, Any]]:
-    """Lexical hits from the generation; any failure sends the caller to legacy."""
+    """Lexical hits from the generation; any failure sends the caller to Markdown."""
     try:
         return _generation_lexical_hits(
             filters, catalog=catalog, context=context, stop=stop
@@ -4443,30 +4448,6 @@ def _generation_dense_backend_hits(
         model_id=model_id,
         model_revision=model_revision,
     )
-
-
-def _legacy_dense_backend_hits(
-    search_memory: Any,
-    filters: Mapping[str, Any],
-    *,
-    page_paths: Any,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> Sequence[Mapping[str, Any]] | None:
-    rows = search_memory._legacy_dense_hits(
-        filters["query"],
-        scope=filters["scope"],
-        limit=filters["limit"],
-        project=filters["project"],
-        since=filters["since"],
-        as_of=filters["as_of"],
-        page_paths=page_paths,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
-    if rows is None:
-        return None
-    return _dense_filtered_hits(rows, filters)
 
 
 def _generation_graph_backend_hits(
@@ -4539,7 +4520,6 @@ class _SearchRun:
     query: str
     scope: str
     limit: int
-    force_rebuild: bool
     project: str | None
     since: str | None
     as_of: str | None
@@ -4628,7 +4608,7 @@ class _SearchRun:
         return True
 
     def catalog_requested(self) -> bool:
-        return _catalog_requested(self.catalog, self.force_rebuild, self.page_paths)
+        return _catalog_requested(self.catalog, self.page_paths)
 
     def open_generation(self, *, want_vectors: bool) -> bool:
         if not self.catalog_requested():
@@ -4683,11 +4663,10 @@ class _SearchRun:
                 stop=self.generation_stop,
                 note=self.note_generation_fallback,
             )
-        rows = self.search_memory._legacy_lexical_hits(
+        rows = self.search_memory.markdown_hits(
             filters["query"],
             scope=filters["scope"],
             limit=filters["limit"],
-            force_rebuild=self.force_rebuild,
             project=filters["project"],
             since=filters["since"],
             as_of=filters["as_of"],
@@ -4721,13 +4700,7 @@ class _SearchRun:
                 model_id=self.model_id,
                 model_revision=self.model_revision,
             )
-        return _legacy_dense_backend_hits(
-            self.search_memory,
-            filters,
-            page_paths=self.page_paths,
-            deadline=self.optional_deadline,
-            cancelled=self.optional_cancelled,
-        )
+        return None
 
     def graph_backend(self, **filters: Any) -> Sequence[Mapping[str, Any]] | None:
         if not self.graph or "graph" not in self.wanted:
@@ -4808,7 +4781,6 @@ def retrieve_via_search_memory(
     *,
     scope: str = "all",
     limit: int = 10,
-    force_rebuild: bool = False,
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
@@ -4832,7 +4804,7 @@ def retrieve_via_search_memory(
     cancelled: Callable[[], bool] | None = None,
     trace_sink: dict[str, object] | None = None,
 ) -> list[dict[str, Any]]:
-    """Public search path: independent backends → retrieve() → legacy rows."""
+    """Public search path: independent backends → retrieve() → rows."""
     import search_memory
 
     _check_stopped(deadline_monotonic, cancelled)
@@ -4850,7 +4822,6 @@ def retrieve_via_search_memory(
         query,
         scope,
         limit,
-        force_rebuild,
         project,
         since,
         as_of,

@@ -22,15 +22,6 @@ def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path, monkeypat
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "legacy-cache")
-    monkeypatch.setattr(
-        search_memory, "INDEX_FILE", tmp_path / "legacy-cache" / "index.sqlite"
-    )
-    monkeypatch.setattr(
-        search_memory,
-        "INDEX_MANIFEST",
-        tmp_path / "legacy-cache" / ".paths-manifest",
-    )
 
     from corpus_snapshot import collect_corpus
 

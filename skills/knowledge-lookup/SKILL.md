@@ -22,7 +22,7 @@ This prints the recommended tier based on the curated wiki page count:
 | Tier | Range | Strategy |
 |---|---|---|
 | **DIRECT** | < 50 pages | Read `knowledge/index.md` + target pages. Skip search — the LLM's own navigation is faster and cheaper. |
-| **BASE** | 50–300 pages | Wiki-first, then use `search_memory.py` for local SQLite FTS5 BM25 when navigation is ambiguous. |
+| **BASE** | 50–300 pages | Wiki-first, then use `search_memory.py` for BM25 over the evidence generation when navigation is ambiguous. |
 | **HYBRID** | > 300 pages | Use `search_memory.py --semantic` for BM25 + optional vectors + graph + reranker, then read top results. |
 
 The helper also warns if the search index is stale.
@@ -42,8 +42,8 @@ Do **not** invoke search in this tier. It adds latency without improving recall 
 1. Read `knowledge/index.md`. Form a hypothesis about which 2–3 sections are relevant.
 2. Read the top candidate pages.
 3. **If the read is convincing** — answer and stop.
-4. **If ambiguous** — run `uv run python scripts/search_memory.py "<keywords>"` for SQLite FTS5 BM25 matches. Read the top 3 hits that the index did not already surface.
-5. **If the index is stale** (last-updated > 24h per `lookup_mode.py`), run `uv run python scripts/search_memory.py --rebuild` before step 4.
+4. **If ambiguous** — run `uv run python scripts/search_memory.py "<keywords>"` for BM25 matches over the evidence generation. Read the top 3 hits that the index did not already surface.
+5. **If `lookup_mode.py` reports no active generation**, run `uv run python scripts/search_memory.py --rebuild` before step 4.
 6. Synthesize across all consulted pages. Cite paths.
 
 ## Tier: HYBRID (>300 pages)
@@ -53,7 +53,7 @@ Do **not** invoke search in this tier. It adds latency without improving recall 
 3. Consult `knowledge/index.md` only for cross-section navigation (e.g. "are there related syntheses I missed?"), not for primary retrieval.
 4. Synthesize. Cite paths.
 
-At this tier, always verify the local index is fresh (`uv run python scripts/lookup_mode.py` → check index age). Stale indexes silently degrade recall.
+At this tier, check that a generation is active (`uv run python scripts/lookup_mode.py`); without one the search reads Markdown directly and says so.
 
 ## Response rules (all tiers)
 

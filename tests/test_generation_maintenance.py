@@ -289,7 +289,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
         max_sources=10,
     )
 
-    assert missing["status"] == "ok"
+    assert missing["status"] == "degraded"
     assert missing["details"]["catalog"] == "missing"
     assert missing["details"]["freshness"] == "missing"
     assert missing["details"]["repairable"] is True
@@ -475,7 +475,7 @@ def test_maintenance_publishes_consumable_v2_search_without_legacy(tmp_path, mon
     monkeypatch.setattr(search_memory, "ROOT", root)
     monkeypatch.setattr(
         search_memory,
-        "_legacy_lexical_hits",
+        "markdown_hits",
         lambda *args, **kwargs: pytest.fail("legacy search must not run"),
     )
     results = search_memory.search(unique, catalog=GenerationCatalog(state), graph=False)
@@ -2061,50 +2061,6 @@ def test_sync_check_reports_stale_generation_and_apply_uses_shared_builder(tmp_p
     assert applied_index["status"] == "changed"
     assert calls, "apply must reach the shared generation builder"
     assert calls[0]["max_sources"] > 0
-
-
-def test_sync_apply_refreshes_generation_and_legacy_index_when_both_are_stale(
-    tmp_path, monkeypatch
-):
-    import sync_memory
-
-    calls = []
-    stale = {"freshness": "stale", "repairable": True}
-    report = {
-        "overall_status": "degraded",
-        "repaired": [],
-        "checks": _ok_checks(_SYNC_CHECK_NAMES)
-        + [
-            {"id": "generation", "status": "degraded", "message": "stale", "details": stale},
-            {"id": "index", "status": "degraded", "message": "stale", "details": stale},
-        ],
-    }
-    _stub_sync_report(
-        monkeypatch,
-        sync_memory,
-        report,
-        sync_memory._result("dependencies", "ok", "ok", {}),
-    )
-    monkeypatch.setattr(
-        sync_memory,
-        "_run_generation_builder",
-        _recording_name(
-            calls, "generation", sync_memory._result("indexes", "changed", "generation", {})
-        ),
-    )
-    monkeypatch.setattr(
-        sync_memory,
-        "_run_index_builder",
-        _recording_name(
-            calls, "index", sync_memory._result("indexes", "changed", "index", {})
-        ),
-    )
-
-    applied = sync_memory.run_sync(root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True)
-
-    action = _action_of(applied, "indexes")
-    assert calls == ["generation", "index"]
-    assert action["status"] == "changed"
 
 
 def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):

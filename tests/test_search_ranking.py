@@ -9,7 +9,6 @@ Locks in:
 """
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import json
 import os
@@ -17,9 +16,7 @@ import sqlite3
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -30,21 +27,6 @@ from tests.slow_machine import SHORT_TIMEOUT
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-
-
-def _build_search_index_worker(root: str, builds: int) -> bool:
-    import search_memory
-
-    vault = Path(root)
-    index_dir = vault / "cache"
-    search_memory.ROOT = vault
-    search_memory.INDEX_DIR = index_dir
-    search_memory.INDEX_FILE = index_dir / "index.sqlite"
-    search_memory.INDEX_MANIFEST = index_dir / ".paths-manifest"
-    page = vault / "knowledge" / "notes" / "page.md"
-    for _ in range(builds):
-        search_memory._build_index([page])
-    return True
 
 
 def test_extract_title_and_summary():
@@ -96,184 +78,6 @@ def test_collect_pages_skips_editorial():
         search_memory.KNOWLEDGE_DIR.exists = MagicMock(return_value=False)
         pages = search_memory._collect_pages("all")
         assert pages == []
-
-
-def test_needs_rebuild_no_index():
-    """Returns True when index doesn't exist."""
-    import search_memory
-
-    with patch.object(Path, "exists", return_value=False):
-        assert search_memory._needs_rebuild([]) is True
-
-
-def test_legacy_search_threads_stop_context_into_freshness_check(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    page = tmp_path / "page.md"
-    page.write_text("# Page\nneedle\n", encoding="utf-8")
-    deadline = time.monotonic() + 30
-
-    def cancelled():
-        return False
-
-    def freshness(_pages, *, deadline=None, cancelled=None):
-        assert deadline == test_deadline
-        assert cancelled is test_cancelled
-        raise TimeoutError("freshness deadline")
-
-    test_deadline = deadline
-    test_cancelled = cancelled
-    monkeypatch.setattr(search_memory, "_needs_rebuild", freshness)
-
-    with pytest.raises(TimeoutError, match="freshness deadline"):
-        search_memory._legacy_lexical_hits(
-            "needle",
-            page_paths=[page],
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-
-
-def test_needs_rebuild_fresh_files(tmp_path):
-    """Returns True when source files are newer than index."""
-    import search_memory
-
-    page = tmp_path / "knowledge" / "notes" / "page.md"
-    index = tmp_path / "cache" / "index.sqlite"
-    manifest = tmp_path / "cache" / ".paths-manifest"
-    page.parent.mkdir(parents=True)
-    index.parent.mkdir(parents=True)
-    page.write_text("# Page\n", encoding="utf-8")
-    with closing(sqlite3.connect(index)) as connection:
-        connection.execute("CREATE TABLE pages (slug TEXT)")
-    manifest.write_text(
-        json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
-    )
-    old = time.time() - 3600
-    os.utime(index, (old, old))
-
-    assert search_memory._needs_rebuild(
-        [page],
-        root=tmp_path,
-        index_file=index,
-        index_manifest=manifest,
-    ) is True
-
-
-def test_needs_rebuild_releases_index_database(tmp_path: Path) -> None:
-    import search_memory
-
-    index = tmp_path / "index.sqlite"
-    manifest = tmp_path / "manifest.json"
-    with closing(sqlite3.connect(index)) as connection:
-        connection.execute(
-            "CREATE VIRTUAL TABLE pages USING fts5("
-            "path UNINDEXED, title, summary, body, project UNINDEXED, "
-            "timestamp UNINDEXED, slug, tokenize = 'porter unicode61')"
-        )
-        connection.execute(
-            "CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO index_metadata (key, value) VALUES ('paths', '[]')"
-        )
-        connection.commit()
-    manifest.write_text("[]", encoding="utf-8")
-
-    assert not search_memory._needs_rebuild(
-        [], root=tmp_path, index_file=index, index_manifest=manifest
-    )
-    replacement = index.with_suffix(".replacement")
-    replacement.write_bytes(index.read_bytes())
-    os.replace(replacement, index)
-
-
-@pytest.mark.parametrize(
-    "missing",
-    ["path", "title", "summary", "body", "project", "timestamp", "slug"],
-)
-def test_needs_rebuild_rejects_partial_fts_schema(tmp_path, missing):
-    import search_memory
-
-    index = tmp_path / "index.sqlite"
-    manifest = tmp_path / "manifest.json"
-    columns = [
-        column
-        for column in ("path", "title", "summary", "body", "project", "timestamp", "slug")
-        if column != missing
-    ]
-    with sqlite3.connect(index) as connection:
-        connection.execute(f"CREATE VIRTUAL TABLE pages USING fts5({', '.join(columns)})")
-    manifest.write_text("[]", encoding="utf-8")
-
-    assert search_memory._needs_rebuild(
-        [], root=tmp_path, index_file=index, index_manifest=manifest
-    ) is True
-
-
-def test_needs_rebuild_rejects_type_incompatible_regular_pages_table(tmp_path):
-    import search_memory
-
-    index = tmp_path / "index.sqlite"
-    manifest = tmp_path / "manifest.json"
-    with sqlite3.connect(index) as connection:
-        connection.execute(
-            "CREATE TABLE pages(path TEXT, title TEXT, summary TEXT, body TEXT, "
-            "project TEXT, timestamp TEXT, slug TEXT)"
-        )
-    manifest.write_text("[]", encoding="utf-8")
-
-    assert search_memory._needs_rebuild(
-        [], root=tmp_path, index_file=index, index_manifest=manifest
-    ) is True
-
-
-def test_needs_rebuild_rejects_fts_with_incompatible_column_options(tmp_path):
-    import search_memory
-
-    index = tmp_path / "index.sqlite"
-    manifest = tmp_path / "manifest.json"
-    with sqlite3.connect(index) as connection:
-        connection.execute(
-            "CREATE VIRTUAL TABLE pages USING fts5("
-            "path, title, summary, body, project, timestamp, slug)"
-        )
-    manifest.write_text("[]", encoding="utf-8")
-
-    assert search_memory._needs_rebuild(
-        [], root=tmp_path, index_file=index, index_manifest=manifest
-    ) is True
-
-
-def test_search_does_not_query_incompatible_index_when_rebuild_fails(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge/notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\n", encoding="utf-8")
-    index = tmp_path / "cache/index.sqlite"
-    index.parent.mkdir()
-    with sqlite3.connect(index) as connection:
-        connection.execute("CREATE TABLE pages(slug TEXT)")
-    manifest = tmp_path / "cache/manifest.json"
-    manifest.write_text(json.dumps(["knowledge/notes/page.md"]), encoding="utf-8")
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", manifest)
-    monkeypatch.setattr(
-        search_memory,
-        "_build_index",
-        lambda pages: (_ for _ in ()).throw(RuntimeError("rebuild failed")),
-    )
-
-    with pytest.raises(RuntimeError, match="rebuild failed"):
-        search_memory.search("page", graph=False, rerank=False)
 
 
 def test_page_collector_honors_deadline(tmp_path):
@@ -332,15 +136,11 @@ def test_slug_is_indexed_and_selects_the_matching_duplicate(tmp_path, monkeypatc
     content = "---\ntype: concept\n---\n# Shared title\n\nUnrelated body.\n"
     first.write_text(content, encoding="utf-8")
     second.write_text(content, encoding="utf-8")
-    index_dir = tmp_path / "cache" / "search"
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
 
-    results = search_memory.search("second implementation", force_rebuild=True)
+    results = search_memory.search("second implementation")
 
     assert results[0]["path"] == "knowledge/notes/second-implementation.md"
 
@@ -353,17 +153,13 @@ def test_exact_filename_short_circuit_emits_final_impressions_once(tmp_path, mon
     notes.mkdir(parents=True)
     page = notes / "exact-page.md"
     page.write_text("---\ntype: concept\n---\n# Exact Page\nbody\n", encoding="utf-8")
-    index_dir = tmp_path / "cache/search"
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
     monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
 
     results = search_memory.search(
-        "exact page", force_rebuild=True, graph=False, rerank=False,
+        "exact page", graph=False, rerank=False,
         source_tool="test.search",
     )
 
@@ -436,302 +232,16 @@ def test_search_can_defer_telemetry_to_post_filter_caller(tmp_path, monkeypatch)
     notes.mkdir(parents=True)
     page = notes / "exact-page.md"
     page.write_text("# Exact Page\n", encoding="utf-8")
-    index_dir = tmp_path / "cache/search"
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
     monkeypatch.setattr(search_memory, "ROOT", tmp_path)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
     monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
 
     assert search_memory.search(
-        "exact page", force_rebuild=True, graph=False, rerank=False,
+        "exact page", graph=False, rerank=False,
         emit_telemetry=False,
     )
     assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
-
-
-def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
-    tmp_path, monkeypatch
-):
-    import doctor
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\nBody", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    index = index_dir / "index.sqlite"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
-    real_connect = search_memory.sqlite3.connect
-    barrier = threading.Barrier(2)
-    opened = []
-    opened_lock = threading.Lock()
-
-    def overlapping_connect(database, *args, **kwargs):
-        connection = real_connect(database, *args, **kwargs)
-        with opened_lock:
-            opened.append(Path(database))
-        barrier.wait(timeout=SHORT_TIMEOUT)
-        return connection
-
-    with monkeypatch.context() as context:
-        context.setattr(search_memory.sqlite3, "connect", overlapping_connect)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(lambda _: search_memory._build_index([page]), range(2)))
-
-    temp_paths = [path for path in opened if path != index]
-    assert len(temp_paths) == 2
-    assert len(set(temp_paths)) == 2
-    assert not any(path.exists() for path in temp_paths)
-    check = doctor._index_check(
-        tmp_path,
-        datetime.now(timezone.utc),
-        deadline=time.monotonic() + 1,
-    )
-    assert check["status"] == "ok"
-
-
-def test_stale_legacy_builder_cannot_replace_newer_source_index(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge/notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\nold generation\n", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
-    real_lock = search_memory._index_swap_lock
-    old_ready = threading.Event()
-    release_old = threading.Event()
-
-    @contextmanager
-    def ordered_lock(*args, **kwargs):
-        if threading.current_thread().name.startswith("old-builder"):
-            old_ready.set()
-            assert release_old.wait(SHORT_TIMEOUT)
-        with real_lock(*args, **kwargs):
-            yield
-
-    monkeypatch.setattr(search_memory, "_index_swap_lock", ordered_lock)
-
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="old-builder") as pool:
-        old = pool.submit(search_memory._build_index, [page])
-        assert old_ready.wait(SHORT_TIMEOUT)
-        page.write_text("# Page\nnew generation\n", encoding="utf-8")
-        with ThreadPoolExecutor(max_workers=1) as newer_pool:
-            newer_pool.submit(search_memory._build_index, [page]).result(timeout=SHORT_TIMEOUT)
-        release_old.set()
-        old.result(timeout=SHORT_TIMEOUT)
-
-    with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
-        assert "new generation" in database.execute(
-            "SELECT body FROM pages"
-        ).fetchone()[0]
-
-
-def test_freshness_reader_never_observes_mixed_index_manifest_pair(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge/notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\nbody\n", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    index = index_dir / "index.sqlite"
-    manifest = index_dir / ".paths-manifest"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", manifest)
-    search_memory._build_index([page])
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        with search_memory._index_swap_lock():
-            manifest.unlink()
-            freshness = pool.submit(search_memory._needs_rebuild, [page])
-            # No "still blocked" sleep: the False below is possible only if
-            # the probe read the manifest written after the lock was released.
-            manifest.write_text(
-                json.dumps(["knowledge/notes/page.md"]), encoding="utf-8"
-            )
-        assert freshness.result(timeout=10) is False
-
-
-def test_index_swap_retries_transient_windows_access_denial(tmp_path, monkeypatch):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\nBody", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    index = index_dir / "index.sqlite"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
-    monkeypatch.setattr(search_memory.sys, "platform", "win32")
-    real_replace = search_memory.os.replace
-    attempts = 0
-
-    def transient_access_denial(source, destination):
-        nonlocal attempts
-        if Path(destination) == index:
-            attempts += 1
-            if attempts < 3:
-                error = PermissionError(13, "transient index access denial")
-                error.winerror = 5
-                raise error
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(search_memory.os, "replace", transient_access_denial)
-
-    search_memory._build_index([page])
-
-    assert attempts == 3
-    with closing(sqlite3.connect(index)) as database:
-        assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
-    assert not list(index_dir.glob(".index.sqlite.*.tmp"))
-
-
-def test_index_publication_reuses_caller_stop_context(tmp_path, monkeypatch):
-    import search_memory
-
-    page = tmp_path / "knowledge" / "notes" / "page.md"
-    page.parent.mkdir(parents=True)
-    page.write_text("# Page\nBody", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
-    deadline = time.monotonic() + 30
-
-    def cancelled():
-        return False
-
-    seen = []
-
-    @contextmanager
-    def lock(*, deadline=None, cancelled=None):
-        seen.append(("lock", deadline, cancelled))
-        yield
-
-    def replace(_temporary, *, deadline=None, cancelled=None):
-        seen.append(("replace", deadline, cancelled))
-
-    monkeypatch.setattr(search_memory, "_index_swap_lock", lock)
-    monkeypatch.setattr(search_memory, "_replace_live_index", replace)
-
-    search_memory._build_index([page], deadline=deadline, cancelled=cancelled)
-
-    assert seen == [("lock", deadline, cancelled), ("replace", deadline, cancelled)]
-
-
-@pytest.mark.parametrize("operation", ["lock", "replace"])
-def test_nested_index_wait_checks_cancellation_before_sleep(
-    tmp_path, monkeypatch, operation
-):
-    import search_memory
-
-    index = tmp_path / "index.sqlite"
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(
-        search_memory.time,
-        "sleep",
-        lambda _seconds: pytest.fail("cancelled wait must not sleep"),
-    )
-    if operation == "lock":
-        lock = index.with_suffix(index.suffix + ".swap.lock")
-        lock.write_text('{"pid": 1, "token": "live"}', encoding="utf-8")
-        monkeypatch.setattr(search_memory, "_is_pid_alive", lambda _pid: True)
-        with pytest.raises(TimeoutError, match="cancelled"):
-            with search_memory._index_swap_lock(
-                deadline=time.monotonic() + 30, cancelled=lambda: True
-            ):
-                pass
-    else:
-        error = PermissionError(13, "busy")
-        error.winerror = 5
-        monkeypatch.setattr(search_memory.sys, "platform", "win32")
-        monkeypatch.setattr(
-            search_memory.os, "replace", lambda *_args: (_ for _ in ()).throw(error)
-        )
-        with pytest.raises(TimeoutError, match="cancelled"):
-            search_memory._replace_live_index(
-                tmp_path / "temporary", deadline=time.monotonic() + 30, cancelled=lambda: True
-            )
-
-
-def test_repeated_thread_and_process_index_builds_leave_valid_index(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    (notes / "page.md").write_text("# Page\nBody", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
-
-    for executor_class in (
-        concurrent.futures.ThreadPoolExecutor,
-        concurrent.futures.ProcessPoolExecutor,
-    ):
-        with executor_class(max_workers=4) as executor:
-            futures = [
-                executor.submit(_build_search_index_worker, str(tmp_path), 4)
-                for _ in range(4)
-            ]
-            assert [future.result(timeout=SHORT_TIMEOUT) for future in futures] == [True] * 4
-
-        with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
-            assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
-        assert not list(index_dir.glob(".index.sqlite.*.tmp"))
-
-
-def test_index_swap_recovers_aged_lock_owned_by_dead_pid(tmp_path, monkeypatch):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    page = notes / "page.md"
-    page.write_text("# Page\nBody", encoding="utf-8")
-    index_dir = tmp_path / "cache"
-    index_dir.mkdir()
-    index = index_dir / "index.sqlite"
-    lock = index.with_suffix(index.suffix + ".swap.lock")
-    lock.write_text(
-        json.dumps({"pid": 2_147_483_647, "token": "abandoned"}),
-        encoding="utf-8",
-    )
-    old = time.time() - 60
-    os.utime(lock, (old, old))
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
-    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
-
-    search_memory._build_index([page])
-
-    assert index.exists()
-    assert not lock.exists()
 
 
 def _generation_snapshot(tmp_path, pages):
@@ -855,10 +365,7 @@ def _orchestrated_legacy_marker(monkeypatch, search_memory):
         "candidate_id": "legacy",
     }
     monkeypatch.setattr(
-        search_memory, "_legacy_lexical_hits", lambda *args, **kwargs: [marker]
-    )
-    monkeypatch.setattr(
-        search_memory, "_legacy_dense_hits", lambda *args, **kwargs: None
+        search_memory, "markdown_hits", lambda *args, **kwargs: [marker]
     )
 
 
@@ -1008,175 +515,6 @@ def test_generation_connection_checks_cancel_after_open_before_validation(
         )
 
     assert closed is True
-
-
-def test_legacy_fts_progress_handler_interrupts_on_cancellation(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    page = tmp_path / "page.md"
-    page.write_text("# Page\nneedle\n", encoding="utf-8")
-    class Cursor:
-        def fetchall(self):
-            return []
-
-    class Connection:
-        progress = None
-
-        def set_progress_handler(self, callback, _instructions):
-            self.progress = callback
-
-        def execute(self, *_args):
-            assert self.progress is not None
-            assert self.progress() == 1
-            raise sqlite3.DatabaseError("interrupted")
-
-        def close(self):
-            pass
-
-    connection = Connection()
-
-    def cancelled():
-        return connection.progress is not None
-
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(
-        search_memory, "_needs_rebuild", lambda _pages, **_kwargs: False
-    )
-    monkeypatch.setattr(search_memory.sqlite3, "connect", lambda *_a, **_k: connection)
-
-    with pytest.raises(TimeoutError, match="SQLite"):
-        search_memory._legacy_lexical_hits(
-            "needle",
-            page_paths=[page],
-            deadline=time.monotonic() + 30,
-            cancelled=cancelled,
-        )
-
-    assert connection.progress is None
-
-
-def test_repeated_legacy_sqlite_failure_returns_degraded_markdown_result(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    page = notes / "recovery.md"
-    page.write_text(
-        "---\ntype: concept\nproject: recovery\n---\n"
-        "# Recovery\nNeedle content remains authoritative.\n",
-        encoding="utf-8",
-    )
-    connections = 0
-    rebuilds = 0
-
-    class Connection:
-        def execute(self, *_args):
-            raise sqlite3.DatabaseError("corrupt legacy index")
-
-        def close(self):
-            pass
-
-    def connect(*args, **_kwargs):
-        # Only the legacy index counts. `sqlite3.connect` is patched on the
-        # shared module object, so every database anything opens during the
-        # search arrives here — including the retrieval telemetry that carries
-        # what past answers cited, added 2026-09-06. Counting those too would
-        # make this test assert something it does not mean.
-        nonlocal connections
-        if "index.sqlite" in str(args[0] if args else ""):
-            connections += 1
-        return Connection()
-
-    def rebuild(_pages, **_kwargs):
-        nonlocal rebuilds
-        rebuilds += 1
-
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
-    monkeypatch.setattr(search_memory, "_build_index", rebuild)
-    monkeypatch.setattr(search_memory.sqlite3, "connect", connect)
-
-    results = search_memory.search(
-        "needle content",
-        project="recovery",
-        graph=False,
-        rerank=False,
-        emit_telemetry=False,
-    )
-
-    assert connections == 2
-    assert rebuilds == 1
-    assert [result["path"] for result in results] == [
-        "knowledge/notes/recovery.md"
-    ]
-    assert results[0]["fallback_reason"] == "legacy_sqlite_unavailable"
-    assert results[0]["partial"] is True
-
-
-def test_repeated_legacy_sqlite_failure_without_direct_match_is_nonzero(
-    tmp_path, monkeypatch, capsys
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    (notes / "page.md").write_text("# Page\nDifferent text.\n", encoding="utf-8")
-
-    class Connection:
-        def execute(self, *_args):
-            raise sqlite3.DatabaseError("corrupt legacy index")
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
-    monkeypatch.setattr(search_memory, "_build_index", lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        search_memory.sqlite3, "connect", lambda *_a, **_k: Connection()
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["search_memory.py", "missing needle", "--no-graph", "--no-rerank"],
-    )
-
-    try:
-        exit_code = search_memory.main()
-    except sqlite3.DatabaseError:
-        pytest.fail("CLI leaked the second SQLite failure without a diagnostic")
-
-    captured = capsys.readouterr()
-    assert exit_code != 0
-    assert "direct Markdown search" in captured.err
-    assert "corrupt legacy index" not in captured.err
-
-
-def test_legacy_dense_skips_model_and_lance_under_hard_deadline(monkeypatch):
-    import search_memory
-
-    monkeypatch.setattr(
-        search_memory,
-        "_have_sentence_transformers",
-        lambda: pytest.fail("model availability probe must not run"),
-    )
-
-    assert (
-        search_memory._legacy_dense_hits(
-            "needle", page_paths=[], deadline=time.monotonic() + 30
-        )
-        is None
-    )
 
 
 def _assert_orchestrated_legacy_fallback(results, expected_reasons):
@@ -1387,11 +725,6 @@ def test_search_prefers_valid_generation_without_rereading_live_markdown(
         "_collect_pages",
         lambda *args, **kwargs: pytest.fail("generation search reread live Markdown"),
     )
-    monkeypatch.setattr(
-        search_memory,
-        "_page_trust_weight",
-        lambda path: pytest.fail("generation search reread trust metadata"),
-    )
 
     results = search_memory.search(
         "generation needle",
@@ -1502,71 +835,6 @@ def test_generation_exact_filename_treats_query_wildcards_literally(tmp_path):
     )
 
     assert results == []
-
-
-def test_legacy_exact_filename_is_rank_one_without_fts_content_match(
-    tmp_path, monkeypatch
-):
-    import search_memory
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True)
-    target = notes / "target-contract.md"
-    target.write_text(
-        "# Unrelated heading\nNo query words occur in this page.\n",
-        encoding="utf-8",
-    )
-    distractor = notes / "distractor.md"
-    distractor.write_text(
-        "# Target Contract\nTarget contract query words occur here.\n",
-        encoding="utf-8",
-    )
-
-    class Cursor:
-        def fetchall(self):
-            return [
-                (
-                    "knowledge/notes/distractor.md",
-                    "Target Contract",
-                    "",
-                    "",
-                    "",
-                    -10.0,
-                )
-            ]
-
-    class Connection:
-        def execute(self, *_args):
-            return Cursor()
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
-    monkeypatch.setattr(search_memory, "_needs_rebuild", lambda *_a, **_k: False)
-    monkeypatch.setattr(
-        search_memory,
-        "_build_index",
-        lambda *_a, **_k: pytest.fail("fresh legacy index was rebuilt"),
-    )
-    monkeypatch.setattr(
-        search_memory.sqlite3, "connect", lambda *_a, **_k: Connection()
-    )
-
-    results = search_memory.search(
-        "target contract",
-        page_paths=[target, distractor],
-        graph=False,
-        rerank=False,
-        emit_telemetry=False,
-    )
-
-    assert results[0]["path"] == "knowledge/notes/target-contract.md"
-    assert results[0]["effective_mode"] == "EXACT"
-    assert results[0]["generation"] == "legacy"
 
 
 def test_generation_search_reports_generation_to_telemetry(tmp_path, monkeypatch):
@@ -1684,7 +952,7 @@ def test_generation_lexical_ranking_uses_declared_authority_hierarchy(tmp_path):
     ], ranked
 
 
-def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
+def test_missing_or_incompatible_generation_fts_falls_back_to_markdown(
     tmp_path, monkeypatch
 ):
     import search_memory
@@ -1713,9 +981,6 @@ def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
     monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
-    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
     results = search_memory.search(
         "Needle content",
         catalog=Catalog(),
@@ -1744,11 +1009,6 @@ def test_semantic_generation_never_mixes_legacy_vectors_or_graph(tmp_path, monke
     generation.mkdir()
     descriptor = search_memory.build_generation_fts(snapshot, generation)
     catalog, _manifest = _activate_search_generation(tmp_path, snapshot, [descriptor])
-    monkeypatch.setattr(
-        search_memory,
-        "_vector_search",
-        lambda *args, **kwargs: pytest.fail("legacy vectors were mixed"),
-    )
     monkeypatch.setitem(
         sys.modules,
         "graph_neighbors",
@@ -2144,9 +1404,6 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
     monkeypatch.setattr(search_memory, "ROOT", vault)
     monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", vault / "knowledge" / "notes")
     monkeypatch.setattr(search_memory, "WIKI_DIR", vault / "knowledge" / "notes")
-    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
-    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
-    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
 
     results = search_memory.search(
         "Bound needle",
@@ -2211,7 +1468,7 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
         ),
     ],
 )
-def test_malformed_generation_fts_falls_back_legacy(
+def test_malformed_generation_fts_falls_back_to_markdown(
     tmp_path, monkeypatch, damage, statement, parameters
 ):
     import search_memory
@@ -2828,8 +2085,8 @@ def test_the_vector_path_boosts_a_project_match_by_one_and_a_half(monkeypatch, t
     assert by_id["b"] == round(0.4, 4)
 
 
-def test_status_names_the_active_generation_before_the_legacy_index(monkeypatch, capsys):
-    """Audit M3: the status says what an answer reads first."""
+def test_status_names_the_active_generation(monkeypatch, capsys):
+    """Audit M3: the status says what an answer reads."""
     import search_memory
 
     class _Catalog:
@@ -2843,16 +2100,15 @@ def test_status_names_the_active_generation_before_the_legacy_index(monkeypatch,
 
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: _Catalog())
     monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
-    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
 
-    assert search_memory._print_index_status() == 0
+    assert search_memory._print_status() == 0
     lines = capsys.readouterr().out.splitlines()
 
     assert lines[0] == (
         "Active generation: generation-1 (markdown-heading-extractor/v3, "
         "vectors complete, model intfloat/multilingual-e5-small)"
     )
-    assert lines[1] == "Index: not built (0 pages would be indexed)"
+    assert lines[1] == "Pages on disk: 0"
 
 
 def test_status_says_when_there_is_no_generation(monkeypatch, capsys):
@@ -2860,34 +2116,17 @@ def test_status_says_when_there_is_no_generation(monkeypatch, capsys):
 
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
     monkeypatch.setattr(search_memory, "_collect_pages", lambda _scope: [])
-    monkeypatch.setattr(search_memory, "INDEX_FILE", Path("/nonexistent/index.sqlite"))
 
-    search_memory._print_index_status()
+    search_memory._print_status()
 
     assert capsys.readouterr().out.splitlines()[0] == (
-        "Active generation: none (search falls back to the legacy index)"
+        "Active generation: none (search reads Markdown directly; run --rebuild)"
     )
 
 
 class TestASilentFallbackNamesItsCause:
     """Audit M5/M6: a vector or generation stage that raises records why."""
 
-    def test_an_encode_that_raises_is_named(self, monkeypatch, capsys):
-        import search_memory
-
-        class _Broken:
-            def encode(self, *_a, **_k):
-                raise RuntimeError("tokenizer exploded")
-
-        monkeypatch.setattr(search_memory, "_get_embedder", lambda: _Broken())
-        search_memory._DEGRADATIONS.clear()
-
-        assert search_memory._embed_texts(["a question"]) is None
-
-        assert search_memory.degradation_reasons() == {
-            "vector_encode": "RuntimeError: tokenizer exploded"
-        }
-        assert "vector_encode degraded — RuntimeError: tokenizer exploded" in capsys.readouterr().err
 
     def test_an_unreadable_catalog_is_named(self, monkeypatch):
         import retrieval

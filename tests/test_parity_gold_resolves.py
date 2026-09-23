@@ -198,9 +198,9 @@ def test_a_retired_task_states_why_it_left():
 
 def test_a_definition_anchor_needs_no_line_number():
     """The name is the fact; the line is resolved here, so edits cannot rot it."""
-    facts = _anchor_facts("scripts/search_memory.py (def _legacy_vector_source_membership)")
+    facts = _anchor_facts("scripts/search_memory.py (def _manifest_seal)")
 
-    assert facts == [("scripts/search_memory.py", 0, "def _legacy_vector_source_membership")]
+    assert facts == [("scripts/search_memory.py", 0, "def _manifest_seal")]
     _assert_anchor_holds(facts[0])
 
 

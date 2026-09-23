@@ -32,3 +32,16 @@ not broken and that each probe was given the 2-second timeout. No clock is read.
 
 - [threading — Barrier objects](https://docs.python.org/3/library/threading.html#barrier-objects) — fetched 2026-09-23.
 - CI run 35857662331, job 107170071717, 2026-09-23 12:18 UTC.
+
+## Addendum, later on 2026-09-23: a ceiling names the alternative
+
+Files: `tests/test_lsp_process.py`.
+
+CI run 35860367016 (Windows, py3.10 shard 2, commit 3352215c) failed
+`test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks` at 10.906 s
+against a ceiling of the 10 s startup wait plus 0.75 s. Five tests in that file bound
+a start that gives up at the startup wait by the same 0.75 s margin. The outcomes the
+bound must exclude are the child's 30 s sleep and four serialised waits (40 s), so the
+ceiling is now twice the startup wait, one constant, `_STARTUP_CEILING_SECONDS`: a
+retry that should not have happened (5 s more) and a start that waited on the child
+are still caught, and a slow runner is not.
