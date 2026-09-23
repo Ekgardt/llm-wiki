@@ -286,3 +286,13 @@ def test_the_prompt_is_flushed_before_the_answer_is_read(monkeypatch):
     review_flush_labels._flushing_write(review_flush_labels.PROMPT)
 
     assert (out.getvalue(), out.flushes) == (review_flush_labels.PROMPT, 1)
+
+
+def test_every_verdict_names_its_reviewer():
+    import review_flush_labels
+
+    case = {"case_id": "c1", "expected_tier": "ok", "label_provenance": "judge"}
+
+    assert review_flush_labels.build_record(case, "minor")["reviewer"] == "owner"
+    assert review_flush_labels.build_record(case, "minor", "claude-fable-5.1")["reviewer"] == "claude-fable-5.1"
+    assert review_flush_labels.parse_args(["--reviewer", "x"]).reviewer == "x"

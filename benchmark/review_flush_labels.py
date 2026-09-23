@@ -146,9 +146,14 @@ def read_answer(stream, write) -> str:
         write("  answer with m, n, o, s or q\n")
 
 
-def build_record(case: dict, answer: str) -> dict:
+DEFAULT_REVIEWER = "owner"
+
+
+def build_record(case: dict, answer: str, reviewer: str = DEFAULT_REVIEWER) -> dict:
+    """Who answered is recorded: an assistant's review is not a human label (rule 3)."""
     return {
         "case_id": str(case["case_id"]),
+        "reviewer": reviewer,
         "human_tier": answer,
         "machine_tier": str(case["expected_tier"]),
         "machine_provenance": str(case.get("label_provenance", "judge")),
@@ -280,6 +285,7 @@ def review(
     verdicts_path: Path,
     stream,
     write,
+    reviewer: str = DEFAULT_REVIEWER,
 ) -> None:
     for position, case in enumerate(pending, start=1):
         write(render_case(case, position, len(pending)))
@@ -288,7 +294,7 @@ def review(
             break
         if answer == "skip":
             continue
-        record = build_record(case, answer)
+        record = build_record(case, answer, reviewer)
         append_verdict(verdicts_path, record)
         verdicts[record["case_id"]] = record
         write(reveal(record))
@@ -305,6 +311,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--all", action="store_true", help="review every case, not a subsample"
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--reviewer", default=DEFAULT_REVIEWER, help="who answers; recorded in every verdict"
+    )
     args = parser.parse_args(argv)
     if args.all:
         args.sample = None
@@ -323,7 +332,7 @@ def main(argv: list[str] | None = None, stream=None, write=None) -> int:
         corpus["cases"], verdicts, sample=args.sample, seed=args.seed
     )
     _write_lines(write, opening_lines(corpus["cases"], pending))
-    review(pending, verdicts, args.verdicts, stream, write)
+    review(pending, verdicts, args.verdicts, stream, write, args.reviewer)
     _write_lines(write, summary_lines(corpus["cases"], verdicts))
     return 0
 
