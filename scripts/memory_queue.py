@@ -13276,12 +13276,16 @@ def _v3_queue_for_cli() -> _QueueV3CandidateReader:
 
 
 def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReader:
-    """Open the queue side of one completely validated adopted V3 pair."""
-    from installed_memory_repair import require_reliability_v3_adopted
+    """Open the queue side of one completely validated adopted V3 pair.
+
+    The validation is the coordinator's: retried while a writer holds the
+    database for a moment, cached once it passed (2026-09-23).
+    """
+    from markdown_transaction import _require_adopted_once
 
     resolved_vault = Path(vault).resolve(strict=True)
     state = Path(state_root).absolute()
-    require_reliability_v3_adopted(root=resolved_vault, state_root=state)
+    _require_adopted_once(resolved_vault, state)
     queue_path = state / "run" / "queue-v3.sqlite3"
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
     require_queue_v3_openable(queue_path, state_root=state)

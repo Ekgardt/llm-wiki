@@ -145,8 +145,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   units). Verified on the installed vault: answered in 59.1 s where it refused
   before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
+### Added
+
+- **The memory retires its own residue.** The nightly removes the transcripts the
+  memory's own provider calls left under `~/.claude/projects` before
+  `--no-session-persistence` (2026-09-14): `sdk-cli` records from the vault, the
+  temporary directory or the job directory, and the project directories they
+  emptied. A held session is never touched. The owner deleted 1 082 of them by
+  hand on 2026-09-23; that was the last time. See
+  `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
+- **The label review of `OPEN-034` is a command.** `benchmark/review_flush_labels.py`
+  (written 2026-08-25 on an agent branch, ported 2026-09-23) walks the unreviewed
+  cases of the classification corpus, hides the machine's label until the reviewer
+  answers, records each verdict durably beside the corpus, and reports Cohen's kappa
+  once 30 cases are reviewed. See `docs/research/2026-09-23-the-label-review-comes-home.md`.
+
 ### Fixed
 
+- **The adoption gate names its cause and the queue waits out a busy
+  database.** `reliability_v3_record_invalid` now carries what the validation
+  saw (`code: Cause: message`), and the adopted queue validates adoption
+  through the coordinator's retried, cached check instead of a bare call:
+  on the live vault a `doctor --rebuild-generation` at 18:27 UTC failed its
+  queue repair with the bare code while a later run and a standalone check
+  passed. See
+  `docs/research/2026-09-23-the-adoption-gate-names-its-cause-and-waits-out-contention.md`.
 - **A barrier proves concurrency; a stopwatch measured the machine.** The
   three parallel version probes of `detect_code_tools` were asserted to finish
   under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run

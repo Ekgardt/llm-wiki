@@ -169,9 +169,47 @@ def build_case(path: Path, index: int, transcript: str, verdict: Verdict) -> dic
     }
 
 
+# The memory's own provider calls (`claude -p`, entrypoint `sdk-cli`) left a
+# transcript each until 2026-09-17; the corpus built on 2026-08-23 took the 40
+# newest transcripts and 39 were those calls, so the reviewer read the
+# classifier's own prompt (2026-09-23). Only a session someone held is a case.
+_OWN_CALL_ENTRYPOINT = "sdk-cli"
+_HEAD_LINES = 40
+
+
+def _entrypoint_of(path: Path) -> str | None:
+    """The entry point named in the transcript's first records, or None."""
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for _ in range(_HEAD_LINES):
+            line = handle.readline()
+            if not line:
+                return None
+            entry = _decoded(line)
+            if entry.get("entrypoint"):
+                return str(entry["entrypoint"])
+    return None
+
+
+def _decoded(line: str) -> dict:
+    try:
+        value = json.loads(line)
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _is_session_transcript(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return _entrypoint_of(path) != _OWN_CALL_ENTRYPOINT
+    except OSError:
+        return False
+
+
 def _transcripts(directory: Path, limit: int) -> list[Path]:
     found = sorted(
-        (path for path in directory.rglob("*.jsonl") if path.is_file()),
+        (path for path in directory.rglob("*.jsonl") if _is_session_transcript(path)),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
