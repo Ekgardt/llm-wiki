@@ -60,4 +60,4 @@ def test_a_processing_failure_fails_the_task_with_a_named_retry(
         )
     state, error_code = _row(queue, binding.task_id)
     assert state == "ready", "the failure must settle the claim, not abandon it"
-    assert error_code == "processor_failed"
+    assert error_code == "processor_failed:RuntimeError"

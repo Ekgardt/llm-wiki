@@ -14401,10 +14401,31 @@ def _claim_when_reachable(
             time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
 
 
+PROCESSOR_ERROR_CODE_BYTES = 64  # `attempt_history.error_code` CHECK in the v3 schema
+_CODE_SHAPED_MESSAGE = re.compile(r"[a-z][a-z0-9_]{0,62}")
+
+
+def processor_error_code(error: BaseException) -> str:
+    """The stable code a failed processor leaves in the attempt history.
+
+    A queue error carries its own code. Any other exception names its type, or
+    its message when the message is itself a code (`RuntimeError("intent_fence_lost")`
+    from the transaction layer). Never the message text: it may carry paths or
+    content. On the live vault every one of 225 failed attempts said only
+    `processor_failed` (2026-09-23, audit C3).
+    """
+    if isinstance(error, QueueOperationError):
+        return error.code
+    message = str(error)
+    reason = message if _CODE_SHAPED_MESSAGE.fullmatch(message) else type(error).__name__
+    return f"processor_failed:{reason}"[:PROCESSOR_ERROR_CODE_BYTES]
+
+
 class _ProcessorOutcome(NamedTuple):
     outcome: bool | DeferredResult
     timed_out: bool
     cleanup_failed: bool
+    error_code: str | None = None
 
 
 def _adopted_counts(
@@ -14435,9 +14456,9 @@ def _run_processor(
     except TimeoutError:
         return _ProcessorOutcome(False, True, False)
     except QueueOperationError as exc:
-        return _ProcessorOutcome(False, False, exc.code == "process_cleanup_failed")
-    except Exception:  # noqa: BLE001 - queue exposes stable codes only
-        return _ProcessorOutcome(False, False, False)
+        return _ProcessorOutcome(False, False, exc.code == "process_cleanup_failed", exc.code)
+    except Exception as exc:  # noqa: BLE001 - queue exposes stable codes only
+        return _ProcessorOutcome(False, False, False, processor_error_code(exc))
     return _ProcessorOutcome(outcome, False, False)
 
 
@@ -14466,7 +14487,7 @@ def _processor_result(
             return _ProcessorOutcome(False, True, False)
         result = _run_processor(processor, _interruptible(processor_runner, heartbeat), lease, remaining)
         if monotonic() >= deadline:
-            return _ProcessorOutcome(result.outcome, True, result.cleanup_failed)
+            return _ProcessorOutcome(result.outcome, True, result.cleanup_failed, result.error_code)
         return result
     finally:
         heartbeat.stop()
@@ -14496,7 +14517,7 @@ def _unsuccessful_worker_failure(result: _ProcessorOutcome) -> QueueFailure | No
     if result.timed_out:
         return QueueFailure("worker_timeout")
     if not bool(result.outcome):
-        return QueueFailure("processor_failed")
+        return QueueFailure(result.error_code or "processor_failed")
     return None
 
 
