@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -64,7 +65,18 @@ def _first_entry(path: Path) -> dict:
 
 
 def _under(path: Path, roots: tuple[Path, ...]) -> bool:
-    return any(path == root or root in path.parents for root in roots)
+    """Resolved on both sides: macOS spells its temporary directory two ways
+    (`/var/...` in a record, `/private/var/...` resolved) and Windows spells a
+    user's directory short and long (CI, 2026-09-23)."""
+    resolved = _resolved(path)
+    return any(resolved == root or root in resolved.parents for root in roots)
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
 
 
 def is_own_call(path: Path, roots: tuple[Path, ...]) -> bool:
@@ -80,8 +92,8 @@ def is_own_call(path: Path, roots: tuple[Path, ...]) -> bool:
 
 
 def _encoded(root: Path) -> str:
-    """How the CLI names a project directory: every `/` and `.` becomes `-`."""
-    return str(root).replace("/", "-").replace(".", "-")
+    """How the CLI names a project directory: separators, drive colons and dots become `-`."""
+    return re.sub(r"[\\/:.]", "-", str(root))
 
 
 def _own_empty_directory(directory: Path, roots: tuple[Path, ...]) -> bool:
