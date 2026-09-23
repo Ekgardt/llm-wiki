@@ -102,7 +102,6 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
 │   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
 │   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
-│   ├── access_log.jsonl             legacy bounded read-only access history
 │   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
 │   ├── vectors_meta.json            v4.0: vector metadata (paths, titles — no vectors)
@@ -618,8 +617,8 @@ or nonzero active state remains fail-closed.
   `scripts/install_language_server.py` are the only supported download/publish paths
   and `scripts/lsp_paths.py` derives them without directory creation.
   v4.0: `models/` (ML model cache),
-  legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
-  action cache), and `cache/claims.sqlite3` (derived claim index).
+  `cache/compile/` (validated compile-plan action cache), and `cache/claims.sqlite3`
+  (derived claim index).
 - `cache/code-hints/<checkout-hash>.sqlite3` — issue #24 C1: the classes,
   functions and methods of one foreign checkout's newest generation, with
   qualified name, first location and resolved in/out degree, exported once by
@@ -654,8 +653,7 @@ cache/evidence-graph/generations/<generation-id>/
   It is not authoritative and contains query hashes rather than raw query or response
   content. Ingestion enforces a transactional row ceiling. Explicit bounded promotion
   records a per-page sequence watermark in the same recoverable Markdown mutation as
-  access counters, making retries idempotent. Legacy `access_log.jsonl` is stats-only
-  history and is never promoted automatically. Telemetry sits beside the catalog and
+  access counters, making retries idempotent. Telemetry sits beside the catalog and
   generations, never under `run/`.
   A v2 generation is immutable after activation and always contains the source
   manifest, Evidence Graph, and FTS snapshot. The incremental manifest is optional;

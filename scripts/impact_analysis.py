@@ -544,7 +544,6 @@ class _ChangeCollector:
         return self._object_blob(record["new_oid"])
 
 
-_LEGACY_RANGE = r"([^.]\S*)\.\.([^.]\S*)"
 
 
 def _changed_paths(changes: list[dict]) -> list[str]:
@@ -1137,7 +1136,6 @@ def _is_test_artifact(path: str, metadata: dict) -> bool:
 
 
 def analyze_impact(
-    git_range: str | None = None,
     *,
     root: Path = ROOT,
     comparison: str = "dirty",
@@ -1157,7 +1155,6 @@ def analyze_impact(
     word-match guesses anyway (the session start, audit 3 B30).
     """
     bounds = _limits_or_default(limits)
-    comparison, base, target = _legacy_endpoints(git_range, comparison, base, target)
     root = Path(root).resolve(strict=True)
     deadline = _deadline_or_default(deadline, bounds, monotonic)
     _check_impact_stop(deadline, cancelled)
@@ -1169,17 +1166,6 @@ def analyze_impact(
     if textual_fallback:
         fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
     return run.report(comparison, fallback)
-
-
-def _legacy_endpoints(
-    git_range: str | None, comparison: str, base: str | None, target: str | None
-) -> tuple[str, str | None, str | None]:
-    if git_range is None:
-        return comparison, base, target
-    match = re.fullmatch(_LEGACY_RANGE, git_range)
-    if match is None:
-        raise ValueError("legacy git_range must contain exactly two commit endpoints")
-    return "two-commits", match.group(1), match.group(2)
 
 
 _PUBLIC_CHANGE_KEYS = (

@@ -48,18 +48,6 @@ DEFAULT_TOKENIZER_CONFIG_SHA256 = "0" * 64
 CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v1"
 COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v2"
 INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v5"
-_LEGACY_INCREMENTAL_MANIFEST_VERSIONS = frozenset(
-    {
-        "evidence-graph-incremental/v1",
-        "evidence-graph-incremental/v2",
-        "evidence-graph-incremental/v3",
-        "evidence-graph-incremental/v4",
-    }
-)
-#: Versions whose source entries carry `workspace_sensitive` per entry.
-_WORKSPACE_SENSITIVE_VERSIONS = frozenset(
-    {"evidence-graph-incremental/v4", "evidence-graph-incremental/v5"}
-)
 # Up to v4 a 64 MiB constant stood here in both roles, and it was the whole
 # defect. The manifest carried one `record_dependencies` row per record, so on
 # this vault's corpus it reached 158,075,010 bytes against 349,306 records, was
@@ -80,7 +68,6 @@ MAX_STORED_INCREMENTAL_MANIFEST_BYTES = MAX_INCREMENTAL_MANIFEST_BYTES
 #: but materialising all 349,306 rows is what made the manifest unstorable, so
 #: it is a deterministic prefix and the manifest states the true total.
 MAX_INLINE_RECORD_DEPENDENCY_ROWS = 10_000
-MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES = 10_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _INVALIDATION_KEYS = frozenset(
     {"exports", "imports", "signatures", "aliases", "project_metadata"}
@@ -1349,12 +1336,6 @@ def _load_incremental_manifest(
     return _validated_incremental_manifest(value), generation_manifest
 
 
-_LANGUAGE_MANIFEST_VERSIONS = {
-    INCREMENTAL_MANIFEST_VERSION,
-    "evidence-graph-incremental/v2",
-    "evidence-graph-incremental/v3",
-    "evidence-graph-incremental/v4",
-}
 
 _BASE_ENTRY_KEYS = {
     "source_id",
@@ -1367,14 +1348,8 @@ _BASE_ENTRY_KEYS = {
 
 
 def _entry_keys_for(version: str) -> set[str]:
-    keys = set(_BASE_ENTRY_KEYS)
-    if version in _LANGUAGE_MANIFEST_VERSIONS:
-        keys.add("language")
-    if version in _WORKSPACE_SENSITIVE_VERSIONS:
-        keys.add("workspace_sensitive")
-    elif version == "evidence-graph-incremental/v3":
-        keys.add("workspace_sensitive_sources")
-    return keys
+    del version  # one supported version since 2026-09-23; the parameter names the receipt
+    return set(_BASE_ENTRY_KEYS) | {"language", "workspace_sensitive"}
 
 
 def _is_bounded_string_list(value: object) -> bool:
@@ -1391,10 +1366,7 @@ def _require_sorted_unique_list(value: object, message: str) -> None:
 
 
 def _require_manifest_version(version: object) -> None:
-    if version not in {
-        INCREMENTAL_MANIFEST_VERSION,
-        *_LEGACY_INCREMENTAL_MANIFEST_VERSIONS,
-    }:
+    if version != INCREMENTAL_MANIFEST_VERSION:
         raise ValueError("incremental manifest has an unsupported version")
 
 
@@ -1424,27 +1396,15 @@ def _require_entry_path(entry: Mapping[str, object]) -> None:
 
 
 def _require_entry_language(entry: Mapping[str, object], version: str) -> None:
-    if version not in _LANGUAGE_MANIFEST_VERSIONS:
-        return
+    del version
     if entry["language"] is None or isinstance(entry["language"], str):
         return
     raise ValueError("incremental source language must be a string or null")
 
 
-def _require_legacy_sensitive_sources(sensitive_sources: object) -> None:
-    message = "incremental workspace-sensitive sources must be bounded, sorted, and unique"
-    _require_sorted_unique_list(sensitive_sources, message)
-    if len(sensitive_sources) > MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES:
-        raise ValueError(message)
-
-
 def _require_entry_workspace(entry: Mapping[str, object], version: str) -> None:
-    if version in _WORKSPACE_SENSITIVE_VERSIONS:
-        _require_workspace_flag(entry)
-        return
-    if version != "evidence-graph-incremental/v3":
-        return
-    _require_legacy_sensitive_sources(entry["workspace_sensitive_sources"])
+    del version
+    _require_workspace_flag(entry)
 
 
 def _require_workspace_flag(entry: Mapping[str, object]) -> None:
@@ -2011,9 +1971,14 @@ def _incremental_parent_state(
 ):
     if parent_generation_id is None:
         return None, {}, False
-    parent_manifest, parent_generation_manifest = _load_incremental_manifest(
-        catalog, parent_generation_id, deadline=deadline, cancelled=cancelled
-    )
+    try:
+        parent_manifest, parent_generation_manifest = _load_incremental_manifest(
+            catalog, parent_generation_id, deadline=deadline, cancelled=cancelled
+        )
+    except ValueError:
+        # A parent the builder cannot read is a parent it cannot reuse: the
+        # full build is the answer, as for a parent with no manifest at all.
+        return None, {}, False
     if parent_manifest is None:
         return None, {}, False
     parent_entries = {
@@ -2394,12 +2359,6 @@ def _merged_records(
     return merged, ownership
 
 
-_LANGUAGE_ENTRY_VERSIONS = {
-    "evidence-graph-incremental/v2",
-    "evidence-graph-incremental/v3",
-    "evidence-graph-incremental/v4",
-    "evidence-graph-incremental/v5",
-}
 
 
 def _entry_source_facts(
@@ -2423,17 +2382,11 @@ def _entry_source_facts(
 
 
 def _entry_language_field(source: Mapping[str, object]) -> dict[str, object]:
-    if INCREMENTAL_MANIFEST_VERSION not in _LANGUAGE_ENTRY_VERSIONS:
-        return {}
     return {"language": source.get("language")}
 
 
 def _entry_workspace_field(workspace_sensitive: bool) -> dict[str, object]:
-    if INCREMENTAL_MANIFEST_VERSION in _WORKSPACE_SENSITIVE_VERSIONS:
-        return {"workspace_sensitive": workspace_sensitive}
-    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v3":
-        return {"workspace_sensitive_sources": []}
-    return {}
+    return {"workspace_sensitive": workspace_sensitive}
 
 
 def _manifest_source_entries(

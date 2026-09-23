@@ -635,43 +635,6 @@ def test_workspace_sensitive_manifest_is_linear_at_10k_sources():
 
 
 @pytest.mark.parametrize(
-    "legacy_version",
-    [
-        "evidence-graph-incremental/v1",
-        "evidence-graph-incremental/v2",
-        "evidence-graph-incremental/v3",
-    ],
-)
-def test_legacy_parent_without_workspace_sensitivity_rebuilds_conservatively(
-    tmp_path, monkeypatch, legacy_version
-):
-    import evidence_graph_builder
-    from generation_catalog import GenerationCatalog
-
-    catalog = GenerationCatalog(tmp_path / "state")
-    files = {"one": ("one.fixture", _document("one"))}
-    monkeypatch.setattr(
-        evidence_graph_builder, "INCREMENTAL_MANIFEST_VERSION", legacy_version
-    )
-    try:
-        _build(catalog, "gen-1", files, FixtureExtractor())
-    except ValueError as exc:
-        pytest.fail(f"could not construct supported legacy parent: {exc}")
-    monkeypatch.setattr(
-        evidence_graph_builder,
-        "INCREMENTAL_MANIFEST_VERSION",
-        "evidence-graph-incremental/v4",
-    )
-    extractor = FixtureExtractor()
-
-    result = _build(catalog, "gen-2", files, extractor, parent="gen-1")
-
-    assert result.reused_sources == ()
-    assert result.rebuilt_sources == ("one",)
-    assert extractor.calls == ["one"]
-
-
-@pytest.mark.parametrize(
     "next_files",
     [
         {"a": ("a.fixture", _document("a")), "b": ("b.fixture", _document("b"))},
@@ -790,3 +753,22 @@ def test_a_manifest_too_large_to_store_still_builds_the_generation(tmp_path, mon
 
     assert result.generation_id == "gen-2"
     assert set(result.rebuilt_sources) == {"consumer", "lib"}
+
+
+def test_a_parent_the_builder_cannot_read_is_rebuilt_in_full(tmp_path, monkeypatch):
+    """Reuse is an optimisation; a parent whose manifest fails validation means no reuse."""
+    import evidence_graph_builder
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    files = {"one": ("one.fixture", _document("one"))}
+    _build(catalog, "gen-1", files, FixtureExtractor())
+
+    def refuse(*args, **kwargs):
+        raise ValueError("incremental manifest has an unsupported version")
+
+    monkeypatch.setattr(evidence_graph_builder, "_load_incremental_manifest", refuse)
+    extractor = FixtureExtractor()
+    result = _build(catalog, "gen-2", files, extractor, parent="gen-1")
+
+    assert (result.reused_sources, result.rebuilt_sources, extractor.calls) == ((), ("one",), ["one"])

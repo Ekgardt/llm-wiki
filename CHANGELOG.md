@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
+  reader (no writer since 2026-08-20, no file on the live vault), the
+  positional `git_range` of `analyze_impact` (every caller names its
+  endpoints), and the readers for incremental-manifest versions v1–v4 (every
+  generation on the live vault is v5; a fresh install builds v5). A parent
+  whose manifest cannot be read is now rebuilt in full instead of failing the
+  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
+  queue migration stay, with the evidence and the plan for each in
+  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+
 ### Deprecated
 
 - **`compile_memory.py --all`.** It has never changed anything: every daily log

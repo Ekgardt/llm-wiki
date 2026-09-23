@@ -6,8 +6,8 @@ direct reads). This data powers:
 - Quality scoring: frequently-accessed pages are validated as useful.
 - Advisory ranking: recently-accessed pages get boost in SessionStart.
 
-New events are stored privately in cache/evidence-graph/telemetry.sqlite3.
-The old cache/access_log.jsonl remains bounded read-only migration history.
+Events are stored privately in cache/evidence-graph/telemetry.sqlite3; the
+pre-telemetry cache/access_log.jsonl reader left on 2026-09-23.
 
 Frontmatter fields updated on page files:
 - access_count: int (how many times accessed)
@@ -26,8 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import read_runtime_bytes, sha256_bytes  # noqa: E402
+from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # One column, one identity: every writer of `retrieval_events` names a page by
@@ -37,10 +37,7 @@ KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # `state.md`. See
 # `docs/research/2026-09-17-one-page-one-identity-and-one-set-of-windows.md`.
 NOTES_RELATIVE = "knowledge/notes"
-ACCESS_LOG_FILE = STATE_ROOT / "cache" / "access_log.jsonl"
 MAX_ACCESS_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-MAX_LEGACY_ACCESS_LOG_BYTES = 16 * 1024 * 1024
-MAX_LEGACY_ACCESS_LOG_LINES = 100_000
 MAX_PAGES_PER_EXPORT = 100
 MAX_CANDIDATES_SCANNED_PER_EXPORT = 1_000
 MAX_EVENTS_PER_PAGE_EXPORT = 1_000
@@ -384,35 +381,6 @@ def _count_telemetry(stats: _Stats, slug: str) -> None:
         _note_flush_failure(slug, exc)
 
 
-def _legacy_lines() -> list[str]:
-    if not ACCESS_LOG_FILE.exists():
-        return []
-    raw = read_runtime_bytes(
-        ACCESS_LOG_FILE, ACCESS_LOG_FILE.parent, max_bytes=MAX_LEGACY_ACCESS_LOG_BYTES
-    )
-    return raw.decode("utf-8", errors="strict").splitlines()[:MAX_LEGACY_ACCESS_LOG_LINES]
-
-
-def _legacy_entry(line: str) -> dict | None:
-    try:
-        entry = json.loads(line)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return entry if isinstance(entry, dict) else None
-
-
-def _count_legacy(stats: _Stats, slug: str) -> None:
-    try:
-        lines = _legacy_lines()
-    except (OSError, PermissionError, UnicodeError, ValueError) as exc:
-        _note_flush_failure(slug, exc)
-        return
-    for line in lines:
-        entry = _legacy_entry(line)
-        if entry is not None and entry.get("slug") == slug:
-            stats.count(entry.get("timestamp", ""), entry.get("source", "unknown"))
-
-
 def get_access_stats(slug: str) -> dict:
     """Get bounded telemetry plus read-only legacy JSONL statistics.
 
@@ -421,7 +389,6 @@ def get_access_stats(slug: str) -> dict:
     """
     stats = _Stats()
     _count_telemetry(stats, slug)
-    _count_legacy(stats, slug)
     return stats.as_dict()
 
 
@@ -533,7 +500,6 @@ def _print_telemetry_locations() -> None:
     from retrieval_telemetry import TELEMETRY_DB
 
     print(f"Durable telemetry: {TELEMETRY_DB}")
-    print(f"Legacy read-only access history: {ACCESS_LOG_FILE}")
     print("Use --flush for explicit bounded frontmatter promotion.")
 
 

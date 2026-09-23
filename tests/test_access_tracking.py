@@ -1,7 +1,6 @@
 """Tests for access_tracking.py — retrieval analytics and decay scoring."""
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import subprocess
@@ -56,9 +55,8 @@ class TestRecordAccess:
 def _own_telemetry_db(tmp_path, monkeypatch):
     """Point the telemetry at this test's own database.
 
-    `get_access_stats` merges the telemetry with the legacy log, so a test that
-    asserts a count owns both sources, or it reads whatever another test left
-    in the shared state root.
+    `get_access_stats` reads the telemetry, so a test that asserts a count owns
+    its database, or it reads whatever another test left in the shared state root.
     """
     import retrieval_telemetry
 
@@ -67,14 +65,37 @@ def _own_telemetry_db(tmp_path, monkeypatch):
     return database
 
 
+def _read_at(slug: str, stamp: str, db_path) -> None:
+    """One recorded page read of `slug` at `stamp`, straight into this test's telemetry."""
+    import secrets
+
+    import access_tracking
+    import retrieval_telemetry
+
+    retrieval_telemetry.record_event(
+        retrieval_telemetry.RetrievalEvent(
+            schema_version=1,
+            event_id=secrets.token_hex(16),
+            event_kind="page_read",
+            query_sha256=None,
+            retrieval_mode="direct",
+            candidate_id=access_tracking.page_identity(slug),
+            rank=None,
+            generation="legacy",
+            source_tool="search",
+            timestamp=retrieval_telemetry._utc_timestamp(stamp),
+        ),
+        db_path=db_path,
+    )
+
+
 class TestGetAccessStats:
-    """Test get_access_stats reads the JSONL log correctly."""
+    """Test get_access_stats reads the telemetry; the JSONL log reader left on 2026-09-23."""
 
     def test_stats_for_no_access(self, tmp_path, monkeypatch):
         import access_tracking
 
         _own_telemetry_db(tmp_path, monkeypatch)
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "nonexistent.jsonl")
         stats = access_tracking.get_access_stats("never-accessed")
         assert stats["total_count"] == 0
         assert stats["last_accessed"] is None
@@ -82,64 +103,16 @@ class TestGetAccessStats:
     def test_stats_counts_correctly(self, tmp_path, monkeypatch):
         import access_tracking
 
-        log_file = tmp_path / "access_log.jsonl"
-        log_file.write_text(
-            json.dumps({"slug": "page-a", "source": "search", "timestamp": "2026-01-01T10:00:00"}) + "\n"
-            + json.dumps({"slug": "page-a", "source": "direct", "timestamp": "2026-01-02T10:00:00"}) + "\n"
-            + json.dumps({"slug": "page-b", "source": "search", "timestamp": "2026-01-03T10:00:00"}) + "\n",
-            encoding="utf-8",
-        )
         _own_telemetry_db(tmp_path, monkeypatch)
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+        access_tracking.record_access("page-a", source="search", query="q", rank=1)
+        access_tracking.record_access("page-a", source="direct")
+        access_tracking.record_access("page-b", source="search", query="q", rank=1)
 
         stats = access_tracking.get_access_stats("page-a")
         assert stats["total_count"] == 2
-        assert stats["last_accessed"] == "2026-01-02T10:00:00"
+        assert stats["last_accessed"] is not None
         assert stats["sources"]["search"] == 1
         assert stats["sources"]["direct"] == 1
-
-    def test_stats_merge_bounded_telemetry_and_legacy_history(self, tmp_path, monkeypatch):
-        import access_tracking
-        import retrieval_telemetry
-
-        database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
-        event = retrieval_telemetry.make_event(
-            event_kind="page_read", query=None, retrieval_mode="direct",
-            candidate_id=access_tracking.page_identity("page"),
-            rank=None, generation="legacy", source_tool="new",
-        )
-        retrieval_telemetry.record_event(event, db_path=database)
-        legacy = tmp_path / "access_log.jsonl"
-        legacy.write_text(
-            json.dumps({"slug": "page", "source": "search", "timestamp": "2026-01-01T00:00:00"}) + "\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", legacy)
-
-        stats = access_tracking.get_access_stats("page")
-        assert stats["total_count"] == 2
-        assert stats["sources"] == {"new": 1, "search": 1}
-
-    def test_legacy_stats_are_bounded_and_reject_symlink(self, tmp_path, monkeypatch):
-        import access_tracking
-
-        _own_telemetry_db(tmp_path, monkeypatch)
-        legacy = tmp_path / "access_log.jsonl"
-        legacy.write_bytes(b"x" * 33)
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", legacy)
-        monkeypatch.setattr(access_tracking, "MAX_LEGACY_ACCESS_LOG_BYTES", 32)
-        assert access_tracking.get_access_stats("page")["total_count"] == 0
-
-        target = tmp_path / "target.jsonl"
-        target.write_text("", encoding="utf-8")
-        link = tmp_path / "link.jsonl"
-        try:
-            link.symlink_to(target)
-        except OSError:
-            pytest.skip("symlink creation unavailable")
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", link)
-        assert access_tracking.get_access_stats("page")["total_count"] == 0
 
 
 class TestDecayScore:
@@ -149,7 +122,7 @@ class TestDecayScore:
         """Decisions have infinite half-life — always score high."""
         import access_tracking
 
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "no.jsonl")
+        _own_telemetry_db(tmp_path, monkeypatch)
         score = access_tracking.decay_score("decision-page", page_type="decision", confidence="high")
         assert score >= 0.9
 
@@ -157,7 +130,7 @@ class TestDecayScore:
         """Concepts decay over 365 days."""
         import access_tracking
 
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "no.jsonl")
+        _own_telemetry_db(tmp_path, monkeypatch)
         score = access_tracking.decay_score("concept-page", page_type="concept", confidence="medium")
         # With no access, still high (delta_t = 0)
         assert score > 0.5
@@ -166,13 +139,8 @@ class TestDecayScore:
         """Debugging pages have 30-day half-life."""
         import access_tracking
 
-        # Simulate 60 days since last access
-        log_file = tmp_path / "old.jsonl"
-        log_file.write_text(
-            json.dumps({"slug": "bug", "source": "search", "timestamp": "2026-05-01T00:00:00"}) + "\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+        database = _own_telemetry_db(tmp_path, monkeypatch)
+        _read_at("bug", "2026-05-01T00:00:00Z", database)
         score = access_tracking.decay_score("bug", page_type="debugging", confidence="low")
         # Should have decayed significantly
         assert score < 0.5
@@ -181,21 +149,16 @@ class TestDecayScore:
         """Frequent access boosts the decay score."""
         import access_tracking
 
-        log_file = tmp_path / "frequent.jsonl"
-        lines = []
+        database = _own_telemetry_db(tmp_path, monkeypatch)
         # Dated from now, not from a fixed month: the score decays with age, so
         # timestamps written into the test go stale and the claim it makes —
         # recent frequent access beats none — stops being the one it checks.
         now = datetime.now()
         for i in range(10):
-            stamp = (now - timedelta(days=i)).replace(microsecond=0).isoformat()
-            lines.append(json.dumps({"slug": "hot", "source": "search", "timestamp": stamp}))
-        log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+            stamp = (now - timedelta(days=i)).replace(microsecond=0).isoformat() + "Z"
+            _read_at("hot", stamp, database)
 
         score_hot = access_tracking.decay_score("hot", page_type="debugging", confidence="low")
-
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "no.jsonl")
         score_cold = access_tracking.decay_score("cold", page_type="debugging", confidence="low")
 
         assert score_hot > score_cold
@@ -203,7 +166,7 @@ class TestDecayScore:
     def test_score_between_0_and_1(self, tmp_path, monkeypatch):
         import access_tracking
 
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "no.jsonl")
+        _own_telemetry_db(tmp_path, monkeypatch)
         for ptype in ["debugging", "pattern", "concept", "decision", "qa"]:
             score = access_tracking.decay_score("x", page_type=ptype, confidence="medium")
             assert 0.0 <= score <= 1.0, f"{ptype}: {score}"
@@ -446,16 +409,12 @@ class TestFlushFrontmatter:
         assert access_tracking.flush_access_to_frontmatter("large") == 0
         assert page.read_bytes() == b"x" * 33
 
-    def test_flush_all_is_manual_only_and_never_appends_legacy_jsonl(self, tmp_path, monkeypatch):
+    def test_flush_all_is_manual_only(self, tmp_path, monkeypatch):
         import access_tracking
 
-        legacy = tmp_path / "access_log.jsonl"
-        legacy.write_text("historic\n", encoding="utf-8")
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", legacy)
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
 
         assert access_tracking.flush_all() == 0
-        assert legacy.read_text(encoding="utf-8") == "historic\n"
 
     def test_event_limit_continues_from_page_watermark(self, tmp_path, monkeypatch):
         import access_tracking
