@@ -145,6 +145,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   units). Verified on the installed vault: answered in 59.1 s where it refused
   before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
+### Added
+
+- **The label review of `OPEN-034` is a command.** `benchmark/review_flush_labels.py`
+  (written 2026-08-25 on an agent branch, ported 2026-09-23) walks the unreviewed
+  cases of the classification corpus, hides the machine's label until the reviewer
+  answers, records each verdict durably beside the corpus, and reports Cohen's kappa
+  once 30 cases are reviewed. See `docs/research/2026-09-23-the-label-review-comes-home.md`.
+
 ### Fixed
 
 - **The adoption gate names its cause and the queue waits out a busy
