@@ -300,7 +300,6 @@ def test_all_readmes_share_reliable_memory_operator_commands():
         "uv run python scripts/markdown_transaction.py recover",
         "uv run python scripts/markdown_transaction.py undo <transaction-id>",
         "uv run python scripts/markdown_transaction.py prune --retention-days 30",
-        "uv run python scripts/memory_queue.py migrate",
         "uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 "
         "--idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 "
         "--max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600",

@@ -575,7 +575,7 @@ def test_cli_list_outputs_only_operator_fields(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
-    memory_queue.migrate_legacy_queue(tmp_path)
+    MemoryQueue(tmp_path)
     task_id = memory_queue.enqueue("query", {"prompt": "do not print"})
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", "list"])
 
@@ -593,7 +593,7 @@ def test_cli_status_outputs_counts_states_capabilities_and_codes_only(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
-    memory_queue.migrate_legacy_queue(tmp_path)
+    MemoryQueue(tmp_path)
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", "status"])
 
     assert memory_queue._cli() == 0
@@ -603,16 +603,12 @@ def test_cli_status_outputs_counts_states_capabilities_and_codes_only(
     assert str(tmp_path) not in json.dumps(output)
 
 
-def test_cli_cancel_redrive_migrate_and_purge(
+def test_cli_cancel_redrive_and_purge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
-    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "migrate"])
-    assert memory_queue._cli() == 0
-    assert set(json.loads(capsys.readouterr().out)) == {"counts", "codes"}
-
     queue = MemoryQueue(tmp_path)
     task_id = queue.enqueue("query", 1, {})
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", "cancel", task_id])

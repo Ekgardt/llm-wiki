@@ -188,12 +188,6 @@ def _block_with_queue_task(root: Path, state_root: Path, daily: Path, digest: st
     MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem, "hash": digest})
 
 
-def _block_with_legacy_queue(root: Path, state_root: Path, daily: Path, digest: str) -> None:
-    legacy = state_root / "run" / "queue"
-    legacy.mkdir()
-    (legacy / "task.json").write_text(json.dumps({"daily_id": daily.stem}), encoding="utf-8")
-
-
 def _block_with_transaction(root: Path, state_root: Path, daily: Path, digest: str) -> None:
     MarkdownCoordinator(root, state_root).prepare(
         [MarkdownChange.delete(f"knowledge/daily/{daily.name}", max_before_bytes=1024)],
@@ -206,7 +200,6 @@ _BLOCKERS = {
     "manual_pin": _block_with_manual_pin,
     "decision": _block_with_decision,
     "queue": _block_with_queue_task,
-    "legacy_queue": _block_with_legacy_queue,
     "transaction": _block_with_transaction,
 }
 
@@ -217,7 +210,6 @@ _BLOCKERS = {
         ("manual_pin", "manual_pin"),
         ("decision", "decision_evidence"),
         ("queue", "queue_reference"),
-        ("legacy_queue", "legacy_queue_reference"),
         ("transaction", "active_transaction"),
     ],
 )

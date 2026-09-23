@@ -50,8 +50,6 @@ except ModuleNotFoundError:  # Python 3.11+ does not install the backport
 
 SCHEMA_VERSION = "1.0"
 INDEX_FRESH_SECONDS = 24 * 60 * 60
-STALE_LEASE_SECONDS = 10 * 60
-PERMANENT_FAILURE_ATTEMPTS = 5
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
 VALID_REPAIR_ACTIONS = frozenset(
@@ -363,37 +361,9 @@ def _read_bounded_json(
         return None, "invalid"
 
 
-def _lease_state(task: dict, now: datetime) -> tuple[bool, bool]:
-    return _lease_is_stale(task, now), _lease_is_owned(task)
-
-
-def _lease_is_stale(task: dict, now: datetime) -> bool:
-    try:
-        acquired = _aware_timestamp(str(task.get("lease_acquired_at", "")))
-    except (TypeError, ValueError):
-        return True
-    return (now - acquired).total_seconds() > STALE_LEASE_SECONDS
-
-
-def _aware_timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(_iso_text(value))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _lease_is_owned(task: dict) -> bool:
-    pid = task.get("lease_pid")
-    token = task.get("lease_token")
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    return isinstance(token, str) and bool(token)
-
-
 def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     details: dict[str, Any] = {
         "legacy_retained": 0,
-        "legacy_malformed": 0,
         "results_retained": 0,
         "queue_quarantined": 0,
         "coordinator_quarantined": 0,
@@ -410,7 +380,7 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
     )
     details["artifact_truncated"] |= truncated
     details["artifact_error"] |= error
-    _count_legacy_queue_entries(entries, legacy, deadline, details)
+    _count_legacy_queue_entries(entries, state_root, details)
     for key, relative in (
         ("results_retained", "run/queue-results"),
         ("queue_quarantined", "run/queue-quarantine"),
@@ -424,16 +394,16 @@ def _queue_artifact_state(state_root: Path, deadline: float) -> dict[str, Any]:
 
 
 def _count_legacy_queue_entries(
-    entries: list[Path], legacy: Path, deadline: float, details: dict
+    entries: list[Path], state_root: Path, details: dict
 ) -> None:
-    for path in entries:
-        if path.suffix not in {".json", ".processing"}:
-            details["artifact_error"] = True
-            continue
-        details["legacy_retained"] += 1
-        _value, problem = _read_bounded_json(path, legacy, deadline=deadline)
-        if problem:
-            details["legacy_malformed"] += 1
+    """Entries of the JSON queue of v3.3.0–v3.4.0: counted and kept, never read.
+
+    No release imports them since 2026-09-23; each one keeps `run/` from deletion,
+    and one that is not a regular file leaves the state unknown.
+    """
+    details["legacy_retained"] += len(entries)
+    if _any_irregular_entry(entries, state_root):
+        details["artifact_error"] = True
 
 
 def _count_queue_artifact_directory(
@@ -455,7 +425,6 @@ def _count_queue_artifact_directory(
 def _append_queue_artifact_codes(details: dict) -> None:
     for key, code in (
         ("legacy_retained", "legacy_queue_retained"),
-        ("legacy_malformed", "legacy_queue_malformed"),
         ("results_retained", "queue_result_retained"),
         ("queue_quarantined", "queue_quarantine_retained"),
         ("coordinator_quarantined", "coordinator_quarantine_retained"),
@@ -473,130 +442,6 @@ def _unreadable_queue_result(state_root: Path, deadline: float, message: str) ->
     return _result("queue", "error", message, details)
 
 
-def _new_queue_counts() -> dict:
-    return {
-        "pending": 0,
-        "permanently_failed": 0,
-        "stale_leases": 0,
-        "ownerless_leases": 0,
-        "unsafe_entries": 0,
-        "oversized_entries": 0,
-        "scanned": 0,
-        "truncated": False,
-    }
-
-
-def _count_stale_processing(entry: os.DirEntry, now: datetime, counts: dict) -> None:
-    try:
-        modified = entry.stat(follow_symlinks=False).st_mtime
-    except OSError:
-        counts["unsafe_entries"] += 1
-        return
-    if now.timestamp() - modified <= STALE_LEASE_SECONDS:
-        return
-    counts["stale_leases"] += 1
-    counts["ownerless_leases"] += 1
-
-
-def _count_problem_entry(
-    entry: os.DirEntry, problem: str, now: datetime, counts: dict
-) -> None:
-    counts["unsafe_entries"] += problem == "unsafe"
-    counts["oversized_entries"] += problem == "oversized"
-    counts["truncated"] = counts["truncated"] or problem == "oversized"
-    if problem == "invalid" and entry.name.endswith(".json"):
-        counts["permanently_failed"] += 1
-        return
-    if entry.name.endswith(".processing"):
-        _count_stale_processing(entry, now, counts)
-
-
-def _count_pending_task(task: dict, counts: dict) -> None:
-    counts["pending"] += 1
-    try:
-        attempts = int(task.get("attempts", 0))
-    except (ValueError, TypeError):
-        counts["permanently_failed"] += 1
-        return
-    counts["permanently_failed"] += attempts >= PERMANENT_FAILURE_ATTEMPTS
-
-
-def _scan_queue_entry(
-    entry: os.DirEntry, queue: Path, now: datetime, counts: dict
-) -> None:
-    task, problem = _read_bounded_json(Path(entry.path), queue)
-    if problem:
-        _count_problem_entry(entry, problem, now, counts)
-        return
-    if entry.name.endswith(".json"):
-        _count_pending_task(task, counts)
-        return
-    stale, owned = _lease_state(task, now)
-    counts["stale_leases"] += stale
-    counts["ownerless_leases"] += stale and not owned
-
-
-def _queue_entry_of_interest(entry: os.DirEntry) -> bool:
-    return entry.name.endswith(".json") or entry.name.endswith(".processing")
-
-
-def _scan_queue_entries(
-    entries, queue: Path, now: datetime, deadline: float, counts: dict
-) -> None:
-    for entry in entries:
-        if counts["scanned"] >= MAX_QUEUE_FILES or time.monotonic() >= deadline:
-            counts["truncated"] = True
-            return
-        counts["scanned"] += 1
-        if _queue_entry_of_interest(entry):
-            _scan_queue_entry(entry, queue, now, counts)
-
-
-def _scan_legacy_queue(
-    state_root: Path, now: datetime, deadline: float, counts: dict
-) -> None:
-    queue = state_root / "run" / "queue"
-    kind, _ = _safe_kind(queue, state_root)
-    if kind == "missing":
-        return
-    if kind != "directory":
-        counts["unsafe_entries"] += 1
-        return
-    try:
-        with os.scandir(queue) as entries:
-            _scan_queue_entries(entries, queue, now, deadline, counts)
-    except OSError:
-        counts["unsafe_entries"] += 1
-
-
-def _legacy_queue_degraded(counts: dict) -> bool:
-    return any(
-        counts[key]
-        for key in (
-            "pending",
-            "stale_leases",
-            "unsafe_entries",
-            "oversized_entries",
-            "truncated",
-        )
-    )
-
-
-def _legacy_queue_status(counts: dict) -> tuple[str, str]:
-    if counts["permanently_failed"]:
-        return (
-            "error",
-            f"Queue has {counts['permanently_failed']} permanently failed task(s).",
-        )
-    if _legacy_queue_degraded(counts):
-        return (
-            "degraded",
-            f"Queue has {counts['pending']} pending task(s) and "
-            f"{counts['stale_leases']} stale lease(s).",
-        )
-    return "ok", "Queue has no pending or stale work."
-
-
 def _adjusted_queue_status(status: str, artifacts: dict) -> str:
     if not artifacts["deletion_codes"]:
         return status
@@ -605,13 +450,24 @@ def _adjusted_queue_status(status: str, artifacts: dict) -> str:
     return "degraded" if status == "ok" else status
 
 
-def _legacy_queue_result(state_root: Path, now: datetime, deadline: float) -> dict:
-    counts = _new_queue_counts()
-    _scan_legacy_queue(state_root, now, deadline, counts)
-    details = dict(counts, read_error=False)
+def _json_queue_status(retained: int) -> tuple[str, str]:
+    if retained:
+        return "degraded", (
+            f"run/queue holds {retained} record(s) of the retired JSON queue; "
+            "this release does not import them."
+        )
+    return "ok", "Queue has no database yet and no retained work."
+
+
+def _legacy_queue_result(state_root: Path, deadline: float) -> dict:
+    """The queue check of a vault that has no queue database.
+
+    The JSON queue of v3.3.0–v3.4.0 is not imported since 2026-09-23: entries
+    under `run/queue/` are counted and named, never read.
+    """
     artifacts = _queue_artifact_state(state_root, deadline)
-    details.update(artifacts)
-    status, message = _legacy_queue_status(counts)
+    details = dict(artifacts, read_error=False)
+    status, message = _json_queue_status(artifacts["legacy_retained"])
     return _result("queue", _adjusted_queue_status(status, artifacts), message, details)
 
 
@@ -646,7 +502,7 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     unreadable = _unreadable_queue_reason(database_kind, database_path, state_root)
     if unreadable is not None:
         return _unreadable_queue_result(state_root, deadline, unreadable)
-    return _legacy_queue_result(state_root, now, deadline)
+    return _legacy_queue_result(state_root, deadline)
 
 
 def _read_busy_ms(deadline: float | None) -> int:
@@ -1879,24 +1735,11 @@ def _empty_queue_details() -> tuple[dict, dict[str, int]]:
 def _record_queue_migration(state_root: Path, details: dict) -> None:
     from markdown_transaction import _reliability_v3_records_present
 
-    if _reliability_v3_records_present(state_root):
-        # Adoption retired the v2 queue and left a tombstone where it stood
-        # (`memory_queue` refuses to migrate one), so there is no legacy
-        # migration left to finish and the v2 marker proves nothing.
-        details["migration"] = "retired"
-        return
-    _record_v2_queue_marker(state_root, details)
-
-
-def _record_v2_queue_marker(state_root: Path, details: dict) -> None:
-    marker = state_root / "run" / "queue-migrated-v2"
-    marker_kind = _safe_kind(marker, state_root)[0]
-    details["migration"] = "complete" if marker_kind == "regular" else "pending"
-    if marker_kind not in {"missing", "regular"}:
-        details["read_error"] = True
-        details["deletion_codes"].append("queue_migration_state_unknown")
-    if marker_kind == "regular" and details["legacy_retained"]:
-        details["migration"] = "conflict"
+    # Adoption retired the v2 queue and left a tombstone where it stood; before
+    # adoption there is nothing to migrate either, since 2026-09-23 the JSON
+    # queue import went and the `queue-migrated-v2` marker is read by nothing.
+    adopted = _reliability_v3_records_present(state_root)
+    details["migration"] = "retired" if adopted else "none"
 
 
 def _valid_queue_error_code(error_code: object) -> bool:
@@ -2234,13 +2077,11 @@ def _queue_error_state(
 ) -> bool:
     if unknown_state or corrupt_metadata:
         return True
-    return bool(details["results_invalid"]) or details["migration"] == "conflict"
+    return bool(details["results_invalid"])
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    if states["ready"] or states["leased"] or states["blocked"]:
-        return True
-    return details["migration"] == "pending"
+    return bool(states["ready"] or states["leased"] or states["blocked"])
 
 
 def _queue_status(
@@ -6562,69 +6403,6 @@ def _release_lock(path: Path, root: Path, token: str) -> None:
             pass
 
 
-def _abandoned_lease(task: dict, now: datetime) -> bool:
-    """A lease is recoverable only when it expired and its owner is gone."""
-    stale, owned = _lease_state(task, now)
-    if not stale or not owned:
-        return False
-    return not _pid_alive(task.get("lease_pid"))
-
-
-def _restore_lease_as_task(lease: Path) -> bool:
-    try:
-        os.link(lease, lease.with_suffix(".json"), follow_symlinks=False)
-        lease.unlink()
-    except (FileExistsError, OSError):
-        return False
-    return True
-
-
-def _recoverable_lease(entry: os.DirEntry, queue: Path, now: datetime) -> Path | None:
-    if not entry.name.endswith(".processing"):
-        return None
-    lease = Path(entry.path)
-    task, problem = _read_bounded_json(lease, queue)
-    if problem or task is None or not _abandoned_lease(task, now):
-        return None
-    return lease
-
-
-def _recover_stale_leases(queue: Path, now: datetime) -> int:
-    recovered = 0
-    with os.scandir(queue) as entries:
-        for number, entry in enumerate(entries):
-            if number >= MAX_QUEUE_FILES:
-                return recovered
-            lease = _recoverable_lease(entry, queue, now)
-            if lease is not None and _restore_lease_as_task(lease):
-                recovered += 1
-    return recovered
-
-
-def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> bool:
-    queue = state_root / "run" / "queue"
-    kind = _safe_kind(queue, state_root)[0]
-    if kind == "missing":
-        return True
-    if kind != "directory":
-        raise OSError("unsafe queue directory")
-    return _recover_queue_leases(queue, now, repaired)
-
-
-def _recover_queue_leases(queue: Path, now: datetime, repaired: list[dict]) -> bool:
-    lock = queue / ".doctor-recovery.lock"
-    lock_token = _acquire_lock(lock, queue, now)
-    if lock_token is None:
-        return False
-    try:
-        recovered = _recover_stale_leases(queue, now)
-    finally:
-        _release_lock(lock, queue, lock_token)
-    if recovered:
-        repaired.append({"action": "recover_stale_lease", "count": recovered})
-    return True
-
-
 def _require_real_directory(component: Path) -> None:
     try:
         component_info = component.lstat()
@@ -8454,65 +8232,13 @@ def _repair_transactions_action(
         )
 
 
-def _record_queue_migration_repair(
-    migration: Any, marker_existed: bool, context: _RepairContext
-) -> None:
-    if migration is None:
-        return
-    if marker_existed and not migration.imported and not migration.quarantined:
-        return
-    context.repaired.append(
-        {
-            "action": "migrate_queue",
-            "count": migration.imported + migration.quarantined,
-        }
-    )
-
-
-def _migrated_legacy_queue(
-    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
-):
-    """Migrate the legacy queue only when the legacy queue could be read."""
-    if not legacy_available:
-        return None
-    return guard.run(
-        migrate_legacy_queue,
-        context.state_path,
-        deadline=context.deadline,
-        cancelled=guard.cancelled,
-    )
-
-
-def _legacy_queue_migrated(
-    guard: Any, context: _RepairContext, migrate_legacy_queue, legacy_available: bool
-) -> bool:
-    """Run the v2 migration where it is still owed; True when the marker stands."""
-    marker = context.state_path / "run" / "queue-migrated-v2"
-    marker_existed = _safe_kind(marker, context.state_path)[0] == "regular"
-    migration = _migrated_legacy_queue(
-        guard, context, migrate_legacy_queue, legacy_available
-    )
-    _record_queue_migration_repair(migration, marker_existed, context)
-    marker_valid = _safe_kind(marker, context.state_path)[0] == "regular"
-    return migration is not None or marker_valid
-
-
 def _repair_queue_action(guard: Any, context: _RepairContext) -> None:
-    """Repair the legacy queue, and stop when its migration could not finish."""
-    from markdown_transaction import _reliability_v3_records_present
-    from memory_queue import active_or_legacy_memory_queue, migrate_legacy_queue
+    """Open the queue this vault has, so a queue that cannot open is an error.
 
-    legacy_available = guard.run(
-        _repair_leases, context.state_path, context.generated_at, context.repaired
-    )
-    if not legacy_available:
-        context.repair_deferred.add("queue")
-    # Adoption retired the v2 queue; `migrate_legacy_queue` would construct it
-    # and abort on its tombstone. An adopted vault has no migration to finish
-    # and no marker to wait for (`memory_queue` applies the same rule).
-    if not _reliability_v3_records_present(context.state_path):
-        if not _legacy_queue_migrated(guard, context, migrate_legacy_queue, legacy_available):
-            return
+    The JSON queue lease repair and the v2 migration went on 2026-09-23.
+    """
+    from memory_queue import active_or_legacy_memory_queue
+
     # Not `MemoryQueue(state_path)`. Adoption replaces the pre-adoption
     # `run/queue.sqlite3` with a JSON tombstone, so constructing the legacy queue
     # directly raises `queue_tombstoned_by_adoption` — and because this is the

@@ -407,7 +407,6 @@ if ($installerCreatedClone -or $ProtectPush) {
 Info "Setting environment variables..."
 
 New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
-New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"

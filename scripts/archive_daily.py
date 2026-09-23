@@ -281,17 +281,13 @@ class DailyArchiver:
         skip_queue_database_checks: bool,
     ) -> tuple[tuple[str, ...], list[str]]:
         if skip_queue_database_checks:
-            return (), self._legacy_queue_reasons(source, digest)
+            return (), []
         blocking = tuple(self._queue_references(source.stem, digest))
         reasons = ["queue_reference"] if blocking else []
         if self.queue.source_failure(logical_path, digest) is not None:
             reasons.append("source_failure")
-        return blocking, reasons + self._legacy_queue_reasons(source, digest)
+        return blocking, reasons
 
-    def _legacy_queue_reasons(self, source: Path, digest: str) -> list[str]:
-        if self._legacy_queue_references(source.stem, digest):
-            return ["legacy_queue_reference"]
-        return []
 
     def _pin_reasons(self, source: Path, digest: str) -> list[str]:
         """Decision evidence and manual pins that hold the source in place."""
@@ -1561,36 +1557,6 @@ class DailyArchiver:
         except (OSError, QueueOperationError, sqlite3.Error):
             return ["queue-unreadable"]
 
-    def _legacy_queue_entries(self, legacy: Path) -> list[Path] | None:
-        """Legacy task files, or None when the directory cannot be trusted."""
-        try:
-            entries = bounded_directory_entries(
-                legacy, MAX_ARCHIVE_ENTRIES, label="legacy queue directory"
-            )
-        except (OSError, ValueError):
-            return None
-        return sorted(
-            entry for entry in entries if entry.suffix in {".json", ".processing"}
-        )
-
-    @staticmethod
-    def _legacy_task_mentions(path: Path, markers: tuple[bytes, ...]) -> bool:
-        """An unreadable legacy task counts as a reference, never as an absence."""
-        try:
-            raw = read_stable_bytes(path, MAX_POLICY_BYTES, label="legacy queue task")
-        except (OSError, ValueError):
-            return True
-        return any(marker in raw for marker in markers)
-
-    def _legacy_queue_references(self, daily_id: str, digest: str) -> bool:
-        legacy = self.state_root / "run" / "queue"
-        if not legacy.exists():
-            return False
-        entries = self._legacy_queue_entries(legacy)
-        if entries is None:
-            return True
-        markers = (daily_id.encode(), digest.encode())
-        return any(self._legacy_task_mentions(path, markers) for path in entries)
 
     def _transaction_rows(self, source_name: str) -> list[tuple[object, object]] | None:
         """Transaction states touching this daily, or None when unreadable."""

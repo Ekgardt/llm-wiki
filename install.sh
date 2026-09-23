@@ -484,7 +484,7 @@ if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
 fi
 
 # Create runtime dirs inside the vault (gitignored)
-mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
+mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
 OPENCODE_PLUGIN=0

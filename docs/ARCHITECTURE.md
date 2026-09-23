@@ -293,9 +293,9 @@ Provider fallback has a distinct cache key; unknown provider/model identity disa
 persistent cache hits.
 
 Queue delivery is at least once, never exactly-once. Leases and acknowledgements are
-fenced; handlers use stable operation IDs for idempotent side effects. Legacy JSON
-tasks migrate once to the rollback-journal `run/queue.sqlite3`; malformed sources are
-quarantined, and migration aborts if a legacy owner cannot be excluded. Workers are
+fenced; handlers use stable operation IDs for idempotent side effects. The JSON
+queue of releases before v4.0.0 is not imported: a `run/queue/` holding records is
+refused and named by `doctor`. Workers are
 short-lived and bounded, not a persistent daemon. Terminal purge is manual and
 export-first. A source failure, retained task/result, or live owner remains visible
 and blocks unsafe cleanup.

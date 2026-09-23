@@ -5,7 +5,7 @@ Three-zone layout: vault holds code + knowledge + gitignored runtime dirs.
     <vault>/
       run/state.json     # compile hashes, dedupe, heartbeats
       run/compile.pid    # maybe_compile lock
-      run/queue-v3.sqlite3   # deferred LLM tasks (run/queue/*.json: migration input only)
+      run/queue-v3.sqlite3   # deferred LLM tasks
       logs/              # lint / nightly reports
       cache/             # FTS5/vector/graph indexes (cache/cognee/ is retired)
 

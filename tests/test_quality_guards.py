@@ -633,7 +633,6 @@ _STAGE_TWO_GUIDE_COMMANDS = (
     "markdown_transaction.py recover",
     "markdown_transaction.py undo <transaction-id>",
     "markdown_transaction.py prune --retention-days 30",
-    "memory_queue.py migrate",
     "memory_queue.py redrive <task-id>",
     "memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
     "archive_daily.py --commit --hot-days 90",

@@ -1496,7 +1496,6 @@ def _retained_queue_db(state_root: Path, now: datetime) -> None:
                 ("dead", "dead", "attempts_exhausted", None, None),
             ],
         )
-    (state_root / "run/queue-migrated-v2").write_text("complete", encoding="utf-8")
 
 
 def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, monkeypatch):
@@ -1577,7 +1576,6 @@ def test_queue_health_fails_closed_on_unknown_state_or_error_metadata(
             "INSERT INTO tasks VALUES ('task', ?, ?, NULL, NULL, NULL, NULL)",
             (state, error_code),
         )
-    (state_root / "run/queue-migrated-v2").write_text("complete", encoding="utf-8")
 
     check = doctor._queue_v2_check(state_root, datetime.now(timezone.utc), float("inf"))
     deletion = doctor._run_deletion_check(
