@@ -226,11 +226,17 @@ def _read_record(
 
 
 class ReliabilityV3ValidationError(RuntimeError):
-    """Stable closed failure from Reliability V3 read-only validation."""
+    """Stable closed failure from Reliability V3 read-only validation.
 
-    def __init__(self, code: str) -> None:
+    `detail` is what the validation saw, for the operator; `code` stays the
+    stable name callers match on (2026-09-23, an invalid record read the same
+    as a database held by a hook for a moment).
+    """
+
+    def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
-        super().__init__(code)
+        self.detail = detail
+        super().__init__(f"{code}: {detail}" if detail else code)
 
 
 def _identity_value(identity: object) -> dict[str, object]:
@@ -783,7 +789,9 @@ def require_reliability_v3_adopted(
     except ReliabilityV3ValidationError:
         raise
     except Exception as exc:
-        raise ReliabilityV3ValidationError("reliability_v3_record_invalid") from exc
+        raise ReliabilityV3ValidationError(
+            "reliability_v3_record_invalid", f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:

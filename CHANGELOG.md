@@ -147,6 +147,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The adoption gate names its cause and the queue waits out a busy
+  database.** `reliability_v3_record_invalid` now carries what the validation
+  saw (`code: Cause: message`), and the adopted queue validates adoption
+  through the coordinator's retried, cached check instead of a bare call:
+  on the live vault a `doctor --rebuild-generation` at 18:27 UTC failed its
+  queue repair with the bare code while a later run and a standalone check
+  passed. See
+  `docs/research/2026-09-23-the-adoption-gate-names-its-cause-and-waits-out-contention.md`.
 - **A barrier proves concurrency; a stopwatch measured the machine.** The
   three parallel version probes of `detect_code_tools` were asserted to finish
   under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run
