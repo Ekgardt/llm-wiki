@@ -183,6 +183,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A test no longer reads a pid file before it is written.** The push run on
+  `main` after PR 41 failed on Windows: a processor killed at its 1-second deadline
+  between creating its pid file and writing it left an empty file, and the test
+  parsed it. Pid files in the queue tests are now written through a temporary name
+  and `os.replace`, read with a bounded wait (`tests/pid_files.py`), and the kill
+  test's deadline is 10 s (CI run 36023732204, 2026-09-24). See
+  `docs/research/2026-09-24-a-pid-file-read-before-it-is-written.md`.
 - **Telemetry schema is created inside the write transaction.** Eight processes
   recording into a fresh telemetry database on Windows: five failed at once with
   `database is locked` although the connection had a busy timeout, because

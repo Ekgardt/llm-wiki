@@ -29,6 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import memory_queue  # noqa: E402
 
+from tests.pid_files import read_pid, write_pid  # noqa: E402
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
 
@@ -40,7 +41,7 @@ def _leaves_a_grandchild(task: dict) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    write_pid(task["payload"]["pid_path"], child.pid)
     return True
 
 
@@ -79,7 +80,7 @@ def test_the_tree_read_at_the_signal_holds_what_the_task_left_running(
 ) -> None:
     pid_path = tmp_path / "grandchild.pid"
     run = _started_child({"payload": {"pid_path": str(pid_path)}})
-    grandchild = int(pid_path.read_text(encoding="ascii"))
+    grandchild = read_pid(pid_path, SHORT_TIMEOUT)
 
     tracked = run.tracked_descendants
 
