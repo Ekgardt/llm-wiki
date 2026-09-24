@@ -91,3 +91,12 @@ Files: `benchmark/review_flush_labels.py`, `tests/test_review_flush_labels.py`,
   thirty-seven `major` verdicts were status reports with no decision or lesson in the
   excerpt. Whether a person agrees with the assistant or with the judge is the open
   question, and it is the only one that closes `OPEN-034`.
+
+## Third addendum, 2026-09-23 night: superseded
+
+The owner: «я не буду делать никаких ручных разметок, система должна работать
+автоматически». The review command this note brought home is removed, and the step it
+existed for is replaced by two automatic readings with a verbatim-quote check; the
+capture path and the stand now share one prompt, and the corpus carries the rendered
+conversation the product classifies. See
+`docs/research/2026-09-23-the-corpus-labels-itself.md`.

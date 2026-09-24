@@ -1,14 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://llm-wiki.local/schemas/flush-classification-v2.json",
+  "$id": "https://llm-wiki.local/schemas/flush-classification-v3.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["corpus_id", "schema_version", "thresholds", "cases"],
   "properties": {
     "corpus_id": {"type": "string", "minLength": 1},
-    "schema_version": {"const": "flush-classification/v2"},
+    "schema_version": {"const": "flush-classification/v3"},
     "source": {"type": "string", "maxLength": 200},
     "built_at": {"type": "string", "maxLength": 64},
+    "agreement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed", "contested"],
+      "properties": {
+        "confirmed": {"type": "integer", "minimum": 0},
+        "contested": {"type": "integer", "minimum": 0},
+        "kappa": {"type": ["number", "null"]}
+      }
+    },
     "thresholds": {
       "type": "object",
       "additionalProperties": false,
@@ -35,7 +45,8 @@
           "expected_tier",
           "required_markers",
           "label_provenance",
-          "label_reviewed"
+          "label_status",
+          "readings"
         ],
         "properties": {
           "case_id": {"type": "string", "pattern": "^[a-z0-9-]{3,64}$"},
@@ -46,7 +57,7 @@
             "uniqueItems": true,
             "items": {"type": "string", "enum": ["decision", "lesson", "command", "gotcha", "question"]}
           },
-          "transcript": {"type": "string", "minLength": 1, "maxLength": 60000},
+          "transcript": {"type": "string", "minLength": 1, "maxLength": 61000},
           "expected_tier": {"type": "string", "enum": ["major", "minor", "ok"]},
           "required_markers": {
             "type": "array",
@@ -54,9 +65,18 @@
             "items": {"type": "string", "minLength": 1, "maxLength": 200}
           },
           "canned_response": {"type": "string", "maxLength": 4000},
-          "label_provenance": {"type": "string", "enum": ["human", "judge"]},
-          "label_reviewed": {"type": "boolean"},
-          "human_tier": {"type": "string", "enum": ["major", "minor", "ok"]}
+          "label_provenance": {"type": "string", "enum": ["readings"]},
+          "label_status": {"type": "string", "enum": ["confirmed", "contested"]},
+          "readings": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rubric", "quote", "passage"],
+            "properties": {
+              "rubric": {"type": "string", "enum": ["major", "minor", "ok"]},
+              "quote": {"type": ["string", "null"], "enum": ["major", "minor", "ok", null]},
+              "passage": {"type": "string", "maxLength": 1000}
+            }
+          }
         }
       }
     }

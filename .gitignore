@@ -131,7 +131,3 @@ benchmark/flush-classification-live*.json
 # Their indexes and configuration are theirs, not ours, and never ship.
 .trace-mcp/
 .serena/
-
-# The human review's verdict sidecar. It holds case identifiers and tiers only,
-# never transcript text, but it names which of the owner's sessions were read.
-benchmark/flush-classification-*.review.jsonl

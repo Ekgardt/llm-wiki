@@ -79,11 +79,6 @@ _CAPTURE_SOURCE_FIELDS = (
     "chunk_count",
     "evidence",
 )
-_CAPTURE_SYSTEM_PROMPT = (
-    "Classify durable session evidence. Emit exactly FLUSH_OK, or FLUSH_MAJOR "
-    "followed by a nonempty body, or FLUSH_MINOR followed by a nonempty body."
-)
-
 # Tier sentinels — replace the legacy single FLUSH_OK. The classifier
 # is asked to emit exactly one of these as the FIRST line of its
 # response, followed (for MAJOR/MINOR) by the structured summary.
@@ -306,7 +301,10 @@ these sections that apply (skip empty sections):
 - **Open questions** — unresolved, worth returning to (any tier).
 
 Be terse. Each bullet should fit on one line. Do NOT narrate what was
-done — that is status, not memory.
+done — that is status, not memory. Keep names exactly as the transcript
+spells them — identifiers, file paths, versions, flags, numbers, commands:
+a later search finds the bullet by those, and a bullet that renames or
+drops them is lost.
 
 === OUTPUT FORMAT ===
 Emit EXACTLY one of these tokens as the FIRST line of your response,
@@ -684,11 +682,17 @@ def _bounded_classifier_evidence(evidence: str) -> str:
 
 
 def _capture_prompt(record: Mapping[str, object]) -> str:
+    """The one classification prompt, on the evidence the intent carries.
+
+    Until 2026-09-23 the capture path sent three lines that named the tier
+    tokens and never said what a tier meant, while the measurement stand
+    scored `build_classification_prompt`, which no installed hook reached. One
+    prompt now serves both, so the stand measures what the product sends. See
+    `docs/research/2026-09-23-the-corpus-labels-itself.md`.
+    """
     evidence = _readable_evidence(record["evidence"])
-    return (
-        "Classify this role-preserved session evidence using the closed flush grammar.\n"
-        f"Event: {record['event']}\n"
-        f"Evidence: {_bounded_classifier_evidence(evidence)}"
+    return build_classification_prompt(
+        _bounded_classifier_evidence(evidence), str(record["event"])
     )
 
 
@@ -843,7 +847,7 @@ def _call_capture_classifier(
     from llm_client import LLMResult, call_llm_result
 
     caller = llm_call if llm_call is not None else call_llm_result
-    result = caller(_capture_prompt(record), _CAPTURE_SYSTEM_PROMPT, 1500)
+    result = caller(_capture_prompt(record), CLASSIFICATION_SYSTEM_PROMPT, 1500)
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
     if (result.available, result.failure_class) != (True, None):
