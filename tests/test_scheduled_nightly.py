@@ -316,7 +316,9 @@ def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monk
     monkeypatch.setattr(scheduled_nightly, "_wait_compile_finished", lambda: False)
     messages: list[str] = []
 
-    failures = scheduled_nightly._nightly_steps(lambda *a, **k: 0, messages.append, None)
+    failures = scheduled_nightly._nightly_steps(
+        lambda *a, **k: 0, scheduled_nightly.StepLog(messages.append), None
+    )
 
     assert failures == 0
     assert any("deferred" in message for message in messages)

@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
-import threading
 import types
 from pathlib import Path
 
@@ -20,7 +19,7 @@ def _weekly_owner_row(candidate: Path) -> tuple:
         ).fetchone()
 
 
-def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
+def test_weekly_keeps_its_owner_and_marker_and_never_runs_the_nightly(
     tmp_path: Path, monkeypatch
 ) -> None:
     state_root = tmp_path / "state"
@@ -41,10 +40,8 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
         phases.append(phase)
         assert (marker_path.read_bytes(), _weekly_owner_row(candidate)) == outer
 
-    def nested_nightly(*, ownership, fence=None) -> int:
-        assert (ownership, isinstance(fence, threading.Event)) == (lease, True)
-        assert_outer("nightly")
-        return 0
+    def nested_nightly(**_kwargs) -> int:
+        raise AssertionError("the weekly must not run the nightly again")
 
     def run_step(_command, _log, name, **_kwargs) -> int:
         assert_outer(name)
@@ -60,6 +57,7 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
     monkeypatch.setattr(scheduled_weekly.scheduled_nightly, "_run_step", run_step)
     monkeypatch.setattr(scheduled_weekly, "_wait_for_compile_idle", lambda _log: None)
     monkeypatch.setattr(scheduled_weekly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(scheduled_weekly, "record_weekly_result", lambda *_a, **_k: None)
     monkeypatch.setitem(
         sys.modules,
         "reflection",
@@ -83,7 +81,7 @@ def test_weekly_keeps_outer_owner_and_marker_while_running_nested_nightly_work(
 
     assert (exit_code, phases[0], len(phases) >= 4, held) == (
         0,
-        "nightly",
+        "okf",
         True,
         original_marker,
     )

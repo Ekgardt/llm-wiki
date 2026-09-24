@@ -183,6 +183,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The weekly pass has its own record, and doctor reads it.** The weekly failed
+  on 2026-09-13 and 2026-09-20 and nothing said so: a failure before its first
+  step went into the nightly's field, which the next nightly overwrote, a failure
+  inside it was recorded nowhere, and doctor had no weekly check. It now writes
+  `last_weekly_status`/`last_weekly_at`/`last_weekly_failure`; doctor's scheduler
+  check calls a failed weekly an `error` and one silent for more than eight days
+  `degraded`. The weekly no longer re-runs the whole nightly an hour after it
+  (a second compile, repository refresh, self-update and prune). Step labels in
+  both logs are numbered by the logger in the order the steps run
+  (`StepLog`); "Step 3c" had come to name three different steps. See
+  `docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md`.
 - **A stray candidate is retired where it refuses.** A provably stray
   pre-adoption candidate (complete adoption, no adoption in flight, no row in any
   data table, no live owner) is moved into `run/coordinator-quarantine/` or

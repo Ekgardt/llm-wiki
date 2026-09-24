@@ -5010,7 +5010,42 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         return _result(
             "scheduler", "error", "Maintenance source or local state is invalid.", details
         )
-    return _nightly_result(state, now, details)
+    details["last_weekly_status"] = state.get("last_weekly_status")
+    details["last_weekly_at"] = state.get("last_weekly_at")
+    return _with_weekly(_nightly_result(state, now, details), _weekly_verdict(state, now))
+
+
+# A seven-day period plus a day of grace. The weekly keeps its own record since
+# 2026-09-24; a vault on which it has never recorded a run is not degraded for
+# that. See docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md.
+WEEKLY_FRESH_SECONDS = 8 * 24 * 3600
+_SEVERITY = {"ok": 0, "skipped": 1, "degraded": 2, "error": 3}
+
+
+def _weekly_verdict(state: dict, now: datetime) -> tuple[str, str] | None:
+    """(status, message) when the weekly pass needs attention, else None."""
+    if state.get("last_weekly_status") == "failed":
+        return "error", "Last weekly maintenance failed."
+    if _weekly_is_stale(_parse_utc(state.get("last_weekly_at")), now):
+        return "degraded", "Weekly maintenance is stale."
+    return None
+
+
+def _weekly_is_stale(ran_at: datetime | None, now: datetime) -> bool:
+    """Stale only once it has run: the first Sunday of an install is not late."""
+    if ran_at is None:
+        return False
+    return (now - ran_at).total_seconds() > WEEKLY_FRESH_SECONDS
+
+
+def _with_weekly(nightly: dict, weekly: tuple[str, str] | None) -> dict:
+    """The scheduler finding: the worse of the two passes, both messages named."""
+    if weekly is None:
+        return nightly
+    status, message = weekly
+    worse = max(nightly["status"], status, key=lambda name: _SEVERITY.get(name, 0))
+    combined = message if nightly["status"] == "ok" else f"{nightly['message']} {message}"
+    return _result("scheduler", worse, combined, nightly["details"])
 
 
 # A day plus slack for a run that starts late or takes long. Freshness of a
