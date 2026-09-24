@@ -166,13 +166,13 @@ branch and tag names are rejected — together with the SHA-256 of every file th
 bootstrap runs. Print them for any tag from a local checkout:
 
 ```bash
-uv run python scripts/release_manifest.py v4.0.0 --markdown
+uv run python scripts/release_manifest.py v4.1.0 --markdown
 ```
 
 Install that exact commit:
 
 ```bash
-git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+git checkout --detach "$(git rev-parse 'v4.1.0^{commit}')"
 bash ./install.sh
 ```
 
@@ -290,9 +290,9 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 `cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
 
-Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. A fallback answer names its reason: `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
+Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild (`uv run python scripts/doctor.py --rebuild-generation`) before expecting generation-backed retrieval. The generation is the only index: the legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json` were retired on 2026-09-23 and are read by nothing. Until a generation exists, memory search reads Markdown directly within its deadline and every hit says `no_active_generation`; a code answer names its own reason, `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
 
-The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. No new embedding model or reranker is selected yet: **evidence pending**. Existing optional vector compatibility still uses its pinned legacy model. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
+The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. The defaults are `intfloat/multilingual-e5-small` for vectors and `BAAI/bge-reranker-v2-m3` for reranking, both pinned; replacing either needs the matrix's evidence, which is pending. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
 
 Real Graphify comparison and model-superiority evidence are pending. The deterministic comparative smoke validates orchestration only and supports no quality or token-ratio claim.
 

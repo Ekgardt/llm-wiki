@@ -7861,6 +7861,47 @@ def _run_repairs(context: _RepairContext) -> None:
         _release_unentered_maintenance(maintenance, guard_entered, context)
 
 
+# The nightly snapshot of `knowledge/` is the memory's second copy
+# (`snapshot_knowledge.py`); a nightly period plus a day of grace. See
+# `docs/research/2026-09-24-the-documents-say-what-the-code-does.md`.
+BACKUP_FRESH_SECONDS = 2 * 24 * 3600
+BACKUP_GIT_TIMEOUT_SECONDS = 5
+
+
+def _last_snapshot_at(root: Path) -> datetime | None:
+    """The time of the snapshot repository's newest commit, or None."""
+    if not (root / ".git").exists():
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "log", "-1", "--format=%ct"],
+            capture_output=True,
+            text=True,
+            timeout=BACKUP_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    stamp = completed.stdout.strip()
+    if completed.returncode != 0 or not stamp.isdigit():
+        return None
+    return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
+
+
+def _backup_check(home_path: Path, now: datetime) -> dict:
+    """Whether the memory's second copy was taken recently."""
+    from snapshot_knowledge import snapshot_root
+
+    taken = _last_snapshot_at(snapshot_root(home_path))
+    details = {"last_snapshot_at": taken.isoformat() if taken else None}
+    if taken is None:
+        return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
+    age_days = (_as_utc(now) - taken).total_seconds() / 86400
+    if age_days * 86400 > BACKUP_FRESH_SECONDS:
+        return _result("backup", "degraded", f"The last knowledge snapshot is {age_days:.1f} days old.", details)
+    return _result("backup", "ok", "The knowledge snapshot is current.", details)
+
+
 def _deferrable_checks(
     root_path: Path,
     state_path: Path,
@@ -7884,6 +7925,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("backup", lambda _budget: _backup_check(home_path, generated_at)),
         ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),

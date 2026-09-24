@@ -169,13 +169,13 @@ remote на `no-push`.
 запускает. Напечатать их для любого тега из локального клона:
 
 ```bash
-uv run python scripts/release_manifest.py v4.0.0 --markdown
+uv run python scripts/release_manifest.py v4.1.0 --markdown
 ```
 
 Установить именно этот коммит:
 
 ```bash
-git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+git checkout --detach "$(git rev-parse 'v4.1.0^{commit}')"
 bash ./install.sh
 ```
 
@@ -293,9 +293,9 @@ RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
 
 `cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в `cache/evidence-graph/generations/<generation-id>/`. Candidate регистрируется только после проверки manifest, состава source, хешей artifacts, целостности базы и evidence spans. Активация меняет указатель через compare-and-swap. Сбой или прерывание до активации оставляет предыдущее поколение активным; повреждённое активное поколение пропускается в пользу последнего проверенного предыдущего. Полные orphan generations могут быть зарегистрированы при recovery, но автоматически не активируются.
 
-Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Ответ с fallback называет причину: `no_generation`, если у репозитория поколения нет, или `generation_unreadable:<ExceptionClass>`, если поколение есть, но открыть его не удалось. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
+Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте поколение (`uv run python scripts/doctor.py --rebuild-generation`) прежде, чем ожидать generation-backed retrieval. Поколение — единственный индекс: legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json` выведены из работы 2026-09-23 и ничем не читаются. Пока поколения нет, поиск по памяти читает Markdown напрямую в пределах своего срока, и каждый ответ помечен `no_active_generation`; ответ по коду называет свою причину: `no_generation`, если у репозитория поколения нет, или `generation_unreadable:<ExceptionClass>`, если поколение есть, но открыть его не удалось. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
 
-Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. Новая embedding model или reranker пока не выбраны: **evidence pending**. Существующая опциональная vector-совместимость продолжает использовать закреплённую legacy model. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
+Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. По умолчанию используются `intfloat/multilingual-e5-small` для векторов и `BAAI/bge-reranker-v2-m3` для reranking, обе закреплены; замена любой из них требует evidence матрицы, которое пока отсутствует. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
 
 Реальное сравнение Graphify и evidence превосходства моделей отсутствуют: **evidence pending**. Детерминированный comparative smoke проверяет только orchestration и не подтверждает claims о качестве или token ratio.
 

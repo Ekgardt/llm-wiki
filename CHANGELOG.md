@@ -183,6 +183,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The documents say what the code does.** The three READMEs, USER-GUIDE,
+  ARCHITECTURE, STRUCTURE and the operating model no longer tell a reader to keep
+  the retired legacy index, no longer say search falls back to it, name the pinned
+  embedding and reranker models, describe the one automatic Git operation (the
+  nightly fast-forward of the default branch) and the retention purges, and show
+  `build_context.py <slug>` as it is parsed. Three superseded status documents are
+  marked as history. Doctor has a `backup` check: the nightly knowledge snapshot
+  must be at most two days old. A test pins the corrected claims. See
+  `docs/research/2026-09-24-the-documents-say-what-the-code-does.md`.
 - **The vault follows its default branch.** The nightly update fast-forwarded
   whatever branch was checked out, up to what `main` held, so a vault left on a
   working branch never received what reached `main` from any other branch and

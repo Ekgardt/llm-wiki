@@ -451,12 +451,13 @@ def test_user_guide_describes_search_signals_conditionally() -> None:
     normalized = " ".join(text.split())
 
     required = (
-        "reads the active evidence generation first",
+        "reads the active evidence generation; without one it reads Markdown directly",
         "Vectors are on by default when the optional model is available; "
         "`--no-semantic` turns them off",
         "Graph-neighbor fusion applies only when graph evidence is available",
     )
     stale = (
+        "falls back to the legacy BM25 index",
         "`--semantic` enables vectors",
         "`search_memory.py` runs hybrid BM25 + Vector + Graph fusion.",
     )

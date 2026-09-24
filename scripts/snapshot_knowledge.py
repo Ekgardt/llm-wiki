@@ -49,9 +49,14 @@ DEFAULT_SNAPSHOT_ROOT = Path.home() / "llm-wiki-snapshots"
 SNAPSHOT_SUBTREE = "knowledge"
 
 
-def snapshot_root() -> Path:
+def snapshot_root(home: Path | None = None) -> Path:
+    """`LLM_WIKI_SNAPSHOT_ROOT`, else `llm-wiki-snapshots` in the given home or the user's."""
     raw = os.environ.get("LLM_WIKI_SNAPSHOT_ROOT", "").strip()
-    return Path(raw) if raw else DEFAULT_SNAPSHOT_ROOT
+    if raw:
+        return Path(raw)
+    if home is None:
+        return DEFAULT_SNAPSHOT_ROOT
+    return Path(home) / DEFAULT_SNAPSHOT_ROOT.name
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:

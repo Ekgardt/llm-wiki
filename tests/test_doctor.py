@@ -287,6 +287,18 @@ def _check(report: dict, check_id: str) -> dict:
     return next(item for item in report["checks"] if item["id"] == check_id)
 
 
+def _take_snapshot(root: Path, home: Path) -> None:
+    """A healthy vault has its nightly second copy: a snapshot repository with a commit."""
+    from snapshot_knowledge import snapshot_root
+
+    del root
+    repository = snapshot_root(home)
+    repository.mkdir(parents=True, exist_ok=True)
+    identity = ["-c", "user.name=test", "-c", "user.email=test@localhost"]
+    for command in (["init", "--quiet"], [*identity, "commit", "--quiet", "--allow-empty", "-m", "snapshot"]):
+        subprocess.run(["git", "-C", str(repository), *command], check=True, capture_output=True)
+
+
 def _qualified_pyright_check(*_args, **_kwargs) -> dict:
     return {
         "id": "pyright",
@@ -337,6 +349,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     )
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _take_snapshot(root, home)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
 
@@ -357,6 +370,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "generation",
         "scheduler",
         "capture",
+        "backup",
         "models",
         "hooks",
         "checkpoints",
@@ -1365,6 +1379,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
     _create_index(state_root / "cache" / "index.sqlite")
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _take_snapshot(root, home)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setenv("HOME", str(home))
@@ -1423,7 +1438,7 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     # builds one (2026-09-23): `--repair` leaves that one honest degradation and
     # names it, and the second run finds nothing left to repair.
     degraded = {check["id"] for check in first_report["checks"] if check["status"] != "ok"}
-    assert (bool(first_report["repaired"]), degraded <= {"generation", "models", "scheduler"}) == (True, True)
+    assert (bool(first_report["repaired"]), degraded <= {"generation", "models", "scheduler", "backup"}) == (True, True)
     assert not any(check["status"] == "error" for check in first_report["checks"])
     assert (
         second_return_code,

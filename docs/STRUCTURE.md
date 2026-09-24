@@ -192,7 +192,7 @@ or provider credentials. Restic receives credentials through its standard extern
 password command or protected password file.
 
 Cognee is retired from the supported product. The optional package extra, sync script,
-and setup path are removed during implementation. Existing `cache/cognee/` content is
+and setup path were removed. Existing `cache/cognee/` content is
 a disposable legacy cache: no supported reader depends on it, and no installer,
 repair, or migration deletes it automatically.
 
@@ -233,7 +233,8 @@ Windows Task Scheduler remains the native Windows scheduler. macOS uses a per-us
 LaunchAgent and Linux uses a per-user systemd timer; cron is explicit degraded
 fallback only. Blackboard tables reuse `markdown-transactions-v3.sqlite3`, capture
 reuses Queue v3 intents/terminal proof, and the active operational database count
-remains two. No daemon, MCP tool, runtime root, or automatic Git operation is added.
+remains two. No daemon, MCP tool or runtime root is added, and no automatic Git
+operation beyond the nightly fast-forward of the default branch.
 Blackboard adds only `blackboard_claim_epochs` and `blackboard_claims` to the exact
 coordinator-v3 schema. They provide bounded all-or-none resource claims, renewable
 logical leases, expiry/reclaim, and monotonic fencing; authoritative task, conflict,
@@ -584,7 +585,7 @@ or nonzero active state remains fail-closed.
   `knowledge/projects/<slug>/journal.md`,
   `context.md`, `.blackboard/`. Template tracked; real projects gitignored.
   `context.md` is written on request by
-  `uv run python scripts/build_context.py --slug <name> --write`; see
+  `uv run python scripts/build_context.py <name> --write`; see
   `docs/research/2026-09-18-the-project-context-page-gets-its-command-back.md`.
 - `knowledge/daily/archive/YYYY-MM/bag-<timestamp>-<id>/` — private immutable,
   uncompressed BagIt-style daily-log bags and
@@ -687,22 +688,22 @@ cache/evidence-graph/generations/<generation-id>/
 
 ### Evidence-cache migration and rollback
 
-There is no automatic legacy-cache deletion and no supported end-user migration CLI
-yet. Generation refresh is integrated with `doctor.run_generation_maintenance()`
-and nightly maintenance. Migration therefore preserves both layouts:
+The generation is the only index since 2026-09-23: the four legacy cache paths are
+read by nothing and may be deleted, and nothing deletes them automatically.
+Generation refresh is integrated with `doctor.run_generation_maintenance()`, the
+nightly pass and every successful command-line compile; `doctor --rebuild-generation`
+builds one on demand.
 
 1. Keep authoritative `knowledge/`, Git history, and project journals unchanged.
-2. Keep all four legacy cache paths while a candidate generation is built and
-   validated.
-3. Switch readers only through catalog CAS activation.
-4. Verify returned generation/fallback fields before treating migration as complete.
-5. Retain legacy caches until installed-vault evidence authorizes their removal.
+2. Switch readers only through catalog CAS activation.
+3. Verify returned generation/fallback fields.
 
 For safe rollback, stop active commands and remove only the derived
 `cache/evidence-graph/` tree, or reactivate a previously validated generation through
 the catalog API. Do not delete `knowledge/`, project journals, Git data, or `run/`.
-With legacy caches retained, readers fall back to legacy FTS/vector/Lance paths;
-graph-dependent code tools use bounded live extraction and label it incomplete.
+Until a generation is active, memory search reads Markdown directly and says
+`no_active_generation`; graph-dependent code tools use bounded live extraction and
+label it incomplete.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`,
   `capture-failures.jsonl` (bounded trail of lost prompt/post-tool captures),
   and `logs/maintenance/` (owner-only `*.out.log` / `*.err.log` artifacts holding

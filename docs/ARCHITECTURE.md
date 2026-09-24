@@ -309,7 +309,9 @@ to quarantine, and automatic semantic supersession remains disabled until the fr
 benchmark demonstrates no more than 1% false supersession. There is no eager backfill
 of claim ledgers.
 
-The system performs no automatic Git staging, commit, branch, or remote operation.
+The system performs no automatic Git staging, commit or push; its one automatic Git
+operation is the nightly fetch and fast-forward of the checkout on its default branch,
+which declines when it would touch a locally modified file.
 It adds no cloud service, remote queue/cache, or persistent daemon. Runtime databases
 coordinate local work only. Operational defaults are 10-second transaction and
 5-second queue busy timeouts; 2-day transaction/undo retention; 90-day archive hot
