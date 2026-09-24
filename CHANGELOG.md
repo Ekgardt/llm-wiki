@@ -195,6 +195,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A foreground subagent's report is kept with its session.** The session record
+  dropped every tool result, so the conclusion a foreground subagent returned was
+  missing from it; it is now kept as `**subagent report:**`, bounded to 8 000
+  characters. A background launch's receipt is skipped: its report arrives as a
+  notification the record already keeps. There is no separate subagent capture,
+  which would classify each subagent again and duplicate the report. See
+  `docs/research/2026-09-24-a-subagents-report-is-kept-with-its-session.md`.
 - **The documents say what the code does.** The three READMEs, USER-GUIDE,
   ARCHITECTURE, STRUCTURE and the operating model no longer tell a reader to keep
   the retired legacy index, no longer say search falls back to it, name the pinned

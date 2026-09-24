@@ -10,7 +10,9 @@ decides only whether the session also deserves a compiled page.
 
 The record keeps the conversation and drops the tool traffic to one line per
 call — the studied setting is dialogue, and tool output is exactly the noise that
-drowns the signal.
+drowns the signal. One tool result is not traffic: a foreground subagent's report,
+which is another agent's conclusion in prose, is kept as `**subagent report:**`
+(docs/research/2026-09-24-a-subagents-report-is-kept-with-its-session.md).
 
 See knowledge/notes/session-evidence-retention-decision.md.
 """
@@ -25,6 +27,10 @@ from pathlib import Path
 SESSION_EVIDENCE_DIR = "knowledge/raw/sessions"
 MAX_EVIDENCE_BYTES = 512 * 1024
 MAX_TOOL_LINE_CHARS = 200
+# The host's subagent tool: `Agent`, named `Task` by older hosts.
+SUBAGENT_TOOLS = frozenset({"Agent", "Task"})
+MAX_SUBAGENT_REPORT_CHARS = 8000
+SUBAGENT_REPORT_CUT = " _(report cut at the size limit)_"
 TRUNCATION_NOTE = "\n\n_(record truncated at the size limit)_\n"
 # No dots: a session id needs none, and a name that cannot contain `..` is one
 # less thing to reason about when it becomes a path.
@@ -148,20 +154,48 @@ def _rendered_text(block: Mapping[str, object], role: str) -> str | None:
     return f"**{role}:** {text}"
 
 
-def _rendered_kind(block: Mapping[str, object], role: str) -> str | None:
-    kind = str(block.get("type") or "")
-    if kind == "tool_use":
-        return _tool_line(block)
-    if kind == "text":
-        return _rendered_text(block, role)
-    return None
+def _result_text(content: object) -> str:
+    texts = [_text_of(block) for block in _blocks_of(content) if isinstance(block, Mapping)]
+    return "\n\n".join(text for text in texts if text)
 
 
-def _rendered_block(block: object, role: str) -> str | None:
-    """One line for a tool call, the text itself for a turn, nothing for output."""
+def _clipped_report(text: str) -> str:
+    if len(text) <= MAX_SUBAGENT_REPORT_CHARS:
+        return text
+    return text[:MAX_SUBAGENT_REPORT_CHARS] + SUBAGENT_REPORT_CUT
+
+
+def _subagent_report(block: Mapping[str, object], subagent_calls: frozenset[str]) -> str | None:
+    """The report a foreground subagent returned; nothing for any other tool's output."""
+    if block.get("tool_use_id") not in subagent_calls:
+        return None
+    text = _result_text(block.get("content"))
+    if not text:
+        return None
+    return f"**subagent report:** {_clipped_report(text)}"
+
+
+_RENDERERS = {
+    "tool_use": lambda block, role, calls: _tool_line(block),
+    "text": lambda block, role, calls: _rendered_text(block, role),
+    "tool_result": lambda block, role, calls: _subagent_report(block, calls),
+}
+
+
+def _rendered_kind(
+    block: Mapping[str, object], role: str, subagent_calls: frozenset[str]
+) -> str | None:
+    renderer = _RENDERERS.get(str(block.get("type") or ""))
+    if renderer is None:
+        return None
+    return renderer(block, role, subagent_calls)
+
+
+def _rendered_block(block: object, role: str, subagent_calls: frozenset[str]) -> str | None:
+    """One line for a tool call, the text itself for a turn, a subagent's report."""
     if not isinstance(block, Mapping):
         return None
-    return _rendered_kind(block, role)
+    return _rendered_kind(block, role, subagent_calls)
 
 
 def _entry_role(entry: Mapping[str, object]) -> str:
@@ -171,12 +205,45 @@ def _entry_role(entry: Mapping[str, object]) -> str:
     return ""
 
 
-def _rendered_entry(entry: Mapping[str, object]) -> list[str]:
+def _is_subagent_call(block: object) -> bool:
+    if not isinstance(block, Mapping):
+        return False
+    return block.get("type") == "tool_use" and block.get("name") in SUBAGENT_TOOLS
+
+
+def _subagent_ids_in(entry: Mapping[str, object] | None) -> list[str]:
+    if entry is None or _entry_role(entry) != "assistant":
+        return []
+    blocks = _content_blocks(entry.get("message"))
+    return [str(block.get("id")) for block in blocks if _is_subagent_call(block)]
+
+
+def _subagent_call_ids(entries: Sequence[Mapping[str, object] | None]) -> frozenset[str]:
+    """The ids of every subagent call in the transcript."""
+    return frozenset(call for entry in entries for call in _subagent_ids_in(entry))
+
+
+def _launched_in_background(entry: Mapping[str, object]) -> bool:
+    """A background launch's result is a receipt; its report arrives as a notification."""
+    result = entry.get("toolUseResult")
+    return isinstance(result, Mapping) and result.get("isAsync") is True
+
+
+def _entry_calls(entry: Mapping[str, object], subagent_calls: frozenset[str]) -> frozenset[str]:
+    if _launched_in_background(entry):
+        return frozenset()
+    return subagent_calls
+
+
+def _rendered_entry(
+    entry: Mapping[str, object], subagent_calls: frozenset[str] = frozenset()
+) -> list[str]:
     role = _entry_role(entry)
     if not role:
         return []
+    calls = _entry_calls(entry, subagent_calls)
     blocks = _content_blocks(entry.get("message"))
-    lines = [_rendered_block(block, role) for block in blocks]
+    lines = [_rendered_block(block, role, calls) for block in blocks]
     return [line for line in lines if line]
 
 
@@ -223,13 +290,15 @@ def _verbatim_line(line: str) -> str:
     return line if note is None else note
 
 
-def _conversation_lines(entry: Mapping[str, object] | None) -> list[str]:
+def _conversation_lines(
+    entry: Mapping[str, object] | None, subagent_calls: frozenset[str]
+) -> list[str]:
     if entry is None:
         return []
     note = _gap_note(entry)
     if note is not None:
         return [note]
-    return _rendered_entry(entry)
+    return _rendered_entry(entry, subagent_calls)
 
 
 def render_transcript(text: str) -> str:
@@ -238,9 +307,10 @@ def render_transcript(text: str) -> str:
     entries = list(map(_decoded_entry, lines))
     if not any(map(_is_conversation, entries)):
         return "\n".join(map(_verbatim_line, lines)).strip()
+    subagent_calls = _subagent_call_ids(entries)
     rendered: list[str] = []
     for entry in entries:
-        rendered.extend(_conversation_lines(entry))
+        rendered.extend(_conversation_lines(entry, subagent_calls))
     return "\n\n".join(rendered)
 
 

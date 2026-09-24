@@ -258,7 +258,8 @@ retries only errors 5, 32, and 33 within the previous lease expiry. See
 **Session evidence (approved 2026-08-23):** every captured session writes a
 redacted copy of itself to `knowledge/raw/sessions/<date>/<session-id>.md` before
 any classification and regardless of the tier — the conversation verbatim, each
-tool call as one line naming the tool and its target. Retention never depends on
+tool call as one line naming the tool and its target, and a foreground subagent's
+report kept whole up to 8 000 characters. Retention never depends on
 a judgement made before the question exists; the classifier decides only whether
 a session also deserves a compiled page. That directory is private by default
 (`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
