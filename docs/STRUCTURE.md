@@ -593,7 +593,11 @@ or nonzero active state remains fail-closed.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of
-  `raw/` inside the Markdown transaction's allowed roots.
+  `raw/` inside the Markdown transaction's allowed roots. The weekly queue purge
+  writes a second one outside the transaction: `knowledge/raw/queue-archive/<date>/`,
+  owner-only, the export `memory_queue purge` makes of finished queue work (intents
+  and decisions included) before it deletes that work from `run/` after
+  `queue_result_retention_days` (2026-09-24).
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 

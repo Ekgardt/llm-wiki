@@ -80,9 +80,14 @@ def list_worktrees(checkout: Path) -> list[Worktree]:
 
 
 def _indexable(worktree: Worktree) -> bool:
+    """A live worktree outside the host's job directory (`ephemeral_paths`)."""
+    from ephemeral_paths import is_throwaway_checkout
+
     if worktree.bare or worktree.prunable:
         return False
-    return worktree.path.is_absolute() and worktree.path.is_dir()
+    if not (worktree.path.is_absolute() and worktree.path.is_dir()):
+        return False
+    return not is_throwaway_checkout(worktree.path)
 
 
 # --------------------------------------------------------------------------

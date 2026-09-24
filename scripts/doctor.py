@@ -1620,10 +1620,11 @@ def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[s
     """
     if status != "ok" or not details.get("truncated_scans"):
         return status, message
+    totals = ", ".join(f"{state} {count}" for state, count in sorted((details.get("state_totals") or {}).items()))
     return (
         "ok",
         "Transaction state is healthy within the scanned rows; the scan stopped at "
-        "its row bound, so every count is a lower bound.",
+        f"its row bound. Rows by state: {totals or 'unknown'}.",
     )
 
 
@@ -1679,7 +1680,21 @@ def _transaction_check(
         return _unreadable_transactions(details, "Transaction state is unreadable.")
     if incomplete is not None:
         return incomplete
+    details["state_totals"] = _transaction_state_totals(path)
     return _transaction_result(details, states)
+
+
+def _transaction_state_totals(path: Path) -> dict[str, int]:
+    """Exact rows per state from one aggregate, whatever the scan bound read.
+
+    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+    """
+    try:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            rows = database.execute('SELECT state, COUNT(*) FROM "transaction" GROUP BY state')
+            return {str(state): int(count) for state, count in rows}
+    except sqlite3.Error:
+        return {}
 
 
 _QUEUE_COUNT_QUERIES = {

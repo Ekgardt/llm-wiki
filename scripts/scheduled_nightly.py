@@ -9,7 +9,7 @@ the wait bound passes) and user-turn keying; then the steps that read the
 compile's output — structural lint, backlink repair, registered-repository
 refresh and retention, generation pruning, orphaned-checkpoint clearing, LSP
 failure-evidence retirement, retirement of the memory's own call transcripts,
-model weights, the bounded memory-generation refresh, telemetry compaction
+retirement of old benchmark runs, model weights, the bounded memory-generation refresh, telemetry compaction
 and the health report; last, report pruning and the bounded fast-forward of
 the checkout. The log numbers the steps in the order they ran (`StepLog`).
 Never requires user interaction. All output goes to
@@ -347,6 +347,20 @@ def _own_calls_step() -> _Step:
     )
 
 
+def _benchmark_runs_step() -> _Step:
+    """Retire benchmark run directories untouched for a month; dataset caches stay.
+
+    1.5 GB under `cache/benchmarks/` on 2026-09-24 with nothing removing any of it.
+    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+    """
+    return _Step(
+        "retiring old benchmark run directories...",
+        "benchmark_runs",
+        _script("retire_benchmark_runs.py"),
+        120,
+    )
+
+
 def _lsp_evidence_step() -> _Step:
     """Retire LSP failure roots older than two weeks beyond the newest twenty.
 
@@ -410,6 +424,7 @@ def _post_compile_steps() -> list[_Step]:
         _checkpoint_step(),
         _lsp_evidence_step(),
         _own_calls_step(),
+        _benchmark_runs_step(),
         _Step(
             # The read path loads weights local-only; a cache that lacks the
             # two pinned models answers by words alone. Present files are not

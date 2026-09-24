@@ -2,8 +2,10 @@
 
 The scheduler is the same one that starts the nightly pass (`install_control.py`).
 The nightly ran at 03:00, so the weekly does not repeat it; it runs only its own
-steps, in order: the OKF conformance sweep, a queue status report, stale-page
-archiving, session-record archiving, daily-log archiving past the hot window,
+steps, in order: the OKF conformance sweep, a queue status report, the queue
+purge (finished work past its retention, exported to the private raw archive
+first), stale-page archiving, session-record archiving, daily-log archiving past
+the hot window,
 superseded-generation pruning, the opt-in contradiction check, A-MEM reflection
 and the L1 tier overviews.
 
@@ -20,7 +22,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,6 +41,30 @@ REFLECTION_BUDGET_SECONDS = 1800
 CONTRADICTIONS_STEP_SECONDS = 1800
 
 
+# The queue keeps finished work for `queue_result_retention_days`; the designed
+# purge exports it (intents and decisions included) to the private raw archive and
+# only then deletes it from `run/`. Nothing ran it until 2026-09-24. See
+# `docs/research/2026-09-24-every-store-has-a-bound.md`.
+QUEUE_ARCHIVE = ROOT / "knowledge" / "raw" / "queue-archive"
+
+
+def _queue_purge_command(script: Path) -> list[str]:
+    from reliable_memory import DEFAULTS
+
+    now = datetime.now(timezone.utc)
+    before = now - timedelta(days=DEFAULTS.queue_result_retention_days)
+    return [
+        sys.executable,
+        str(script / "memory_queue.py"),
+        "purge",
+        "--terminal-before",
+        before.isoformat(timespec="seconds"),
+        "--export",
+        str(QUEUE_ARCHIVE / now.strftime("%Y-%m-%d")),
+        "--include-dead",
+    ]
+
+
 def _script_steps() -> list[tuple[str, str, list[str], int]]:
     """(message, label, command, timeout) for every subprocess step, in order."""
     script = ROOT / "scripts"
@@ -54,6 +80,12 @@ def _script_steps() -> list[tuple[str, str, list[str], int]]:
             "status",
             [sys.executable, str(script / "memory_queue.py"), "status"],
             60,
+        ),
+        (
+            "archiving and purging queue work finished past its retention...",
+            "queue_purge",
+            _queue_purge_command(script),
+            600,
         ),
         (
             "auto-archiving stale pages (>180 days)...",

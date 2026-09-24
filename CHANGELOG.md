@@ -183,6 +183,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Every store that only grew has a bound.** Settled transaction rows and the
+  attempts of committed checkpoints are dropped after 90 days (checkpoint rows
+  and quarantined transactions stay), and doctor reports exact row totals by
+  state. The weekly runs the designed queue purge: finished work older than
+  `queue_result_retention_days` is exported to the private
+  `knowledge/raw/queue-archive/<date>/` and removed from `run/`. The hook error
+  log is trimmed with the scheduler logs; old lock probes, empty intent shards
+  and staged state links are swept (the state keeper no longer leaves one when
+  `rename` finds the same inode); benchmark run directories untouched for 30 days
+  are retired while dataset caches stay; and checkouts under the temporary or
+  host job directory are neither refreshed nor followed, and their code
+  generations are retired. See `docs/research/2026-09-24-every-store-has-a-bound.md`.
 - **An answer says how old its index is, and the index follows the compile.** A
   page compiled during the day was not searchable until the next nightly, and
   `recall` said `fresh`. A successful command-line compile now refreshes the

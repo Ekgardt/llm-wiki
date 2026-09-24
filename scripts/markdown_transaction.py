@@ -637,6 +637,24 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
 # See `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
 UNDO_RETENTION_DAYS = 2
 
+# How long a settled transaction's row and a committed checkpoint's attempts are
+# kept after their images are gone: the hot window the archive contract already
+# uses. Checkpoint rows and quarantined transactions are never removed here. See
+# `docs/research/2026-09-24-every-store-has-a-bound.md`.
+HISTORY_RETENTION_DAYS = 90
+
+_PRUNE_COMMITTED_ATTEMPTS = (
+    "DELETE FROM project_checkpoint_attempts WHERE created_at < ? AND EXISTS ("
+    "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
+    "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
+)
+_PRUNE_SETTLED_TRANSACTIONS = (
+    'DELETE FROM "transaction" WHERE state IN (\'committed\', \'discarded\') '
+    "AND artifacts_pruned_at IS NOT NULL AND updated_at < ? "
+    "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
+    "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
+)
+
 MAX_ATTEMPT_ORDINAL = 100
 
 # Transaction states a reserved checkpoint can never recover from: the write it
@@ -7483,6 +7501,21 @@ class MarkdownCoordinator:
                 if _parse_timestamp(row["updated_at"]) < cutoff:
                     pruned += self._prune_one(row, deadline, cancelled)
         return pruned
+
+    def prune_history(
+        self, *, retention_days: int = HISTORY_RETENTION_DAYS, now: datetime | None = None
+    ) -> dict[str, int]:
+        """Drop settled history past its window: committed attempts, then settled rows.
+
+        Attempts first, so the transactions they named are no longer named. A
+        transaction a checkpoint row names stays, and so does every quarantined
+        one; operations go with their transaction (`ON DELETE CASCADE`).
+        """
+        cutoff = _timestamp(_prune_cutoff(retention_days, now))
+        with self.writer_gate(), self._connect() as database, begin_immediate(database):
+            attempts = database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
+            transactions = database.execute(_PRUNE_SETTLED_TRANSACTIONS, (cutoff,)).rowcount
+        return {"attempts": attempts, "transactions": transactions}
 
     def _recover_interrupted_prunes(self) -> None:
         """Put back the images of every prune that died between rename and mark.
