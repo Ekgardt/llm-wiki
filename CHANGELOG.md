@@ -183,6 +183,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The vault follows its default branch.** The nightly update fast-forwarded
+  whatever branch was checked out, up to what `main` held, so a vault left on a
+  working branch never received what reached `main` from any other branch and
+  still said `current`. It now updates only on the default branch and answers
+  `skipped: not_on_default_branch` (naming the branch) anywhere else; a checkout
+  ahead of its remote says `ahead_of_remote`. See
+  `docs/research/2026-09-24-the-vault-follows-its-default-branch.md`.
 - **A long session in the vault is captured, and each capture keeps its window.**
   The prompt hook skipped every prompt inside the vault as "maintenance", so the
   owner's own sessions there never reached the every-20th-prompt capture; the
