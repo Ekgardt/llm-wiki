@@ -183,6 +183,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A vanished project is rebuilt by the night.** A project whose directory was
+  deleted while its committed checkpoints remained blocked every later checkpoint
+  with `ProjectJournalRebuildRequired`; the nightly re-attempted it, printed
+  `failed` and exited 0, and the pass said `failures=0`. The nightly now runs the
+  same `rebuild_journal` + `recover` the manual `project_journal.py --rebuild`
+  runs, when the journal is behind the store (never over a journal that is ahead),
+  and exits 1 for a row it could not settle. Doctor ages a stuck sequence from its
+  first attempt, so the night's own retry no longer hides it, and calls an
+  unreadable checkpoint database `degraded`. See
+  `docs/research/2026-09-24-a-vanished-project-is-rebuilt-by-the-night.md`.
 - **The weekly pass has its own record, and doctor reads it.** The weekly failed
   on 2026-09-13 and 2026-09-20 and nothing said so: a failure before its first
   step went into the nightly's field, which the next nightly overwrote, a failure

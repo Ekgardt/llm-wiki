@@ -32,7 +32,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from project_journal import ProjectLeaseBusy, ProjectStore, _timestamp  # noqa: E402
+from project_journal import (  # noqa: E402
+    ProjectJournalRebuildRequired,
+    ProjectLeaseBusy,
+    ProjectStore,
+    _timestamp,
+)
 
 # Every checkpoint written since the rename is named by `_batch_occurrence_id`.
 # Anything else on an unsettled row predates it and can never be re-requested.
@@ -142,11 +147,42 @@ def repair_one(store: ProjectStore, project: str, sequence: int) -> str:
         store._release(lease)  # noqa: SLF001
 
 
+FAILED = "failed: "
+
+
+def _failed(error: BaseException) -> str:
+    return f"{FAILED}{type(error).__name__}: {error}"
+
+
+def _rebuilt(store: ProjectStore, behind: ProjectJournalRebuildRequired) -> str:
+    """Rebuild a journal that fell behind its committed checkpoints, then settle.
+
+    The journal is a projection of the committed checkpoints (issue #20), and
+    `project_journal.py --rebuild` did exactly this by hand. A journal *ahead* of
+    the store is never rebuilt over: that would drop entries. See
+    `docs/research/2026-09-24-a-vanished-project-is-rebuilt-by-the-night.md`.
+    """
+    if behind.journal_head >= behind.sequence - 1:
+        return _failed(behind)
+    report = store.rebuild_journal(behind.project)
+    settled = len(store.recover(behind.project))
+    return f"rebuilt: {report['events']} events, head {report['last_sequence']}, {settled} pending settled"
+
+
 def _outcome(store: ProjectStore, project: str, sequence: int) -> str:
     try:
         return repair_one(store, project, sequence)
+    except ProjectJournalRebuildRequired as behind:
+        return _rebuild_outcome(store, behind)
     except Exception as error:  # noqa: BLE001
-        return f"failed: {type(error).__name__}: {error}"
+        return _failed(error)
+
+
+def _rebuild_outcome(store: ProjectStore, behind: ProjectJournalRebuildRequired) -> str:
+    try:
+        return _rebuilt(store, behind)
+    except Exception as error:  # noqa: BLE001
+        return _failed(error)
 
 
 def repair(store: ProjectStore) -> list[str]:
@@ -155,6 +191,11 @@ def repair(store: ProjectStore) -> list[str]:
         outcome = _outcome(store, project, sequence)
         lines.append(f"{project} {sequence} ({state}, {occurrence[:16]}…): {outcome}")
     return lines
+
+
+def any_failed(lines: list[str]) -> bool:
+    """A row the night could not settle fails the step, so the pass says so."""
+    return any(f": {FAILED}" in line for line in lines)
 
 
 def main() -> int:
@@ -169,11 +210,15 @@ def main() -> int:
     args = parser.parse_args()
     store = ProjectStore(Path(args.vault), Path(args.state_root))
     if args.list_only:
-        rows = orphaned_rows(store)
-        print("\n".join(f"{p} {s} ({st}, {o[:16]}…)" for p, s, st, o in rows) or "none")
-        return 0
+        return _list_only(store)
     lines = repair(store)
     print("\n".join(lines) or "no orphaned checkpoint names")
+    return int(any_failed(lines))
+
+
+def _list_only(store: ProjectStore) -> int:
+    rows = orphaned_rows(store)
+    print("\n".join(f"{p} {s} ({st}, {o[:16]}…)" for p, s, st, o in rows) or "none")
     return 0
 
 

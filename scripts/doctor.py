@@ -4879,14 +4879,19 @@ CHECKPOINT_STUCK_SECONDS = 3600.0
 
 
 def _checkpoint_head_rows(path: Path) -> list[dict[str, Any]]:
-    """The lowest unfinished sequence per project, or nothing we can read."""
+    """The lowest unfinished sequence per project, aged from its first attempt.
+
+    From the first, not the latest: the nightly's own re-attempt used to reset the
+    age, so the report written at 03:09 said `ok` about a project stuck for a day.
+    See `docs/research/2026-09-24-a-vanished-project-is-rebuilt-by-the-night.md`.
+    """
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
             "SELECT c.project AS project, c.sequence AS sequence, c.state AS state, "
             "COALESCE(("
-            "  SELECT MAX(a.created_at) FROM project_checkpoint_attempts a"
+            "  SELECT MIN(a.created_at) FROM project_checkpoint_attempts a"
             "   WHERE a.project = c.project AND a.sequence = c.sequence"
             "), ("
             '  SELECT t.created_at FROM "transaction" t'
@@ -4956,7 +4961,7 @@ def _checkpoint_check(state_root: Path, now: datetime) -> dict:
     except sqlite3.Error as error:
         details["error"] = str(error)[:200]
         return _result(
-            "checkpoints", "ok", "The checkpoint database could not be read.", details
+            "checkpoints", "degraded", "The checkpoint database could not be read.", details
         )
     stuck = [row for row in rows if _checkpoint_stuck(row, now)]
     details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
