@@ -50,6 +50,7 @@ from pathlib import Path
 
 from bounded_io import IO_CHUNK_BYTES
 from evidence_graph import MAX_NODE_FILTER
+from reliable_memory import begin_immediate
 
 TRACE_SCHEMA = "execution-trace/v1"
 STORE_SCHEMA_VERSION = "execution-traces/v1"
@@ -417,7 +418,10 @@ def open_store(state_root: Path | None = None) -> sqlite3.Connection:
     path = store_path(state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     database = _configure(sqlite3.connect(path))
-    _ensure_schema(database)
+    # Inside a write transaction for the reason `retrieval_telemetry.record_events`
+    # states: schema creation outside one is the lock promotion SQLite will not wait for.
+    with begin_immediate(database):
+        _ensure_schema(database)
     return database
 
 

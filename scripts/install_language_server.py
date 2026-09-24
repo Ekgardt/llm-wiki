@@ -66,6 +66,7 @@ from pinned_download import (
     MAX_PATH_COMPONENTS,
     PinnedDownloadError,
     download_pinned,
+    retry_transient,
 )
 from reliable_memory import canonical_json_bytes
 
@@ -161,6 +162,15 @@ def _fsync_tree(root: Path) -> None:
 
 
 def _downloaded(url: str, target: Path, deadline: float, limit: int) -> None:
+    """The archive on disk; a transient network failure is tried again.
+
+    Each attempt opens the target afresh, so a partial file from a reset
+    connection is truncated rather than appended to.
+    """
+    retry_transient(lambda: _download_once(url, target, deadline, limit), deadline=deadline)
+
+
+def _download_once(url: str, target: Path, deadline: float, limit: int) -> None:
     with open(target, "wb") as handle:
         _stream_pinned(url, handle, deadline, limit)
         _fsync_file(handle)

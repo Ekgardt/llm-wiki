@@ -183,6 +183,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Telemetry schema is created inside the write transaction.** Eight processes
+  recording into a fresh telemetry database on Windows: five failed at once with
+  `database is locked` although the connection had a busy timeout, because
+  `CREATE … IF NOT EXISTS` outside a transaction promotes a read lock to a write
+  lock, the one wait SQLite refuses. `record_events` and `trace_ingest.open_store`
+  now create their schema under `BEGIN IMMEDIATE` (CI run 35941975284, 2026-09-24).
+- **A pinned download that meets a transient network error is tried again.**
+  `pinned_download.retry_transient` runs a download up to three times, after 1 s
+  and 4 s, for a connection reset, a timeout, HTTP 408, 429 or 5xx, inside the
+  install deadline; a 4xx, a redirect or a digest mismatch is raised at once. The
+  language-server installer uses it, truncating the target between attempts; one
+  reset had ended a CI install (run 35926589114, 2026-09-23). See
+  `docs/research/2026-09-24-two-post-merge-failures-on-main.md`.
 - **The adoption gate names its cause and the queue waits out a busy
   database.** `reliability_v3_record_invalid` now carries what the validation
   saw (`code: Cause: message`), and the adopted queue validates adoption
