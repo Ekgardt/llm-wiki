@@ -44,6 +44,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── retrieval_telemetry.py       private bounded retrieval event cache
 │   ├── reflection.py                v4.0: A-MEM page consolidation
 │   ├── mcp_server.py                v4.0: MCP server (12 task-shaped tools, stdio)
+│   ├── mcp_supervisor.py            stdio supervisor: reloads the server child on code change
 │   ├── integration_adapter.py       v4.x: thin native lifecycle adapter
 │   ├── event_envelope.py            v4.x: shared lifecycle event contract
 │   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
@@ -531,7 +532,9 @@ or nonzero active state remains fail-closed.
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (entry point; fusion lives in `retrieval.py`),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
-  lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
+  lifecycle boundary), `mcp_server.py` (12 task-shaped tools; run as a program it is
+  `mcp_supervisor.py`, which serves the tools from a child it restarts, with the client's
+  initialisation replayed, when the code under `scripts/` changes), and `doctor.py`.
 - `tests/` — full regression suite. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).

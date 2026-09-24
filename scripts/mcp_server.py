@@ -52,6 +52,14 @@ from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Run as a program, this file is the supervisor that restarts the server when its
+# code changes; the server itself runs in a child with LLM_WIKI_MCP_WORKER=1. See
+# `docs/research/2026-09-24-the-memory-server-reloads-its-own-code.md`.
+if __name__ == "__main__" and os.environ.get("LLM_WIKI_MCP_WORKER") != "1":
+    import mcp_supervisor
+
+    raise SystemExit(mcp_supervisor.main(sys.argv[1:]))
+
 from bounded_io import read_stable_bytes  # noqa: E402
 
 # A queue commit locks readers out for milliseconds; wait it out instead of

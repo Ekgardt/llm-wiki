@@ -183,6 +183,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The memory server reloads its own code.** A Claude Code session keeps its
+  stdio MCP server for its whole life, and the nightly changes the code under it:
+  on 2026-09-23 a server kept its old `bounded_io`, imported a new
+  `evidence_graph` lazily, and answered `get_architecture` with
+  `operation_failed` for the rest of the session. `mcp_server.py`, run as a
+  program, is now a standard-library supervisor (`mcp_supervisor.py`) that serves
+  the tools from a child process. When a request arrives, none is in flight and
+  the code under `scripts/` has changed, it restarts the child and replays the
+  client's initialisation; a child that exits answers what was in flight with an
+  error and is started again. The registered command is unchanged, and
+  `--help` no longer starts a server. See
+  `docs/research/2026-09-24-the-memory-server-reloads-its-own-code.md`.
 - **A vanished project is rebuilt by the night.** A project whose directory was
   deleted while its committed checkpoints remained blocked every later checkpoint
   with `ProjectJournalRebuildRequired`; the nightly re-attempted it, printed
