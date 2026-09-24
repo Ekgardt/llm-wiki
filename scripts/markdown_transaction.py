@@ -3502,9 +3502,26 @@ def _transient_adoption_contention(error: BaseException) -> bool:
     return False
 
 
+def _retire_strays_before_validation(state_root: Path) -> None:
+    """A provably stray candidate is moved aside here, where it would refuse.
+
+    Only when a candidate exists: two `lstat`s otherwise. A candidate that holds
+    data, a live owner or an adoption in flight stays, and the validation below
+    refuses exactly as it did. See
+    `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
+    """
+    from installed_memory_repair import STRAY_CANDIDATE_NAMES, retire_stray_candidates
+
+    run = Path(state_root) / "run"
+    if not any(os.path.lexists(run / name) for name in STRAY_CANDIDATE_NAMES):
+        return
+    retire_stray_candidates(state_root, datetime.now(timezone.utc))
+
+
 def _validate_adoption_with_retry(vault: Path, state_root: Path) -> None:
     from installed_memory_repair import require_reliability_v3_adopted
 
+    _retire_strays_before_validation(state_root)
     deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
     while True:
         try:

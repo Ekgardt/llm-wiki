@@ -183,6 +183,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A stray candidate is retired where it refuses.** A provably stray
+  pre-adoption candidate (complete adoption, no adoption in flight, no row in any
+  data table, no live owner) is moved into `run/coordinator-quarantine/` or
+  `run/queue-quarantine/` by the writer that meets it, not only by
+  `doctor --repair`, which nothing ran on a schedule: on 2026-09-17..23 one stray
+  refused capture, the nightly and the weekly for six days. The queue candidate is
+  covered too, the quarantine directory is created `0700`, and doctor's adoption
+  check counts what has been quarantined. One rule, in
+  `installed_memory_repair.retire_stray_candidates`. See
+  `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
 - **A test no longer reads a pid file before it is written.** The push run on
   `main` after PR 41 failed on Windows: a processor killed at its 1-second deadline
   between creating its pid file and writing it left an empty file, and the test
