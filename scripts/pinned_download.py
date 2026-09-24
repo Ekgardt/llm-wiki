@@ -171,3 +171,41 @@ def download_pinned(url: str, write: object, *, deadline: float, limit: int) -> 
         total = _stream(response, write, deadline, limit, declared)
     _require_complete(total, declared)
     return total
+
+
+# Three attempts: the first, then after 1 s and after 4 s. One TCP reset ended a
+# CI install on 2026-09-23 (run 35926589114); a reset, a timeout, a 408, a 429 or
+# a 5xx is transient, a 4xx, a redirect or a digest mismatch is not.
+TRANSIENT_WAITS = (1.0, 4.0)
+_TRANSIENT_HTTP = frozenset({408, 429})
+
+
+def is_transient_network_error(error: BaseException) -> bool:
+    """A failure the next attempt may not meet: the network's, not the pin's."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in _TRANSIENT_HTTP or error.code >= 500
+    return isinstance(error, (urllib.error.URLError, ConnectionError, TimeoutError))
+
+
+def _may_retry(error: BaseException, wait: float, deadline: float) -> bool:
+    if not is_transient_network_error(error):
+        return False
+    return time.monotonic() + wait < deadline
+
+
+def retry_transient(
+    operation: object,
+    *,
+    deadline: float,
+    waits: tuple[float, ...] = TRANSIENT_WAITS,
+    sleep: object = time.sleep,
+) -> object:
+    """Run `operation` again after a transient network error, inside the deadline."""
+    for wait in waits:
+        try:
+            return operation()
+        except Exception as error:
+            if not _may_retry(error, wait, deadline):
+                raise
+            sleep(wait)
+    return operation()

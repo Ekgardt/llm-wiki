@@ -339,7 +339,15 @@ def record_events(
         return 0
     database = _open_write_database(Path(db_path or TELEMETRY_DB), busy_ms=busy_ms)
     try:
-        _ensure_schema(database)
+        # Schema under its own write lock: created outside a transaction, each
+        # `CREATE … IF NOT EXISTS` reads under a shared lock and then asks for
+        # the write lock, the one promotion SQLite refuses to wait for when
+        # another writer is mid-commit (busy handler skipped, `database is
+        # locked` at once). Eight writers on a fresh file did that on Windows
+        # (CI run 35941975284, 2026-09-24). Its own transaction, not the
+        # batch's, so a batch that rolls back leaves the schema in place.
+        with begin_immediate(database):
+            _ensure_schema(database)
         with begin_immediate(database):
             _trim_for_batch(database, len(events), max_rows)
             _insert_events(database, events)
