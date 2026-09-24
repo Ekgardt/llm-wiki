@@ -66,6 +66,11 @@ Files: `README.md`, `README.ru.md`, `README.zh-CN.md`, `docs/USER-GUIDE.md`,
    old (a nightly period plus a day of grace); absent or older is `degraded`.
 5. Version 4.1.0: `[Unreleased]` becomes `[4.1.0] — <date of merge>`, `pyproject.toml` says
    4.1.0, and the READMEs name `v4.1.0`. The tag is created on the merged commit.
+   **Superseded the same day** by
+   `docs/research/2026-09-24-a-green-main-tags-its-version.md`: the changes since 4.0.0
+   remove supported surface (Cursor and Antigravity, the v3 queue import, the legacy
+   index files), so the claim above that they change no public contract was wrong and
+   the release is 5.0.0; the tag is created by the `release-tag` workflow.
 
 ## Sources
 

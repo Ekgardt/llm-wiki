@@ -3,7 +3,7 @@
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
 **Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git и полный контроль пользователя.**
 
@@ -169,13 +169,13 @@ remote на `no-push`.
 запускает. Напечатать их для любого тега из локального клона:
 
 ```bash
-uv run python scripts/release_manifest.py v4.1.0 --markdown
+uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
 Установить именно этот коммит:
 
 ```bash
-git checkout --detach "$(git rev-parse 'v4.1.0^{commit}')"
+git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
 bash ./install.sh
 ```
 

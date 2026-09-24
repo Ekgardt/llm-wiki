@@ -6,54 +6,290 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Removed
+## [5.0.0] — 2026-09-24
 
-- **Code no product path reaches.** Seven functions nothing called; twelve that
-  only their own tests called (`MemoryQueue.export_task`,
-  `payload_for_execution`, `retrieval.trace_to_dict`,
-  `project_journal.build_handoff`, `retrieval_telemetry.record_event` and
-  `count_events_after`, and six smaller ones); the Windows directory-listing layer
-  of `generation_catalog.py` they left unreached; and the module-level queue owner
-  of `memory_queue.py`, which no product module called since the queue worker and
-  doctor own the queue through `MemoryQueue.queue_owner`. Tests that used a removed
-  function as a tool now use the product path. Test seams and the Reliability v3
-  repair and discard operations stay. `compile_memory.py --all` stays deprecated
-  until 5.0.0. See
-  `docs/research/2026-09-24-code-no-product-path-reaches-is-removed.md`.
-- **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
-  its verdict sidecar are gone: the owner does no manual labelling, and the two
-  automatic readings above replace the step it existed for. Corpus schema v2
-  (`label_reviewed`, `human_tier`) is refused; the only v2 corpus was the private
-  live one, rebuilt under v3 (2026-09-23).
-- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
-  reader (no writer since 2026-08-20, no file on the live vault), the
-  positional `git_range` of `analyze_impact` (every caller names its
-  endpoints), and the readers for incremental-manifest versions v1–v4 (every
-  generation on the live vault is v5; a fresh install builds v5). A parent
-  whose manifest cannot be read is now rebuilt in full instead of failing the
-  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
-  queue migration stay, with the evidence and the plan for each in
-  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
-- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
-  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
-  are read and written by nothing: their builders, readers, swap lock and
-  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
-  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
-  a hundred functions with them. On the live vault the legacy index answered
-  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
-  it by design until now. The evidence generation is the only index: without
-  one a search reads Markdown directly, bounded by its deadline, and every
-  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
-  the generation and `--status` names it. See
-  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
-- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
-  per task under `run/queue/`; the importer, its marker, quarantine, lease
-  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
-  installers still created. Measured before removal: the installer's adoption
-  already refused such a vault and never ran the import. A `run/queue/` holding
-  records is now refused by the queue (`legacy_json_queue_unsupported`) and
-  named by `doctor`, which keeps `run/` from deletion while they exist. See
-  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+Everything since 4.0.0, found and fixed by the audits of 2026-09-17 and
+2026-09-24. A major release: Cursor and Antigravity are no longer supported
+platforms, an upgrade from v3.3.0–v3.4.0 no longer imports the JSON queue, and
+the legacy index files are no longer read (see Removed).
+
+### Added
+
+- **A ledger of things and events, posted once and counted by code.** The
+  nightly fact-keys call now also returns, per user turn, the things the person
+  names and the dated events about them; `scripts/ledger.py` posts each record
+  once under a digest of its fields and source pointer, merges two records of one
+  thing within 30 days into one event unless a stated quantity contradicts (the
+  CDC's case de-duplication rule, decided field by field as Fellegi–Sunter), and
+  `count` answers "how many" over every record of a kind with a tier —
+  "confirmed" when every record is the user's own dated words, "probable"
+  otherwise — and the pointers; `reconcile` flags a reader's number the ledger
+  does not hold. The rows ride into the generation as a `ledger` table of
+  `search.sqlite3`, disposable like the rest of it; a generation built before the
+  table carries none and the reader is told so. A thing seen on two or more days
+  opens the recurrence gate and its entity page is extended with dated pointer
+  lines by code, never rewritten by a model. Zero provider calls at question
+  time. Approved 2026-09-22; see `docs/STRUCTURE.md` and
+  `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
+- **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
+  records all of them on `694991b`: the parity stand at 16 of 16 against the
+  other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the
+  14 both answered; code navigation 200/200 definitions and F1 1.0 on references
+  and calls with 0 orphan processes; durability 0 silent losses over 108 killed
+  trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
+  at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
+  last one is open and unexplained.
+- **A killed test names itself, without paying for it.** `PYTHONFAULTHANDLER=1`
+  on every shard, and the name of the running test appended to
+  `LLM_WIKI_TEST_PROGRESS_FILE` — one line per test, uploaded with the timings.
+  `-v` was tried first and cost two runs: a 40-minute and then a 65-minute cap on
+  Windows shards that normally take 22-26 minutes.
+
+- **The memory retires its own residue.** The nightly removes the transcripts the
+  memory's own provider calls left under `~/.claude/projects` before
+  `--no-session-persistence` (2026-09-14): `sdk-cli` records from the vault, the
+  temporary directory or the job directory, and the project directories they
+  emptied. A held session is never touched. The owner deleted 1 082 of them by
+  hand on 2026-09-23; that was the last time. See
+  `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
+- **The classification corpus labels itself.** `benchmark/build_flush_corpus.py`
+  labels each real session with two automatic readings that never see the
+  product's tier names: the rubric of 2026-08-23 and a new extractive reading that
+  must quote, verbatim, the one passage a reader would still need later — a quote
+  the transcript does not carry voids the reading. A case the readings agree on is
+  confirmed; one they disagree on is contested, stays in the corpus, and counts in
+  no metric, the rule the product applies to a claim its evaluators disagree on.
+  The stand reports confirmed and contested counts; nothing is "provisional until
+  a person reviews it". The corpus now carries the rendered, bounded conversation
+  the product classifies, not the raw host JSONL it stopped reading on 2026-09-06.
+  Schema v3 replaces v2. See `docs/research/2026-09-23-the-corpus-labels-itself.md`.
+
+- **A verified digest is remembered across processes, and the warm-up it would
+  have hidden is gone.** Hashing every artifact of a generation against its
+  manifest is what a cold open paid, in every new process, to learn what the
+  previous process already knew about an immutable file. It is now remembered by
+  stat identity — generation, path, device, inode, size, mtime — in the disposable
+  `cache/evidence-graph/verified-artifacts.json`, with Git's racily-clean rule:
+  an artifact whose mtime is not strictly older than the cache's own is hashed
+  anyway, and an unreadable cache is an empty cache. Cold open on the installed
+  vault 2.22 s → 1.71 s, and 4.9 s → 1.71 s across the evening. The graph warm-up
+  added earlier the same day is deleted: it moved the cost rather than removing
+  it, which is what the owner called it. What remains of the 1.71 s is measured
+  and named in
+  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`, and
+  two of its three parts were the same waste elsewhere: the format receipt hashed
+  241 MB to key a verdict it already had, and the index check walked all 3 405
+  rows on a read that already has the digest. Both fixed, cold open **1.23 s** —
+  4.9 s this morning. What remains is the seal's own read after the open, which is
+  the fence itself and stays.
+- **A reader checks the digest, a writer derives.** A cold code answer on the
+  installed vault re-derived all 3 405 chunks of the search index before
+  answering — 1.68 s of it spent inferring the language of each chunk — to prove
+  that our own chunker is deterministic, when the artifact digest, the manifest's
+  versions and the entry seal already pin every input. That re-derivation now runs
+  where the rows are created and in `doctor`; a read trusts the digest. Depth is
+  part of the memo keys, and a deep verdict answers a shallow question while the
+  reverse never does. Cold 4.9 s → 2.22 s, warm 0.31 s.
+- **The vault is a repository too, and answers about its own code.** The
+  decision left open this morning, taken on the owner's instruction to decide by
+  rules 2 and 4: the vault's checkout gets a code generation beside its memory
+  one, because current practice keeps one index per data lifecycle and code apart
+  from documents, and because mixing them re-derives 240 MB of code index for a
+  knowledge edit. `admit_repository` no longer refuses the vault; a vault's code
+  roots exclude `knowledge/` and say so; a generation that holds code names its
+  roots in its manifest, so one checkout can carry both and a reader can tell
+  them apart; the graph opener asks for the code generation first; and
+  `refresh-all` adopts the vault once so the nightly keeps it fresh with no
+  operator action. Measured after indexing the installed vault:
+  `get_architecture mode=query` for `fuse_rrf` answers in 4.4 s where it
+  returned `"nodes": []` this morning. Reasons, sources and costs:
+  `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
+- **The decision rule is satisfied.** Three runs, every condition met on the
+  surface an agent actually reaches: 16 correct answers of 16 against
+  codebase-memory-mcp's 15, zero confident-wrong answers against their one, no
+  non-answers on either side, tokens 1.45× against a 1.5× ceiling and p95 per
+  task 1.58× against a 2× ceiling. The rule was written before the first number
+  was read and has not been touched since; by it, llm-wiki can now replace the
+  other tool, and removing it is the owner's call. What moved the numbers is in
+  `docs/research/2026-09-12-the-rule-is-satisfied.md`: six changes, of which one
+  added a capability and five removed waste — two wrong answers and four repeats
+  of work already done. Measured on the worktree checkout, because the installed
+  vault still holds no code generation of its own.
+- **Sixteen of sixteen, against fifteen.** After the two defect fixes and the
+  three changes the owner approved on 2026-09-12, three runs of the parity set
+  give our two surfaces 16 correct answers of 16 against codebase-memory-mcp's
+  15, with zero confident-wrong answers against their one and no non-answers on
+  either side; every grade repeated exactly across the three runs. The
+  cross-service route question is ours too: correct in 0.6 s against their
+  partial in 2.0 s. Cost is the one condition of the decision rule still unmet
+  on the default surface — tokens 1.57× and p95 2.74× against ceilings of 1.5×
+  and 2× — while the `query` surface passes all four at 1.18× and 1.36×. The
+  other tool stays installed until the default surface passes too, and what the
+  remaining gap is made of is measured in
+  `docs/research/2026-09-12-sixteen-of-sixteen.md`: two `find_dead_code` calls at
+  11 s carry the whole p95, and a quarter of the largest answer is one absolute
+  path prefix repeated 110 times.
+
+- **The parity numbers exist, and they say keep the other tool.** Three runs of
+  the sixteen-task set and three of the cross-service pair, llm-wiki against
+  codebase-memory-mcp, both sides indexing the same checkout, graded by a rule
+  written before the numbers were read. Correct answers: 13 and 14 of 16 for our
+  two columns against 15; tokens 9 869 / 7 685 against 5 565; p95 per task
+  12.7 s / 10.2 s against 4.2 s; one confident-wrong answer each and no
+  non-answers on either side. Every grade repeated exactly in all three runs. We
+  win "which tests exercise this function" outright and the cross-service route
+  question in 0.6 s against 2.0 s; we lose "where is this constant defined" in
+  every run, because the generation holds no module-level constant node. Two of
+  the rule's four conditions fail, so codebase-memory-mcp stays installed and
+  the four things that would close the gap are named in
+  `docs/research/2026-09-12-the-first-honest-parity-numbers.md`. Runs are in
+  `benchmark/code-parity-v2-2026-09-12-run{1,2,3}.json` and
+  `benchmark/code-parity-cross-service-2026-09-12-run{1,2,3}.json`.
+
+- **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
+  `definition`, `references`, `implementations`, `type`, `callers`/`callees`
+  and `hover` for `.rs`. The binary is published, but it needs a toolchain
+  behind it — the project is read by `cargo metadata`, the sysroot by
+  `rustc --print sysroot`, and the standard library from its *sources* — so
+  the install unpacks five archives of one release (`rust-analyzer`, `rustc`,
+  `rust-std`, `cargo`, `rust-src`), each pinned by the SHA-256 the release
+  manifest publishes, into one toolchain under
+  `cache/code-tools/rust-analyzer/1.98.1/`. No compilation. Measured here:
+  49 s to install, 137.5 MB downloaded, 701 MB on disk, `definition` 0.10 s
+  warm. A profile may now declare further **components** with their own
+  platform tables and their own place in the managed root, archives may be
+  `.tar.xz`, and the per-member size bound is a profile's own — a language
+  server binary can be 90 MB. The profile also names the library path its
+  verified copy needs: `rust-analyzer` is linked against `librustc_driver` and
+  finds it relative to itself, so the copy in the owner root would otherwise
+  die before the handshake. Installation stays one explicit operator action
+  (`uv run python scripts/install_language_server.py --profile rust-analyzer
+  --state-root <state-root>`).
+- **Precise navigation for Go (#24, B).** `gopls v0.23.0` joins Pyright and
+  `typescript-language-server` as a managed profile, so `definition`,
+  `references`, `implementations`, `type`, `callers`/`callees` and `hover`
+  answer for `.go` files from a type checker instead of a name match. It is
+  the first managed server that is **built** rather than unpacked, because the
+  Go team publishes gopls only as a module: the install unpacks a pinned Go
+  toolchain (1.27.1, per-platform archive pinned by sha256) and compiles one
+  pinned module version with it, inside `cache/code-tools/gopls/v0.23.0/`,
+  with `GOPATH`, `GOCACHE`, `GOMODCACHE` and `GOBIN` under that root and
+  `GOTOOLCHAIN=local` so the pin cannot be swapped. Measured here: 44 s to
+  install, 324 MB on disk, `definition` 0.48 s cold and 0.10 s warm. It is
+  also the first **native** server: a profile now declares `node_major` or
+  `native`, identity stops probing Node for it, and the verified copy is
+  launched by path from the owner root instead of through an unlinked
+  descriptor — gopls hashes its own executable and re-executes itself, so a
+  file with no name makes it exit. The launch invariant is stated instead of
+  assumed: a generation may name the inherited descriptor or a file inside its
+  own owner root, never anything else. Installation stays one explicit
+  operator action (`uv run python scripts/install_language_server.py --profile
+  gopls --state-root <state-root>`); until it runs, Go answers from structural
+  evidence exactly as before. New module `scripts/go_source_build.py`.
+- **Argument bindings, the HTTP boundary and routes across repositories
+  (#24, B3/D2).** `get_architecture mode=data_flow` answers, hop by hop,
+  which caller-visible name binds which parameter of the callee, and says in
+  its own answer that this is argument binding and not data-flow analysis.
+  `mode=cross_service` follows calls plus literal-path HTTP client calls:
+  a call reaches the `route` node of the same method and path and the walk
+  turns around into the handler that exposes it; a route this repository
+  does not serve is matched against the exported routes of every other
+  indexed checkout and named with the repository it lives in, without
+  opening a second generation. The extractor (`code-extractor/v12`) records
+  one `BINDS_ARGUMENTS` literal assertion per resolved call (at most 8
+  `argument->parameter` pairs, 256 bytes) and one `HTTP_CALLS` assertion per
+  literal-path client call; the callee of a binding is named by the `CALLS`
+  assertion of the same call span, because the graph contract allows an
+  assertion to carry a target node or a literal, never both. Hint files gain
+  a `route` table (`code-hints/v2`) and new readers
+  `EvidenceGraph.argument_bindings` and `unresolved_edges` answer both
+  modes. Measured on this repository: 30 617 bindings, 24.0 s to index.
+  Derived generations rebuild themselves on the next nightly pass; until
+  then both modes answer nothing.
+- **The parity set asks the new questions (#24, E).**
+  `benchmark/code-parity-v2.json` carries the thirteen v1 tasks unchanged and
+  adds two argument-binding tasks and one "which tests exercise this
+  function" task, with gold read by hand from the working tree on
+  2026-09-11; the stand now defaults to it.
+  `benchmark/code-parity-cross-service-v1.json` asks the cross-service
+  questions against the two-repository fixture
+  `benchmark/build_cross_service_fixture.py` builds, because this repository
+  serves no HTTP route. No run is included: runs need the owner's word.
+- **The graph meets the agent where it searches (#24, C).** A Claude Code
+  `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
+  indexed repository gets a hint of at most three definitions (qualified name,
+  path:line, resolved in/out degree) and the `mcp__llm-wiki__get_architecture`
+  call that answers authoritatively; `SubagentStart` (Claude Code, Codex) and
+  every session start get one line naming the code tools; the OpenCode plugin
+  appends the hint to its `grep`/`glob` output (best effort: OpenCode does not
+  document that this reaches the model). One adapter, `scripts/graph_hint.py`,
+  reads `cache/code-hints/<checkout-hash>.sqlite3`, a per-checkout table each
+  index build exports from its generation through the new
+  `EvidenceGraph.symbol_page` (the validated reader costs ~2 s cold; a hook
+  cannot). Measured, one fresh process per call, 558-source fixture: 56 ms p50
+  / 58 ms p95 for a hit or a miss, 33 ms for a literal, plus ~9 ms for
+  `uv run`. Silent on anything else and on every error; never blocks a tool
+  call; the text is labelled as repository data. Codex ownership recognises the
+  new handlers through one rule (`scripts/codex_hook_identity.py`) shared by the
+  installer merge and the doctor's runtime-hook check, which would otherwise
+  have called every installed Codex `runtime_hooks_mismatch`; the OpenCode plugin was rewritten under the complexity gate
+  with unchanged lifecycle behaviour. Tool names stay `mcp__llm-wiki__*` (C3).
+- **Repository indexes follow worktrees, and are retired (#24, D1).** The
+  nightly `refresh-all` indexes up to eight new worktrees of every registered
+  repository with their sibling's code roots, and the first structural answer
+  in a new worktree starts the fenced `repository_index.py follow` detached. A
+  new nightly step, `repository_index.py retire`, removes every generation of
+  a checkout whose root is gone or that is marked not indexed, and all but the
+  newest two of a live one — foreign generations were never activated, so the
+  pruner had kept every one — each repository under its refresh fence, the
+  vault's own generations never considered; hint tables without a generation
+  go with them. `git config branch.<name>.llmwikiIndex false` or
+  `llmwiki.index false` marks a checkout; `index`, `refresh` and `follow`
+  refuse it by name. Cross-repository routes (D2) are not done: the graph has
+  no route nodes. Research:
+  `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
+- CI installs the production profile into a clean environment on Windows and macOS too, and runs the install smoke there (audit OPS-14).
+- One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
+- **The query surface answers the whole graph (#24, B).** `get_architecture`
+  gains `mode=search` — ranked qualified names with in/out degree, exact
+  `total` and `has_more`, globs, a path prefix — and `depth` (1–8) on
+  `callers`/`callees`, a breadth-first CALLS closure reporting
+  `depth_applied` and `depth_frontier_open`. `mode=snippet` accepts
+  `owner.name` and cuts the block out of the generation's stored bytes at the
+  exact definition span (`precision: "exact"`, `freshness` against the
+  working tree). `mode=coverage` now answers `indexed` and `freshness` from
+  the generation's own source row — a foreign repository's indexed file
+  answered `indexed=false` beside a real node count — and adds a `parse`
+  block naming the `ERROR`/`MISSING` ranges (tree-sitter) or `SyntaxError`
+  line (Python) the extractor could not read. `mode=impact` adds
+  `affected_symbols`: the code symbols a dirty diff reaches within eight
+  hops, beside the unchanged `affected` groups. No new tool, no generation
+  format change. Measured warm on a 1 020-file fixture: search ~99 ms,
+  snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
+  New modules
+  `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
+  `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
+- **The weights arrive with the install.** `scripts/install_models.py`
+  fetches the encoder and the default reranker at their pinned commits,
+  only the files the loaders read, verifies `model.safetensors` against the
+  size and SHA-256 recorded beside each revision, removes a file that does
+  not match, and never fetches a present file again. The installer runs it
+  when the semantic extra is present, the nightly pass runs it every night
+  (a no-op once the weights are there), and `doctor` reports `models:
+  degraded` with the command while they are missing. Before this nothing in
+  the product downloaded a model: a fresh install answered by words alone
+  and only the trace said so.
+- **Background incremental refresh of repository indexes (#24, A).**
+  `repository_index.py refresh <dir>` hashes a registered repository's sources
+  against its newest generation and rebuilds only when something changed,
+  reusing every unchanged record (one edited file in a 1 022-file fixture:
+  100 rebuilt, 922 reused, 16 s against 60 s for the full build), fenced under
+  the ownership registry's `doctor` role scoped to that one repository. The
+  MCP server spawns it detached once per repository and commit when a
+  structural answer finds the checkout's commit ahead of the generation's; the
+  nightly pass runs `refresh-all`. Structural answers carry a `freshness`
+  block naming both commits and what was done. `repository_index.py` gains a
+  command line (`index`, `list`, `detect`, `refresh`, `refresh-all`).
 
 ### Changed
 
@@ -74,15 +310,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   root), `doctor --rebuild-generation` builds it on demand, and a
   generation reason (`generation_corrupt`, …) is reported ahead of the
   Markdown read's `no_active_generation` when both apply.
-
-### Deprecated
-
-- **`compile_memory.py --all`.** It has never changed anything: every daily log
-  without a committed receipt is compiled anyway, and a day with one is never
-  compiled again. The flag is still accepted, is hidden from `--help`, and now
-  prints one line saying it does nothing and will be removed.
-
-### Changed
 
 - **One limit, one place.** Fifteen numeric bounds that were copied into a
   second module now have one owner each (the 64 KiB I/O chunk, the archive
@@ -129,40 +356,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   request, and the runtime-deletion guard resolves paths through a dispatch on
   node type. No test lost an assertion: each file was run before and after.
 
-### Added
-
-- **A ledger of things and events, posted once and counted by code.** The
-  nightly fact-keys call now also returns, per user turn, the things the person
-  names and the dated events about them; `scripts/ledger.py` posts each record
-  once under a digest of its fields and source pointer, merges two records of one
-  thing within 30 days into one event unless a stated quantity contradicts (the
-  CDC's case de-duplication rule, decided field by field as Fellegi–Sunter), and
-  `count` answers "how many" over every record of a kind with a tier —
-  "confirmed" when every record is the user's own dated words, "probable"
-  otherwise — and the pointers; `reconcile` flags a reader's number the ledger
-  does not hold. The rows ride into the generation as a `ledger` table of
-  `search.sqlite3`, disposable like the rest of it; a generation built before the
-  table carries none and the reader is told so. A thing seen on two or more days
-  opens the recurrence gate and its entity page is extended with dated pointer
-  lines by code, never rewritten by a model. Zero provider calls at question
-  time. Approved 2026-09-22; see `docs/STRUCTURE.md` and
-  `docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md`.
-- **Every stand, measured in one pass.** `docs/REPORT-2026-09-13-stands.md`
-  records all of them on `694991b`: the parity stand at 16 of 16 against the
-  other tool's 14, with 0 confident-wrong against 2 and 0.43× the tokens on the
-  14 both answered; code navigation 200/200 definitions and F1 1.0 on references
-  and calls with 0 orphan processes; durability 0 silent losses over 108 killed
-  trials; and the one failing gate — selective forgetting's `ageing.retain_rate`
-  at 0.8857, where archiving 59 pages stopped eight others from surfacing. That
-  last one is open and unexplained.
-- **A killed test names itself, without paying for it.** `PYTHONFAULTHANDLER=1`
-  on every shard, and the name of the running test appended to
-  `LLM_WIKI_TEST_PROGRESS_FILE` — one line per test, uploaded with the timings.
-  `-v` was tried first and cost two runs: a 40-minute and then a 65-minute cap on
-  Windows shards that normally take 22-26 minutes.
-
-### Changed
-
 - **The reader is named by configuration, and this machine names Sonnet.** With
   `MEMORY_CLAUDE_MODEL` unset the claude CLI call carries no `--model` flag, so the
   pipeline read with whatever the operator's own session was set to — on this
@@ -172,26 +365,174 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   units). Verified on the installed vault: answered in 59.1 s where it refused
   before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
-### Added
+- Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
+- The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
+- **Codex sessions leave the same breadcrumbs as Claude's.** Codex supports `UserPromptSubmit` and `PostToolUse` for `apply_patch` and `Bash`, and the template registered neither for capture, so a Codex session recorded no mid-session prompt or edit. Both are registered now through `integration_adapter.py --source codex`, a patch is recorded as an edit of the first file it touches, and the ownership rule and the doctor's runtime-hook check know the two new handlers. The capture path prints nothing, which is what Codex requires of a `UserPromptSubmit` hook. Research: `docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md`.
+- Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
 
-- **The memory retires its own residue.** The nightly removes the transcripts the
-  memory's own provider calls left under `~/.claude/projects` before
-  `--no-session-persistence` (2026-09-14): `sdk-cli` records from the vault, the
-  temporary directory or the job directory, and the project directories they
-  emptied. A held session is never touched. The owner deleted 1 082 of them by
-  hand on 2026-09-23; that was the last time. See
-  `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
-- **The classification corpus labels itself.** `benchmark/build_flush_corpus.py`
-  labels each real session with two automatic readings that never see the
-  product's tier names: the rubric of 2026-08-23 and a new extractive reading that
-  must quote, verbatim, the one passage a reader would still need later — a quote
-  the transcript does not carry voids the reading. A case the readings agree on is
-  confirmed; one they disagree on is contested, stays in the corpus, and counts in
-  no metric, the rule the product applies to a claim its evaluators disagree on.
-  The stand reports confirmed and contested counts; nothing is "provisional until
-  a person reviews it". The corpus now carries the rendered, bounded conversation
-  the product classifies, not the raw host JSONL it stopped reading on 2026-09-06.
-  Schema v3 replaces v2. See `docs/research/2026-09-23-the-corpus-labels-itself.md`.
+- The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).
+- The navigation stand obeys the complexity gate: schema validation is one function per keyword, the fixture run is one object with a phase per measurement, the evidence check is a list of named predicates, the gates are one entry per field; reports, error order and gate verdicts unchanged (audit L13).
+- The comparative stand obeys the complexity gate: one check per manifest section, one finding collector per preflight probe, the paired statistics as named steps; messages, codes and RNG consumption unchanged (audit L13).
+- The scale stand obeys the complexity gate: the three optional adapter cells share one cell shape, the crash matrix is one outcome per point with named steps; reports and adoption reasons unchanged (audit L13).
+- The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
+- `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
+- `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
+- `lsp_security` obeys the complexity gate: the no-follow walk, the provider URI check and the path redaction scanners are pipelines of named steps; every containment message and refusal order is unchanged (audit OPS-15).
+- `sync_memory`, `install_smoke` and `lsp_positions` obey the complexity gate: the sync run is a table of actions over one `_SyncRun`, the three `uv` steps are one step record, the file-URI parser is a pipeline of named checks; behaviour and messages unchanged (audit OPS-15).
+- Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
+- The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
+- The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).
+- Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
+- **A `recall` row carries its page, not the trace.** Through MCP each row
+  repeated the twelve trace fields and thirteen per-signal scores the
+  envelope already reports once; rows now carry the page, its score and
+  one per-signal score. Measured on one five-row call: a row 1 112 → 541
+  bytes, the envelope 8 849 → 4 996 (audit M7, rule 4). Research:
+  `docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md`.
+- **The installer job runs on macOS too.** The LaunchAgent path had no CI
+  evidence (audit OPS-14); `macos-15` joins the installer matrix. Research:
+  `docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`.
+- **The shipped Claude Code allowlist grants only read-only forms.** `Bash(sed *)`,
+  `Bash(xargs *)`, `Bash(sort *)` and `Bash(uv run --directory *)` let an
+  agent rewrite files or run any Python without a prompt under a
+  read-only-looking name; they are gone, `sed -n *` stays, and the built-in
+  read-only commands (`ls`, `cat`, `grep`, `find`, …) need no entry. The
+  settings merge retires exactly those four strings from an installed
+  `~/.claude/settings.json` on the next install or sync (audit OPS-12).
+  Research: `docs/research/2026-09-10-an-allowlist-that-reads-as-read-only-must-be-read-only.md`.
+- **The nightly and weekly passes take the canonical fence.** On an adopted
+  vault they hold the registry's `nightly`/`weekly` lease with a heartbeat,
+  so the doctor and the `run/` deletion contract see a running pass; a lost
+  fence stops the pass before its next step and is recorded as
+  `owner_fence_lost` instead of success; a marker a dead owner left behind
+  is reclaimed only with the registry's proof (expired lease and a provably
+  dead process, or an ownerless marker naming a PID that no longer exists),
+  never by age. A vault without a V3 coordinator keeps the legacy marker. The
+  `inspect.signature` ownership plumbing that no step ever received is gone
+  (audit OPS-02, OPS-03; owner's yes 2026-09-10). Decision:
+  `knowledge/notes/nightly-takes-the-canonical-fence-decision.md`; research:
+  `docs/research/2026-09-10-the-nightly-and-the-fence-it-never-takes.md`.
+- **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`
+  at its matrix-pinned revision is the product default when the environment
+  names no reranker (`LLMWIKI_RERANKER_MODEL=off` switches it off), it
+  reranks every question in a rerank profile instead of waiting for a
+  trigger a Russian question over English pages never matched, its depth is
+  10 over the fused pool of 20, and the MCP server loads it at start-up so no
+  question pays the load. Measured on the 45-query cross-lingual corpus:
+  cross-language MRR 0.60 → 0.98 on the shipped encoder, where swapping the
+  encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
+  once and not retried per question.
+- **Structural code answers are warm (#24, A).** The validated Evidence Graph
+  reader is kept per MCP process and reused while the catalog, the artifact
+  and the checkout's Git state keep their stat identity, instead of the
+  catalog re-validating the generation three times per open and hashing every
+  artifact each time. Same 44.7 MB generation, warm p50: `callers` 42 ms (was
+  511), `callees` 23 ms (249), `symbol` 86 ms (1 007), snippet 21 ms (335),
+  coverage 21 ms (258).
+- **`code_graph.py --callers` no longer re-parses a repository without a
+  generation** (300 s on 1 026 files in #24): it names `mode=index` and exits
+  2; `--live` opts into the scan.
+
+### Deprecated
+
+- **`compile_memory.py --all`.** It has never changed anything: every daily log
+  without a committed receipt is compiled anyway, and a day with one is never
+  compiled again. The flag is still accepted, is hidden from `--help`, and now
+  prints one line saying it does nothing and will be removed.
+
+### Removed
+
+- **Code no product path reaches.** Seven functions nothing called; twelve that
+  only their own tests called (`MemoryQueue.export_task`,
+  `payload_for_execution`, `retrieval.trace_to_dict`,
+  `project_journal.build_handoff`, `retrieval_telemetry.record_event` and
+  `count_events_after`, and six smaller ones); the Windows directory-listing layer
+  of `generation_catalog.py` they left unreached; and the module-level queue owner
+  of `memory_queue.py`, which no product module called since the queue worker and
+  doctor own the queue through `MemoryQueue.queue_owner`. Tests that used a removed
+  function as a tool now use the product path. Test seams and the Reliability v3
+  repair and discard operations stay. `compile_memory.py --all` stays deprecated
+  until 6.0.0. See
+  `docs/research/2026-09-24-code-no-product-path-reaches-is-removed.md`.
+- **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
+  its verdict sidecar are gone: the owner does no manual labelling, and the two
+  automatic readings above replace the step it existed for. Corpus schema v2
+  (`label_reviewed`, `human_tier`) is refused; the only v2 corpus was the private
+  live one, rebuilt under v3 (2026-09-23).
+- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
+  reader (no writer since 2026-08-20, no file on the live vault), the
+  positional `git_range` of `analyze_impact` (every caller names its
+  endpoints), and the readers for incremental-manifest versions v1–v4 (every
+  generation on the live vault is v5; a fresh install builds v5). A parent
+  whose manifest cannot be read is now rebuilt in full instead of failing the
+  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
+  queue migration stay, with the evidence and the plan for each in
+  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
+  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
+  are read and written by nothing: their builders, readers, swap lock and
+  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
+  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
+  a hundred functions with them. On the live vault the legacy index answered
+  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
+  it by design until now. The evidence generation is the only index: without
+  one a search reads Markdown directly, bounded by its deadline, and every
+  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
+  the generation and `--status` names it. See
+  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
+- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
+  per task under `run/queue/`; the importer, its marker, quarantine, lease
+  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
+  installers still created. Measured before removal: the installer's adoption
+  already refused such a vault and never ran the import. A `run/queue/` holding
+  records is now refused by the queue (`legacy_json_queue_unsupported`) and
+  named by `doctor`, which keeps `run/` from deletion while they exist. See
+  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+
+- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
+- The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
+- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
+  had no caller; 40 functions reachable only from it (legacy triple RRF, its
+  own reranker call, its own generation search) and the tests that existed
+  only for them are gone — 897 lines. The live path is unchanged:
+  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
+  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
+- **The repository ships no memory.** The 89 published pages under
+  `knowledge/notes/` (the owner's architecture decisions and the
+  demonstration pages), the two synthetic daily logs and the vault's log
+  entries leave the repository; a fresh install starts with an empty memory
+  instead of another person's guard rails and "89 curated pages" (issue #19).
+  The owner's pages stay where they are, private. `knowledge/index.md` and
+  `knowledge/log.md` ship as empty skeletons the runtime fills.
+- **The memory index no longer holds the product's own code.** The vault
+  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
+  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
+  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
+  repository, the checkout included when its owner asks.
+- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
+  --legacy-only` and the generated-query run measured recall over the pages
+  the repository used to ship; with no pages shipped there is nothing to
+  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
+  and `benchmark/legacy-60-v1.json` are gone.
+- **The vault stands are retired**: retrieval, application, contamination
+  and lift attribution, with their answer-key and entry-point helpers. Their
+  questions and gold pages were the owner's decision pages; with those pages
+  private there is nothing public to run them on. The synthetic
+  `retrieval-v2.json` corpus (which carries cross-language queries) and the
+  LongMemEval stand are the public measurements.
+- **Cursor and Antigravity are no longer supported platforms.** The owner uses
+  neither, and carrying two hosts nobody exercises meant two managed hook
+  formats, two doctor checks, two installer detections, and two event
+  projections whose only evidence was their own tests. Claude Code, OpenCode,
+  and Codex CLI remain supported. Gone: `integrations/cursor/`,
+  `integrations/antigravity/`, the `--cursor-hooks` / `--antigravity-hooks`
+  install flags, installer detection in `install.sh` and `install.ps1`, the
+  IDE branches in `integration_adapter.py`, the two `event_envelope.py` agent
+  patterns, the two `doctor.py` integration hosts, and the `cursor` /
+  `antigravity` values of `flush_memory.py --agent`.
+- What an existing user of those hosts loses: automatic capture and injected
+  session context. MCP reads and actions were never platform-specific and are
+  unaffected — any agent that speaks MCP can still use the vault.
 
 ### Fixed
 
@@ -508,308 +849,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   duplicate receipt, anything else keeps the old fence error. Found by the
   Windows job of CI run 34655557302, which is where the window is widest.
 
-### Added
-
-- **A verified digest is remembered across processes, and the warm-up it would
-  have hidden is gone.** Hashing every artifact of a generation against its
-  manifest is what a cold open paid, in every new process, to learn what the
-  previous process already knew about an immutable file. It is now remembered by
-  stat identity — generation, path, device, inode, size, mtime — in the disposable
-  `cache/evidence-graph/verified-artifacts.json`, with Git's racily-clean rule:
-  an artifact whose mtime is not strictly older than the cache's own is hashed
-  anyway, and an unreadable cache is an empty cache. Cold open on the installed
-  vault 2.22 s → 1.71 s, and 4.9 s → 1.71 s across the evening. The graph warm-up
-  added earlier the same day is deleted: it moved the cost rather than removing
-  it, which is what the owner called it. What remains of the 1.71 s is measured
-  and named in
-  `docs/research/2026-09-12-a-verdict-worth-remembering-across-processes.md`, and
-  two of its three parts were the same waste elsewhere: the format receipt hashed
-  241 MB to key a verdict it already had, and the index check walked all 3 405
-  rows on a read that already has the digest. Both fixed, cold open **1.23 s** —
-  4.9 s this morning. What remains is the seal's own read after the open, which is
-  the fence itself and stays.
-- **A reader checks the digest, a writer derives.** A cold code answer on the
-  installed vault re-derived all 3 405 chunks of the search index before
-  answering — 1.68 s of it spent inferring the language of each chunk — to prove
-  that our own chunker is deterministic, when the artifact digest, the manifest's
-  versions and the entry seal already pin every input. That re-derivation now runs
-  where the rows are created and in `doctor`; a read trusts the digest. Depth is
-  part of the memo keys, and a deep verdict answers a shallow question while the
-  reverse never does. Cold 4.9 s → 2.22 s, warm 0.31 s.
-- **The vault is a repository too, and answers about its own code.** The
-  decision left open this morning, taken on the owner's instruction to decide by
-  rules 2 and 4: the vault's checkout gets a code generation beside its memory
-  one, because current practice keeps one index per data lifecycle and code apart
-  from documents, and because mixing them re-derives 240 MB of code index for a
-  knowledge edit. `admit_repository` no longer refuses the vault; a vault's code
-  roots exclude `knowledge/` and say so; a generation that holds code names its
-  roots in its manifest, so one checkout can carry both and a reader can tell
-  them apart; the graph opener asks for the code generation first; and
-  `refresh-all` adopts the vault once so the nightly keeps it fresh with no
-  operator action. Measured after indexing the installed vault:
-  `get_architecture mode=query` for `fuse_rrf` answers in 4.4 s where it
-  returned `"nodes": []` this morning. Reasons, sources and costs:
-  `docs/research/2026-09-12-the-vault-is-a-repository-too.md`.
-- **The decision rule is satisfied.** Three runs, every condition met on the
-  surface an agent actually reaches: 16 correct answers of 16 against
-  codebase-memory-mcp's 15, zero confident-wrong answers against their one, no
-  non-answers on either side, tokens 1.45× against a 1.5× ceiling and p95 per
-  task 1.58× against a 2× ceiling. The rule was written before the first number
-  was read and has not been touched since; by it, llm-wiki can now replace the
-  other tool, and removing it is the owner's call. What moved the numbers is in
-  `docs/research/2026-09-12-the-rule-is-satisfied.md`: six changes, of which one
-  added a capability and five removed waste — two wrong answers and four repeats
-  of work already done. Measured on the worktree checkout, because the installed
-  vault still holds no code generation of its own.
-- **Sixteen of sixteen, against fifteen.** After the two defect fixes and the
-  three changes the owner approved on 2026-09-12, three runs of the parity set
-  give our two surfaces 16 correct answers of 16 against codebase-memory-mcp's
-  15, with zero confident-wrong answers against their one and no non-answers on
-  either side; every grade repeated exactly across the three runs. The
-  cross-service route question is ours too: correct in 0.6 s against their
-  partial in 2.0 s. Cost is the one condition of the decision rule still unmet
-  on the default surface — tokens 1.57× and p95 2.74× against ceilings of 1.5×
-  and 2× — while the `query` surface passes all four at 1.18× and 1.36×. The
-  other tool stays installed until the default surface passes too, and what the
-  remaining gap is made of is measured in
-  `docs/research/2026-09-12-sixteen-of-sixteen.md`: two `find_dead_code` calls at
-  11 s carry the whole p95, and a quarter of the largest answer is one absolute
-  path prefix repeated 110 times.
-
-- **The parity numbers exist, and they say keep the other tool.** Three runs of
-  the sixteen-task set and three of the cross-service pair, llm-wiki against
-  codebase-memory-mcp, both sides indexing the same checkout, graded by a rule
-  written before the numbers were read. Correct answers: 13 and 14 of 16 for our
-  two columns against 15; tokens 9 869 / 7 685 against 5 565; p95 per task
-  12.7 s / 10.2 s against 4.2 s; one confident-wrong answer each and no
-  non-answers on either side. Every grade repeated exactly in all three runs. We
-  win "which tests exercise this function" outright and the cross-service route
-  question in 0.6 s against 2.0 s; we lose "where is this constant defined" in
-  every run, because the generation holds no module-level constant node. Two of
-  the rule's four conditions fail, so codebase-memory-mcp stays installed and
-  the four things that would close the gap are named in
-  `docs/research/2026-09-12-the-first-honest-parity-numbers.md`. Runs are in
-  `benchmark/code-parity-v2-2026-09-12-run{1,2,3}.json` and
-  `benchmark/code-parity-cross-service-2026-09-12-run{1,2,3}.json`.
-
-- **Precise navigation for Rust.** `rust-analyzer` 1.98.1 answers
-  `definition`, `references`, `implementations`, `type`, `callers`/`callees`
-  and `hover` for `.rs`. The binary is published, but it needs a toolchain
-  behind it — the project is read by `cargo metadata`, the sysroot by
-  `rustc --print sysroot`, and the standard library from its *sources* — so
-  the install unpacks five archives of one release (`rust-analyzer`, `rustc`,
-  `rust-std`, `cargo`, `rust-src`), each pinned by the SHA-256 the release
-  manifest publishes, into one toolchain under
-  `cache/code-tools/rust-analyzer/1.98.1/`. No compilation. Measured here:
-  49 s to install, 137.5 MB downloaded, 701 MB on disk, `definition` 0.10 s
-  warm. A profile may now declare further **components** with their own
-  platform tables and their own place in the managed root, archives may be
-  `.tar.xz`, and the per-member size bound is a profile's own — a language
-  server binary can be 90 MB. The profile also names the library path its
-  verified copy needs: `rust-analyzer` is linked against `librustc_driver` and
-  finds it relative to itself, so the copy in the owner root would otherwise
-  die before the handshake. Installation stays one explicit operator action
-  (`uv run python scripts/install_language_server.py --profile rust-analyzer
-  --state-root <state-root>`).
-- **Precise navigation for Go (#24, B).** `gopls v0.23.0` joins Pyright and
-  `typescript-language-server` as a managed profile, so `definition`,
-  `references`, `implementations`, `type`, `callers`/`callees` and `hover`
-  answer for `.go` files from a type checker instead of a name match. It is
-  the first managed server that is **built** rather than unpacked, because the
-  Go team publishes gopls only as a module: the install unpacks a pinned Go
-  toolchain (1.27.1, per-platform archive pinned by sha256) and compiles one
-  pinned module version with it, inside `cache/code-tools/gopls/v0.23.0/`,
-  with `GOPATH`, `GOCACHE`, `GOMODCACHE` and `GOBIN` under that root and
-  `GOTOOLCHAIN=local` so the pin cannot be swapped. Measured here: 44 s to
-  install, 324 MB on disk, `definition` 0.48 s cold and 0.10 s warm. It is
-  also the first **native** server: a profile now declares `node_major` or
-  `native`, identity stops probing Node for it, and the verified copy is
-  launched by path from the owner root instead of through an unlinked
-  descriptor — gopls hashes its own executable and re-executes itself, so a
-  file with no name makes it exit. The launch invariant is stated instead of
-  assumed: a generation may name the inherited descriptor or a file inside its
-  own owner root, never anything else. Installation stays one explicit
-  operator action (`uv run python scripts/install_language_server.py --profile
-  gopls --state-root <state-root>`); until it runs, Go answers from structural
-  evidence exactly as before. New module `scripts/go_source_build.py`.
-- **Argument bindings, the HTTP boundary and routes across repositories
-  (#24, B3/D2).** `get_architecture mode=data_flow` answers, hop by hop,
-  which caller-visible name binds which parameter of the callee, and says in
-  its own answer that this is argument binding and not data-flow analysis.
-  `mode=cross_service` follows calls plus literal-path HTTP client calls:
-  a call reaches the `route` node of the same method and path and the walk
-  turns around into the handler that exposes it; a route this repository
-  does not serve is matched against the exported routes of every other
-  indexed checkout and named with the repository it lives in, without
-  opening a second generation. The extractor (`code-extractor/v12`) records
-  one `BINDS_ARGUMENTS` literal assertion per resolved call (at most 8
-  `argument->parameter` pairs, 256 bytes) and one `HTTP_CALLS` assertion per
-  literal-path client call; the callee of a binding is named by the `CALLS`
-  assertion of the same call span, because the graph contract allows an
-  assertion to carry a target node or a literal, never both. Hint files gain
-  a `route` table (`code-hints/v2`) and new readers
-  `EvidenceGraph.argument_bindings` and `unresolved_edges` answer both
-  modes. Measured on this repository: 30 617 bindings, 24.0 s to index.
-  Derived generations rebuild themselves on the next nightly pass; until
-  then both modes answer nothing.
-- **The parity set asks the new questions (#24, E).**
-  `benchmark/code-parity-v2.json` carries the thirteen v1 tasks unchanged and
-  adds two argument-binding tasks and one "which tests exercise this
-  function" task, with gold read by hand from the working tree on
-  2026-09-11; the stand now defaults to it.
-  `benchmark/code-parity-cross-service-v1.json` asks the cross-service
-  questions against the two-repository fixture
-  `benchmark/build_cross_service_fixture.py` builds, because this repository
-  serves no HTTP route. No run is included: runs need the owner's word.
-- **The graph meets the agent where it searches (#24, C).** A Claude Code
-  `Grep`/`Glob`, or a Codex `rg`/`grep`, whose pattern names a symbol of an
-  indexed repository gets a hint of at most three definitions (qualified name,
-  path:line, resolved in/out degree) and the `mcp__llm-wiki__get_architecture`
-  call that answers authoritatively; `SubagentStart` (Claude Code, Codex) and
-  every session start get one line naming the code tools; the OpenCode plugin
-  appends the hint to its `grep`/`glob` output (best effort: OpenCode does not
-  document that this reaches the model). One adapter, `scripts/graph_hint.py`,
-  reads `cache/code-hints/<checkout-hash>.sqlite3`, a per-checkout table each
-  index build exports from its generation through the new
-  `EvidenceGraph.symbol_page` (the validated reader costs ~2 s cold; a hook
-  cannot). Measured, one fresh process per call, 558-source fixture: 56 ms p50
-  / 58 ms p95 for a hit or a miss, 33 ms for a literal, plus ~9 ms for
-  `uv run`. Silent on anything else and on every error; never blocks a tool
-  call; the text is labelled as repository data. Codex ownership recognises the
-  new handlers through one rule (`scripts/codex_hook_identity.py`) shared by the
-  installer merge and the doctor's runtime-hook check, which would otherwise
-  have called every installed Codex `runtime_hooks_mismatch`; the OpenCode plugin was rewritten under the complexity gate
-  with unchanged lifecycle behaviour. Tool names stay `mcp__llm-wiki__*` (C3).
-- **Repository indexes follow worktrees, and are retired (#24, D1).** The
-  nightly `refresh-all` indexes up to eight new worktrees of every registered
-  repository with their sibling's code roots, and the first structural answer
-  in a new worktree starts the fenced `repository_index.py follow` detached. A
-  new nightly step, `repository_index.py retire`, removes every generation of
-  a checkout whose root is gone or that is marked not indexed, and all but the
-  newest two of a live one — foreign generations were never activated, so the
-  pruner had kept every one — each repository under its refresh fence, the
-  vault's own generations never considered; hint tables without a generation
-  go with them. `git config branch.<name>.llmwikiIndex false` or
-  `llmwiki.index false` marks a checkout; `index`, `refresh` and `follow`
-  refuse it by name. Cross-repository routes (D2) are not done: the graph has
-  no route nodes. Research:
-  `docs/research/2026-09-11-the-graph-meets-the-agent-where-it-searches.md`.
-- CI installs the production profile into a clean environment on Windows and macOS too, and runs the install smoke there (audit OPS-14).
-- One end-to-end nightly test runs the pass with its real step runner against real child processes, one of which fails, and checks the report line, the artifact and the recorded state (audit OPS-17).
-- **The query surface answers the whole graph (#24, B).** `get_architecture`
-  gains `mode=search` — ranked qualified names with in/out degree, exact
-  `total` and `has_more`, globs, a path prefix — and `depth` (1–8) on
-  `callers`/`callees`, a breadth-first CALLS closure reporting
-  `depth_applied` and `depth_frontier_open`. `mode=snippet` accepts
-  `owner.name` and cuts the block out of the generation's stored bytes at the
-  exact definition span (`precision: "exact"`, `freshness` against the
-  working tree). `mode=coverage` now answers `indexed` and `freshness` from
-  the generation's own source row — a foreign repository's indexed file
-  answered `indexed=false` beside a real node count — and adds a `parse`
-  block naming the `ERROR`/`MISSING` ranges (tree-sitter) or `SyntaxError`
-  line (Python) the extractor could not read. `mode=impact` adds
-  `affected_symbols`: the code symbols a dirty diff reaches within eight
-  hops, beside the unchanged `affected` groups. No new tool, no generation
-  format change. Measured warm on a 1 020-file fixture: search ~99 ms,
-  snippet 13 ms, coverage 16 ms, callers depth 3 from 20 seeds 144 ms.
-  New modules
-  `scripts/symbol_search.py`, `scripts/impact_symbols.py`; new readers
-  `EvidenceGraph.source_by_path`, `source_observations`, `search_nodes`.
-- **The weights arrive with the install.** `scripts/install_models.py`
-  fetches the encoder and the default reranker at their pinned commits,
-  only the files the loaders read, verifies `model.safetensors` against the
-  size and SHA-256 recorded beside each revision, removes a file that does
-  not match, and never fetches a present file again. The installer runs it
-  when the semantic extra is present, the nightly pass runs it every night
-  (a no-op once the weights are there), and `doctor` reports `models:
-  degraded` with the command while they are missing. Before this nothing in
-  the product downloaded a model: a fresh install answered by words alone
-  and only the trace said so.
-- **Background incremental refresh of repository indexes (#24, A).**
-  `repository_index.py refresh <dir>` hashes a registered repository's sources
-  against its newest generation and rebuilds only when something changed,
-  reusing every unchanged record (one edited file in a 1 022-file fixture:
-  100 rebuilt, 922 reused, 16 s against 60 s for the full build), fenced under
-  the ownership registry's `doctor` role scoped to that one repository. The
-  MCP server spawns it detached once per repository and commit when a
-  structural answer finds the checkout's commit ahead of the generation's; the
-  nightly pass runs `refresh-all`. Structural answers carry a `freshness`
-  block naming both commits and what was done. `repository_index.py` gains a
-  command line (`index`, `list`, `detect`, `refresh`, `refresh-all`).
-
-
-### Changed
-
-- Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
-- The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
-- **Codex sessions leave the same breadcrumbs as Claude's.** Codex supports `UserPromptSubmit` and `PostToolUse` for `apply_patch` and `Bash`, and the template registered neither for capture, so a Codex session recorded no mid-session prompt or edit. Both are registered now through `integration_adapter.py --source codex`, a patch is recorded as an edit of the first file it touches, and the ownership rule and the doctor's runtime-hook check know the two new handlers. The capture path prints nothing, which is what Codex requires of a `UserPromptSubmit` hook. Research: `docs/research/2026-09-11-codex-leaves-breadcrumbs-too.md`.
-- Contextual retrieval keeps only what runs: the LLM branches that every entry point refused before reaching them, and their option validator, are gone; the deterministic context, the cache identities for both modes, every public signature and every message stay; the rest is named steps under the complexity gates.
-
-- The retrieval stand obeys the complexity gate: one run is an object with a method per stage (build, selection, embedding and its lexical fallback, materialized retrieval, reranking, evaluation, report), report verification and selection aggregation are named checks, the CLI is a table of modes; report bytes, messages, error order and clock reads unchanged (audit H3).
-- The navigation stand obeys the complexity gate: schema validation is one function per keyword, the fixture run is one object with a phase per measurement, the evidence check is a list of named predicates, the gates are one entry per field; reports, error order and gate verdicts unchanged (audit L13).
-- The comparative stand obeys the complexity gate: one check per manifest section, one finding collector per preflight probe, the paired statistics as named steps; messages, codes and RNG consumption unchanged (audit L13).
-- The scale stand obeys the complexity gate: the three optional adapter cells share one cell shape, the crash matrix is one outcome per point with named steps; reports and adoption reasons unchanged (audit L13).
-- The Python qualification generator and the contradiction benchmark obey the complexity gate; their output is byte-identical (audit L13, first two files).
-- `pyright_profile` obeys the complexity gate: the Node probe is one run with named phases, JSONC normalisation is two small scanners, and each system-candidate shape is one function; degradation codes and precedence unchanged (audit OPS-15, the last file in scope).
-- `lsp_protocol` obeys the complexity gate: the frame reader, the JSON validators, start-up, the writer loop and the fatal transition are small steps under the one state lock; messages, outcomes and lock discipline unchanged (audit OPS-15).
-- `lsp_security` obeys the complexity gate: the no-follow walk, the provider URI check and the path redaction scanners are pipelines of named steps; every containment message and refusal order is unchanged (audit OPS-15).
-- `sync_memory`, `install_smoke` and `lsp_positions` obey the complexity gate: the sync run is a table of actions over one `_SyncRun`, the three `uv` steps are one step record, the file-URI parser is a pipeline of named checks; behaviour and messages unchanged (audit OPS-15).
-- Three tests no longer sleep to assert that a worker is still blocked; the outcome after the release is the proof (audit M9).
-- The public search path is a pipeline over one `_SearchRun` object instead of a 290-line function with eleven closures; behaviour and the trace are unchanged (audit L8).
-- The 16 and 64 GiB constants of the evidence graph and the generation catalog are declared as absurdity ceilings that name where the real read bounds live (audit M8).
-- Test helpers obey the complexity gate: the 24-arm damage ladder in the evidence-graph tests is a table, and six other test functions are split into named helpers (audit M12).
-- **A `recall` row carries its page, not the trace.** Through MCP each row
-  repeated the twelve trace fields and thirteen per-signal scores the
-  envelope already reports once; rows now carry the page, its score and
-  one per-signal score. Measured on one five-row call: a row 1 112 → 541
-  bytes, the envelope 8 849 → 4 996 (audit M7, rule 4). Research:
-  `docs/research/2026-09-11-a-row-carries-its-page-not-the-trace.md`.
-- **The installer job runs on macOS too.** The LaunchAgent path had no CI
-  evidence (audit OPS-14); `macos-15` joins the installer matrix. Research:
-  `docs/research/2026-09-11-the-installer-runs-on-every-platform-it-claims.md`.
-- **The shipped Claude Code allowlist grants only read-only forms.** `Bash(sed *)`,
-  `Bash(xargs *)`, `Bash(sort *)` and `Bash(uv run --directory *)` let an
-  agent rewrite files or run any Python without a prompt under a
-  read-only-looking name; they are gone, `sed -n *` stays, and the built-in
-  read-only commands (`ls`, `cat`, `grep`, `find`, …) need no entry. The
-  settings merge retires exactly those four strings from an installed
-  `~/.claude/settings.json` on the next install or sync (audit OPS-12).
-  Research: `docs/research/2026-09-10-an-allowlist-that-reads-as-read-only-must-be-read-only.md`.
-- **The nightly and weekly passes take the canonical fence.** On an adopted
-  vault they hold the registry's `nightly`/`weekly` lease with a heartbeat,
-  so the doctor and the `run/` deletion contract see a running pass; a lost
-  fence stops the pass before its next step and is recorded as
-  `owner_fence_lost` instead of success; a marker a dead owner left behind
-  is reclaimed only with the registry's proof (expired lease and a provably
-  dead process, or an ownerless marker naming a PID that no longer exists),
-  never by age. A vault without a V3 coordinator keeps the legacy marker. The
-  `inspect.signature` ownership plumbing that no step ever received is gone
-  (audit OPS-02, OPS-03; owner's yes 2026-09-10). Decision:
-  `knowledge/notes/nightly-takes-the-canonical-fence-decision.md`; research:
-  `docs/research/2026-09-10-the-nightly-and-the-fence-it-never-takes.md`.
-- **The cross-encoder reranker is on by default.** `BAAI/bge-reranker-v2-m3`
-  at its matrix-pinned revision is the product default when the environment
-  names no reranker (`LLMWIKI_RERANKER_MODEL=off` switches it off), it
-  reranks every question in a rerank profile instead of waiting for a
-  trigger a Russian question over English pages never matched, its depth is
-  10 over the fused pool of 20, and the MCP server loads it at start-up so no
-  question pays the load. Measured on the 45-query cross-lingual corpus:
-  cross-language MRR 0.60 → 0.98 on the shipped encoder, where swapping the
-  encoder gained at most 0.04 (issue #29.3). A load that fails is recorded
-  once and not retried per question.
-- **Structural code answers are warm (#24, A).** The validated Evidence Graph
-  reader is kept per MCP process and reused while the catalog, the artifact
-  and the checkout's Git state keep their stat identity, instead of the
-  catalog re-validating the generation three times per open and hashing every
-  artifact each time. Same 44.7 MB generation, warm p50: `callers` 42 ms (was
-  511), `callees` 23 ms (249), `symbol` 86 ms (1 007), snippet 21 ms (335),
-  coverage 21 ms (258).
-- **`code_graph.py --callers` no longer re-parses a repository without a
-  generation** (300 s on 1 026 files in #24): it names `mode=index` and exits
-  2; `--live` opts into the scan.
-
-### Fixed
-
 - **A capture worker that loses its intent fence no longer counts a lost capture.** Every `adapter_capture_worker` "lost" row since 2026-09-07 carried `QueueOperationError: intent_fence_lost`, and on 2026-09-11 every intent those rows named had a succeeded task, with no ready intent left without one. Losing the fence moves authority, not data: the intent is durable, a lapsed lease is recovered, an undispatched intent is adopted. That code is now recorded as deferred; every other queue error stays a loss.
 
 - **A refused compile of a day that is compiled now no longer keeps health red.** Since 2026-08-25 the doctor reported one refused attempt "whose work never happened": a DLP refusal had staged receipts for eight snapshots of one day, snapshots that no longer exist and whose receipts can never be written. A refused attempt that meant to create only compile receipts is now history when every day its staged receipts name has a committed receipt for every part of its current bytes. Anything unreadable or unexpected keeps the finding. On the live vault the transaction check reads `ok` with this rule.
@@ -987,55 +1026,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   content check now applies only to generations this extractor built; an
   older one is validated structurally and served until the nightly rebuilds
   it, and a refusal is remembered under the same hashed identity as a success.
-
-### Removed
-
-- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
-- The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
-- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
-  had no caller; 40 functions reachable only from it (legacy triple RRF, its
-  own reranker call, its own generation search) and the tests that existed
-  only for them are gone — 897 lines. The live path is unchanged:
-  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
-  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
-- **The repository ships no memory.** The 89 published pages under
-  `knowledge/notes/` (the owner's architecture decisions and the
-  demonstration pages), the two synthetic daily logs and the vault's log
-  entries leave the repository; a fresh install starts with an empty memory
-  instead of another person's guard rails and "89 curated pages" (issue #19).
-  The owner's pages stay where they are, private. `knowledge/index.md` and
-  `knowledge/log.md` ship as empty skeletons the runtime fills.
-- **The memory index no longer holds the product's own code.** The vault
-  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
-  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
-  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
-  repository, the checkout included when its owner asks.
-- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
-  --legacy-only` and the generated-query run measured recall over the pages
-  the repository used to ship; with no pages shipped there is nothing to
-  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
-  and `benchmark/legacy-60-v1.json` are gone.
-- **The vault stands are retired**: retrieval, application, contamination
-  and lift attribution, with their answer-key and entry-point helpers. Their
-  questions and gold pages were the owner's decision pages; with those pages
-  private there is nothing public to run them on. The synthetic
-  `retrieval-v2.json` corpus (which carries cross-language queries) and the
-  LongMemEval stand are the public measurements.
-- **Cursor and Antigravity are no longer supported platforms.** The owner uses
-  neither, and carrying two hosts nobody exercises meant two managed hook
-  formats, two doctor checks, two installer detections, and two event
-  projections whose only evidence was their own tests. Claude Code, OpenCode,
-  and Codex CLI remain supported. Gone: `integrations/cursor/`,
-  `integrations/antigravity/`, the `--cursor-hooks` / `--antigravity-hooks`
-  install flags, installer detection in `install.sh` and `install.ps1`, the
-  IDE branches in `integration_adapter.py`, the two `event_envelope.py` agent
-  patterns, the two `doctor.py` integration hosts, and the `cursor` /
-  `antigravity` values of `flush_memory.py --agent`.
-- What an existing user of those hosts loses: automatic capture and injected
-  session context. MCP reads and actions were never platform-specific and are
-  unaffected — any agent that speaks MCP can still use the vault.
-
-### Fixed
 
 - Two users' first-day findings (issues #17–#29, PR #27), each with its test
   and, where the design changed, a dated note under `docs/research/`:

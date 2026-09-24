@@ -3,7 +3,7 @@
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
 **面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，完全由你掌控。**
 
@@ -163,13 +163,13 @@ remote 的 push URL 替换为 `no-push`。
 bootstrap 运行的每个文件的 SHA-256。在本地检出中打印任意标签的清单：
 
 ```bash
-uv run python scripts/release_manifest.py v4.1.0 --markdown
+uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
 安装该确切提交：
 
 ```bash
-git checkout --detach "$(git rev-parse 'v4.1.0^{commit}')"
+git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
 bash ./install.sh
 ```
 

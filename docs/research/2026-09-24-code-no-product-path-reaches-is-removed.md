@@ -81,8 +81,9 @@ a separate grep over `tests/` gave its test users.
   `tests/test_memory_queue_migration.py`).
 - Keep the seams and contract operations of finding 4; removing them would force
   tests to reach private state or would delete a contract operation.
-- Keep `--all` until 5.0.0: SemVer removes a deprecated option in a major release,
-  after a minor release that ships the deprecation (4.1.0).
+- Keep `--all` until 6.0.0: SemVer removes a deprecated option in a major release
+  after a release that ships the deprecation, and the deprecation first ships in
+  5.0.0 (docs/research/2026-09-24-a-green-main-tags-its-version.md).
 - Keep the reply sentinels.
 
 ## Edited files

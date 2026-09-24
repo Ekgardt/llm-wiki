@@ -158,7 +158,10 @@ Before tagging a release or updating public marketing numbers:
 4. **CHANGELOG** — newest version at top (Keep a Changelog).
 5. **pyproject.toml version** + `uv.lock` package version must match the tag.
 6. If benchmark numbers changed, update `docs/ARCHITECTURE.md` search section + `benchmark/report.md` in the same change.
-7. Only then: tag, push, GitHub Release.
+7. Only then merge. The `release-tag` workflow tags `vX.Y.Z` on the first green
+   `main` commit whose `pyproject.toml` version has its own `CHANGELOG.md` section,
+   with that section and the release manifest as the tag message; nobody tags by
+   hand, and an existing tag is never moved.
 
 **Never ship a release with EN updated and RU/ZH left stale.** That is a release blocker.
 
