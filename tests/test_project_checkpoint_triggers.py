@@ -4,13 +4,20 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from project_journal import (
+    MAX_PROJECT_HANDOFF_CHARS,
     CheckpointReducer,
     ProjectProjection,
-    build_handoff,
+    _render_handoff_items,
+    build_handoff_items,
     recover_project_handoff,
 )
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+
+
+def _rendered(projection: ProjectProjection, *, max_chars: int = MAX_PROJECT_HANDOFF_CHARS) -> str:
+    """The handoff as `recover_project_handoff` renders it."""
+    return _render_handoff_items(build_handoff_items(projection), max_chars=max_chars)
 
 
 @pytest.fixture
@@ -309,7 +316,7 @@ def test_handoff_is_bounded_and_contains_only_active_operational_fields():
         last_applied_sequence=42,
     )
 
-    handoff = build_handoff(projection, max_actions=10)
+    handoff = _rendered(projection)
 
     assert len(handoff) <= 2400
     assert "Ship Stage 2" in handoff
@@ -333,7 +340,7 @@ def test_handoff_hard_limit_fails_visibly_without_dropping_mandatory_sections():
         blockers={"blocker": "b" * 4000},
         last_applied_sequence=1,
     )
-    handoff = build_handoff(projection, max_chars=300)
+    handoff = _rendered(projection, max_chars=300)
     assert len(handoff.encode()) <= 300
     assert "mandatory_" in handoff
     assert "g" * 100 not in handoff
@@ -341,8 +348,6 @@ def test_handoff_hard_limit_fails_visibly_without_dropping_mandatory_sections():
 
 
 def test_complete_handoff_semantic_package_is_mandatory():
-    from project_journal import build_handoff_items
-
     items = build_handoff_items(
         ProjectProjection(
             project="demo",
@@ -372,7 +377,7 @@ def test_public_handoff_rendering_uses_compiler_facade(monkeypatch):
 
     monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
 
-    rendered = build_handoff(ProjectProjection(project="demo", last_applied_sequence=2))
+    rendered = _rendered(ProjectProjection(project="demo", last_applied_sequence=2))
 
     assert rendered == "compatible handoff\n"
     assert captured["packing"]["emergency_byte_cap"] == 2400

@@ -51,11 +51,8 @@ def test_position_range_is_nonnegative_half_open(start: object, end: object) -> 
         PositionRange(start, end)  # type: ignore[arg-type]
 
 
-def test_position_range_nonempty_boundary() -> None:
+def test_position_range_allows_an_empty_range() -> None:
     assert PositionRange(0, 0).byte_start == 0
-    with pytest.raises(ValueError, match="claim.*non-empty"):
-        PositionRange(0, 0).require_nonempty("claim range")
-    assert PositionRange(0, 1).require_nonempty("claim range") == PositionRange(0, 1)
 
 
 def test_position_range_accepts_signed_int64_max_and_rejects_overflow() -> None:

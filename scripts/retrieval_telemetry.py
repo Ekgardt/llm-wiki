@@ -422,18 +422,6 @@ def _insert_events(database: sqlite3.Connection, events: Sequence[RetrievalEvent
     )
 
 
-def record_event(
-    event: RetrievalEvent,
-    *,
-    db_path: Path | None = None,
-    busy_ms: int = STRICT_BUSY_MS,
-    max_rows: int = DEFAULT_MAX_ROWS,
-) -> int:
-    return record_events(
-        [event], db_path=db_path, busy_ms=busy_ms, max_rows=max_rows
-    )
-
-
 def best_effort_record_events(
     events: list[RetrievalEvent] | tuple[RetrievalEvent, ...],
     *,
@@ -631,31 +619,6 @@ def read_events_after(
             SequencedRetrievalEvent(sequence=row["sequence"], event=_event_from_row(row))
             for row in rows
         ]
-    finally:
-        database.close()
-
-
-def count_events_after(
-    candidate_id: str,
-    *,
-    after_sequence: int,
-    limit: int = MAX_READ_EVENTS,
-    db_path: Path | None = None,
-) -> int:
-    """Count at most ``limit`` candidate events after a sequence."""
-    _bounded_text("candidate_id", candidate_id)
-    _validate_nonnegative_integer("after_sequence", after_sequence)
-    _validate_limit("limit", limit, MAX_READ_EVENTS)
-    path = Path(db_path or TELEMETRY_DB)
-    database = _readonly_database(path)
-    if database is None:
-        return 0
-    try:
-        return int(database.execute(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM retrieval_events "
-            "WHERE candidate_id = ? AND sequence > ? ORDER BY sequence LIMIT ?)",
-            (candidate_id, after_sequence, limit),
-        ).fetchone()[0])
     finally:
         database.close()
 

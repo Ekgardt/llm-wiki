@@ -8,7 +8,6 @@ from context_budget import (
     TokenCount,
     TokenUsage,
     count_tokens,
-    fits_within_budget,
 )
 
 
@@ -119,9 +118,3 @@ def test_empty_input_has_deterministic_zero_estimate():
     assert count_tokens("") == TokenCount(tokens=0, source="estimated")
 
 
-def test_safety_margin_is_applied_when_checking_budget():
-    budget = ContextBudget("model", 100, 10, 10)
-
-    assert fits_within_budget(TokenCount(80, "estimated"), budget) is True
-    assert fits_within_budget(TokenCount(81, "estimated"), budget) is False
-    assert fits_within_budget(TokenCount(None, "unknown"), budget) is False

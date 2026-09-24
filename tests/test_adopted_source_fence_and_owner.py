@@ -1,15 +1,14 @@
-"""The two named-refusal gaps from 2026-08-27, implemented for real.
+"""The adopted V3 queue carries the source-fence family.
 
-The adopted V3 queue used to refuse the whole source-fence family
-(`queue_api_not_adopted`) and the module-level queue owner registry
-(`queue_tombstoned_by_adoption`) by name, because faking either would have
-been worse. These tests build a genuinely adopted state root with the real
-adoption command and prove both now work against the V3 schema the adoption
-already ships: `source_fences` rows carry `logical_path` and
-`owner_start_identity`, and the bounded worker's owner goes through the
-canonical V3 ownership registry with a `queue_ownership` projection.
+The adopted V3 queue used to refuse the source-fence family
+(`queue_api_not_adopted`) by name, because faking it would have been worse. These
+tests build a genuinely adopted state root with the real adoption command and
+prove it now works against the V3 schema the adoption already ships:
+`source_fences` rows carry `logical_path` and `owner_start_identity`. The
+module-level queue owner these tests also covered was reached by no product path
+and was removed on 2026-09-24
+(docs/research/2026-09-24-code-no-product-path-reaches-is-removed.md).
 """
-
 from __future__ import annotations
 
 import os
@@ -73,34 +72,6 @@ def _fence_snapshot(state_root: Path) -> list[tuple[str, str, str, int, bool]]:
         )
         for row in _rows(state_root, "source_fences")
     ]
-
-
-def _owner_snapshots(
-    state_root: Path,
-) -> tuple[list[tuple[str, str, str, int]], list[tuple[str, str]]]:
-    """The queue_ownership projection and the canonical registry rows."""
-    projection = [
-        (
-            str(row["canonical_role"]),
-            str(row["domain_role"]),
-            str(row["owner_token"]),
-            int(row["process_id"]),
-        )
-        for row in _rows(state_root, "queue_ownership")
-    ]
-    database = state_root / "run/markdown-transactions-v3.sqlite3"
-    with sqlite3.connect(database) as connection:
-        canonical = connection.execute(
-            "SELECT role, scope FROM maintenance_owners"
-        ).fetchall()
-    return projection, [tuple(row) for row in canonical]
-
-
-def _acquire_worker_owner(state_root: Path) -> memory_queue.QueueOwnerLease:
-    """The exact call doctor's `_run_bounded_worker` makes."""
-    return memory_queue._acquire_queue_owner(
-        state_root, "worker", "worker_busy", ttl_seconds=120
-    )
 
 
 def _inject_ready_task(
@@ -274,69 +245,3 @@ def test_the_archiver_queue_path_answers_instead_of_refusing(
     archiver.queue.release_source_fence(fence.token)
 
 
-def test_the_bounded_worker_owner_acquires_on_an_adopted_vault(
-    tmp_path: Path,
-) -> None:
-    _root, state_root, _queue = _adopted_queue(tmp_path)
-
-    owner = _acquire_worker_owner(state_root)
-
-    assert _owner_snapshots(state_root) == (
-        [("queue-worker", "worker", owner.token, os.getpid())],
-        [("queue-worker", "queue-owner:worker")],
-    )
-
-    assert memory_queue._release_queue_owner(owner) is True
-    assert _owner_snapshots(state_root) == ([], [])
-
-
-def test_the_worker_owner_heartbeats_and_excludes_a_second_worker(
-    tmp_path: Path,
-) -> None:
-    _root, state_root, _queue = _adopted_queue(tmp_path)
-    owner = _acquire_worker_owner(state_root)
-
-    renewed = memory_queue._heartbeat_queue_owner(owner)
-    assert (renewed.token, renewed.expires_at >= owner.expires_at) == (
-        owner.token,
-        True,
-    )
-
-    with pytest.raises(memory_queue.MigrationBusy) as busy:
-        _acquire_worker_owner(state_root)
-    assert busy.value.code == "worker_busy"
-
-    assert memory_queue._release_queue_owner(renewed) is True
-
-
-def test_legacy_owner_roles_keep_their_named_refusal_when_adopted(
-    tmp_path: Path,
-) -> None:
-    """'legacy' and 'migration' guard pre-adoption workflows and stay refused."""
-    _root, state_root, _queue = _adopted_queue(tmp_path)
-
-    for role, busy_code in (
-        ("legacy", "legacy_owner_busy"),
-        ("migration", "migration_busy"),
-    ):
-        with pytest.raises(memory_queue.QueueOperationError) as raised:
-            memory_queue._acquire_queue_owner(state_root, role, busy_code)
-        assert raised.value.code == "queue_tombstoned_by_adoption"
-
-
-def test_the_legacy_owner_registry_is_untouched_off_adoption(
-    tmp_path: Path,
-) -> None:
-    """On an unadopted vault the registry keeps its pre-adoption database."""
-    state_root = tmp_path / "plain-state"
-    state_root.mkdir(parents=True)
-
-    owner = memory_queue._acquire_queue_owner(state_root, "worker", "worker_busy")
-    renewed = memory_queue._heartbeat_queue_owner(owner)
-    assert memory_queue._release_queue_owner(renewed) is True
-
-    with sqlite3.connect(state_root / "run/queue.sqlite3") as connection:
-        stored = connection.execute(
-            "SELECT role, token FROM queue_ownership"
-        ).fetchall()
-    assert stored == [("worker", None)]

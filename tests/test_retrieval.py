@@ -473,9 +473,12 @@ def test_cli_exposes_profile_and_disable_switches() -> None:
 
 
 def test_retrieval_trace_schema_accepts_contract_payload() -> None:
+    import dataclasses
+
+    import mcp_server
     import retrieval
 
-    payload = retrieval.trace_to_dict(
+    payload = mcp_server._reported_trace(dataclasses.asdict(
         retrieval.RetrievalTrace(
             requested_mode="HYBRID",
             effective_mode="BASE",
@@ -490,7 +493,7 @@ def test_retrieval_trace_schema_accepts_contract_payload() -> None:
             reranker_duration_ms=None,
             reranker_fallback_reason="reranker_unavailable",
         )
-    )
+    ))
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
     schema = json.loads((SCHEMAS / "retrieval-trace-v1.json").read_text(encoding="utf-8"))
     assert schema["$id"].endswith("retrieval-trace-v1.json")

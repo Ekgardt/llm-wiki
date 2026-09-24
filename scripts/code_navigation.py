@@ -1160,34 +1160,6 @@ def _dedupe_locations(
     return tuple(result.values())
 
 
-def _graph_only_candidates(
-    graph_locations: tuple[NavigationLocation, ...],
-    lsp_locations: tuple[NavigationLocation, ...],
-    graph_provenance: tuple[Provenance, ...],
-) -> tuple[NavigationLocation, ...]:
-    lsp_keys = {
-        (location.path, location.range.byte_start, location.range.byte_end)
-        for location in lsp_locations
-    }
-    appended: list[NavigationLocation] = []
-    for location in graph_locations:
-        if (location.path, location.range.byte_start, location.range.byte_end) in lsp_keys:
-            continue
-        appended.append(
-            NavigationLocation(
-                path=location.path,
-                range=location.range,
-                line=location.line,
-                character=location.character,
-                containing_symbol=location.containing_symbol,
-                signature=location.signature,
-                resolution=ResolutionLabel.GRAPH_CANDIDATE,
-                provenance=_union_provenance(location.provenance, graph_provenance),
-            )
-        )
-    return tuple(appended)
-
-
 def _span_key(location: NavigationLocation) -> tuple[str, int, int]:
     return (location.path, location.range.byte_start, location.range.byte_end)
 

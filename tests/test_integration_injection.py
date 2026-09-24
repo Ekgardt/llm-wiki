@@ -2339,7 +2339,9 @@ def test_codex_hooks_feature_state_obeys_canonical_precedence(tmp_path, features
     body = f"[features]\n{features}\n" if features else 'model = "gpt-5.6"\n'
     config.write_text(body, encoding="utf-8")
 
-    assert codex_memory.codex_hooks_feature_state(config) == expected
+    state = codex_memory._codex_hooks_feature_state(codex_memory._read_codex_toml(config))
+
+    assert state == expected
 
 
 def test_codex_hook_command_reports_disabled_without_writing(tmp_path, capsys):

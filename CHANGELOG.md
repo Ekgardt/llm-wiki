@@ -8,6 +8,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **Code no product path reaches.** Seven functions nothing called; twelve that
+  only their own tests called (`MemoryQueue.export_task`,
+  `payload_for_execution`, `retrieval.trace_to_dict`,
+  `project_journal.build_handoff`, `retrieval_telemetry.record_event` and
+  `count_events_after`, and six smaller ones); the Windows directory-listing layer
+  of `generation_catalog.py` they left unreached; and the module-level queue owner
+  of `memory_queue.py`, which no product module called since the queue worker and
+  doctor own the queue through `MemoryQueue.queue_owner`. Tests that used a removed
+  function as a tool now use the product path. Test seams and the Reliability v3
+  repair and discard operations stay. `compile_memory.py --all` stays deprecated
+  until 5.0.0. See
+  `docs/research/2026-09-24-code-no-product-path-reaches-is-removed.md`.
 - **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
   its verdict sidecar are gone: the owner does no manual labelling, and the two
   automatic readings above replace the step it existed for. Corpus schema v2

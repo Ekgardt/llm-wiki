@@ -705,7 +705,6 @@ def test_v3_claim_demotes_corrupt_row_and_continues_without_dispatching_it(
     "transition",
     [
         "heartbeat",
-        "execute-handoff",
         "result-adoption",
         "result-publication",
         "acknowledge",
@@ -729,7 +728,6 @@ def test_v3_leased_transitions_demote_payload_mismatch(
 
     actions = {
         "heartbeat": lambda: queue.heartbeat(lease),
-        "execute-handoff": lambda: queue.payload_for_execution(lease),
         "result-adoption": lambda: queue.adopt_published_result(
             lease, operation_id=operation_id
         ),
@@ -842,7 +840,9 @@ def test_v3_exporter_round_trips_real_task_through_queue_task_schema(
     queue.publish_result(lease, operation_id="query-operation", result=b"answer")
     queue.acknowledge(lease)
 
-    record = queue.export_task(task_id)
+    with memory_queue.closing(queue._connect()) as database:
+        row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        record = queue._export_task_in_transaction(database, row)
 
     validate_schema(
         record,

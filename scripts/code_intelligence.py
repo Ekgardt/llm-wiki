@@ -97,10 +97,3 @@ class PositionRange:
         if self.byte_end < self.byte_start:
             raise ValueError("byte_end must not precede byte_start")
 
-    def require_nonempty(self, label: str) -> PositionRange:
-        _require_text(label, "range label", maximum=128)
-        if self.byte_end <= self.byte_start:
-            raise ValueError(f"{label} must use a non-empty half-open byte range")
-        return self
-
-

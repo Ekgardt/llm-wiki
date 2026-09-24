@@ -216,16 +216,3 @@ def read_stable_bytes(
         os.close(descriptor)
 
 
-def read_stable_utf8(
-    path: Path,
-    max_bytes: int,
-    *,
-    label: str = "file",
-    deadline: float | None = None,
-) -> str:
-    return read_stable_bytes(
-        path,
-        max_bytes,
-        label=label,
-        deadline=deadline,
-    ).decode("utf-8", errors="strict")

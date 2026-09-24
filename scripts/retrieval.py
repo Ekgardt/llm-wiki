@@ -4036,24 +4036,6 @@ def retrieve(
         return _partial_or_reraise(progress, stopped)
 
 
-def trace_to_dict(trace: RetrievalTrace) -> dict[str, object]:
-    return {
-        "schema_version": "retrieval-trace/v1",
-        "requested_mode": trace.requested_mode,
-        "effective_mode": trace.effective_mode,
-        "signals_used": list(trace.signals_used),
-        "fallback_reason": trace.fallback_reason,
-        "corpus_generation": trace.corpus_generation,
-        "partial": trace.partial,
-        "reranker_applied": trace.reranker_applied,
-        "reranker_model_id": trace.reranker_model_id,
-        "reranker_model_revision": trace.reranker_model_revision,
-        "reranker_depth": trace.reranker_depth,
-        "reranker_duration_ms": trace.reranker_duration_ms,
-        "reranker_fallback_reason": trace.reranker_fallback_reason,
-    }
-
-
 _LEGACY_DISPLAY_FIELDS = (
     "authority",
     "confidence",

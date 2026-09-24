@@ -4886,38 +4886,6 @@ def test_verify_edge_validates_both_anchors_before_callback_and_propagates_inter
         session.close(deadline=time.monotonic() + 5)
 
 
-def test_graph_candidates_appended_after_lsp_results(
-    repository: Path,
-    state_root: Path,
-    semantic_pyright: SemanticPyrightFixture,
-) -> None:
-    from code_navigation import _graph_only_candidates
-
-    lsp = (
-        NavigationLocation(
-            "pkg/a.py",
-            PositionRange(0, 4),
-            1,
-            0,
-            None,
-            None,
-            ResolutionLabel.LSP_CONFIRMED,
-            (Provenance("lsp", "pyright", "1.1.411", "provider_reported"),),
-        ),
-    )
-    graph = (
-        _graph_location("pkg/a.py", 0, 4),
-        _graph_location("pkg/b.py", 10, 14),
-    )
-    graph_provenance = (
-        Provenance("graph", "evidence-graph", "structural", "graph_candidate"),
-    )
-    appended = _graph_only_candidates(graph, lsp, graph_provenance)
-    assert len(appended) == 1
-    assert appended[0].path == "pkg/b.py"
-    assert appended[0].resolution is ResolutionLabel.GRAPH_CANDIDATE
-
-
 def test_dedupe_locations_collapses_duplicates(
     repository: Path,
 ) -> None:

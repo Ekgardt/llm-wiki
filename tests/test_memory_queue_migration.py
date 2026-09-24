@@ -16,7 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
-from memory_queue import DEFAULTS, MemoryQueue, MigrationBusy, QueueFailure  # noqa: E402
+from memory_queue import DEFAULTS, MemoryQueue, QueueFailure  # noqa: E402
 from reliable_memory import (  # noqa: E402
     OperationalDatabaseContractError,
     canonical_json_bytes,
@@ -205,68 +205,6 @@ def test_queue_v2_hash_valid_invalid_payload_is_preserved_dead(
         "dead",
         "payload_hash_mismatch",
     )
-
-
-def test_sqlite_owner_takeover_is_epoch_fenced_and_release_is_token_fenced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
-    first = memory_queue._acquire_queue_owner(
-        tmp_path, "migration", "migration_busy", now=now, ttl_seconds=10
-    )
-    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: False)
-    second = memory_queue._acquire_queue_owner(
-        tmp_path,
-        "migration",
-        "migration_busy",
-        now=now + timedelta(seconds=1),
-        ttl_seconds=10,
-    )
-
-    with pytest.raises(memory_queue.QueueOperationError) as raised:
-        memory_queue._heartbeat_queue_owner(first, now=now + timedelta(seconds=2))
-
-    assert (
-        second.epoch - first.epoch,
-        raised.value.code,
-        (
-            memory_queue._release_queue_owner(first),
-            memory_queue._release_queue_owner(second),
-        ),
-        list((tmp_path / "run").glob("queue-*.lock")),
-    ) == (1, "migration_fence_lost", (False, True), [])
-
-
-def test_expired_owner_cannot_be_stolen_while_pid_is_alive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
-    owner = memory_queue._acquire_queue_owner(
-        tmp_path, "migration", "migration_busy", now=now, ttl_seconds=1
-    )
-    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: pid == owner.pid)
-
-    with pytest.raises(MigrationBusy) as raised:
-        memory_queue._acquire_queue_owner(
-            tmp_path,
-            "migration",
-            "migration_busy",
-            now=now + timedelta(seconds=2),
-            ttl_seconds=1,
-        )
-
-    assert raised.value.code == "migration_busy"
-    assert memory_queue._release_queue_owner(owner) is True
-
-
-def _await_file(path: Path, timeout: float) -> None:
-    """Wait for a child to signal through the filesystem."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists():
-            return
-        time.sleep(0.01)
-    raise AssertionError(f"{path.name} never appeared")
 
 
 def test_redrive_links_new_task_without_changing_dead_history(tmp_path: Path) -> None:

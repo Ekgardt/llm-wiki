@@ -87,39 +87,10 @@ _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _LATIN = re.compile(r"[A-Za-z]")
 
 
-_POLICY_BOUNDS = {
-    "roots": (1, 128),
-    "include_globs": (1, 256),
-    "ignore_globs": (0, 256),
-    "suffixes": (1, 128),
-}
-
-
-def _bounded_nfc_text(value: object, limit: int) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return len(value) <= limit and value == unicodedata.normalize("NFC", value)
-
-
-def _normalized_text(value: str, limit: int) -> bool:
-    if not _bounded_nfc_text(value, limit):
-        return False
-    return "\\" not in value
-
-
 def _relative_parts_ok(pure: PurePosixPath) -> bool:
     if pure.is_absolute():
         return False
     return not any(part in {"", ".", ".."} for part in pure.parts)
-
-
-def _normalized_values(name: str, values: tuple[str, ...]) -> tuple[str, ...]:
-    nfc_values = tuple(unicodedata.normalize("NFC", value) for value in values)
-    if len(set(nfc_values)) < len(set(values)):
-        raise ValueError(f"{name} contains a Unicode normalization collision")
-    if name == "suffixes":
-        return tuple(value.casefold() for value in nfc_values)
-    return nfc_values
 
 
 def _require_manifest_versions(collector_version: object, extractor_version: object) -> None:
@@ -181,11 +152,6 @@ class CapturedSource:
     record: SourceRecord
     metadata: SourceMetadata
     content: bytes
-
-    @property
-    def captured_bytes(self) -> bytes:
-        return self.content
-
 
 @dataclass(frozen=True, slots=True)
 class RetrievalChunk:

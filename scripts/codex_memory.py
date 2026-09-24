@@ -614,13 +614,6 @@ def _codex_hooks_feature_state(document: dict[str, Any]) -> str:
     return "disabled"
 
 
-def codex_hooks_feature_state(config: Path) -> str:
-    """Return the effective user-level lifecycle feature state."""
-    if not config.exists():
-        return "enabled"
-    return _codex_hooks_feature_state(_read_codex_toml(config))
-
-
 def _inline_hook_state(config: Path, template: dict[str, Any]) -> str:
     if not config.exists():
         return "absent"

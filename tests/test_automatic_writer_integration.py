@@ -245,8 +245,8 @@ def _drive_access_tracking(d: _Drive) -> None:
     monkeypatch.setattr(module, "KNOWLEDGE_DIR", page.parent)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
     monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
-    retrieval_telemetry.record_event(
-        retrieval_telemetry.make_event(
+    retrieval_telemetry.record_events(
+        [retrieval_telemetry.make_event(
             event_kind="page_read",
             query=None,
             retrieval_mode="direct",
@@ -256,7 +256,7 @@ def _drive_access_tracking(d: _Drive) -> None:
             rank=None,
             generation="legacy",
             source_tool="writer-test",
-        ),
+        )],
         db_path=database,
     )
     d.function("page")

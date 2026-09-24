@@ -198,11 +198,6 @@ def _byte_estimate(text: str) -> TokenCount:
     return TokenCount(len(encoded), "estimated")
 
 
-def fits_within_budget(count: TokenCount, budget: ContextBudget) -> bool:
-    """Conservatively accept only known counts within the budget's safe input."""
-    return count.tokens is not None and count.tokens <= budget.available_input_tokens
-
-
 _ITEM_CHECKS = (
     ("item_id", _nonempty_text, "item_id must be a non-empty string"),
     ("text", lambda value: isinstance(value, str), "text must be a string"),
