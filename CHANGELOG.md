@@ -183,6 +183,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A long session in the vault is captured, and each capture keeps its window.**
+  The prompt hook skipped every prompt inside the vault as "maintenance", so the
+  owner's own sessions there never reached the every-20th-prompt capture; the
+  adapter's reentry marker already filters the memory's own processes, and the
+  vault rule is gone. A second, different record of a session on one day is
+  written beside the first (`<session>@<digest>.md`) instead of replacing it, so
+  the earlier window survives and consolidation reads the new one. A hook
+  delegate that exits non-zero is recorded as a lost capture, and the prompt hook
+  no longer runs on no-op stand-ins when its state module will not import. A rule
+  no longer reads "When When". The 25 dead capture tasks of August and September
+  are archived by the weekly purge rather than redriven under today's date. See
+  `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
 - **Every store that only grew has a bound.** Settled transaction rows and the
   attempts of committed checkpoints are dropped after 90 days (checkpoint rows
   and quarantined transactions stay), and doctor reports exact row totals by

@@ -743,8 +743,9 @@ def _require_canonical_body(body: str) -> str:
     its answer with a newline. Whitespace around a Markdown body carries
     nothing a reader or a later grep can use, so refusing it protects nothing
     and costs a session. Output that is not a flush body at all is still
-    refused: a body that is only whitespace here, and a reply that declares no
-    tier anywhere in `_parse_capture_wire_output`.
+    refused: a body that is only whitespace here, and a reply whose first
+    non-blank line declares no tier (`_declared_tier`; a tier quoted further
+    down, from the transcript, must not decide).
     """
     stripped = body.strip()
     if not stripped:

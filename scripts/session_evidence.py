@@ -73,6 +73,34 @@ def evidence_relative_path(day: str, session_id: str, document: bytes = b"") -> 
     )
 
 
+PART_DIGEST_CHARS = 8
+
+
+def _free_relative_path(vault: Path, fields: Mapping[str, object], document: bytes) -> str:
+    """The session's record path, or a sibling when that name holds another window.
+
+    A second capture of one session on one day used to replace the first, and
+    the day's record set, which consolidation reads by name, did not change: the
+    earlier tail was lost and the new one never read. A different window is
+    written beside it as `<session>@<8 hex of its sha256>.md`; the same content
+    keeps the first name, so a replay stays one record. See
+    `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
+    """
+    base = evidence_relative_path(_capture_day(fields), str(fields.get("session") or ""), document)
+    existing = vault / base
+    if not existing.exists() or _same_bytes(existing, document):
+        return base
+    part = hashlib.sha256(document).hexdigest()[:PART_DIGEST_CHARS]
+    return f"{base[: -len('.md')]}@{part}.md"
+
+
+def _same_bytes(path: Path, document: bytes) -> bool:
+    try:
+        return path.read_bytes() == document
+    except OSError:
+        return False
+
+
 def _blocks_of(content: object) -> list[object]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
@@ -323,9 +351,7 @@ def write_session_evidence(
         return None
     document = _document_from_body(fields, body)
     encoded = document.encode("utf-8")
-    relative = evidence_relative_path(
-        _capture_day(fields), str(fields.get("session") or ""), encoded
-    )
+    relative = _free_relative_path(Path(vault), fields, encoded)
     path = Path(vault) / relative
     try:
         _write_record(
