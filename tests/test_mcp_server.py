@@ -649,7 +649,7 @@ class TestHelperFunctions:
 
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
         monkeypatch.setattr(lookup_mode, "count_wiki_pages", lambda: 0)
-        monkeypatch.setattr(lookup_mode, "tier_for", lambda count: "direct")
+        monkeypatch.setattr(lookup_mode, "index_status", lambda: {"available": False})
 
         result = _wiki_overview()
 
@@ -2507,11 +2507,12 @@ class TestHandleToolCall:
             trace["fallback_reason"],
             trace["partial"],
         ) == ("gen-17", ["lexical", "dense"], None, False)
+        # HYBRID declares lexical and dense only, so graph is not reported at all.
         assert (
             components["dense"],
-            components["graph"]["freshness"],
+            "graph" in components,
             _named_generations(components),
-        ) == ({"generation": "gen-17", "freshness": "fresh"}, "missing", {"gen-17"})
+        ) == ({"generation": "gen-17", "freshness": "fresh"}, False, {"gen-17"})
 
     def test_recall_rejects_trace_outside_the_closed_schema(self, monkeypatch):
         import mcp_server

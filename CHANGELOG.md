@@ -183,6 +183,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **An answer says how old its index is, and the index follows the compile.** A
+  page compiled during the day was not searchable until the next nightly, and
+  `recall` said `fresh`. A successful command-line compile now refreshes the
+  memory generation (a no-op when nothing changed); `recall` reports its lexical
+  and dense components `stale` when a page changed after the generation was
+  built, and the envelope's `index_timestamp`, declared and never filled, now
+  names the build time. Graph is no longer reported "missing" from an answer
+  whose mode never asks for it. Doctor calls a generation stale when changed
+  sources waited a day unrefreshed, not for every daily-log append nor for age
+  alone. `lookup_mode` reports the mode search runs in (HYBRID, BASE, DIRECT)
+  instead of a page-count recommendation nothing followed, and `wiki_overview`
+  carries the same. `prune_generations` counts only memory publications as
+  pending. Command-line hits show their text, not only their heading, and the
+  model-loading progress bar is gone. See
+  `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
 - **The memory server reloads its own code.** A Claude Code session keeps its
   stdio MCP server for its whole life, and the nightly changes the code under it:
   on 2026-09-23 a server kept its old `bounded_io`, imported a new

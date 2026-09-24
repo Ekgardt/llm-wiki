@@ -2108,7 +2108,7 @@ def test_status_names_the_active_generation(monkeypatch, capsys):
         "Active generation: generation-1 (markdown-heading-extractor/v3, "
         "vectors complete, model intfloat/multilingual-e5-small)"
     )
-    assert lines[1] == "Pages on disk: 0"
+    assert lines[1] == "Searchable pages (superseded excluded): 0"
 
 
 def test_status_says_when_there_is_no_generation(monkeypatch, capsys):

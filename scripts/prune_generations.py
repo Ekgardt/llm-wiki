@@ -153,10 +153,13 @@ def _memory_publications(catalog: GenerationCatalog) -> set[str]:
     }
 
 
-def _abandoned_publications(catalog: GenerationCatalog, never_activated: set[str]) -> set[str]:
+def _abandoned_publications(catalog: GenerationCatalog, unactivated_memory: set[str]) -> set[str]:
     """Never-activated memory publications no writer has touched for a day."""
-    memory = _memory_publications(catalog) & never_activated
-    return {name for name in memory if untouched_for(catalog.generations_path / name, ABANDONED_AFTER_SECONDS)}
+    return {
+        name
+        for name in unactivated_memory
+        if untouched_for(catalog.generations_path / name, ABANDONED_AFTER_SECONDS)
+    }
 
 
 def plan_prune(
@@ -169,13 +172,15 @@ def plan_prune(
     on_disk = _generation_directories(catalog.generations_path)
     interrupted = _interrupted_discards(retained, registered, on_disk, activated)
     candidates = _prune_candidates(retained, registered, on_disk)
-    never_activated = candidates - activated
-    abandoned = _abandoned_publications(catalog, never_activated)
+    # Only memory publications wait for activation; a code generation is never
+    # activated by design, so counting it as pending hid a real stuck one.
+    unactivated_memory = (candidates - activated) & _memory_publications(catalog)
+    abandoned = _abandoned_publications(catalog, unactivated_memory)
     return PrunePlan(
         retained,
         tuple(sorted((candidates & activated) | interrupted)),
         tuple(sorted(registered - on_disk - interrupted)),
-        tuple(sorted(never_activated - abandoned)),
+        tuple(sorted(unactivated_memory - abandoned)),
         tuple(sorted(abandoned)),
         tuple(sorted(on_disk - registered)),
     )

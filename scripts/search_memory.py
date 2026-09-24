@@ -255,6 +255,10 @@ def _get_embedder():
         return _embedder_cache
     try:
         from sentence_transformers import SentenceTransformer
+        from transformers.utils import logging as transformers_logging
+
+        # A "Loading weights" bar on every command-line search is not output.
+        transformers_logging.disable_progress_bar()
         _embedder_cache = SentenceTransformer(
             EMBEDDING_MODEL,
             revision=EMBEDDING_MODEL_REVISION,
@@ -4211,7 +4215,7 @@ def _active_generation_line() -> str:
 def _print_status() -> int:
     """The generation the search reads and the pages it would index."""
     print(_active_generation_line())
-    print(f"Pages on disk: {len(_collect_pages('all'))}")
+    print(f"Searchable pages (superseded excluded): {len(_collect_pages('all'))}")
     return 0
 
 
@@ -4256,9 +4260,41 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
         print(f"{i}. [{r['score']}] {r['title']}{proj_tag}{ts_tag}")
         print(f"   {r['path']}")
-        if r["summary"]:
-            print(f"   {r['summary']}")
+        snippet = result_snippet(r)
+        if snippet:
+            print(f"   {snippet}")
         print()
+
+
+SNIPPET_CHARS = 240
+
+
+def result_snippet(result: dict) -> str:
+    """The first words of the hit's text after its heading; the summary otherwise.
+
+    A chunk's summary is its heading, and a heading such as "Consequences" says
+    nothing on its own line. See
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    """
+    text = _body_text(str(result.get("content") or ""))
+    if not text:
+        return str(result.get("summary") or "")
+    return _clipped(text, SNIPPET_CHARS)
+
+
+def _body_text(content: str) -> str:
+    lines = [line.strip() for line in content.splitlines()]
+    return " ".join(line for line in lines if _is_body_line(line))
+
+
+def _is_body_line(line: str) -> bool:
+    return bool(line) and not line.startswith("#")
+
+
+def _clipped(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 if __name__ == "__main__":

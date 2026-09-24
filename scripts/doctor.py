@@ -4345,7 +4345,14 @@ def _generation_message(degraded: bool, extraction_faults: int) -> str:
 
 
 def _generation_is_stale(facts: _GenerationFacts, age: float, complete_v2: bool) -> bool:
-    if facts.delta or age > GENERATION_FRESH_SECONDS:
+    """Stale when its identity is, or when sources changed and a day passed unrefreshed.
+
+    Not for a delta alone: every capture appends to a daily log, so that made the
+    vault degraded for most of every day. Not for age alone: an unchanged vault's
+    refresh builds nothing, so its age grows while it is current. See
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    """
+    if facts.delta and age > GENERATION_FRESH_SECONDS:
         return True
     return _identity_stale(facts, complete_v2)
 
