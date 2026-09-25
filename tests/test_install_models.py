@@ -212,3 +212,12 @@ def test_a_check_or_a_failed_fetch_retires_nothing(two_models):
     install_models.main([])
 
     assert link.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Hub cache links files only where symlinks work")
+def test_the_text_report_names_the_file_it_removed(two_models, capsys):
+    _retired_link(two_models, "org/encoder")
+
+    install_models.main([])
+
+    assert "fetched org/encoder@ffffffffffff; removed model.safetensors" in capsys.readouterr().out

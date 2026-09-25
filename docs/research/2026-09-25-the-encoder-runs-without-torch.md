@@ -117,3 +117,13 @@ which runs after the `models` step, restores them in the same pass.
 The 1.5 s left is mostly the runtime building the 470 MB session. The load was
 measured on this machine only; Windows and macOS CI run the tests, not the
 timing.
+
+## After the change (2026-09-25, live vault)
+
+The owner ran the nightly pass by hand at 11:30 UTC: 22 steps, `failures=0`. The
+`models` step fetched and verified `onnx/model.onnx` and removed the encoder's
+`model.safetensors`; the cache directory now holds 471 MB, the ONNX weights
+alone. The generation rebuilt with vectors in 33.8 s, a cold command-line search
+took 2.41 s, and `doctor` reported `models: ok` and `generation: ok`. The text
+report said only `fetched`: the removal was visible in the JSON form alone, so
+the text line now names the removed file too.

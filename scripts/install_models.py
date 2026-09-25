@@ -260,8 +260,15 @@ def _print(outcomes: list[dict], as_json: bool) -> None:
         print(json.dumps({"models": outcomes}, ensure_ascii=False, sort_keys=True))
         return
     for item in outcomes:
-        reason = f" ({item['reason']})" if item["reason"] else ""
-        print(f"install_models: {item['state']} {item['model']}@{item['revision'][:12]}{reason}")
+        print(_line(item))
+
+
+def _line(item: dict) -> str:
+    """One model's outcome, naming any retired file it removed from the cache."""
+    reason = f" ({item['reason']})" if item["reason"] else ""
+    retired = item.get("retired") or []
+    removed = f"; removed {', '.join(retired)}" if retired else ""
+    return f"install_models: {item['state']} {item['model']}@{item['revision'][:12]}{reason}{removed}"
 
 
 def _exit_code(outcomes: list[dict]) -> int:
