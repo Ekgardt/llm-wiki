@@ -1239,11 +1239,18 @@ def _require_reference_prefix(line: str, start: int) -> None:
         raise ValueError("evidence reference has an invalid prefix")
 
 
+# A reference opened by one of these ends at the next of the same, not at the
+# line: backticks in prose, quotation marks in the `## Claims` JSON block. See
+# `docs/research/2026-09-25-a-quoted-reference-ends-at-its-quote.md`.
+_REFERENCE_DELIMITERS = frozenset({"`", '"'})
+
+
 def _reference_candidate(line: str, start: int) -> tuple[str, int]:
-    """A backtick-quoted reference ends at its closing backtick, not at the line."""
-    if start == 0 or line[start - 1] != "`":
+    """A delimited reference ends at its closing delimiter; an open one at the line."""
+    opener = line[start - 1] if start else ""
+    if opener not in _REFERENCE_DELIMITERS:
         return line[start:].strip(), len(line)
-    end = line.find("`", start)
+    end = line.find(opener, start)
     if end < 0:
         raise ValueError("evidence reference has no closing delimiter")
     return line[start:end], end + 1

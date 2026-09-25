@@ -199,9 +199,10 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
             text = read_stable_bytes(
                 page, MAX_LINT_PAGE_BYTES, label="lint evidence page"
             ).decode("utf-8", errors="strict")
-            references = extract_evidence_references(
-                CLAIMS_SECTION_RE.sub("", text)
-            )
+            # The whole page, as `read_page` reads it: lint once skipped the
+            # `## Claims` block, so 52 pages that `read_page` refused passed lint
+            # (docs/research/2026-09-25-a-quoted-reference-ends-at-its-quote.md).
+            references = extract_evidence_references(text)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             findings.append(f"{_rel(page)}: evidence scan failed: {exc}")
             continue
@@ -498,7 +499,6 @@ SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", 
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
 CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
-CLAIMS_SECTION_RE = re.compile(r"(?ms)^## Claims[ \t]*\r?\n.*?(?=^## |\Z)")
 
 
 # Page types where claims need provenance. Skill / rule / project-state

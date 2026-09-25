@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`read_page` returns every note again.** 52 of 209 live notes answered "Evidence
+  resolution failed": the `## Claims` block writes its references inside JSON strings,
+  and the extractor ended a reference only at a backtick. A reference opened by a
+  backtick or a quotation mark now ends at the matching one; strictness is unchanged.
+  Lint skipped that block and so never saw it; it now reads the whole page, as
+  `read_page` does. See `docs/research/2026-09-25-a-quoted-reference-ends-at-its-quote.md`.
 - **The scheduler check says what the night could not do.** One table of limits
   (`SCHEDULER_LIMIT_HOURS`, 4 h and 6 h) now renders both the systemd units and the
   Windows tasks; the systemd nightly limit was 3 h, below the pass's 3.19 h worst
