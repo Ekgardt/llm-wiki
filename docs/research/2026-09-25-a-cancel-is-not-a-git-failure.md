@@ -18,6 +18,11 @@ Date: 2026-09-25. CI run 36197318516 (PR 43, commit 543fc591).
   later reject with `RecursionError`; the A-14 test assumed the error on every
   version (checked locally with 3.10 to 3.14, 2026-09-25).
 
+- The catalog test helper `_backdate_tree` called `os.utime(..., follow_symlinks=False)`;
+  on Windows CPython raises `NotImplementedError: utime: follow_symlinks unavailable
+  on this platform` (CI windows py3.11 shard 1). The tree it backdates holds no
+  links, so it skips links and calls `os.utime` plainly.
+
 ## Source (fetched 2026-09-25)
 Python documentation, Built-in Exceptions, https://docs.python.org/3/library/exceptions.html:
 "The following exceptions are subclasses of OSError, they get raised depending on
@@ -37,3 +42,4 @@ every `TimeoutError`, including a caller's stop.
 - scripts/mcp_server.py
 - tests/test_workspace_revision.py
 - tests/test_one_hard_python_file_does_not_freeze_the_index.py
+- tests/test_generation_catalog.py

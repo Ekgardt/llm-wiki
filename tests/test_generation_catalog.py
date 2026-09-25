@@ -1779,8 +1779,10 @@ def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_p
 
 def _backdate_tree(root: Path, *, seconds: float) -> None:
     moment = time.time() - seconds
+    # Windows has no utime without following links; the tree holds none.
     for path in [root, *root.rglob("*")]:
-        os.utime(path, (moment, moment), follow_symlinks=False)
+        if not path.is_symlink():
+            os.utime(path, (moment, moment))
 
 
 def test_open_existing_read_only_avoids_catalog_setup_writes(tmp_path, monkeypatch):
