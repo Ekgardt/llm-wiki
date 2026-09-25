@@ -644,11 +644,11 @@ def _resolved_evidence_texts(root: Path, page: str) -> list:
     return sorted(resolver.resolve(item).bytes.decode("utf-8") for item in references)
 
 
-def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pending(vault):
+def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(vault):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
-    from claims import ClaimIndex, NormalizedClaim
+    from claims import ClaimIndex
 
     old = _claim_record(
         root,
@@ -681,8 +681,7 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
             "content": canonical_json_bytes(operation).decode(),
         }],
     }
-    index = ClaimIndex(state_root, vault=root)
-    index.rebuild()
+    ClaimIndex(state_root, vault=root).rebuild()
     coordinator = MarkdownCoordinator(root, state_root)
 
     result = compile_memory.apply_compile_plan(
@@ -695,35 +694,20 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
     )
 
     page = root / "knowledge/notes/exact-byte-pattern.md"
-    receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
-    assert (
-        page.exists(),
-        receipt.exists(),
-        b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes(),
-        b"Use an immutable snapshot" in (root / "knowledge/log.md").read_bytes(),
-        page in _collected_pages(root),
-    ) == (False, False, False, False, False)
     candidates = list((root / "knowledge/inbox/claims").glob("*.md"))
     transaction = coordinator._record_for_operation_id(result.operation_id)
-    indexed_pages = _candidate_pages(index, NormalizedClaim(new))
-    selected = compile_memory.select_dailies(
-        Namespace(file=None), {}, coordinator=coordinator
-    )
+    receipt = compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)
+    # A quarantined claim no longer holds its day (audit A-13): the page is
+    # published carrying the claim as `quarantined`, the candidate joins the
+    # same commit, and the day carries its receipt.
     assert (
+        page.exists(),
+        _page_claim_lifecycles(page),
         len(candidates),
-        transaction is not None,
         result.operation_id.startswith("compile-quarantine:"),
-        _operation_paths(transaction),
-        "knowledge/notes/exact-byte-pattern.md" in indexed_pages,
-        selected,
-    ) == (
-        1,
-        True,
-        True,
-        {candidates[0].relative_to(root).as_posix()},
-        False,
-        [daily],
-    )
+        candidates[0].relative_to(root).as_posix() in _operation_paths(transaction),
+        receipt is not None,
+    ) == (True, {"new": "quarantined"}, 1, False, True, True)
 
     retried = compile_memory.apply_compile_plan(
         inputs,
@@ -739,24 +723,13 @@ def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pend
     ) == (result.transaction_id, 1)
 
 
+def _page_claim_lifecycles(page: Path) -> dict:
+    ledger = page.read_text(encoding="utf-8").split("```json", 1)[1].split("```", 1)[0]
+    return {item["id"]: item["lifecycle"] for item in json.loads(ledger)["claims"]}
+
+
 def _operation_paths(transaction) -> set:
     return {item.path for item in transaction.operations}
-
-
-def _candidate_pages(index, claim) -> list:
-    return [item.page for item in index.candidates(claim)]
-
-
-def _collected_pages(root: Path) -> list:
-    """What the search collector sees when it is pointed at this vault's notes."""
-    import search_memory
-
-    original = search_memory.KNOWLEDGE_DIR
-    search_memory.KNOWLEDGE_DIR = root / "knowledge/notes"
-    try:
-        return list(search_memory._collect_pages())
-    finally:
-        search_memory.KNOWLEDGE_DIR = original
 
 
 def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
@@ -795,20 +768,31 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
     candidates = sorted((root / "knowledge/inbox/claims").glob("*.md"))
     before = candidates[0].read_bytes()
 
-    with pytest.raises(compile_memory.CandidatesAlreadyQuarantined) as raised:
-        compile_memory.apply_compile_plan(
-            inputs, plan, action_key="8" * 64, trigger="manual",
-            coordinator=coordinator, completed_at="2026-07-15T12:00:00Z",
-        )
+    # Since audit A-13 the first apply compiled the day, so a second plan for it
+    # returns that commit and writes no candidate again.
+    first = coordinator._record_for_operation_id(
+        compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator)["operation_id"]
+    )
+    again = compile_memory.apply_compile_plan(
+        inputs, plan, action_key="8" * 64, trigger="manual",
+        coordinator=coordinator, completed_at="2026-07-15T12:00:00Z",
+    )
 
-    selected = compile_memory.select_dailies(Namespace(file=None), {}, coordinator=coordinator)
     assert (
-        raised.value.paths,
+        again.transaction_id,
         sorted((root / "knowledge/inbox/claims").glob("*.md")),
         candidates[0].read_bytes(),
-        selected,
-    ) == ((candidates[0].relative_to(root).as_posix(),), candidates, before, [daily])
-    outcome = compile_memory._still_quarantined_outcome(raised.value)
+    ) == (first.id, candidates, before)
+
+
+def test_a_stale_target_that_finds_its_candidates_present_says_so(capsys):
+    """The one path that still ends in candidates only: a concurrent lifecycle change."""
+    import compile_memory
+
+    outcome = compile_memory._still_quarantined_outcome(
+        compile_memory.CandidatesAlreadyQuarantined(("knowledge/inbox/claims/a.md",))
+    )
+
     assert (outcome.status, outcome.outcome, outcome.paths) == (0, "quarantined", 0)
     assert "batch still quarantined: 1 candidate(s)" in capsys.readouterr().out
 
@@ -843,8 +827,10 @@ def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quaranti
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
-    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 2
+    page = root / "knowledge/notes/exact-byte-pattern.md"
+    # Only the claim that met a conflict is held; the first one it met stays active.
+    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
+    assert _page_claim_lifecycles(page) == {"first": "active", "second": "quarantined"}
 
 
 def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):

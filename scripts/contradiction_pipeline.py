@@ -450,18 +450,15 @@ def _reduce_candidate_outcomes(outcomes: Sequence[_Outcome]) -> _Outcome:
 def _reduce_outcomes(
     outcomes: Sequence[_Outcome], retrieval_context: Sequence[Mapping[str, object]]
 ) -> _Outcome:
-    """One verdict for the whole candidate set."""
-    if retrieval_context:
-        return (
-            "unresolved",
-            LifecycleDecision(
-                "quarantine",
-                reason="retrieval-only context has no verified claim ledger",
-            ),
-            (),
-        )
+    """One verdict for the whole candidate set.
+
+    A page a search found is not a claim, so it contradicts nothing: with no
+    ledger candidate the claim is kept, and the retrieved pages stay in its
+    evidence. See `docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md`.
+    """
     if not outcomes:
-        return ("no-candidate", LifecycleDecision("keep-both", reason="no candidate"), ())
+        reason = "no ledger candidate; retrieved pages are evidence only" if retrieval_context else "no candidate"
+        return ("no-candidate", LifecycleDecision("keep-both", reason=reason), ())
     return _reduce_candidate_outcomes(outcomes)
 
 

@@ -654,14 +654,15 @@ preflight, exact evidence, or pins do not validate. Published BagIt bags are imm
 and uncompressed; logical evidence resolves from the flat file first and then a
 verified bag. There is no gzip archive tier. Claims with invalid evidence, evaluator
 disagreement, unsupported semantics, or low confidence enter
-`knowledge/inbox/claims/` quarantine. A batch that quarantines publishes the
-candidate only, no page: the compile prints `batch quarantined`, records
-`last_compile_outcome: quarantined` (or `partial` when other batches published),
-and the daily stays pending, so the next run retries it. The batch is atomic:
-an independent decision in the same daily is not published on its own. There is
-no accept command for a candidate; review it, then publish the decision as a
-page through the transaction API, or edit the daily and recompile it with
-`compile_memory.py --file`. The candidate and the audit trail are kept. The frozen benchmark reports false
+`knowledge/inbox/claims/` quarantine. Quarantine holds the claim, not the day:
+the batch publishes its pages and receipts, the held claim stays on its page as
+`lifecycle: quarantined` (it supersedes nothing and nothing supersedes it), and
+its candidate file is written in the same commit. The compile prints how many
+claims it held. A page that a search finds but that carries no matching claim
+is evidence only; it does not quarantine a new claim. Nothing needs a person:
+the candidate and the audit trail are kept. Only a concurrent change to a claim
+the batch meant to supersede still ends in candidates only (`batch
+quarantined`), and the daily stays pending for the next run. The frozen benchmark reports false
 supersession and provenance metrics; automatic semantic supersession and eager
 backfill remain disabled.
 

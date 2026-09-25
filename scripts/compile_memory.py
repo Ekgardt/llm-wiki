@@ -1989,6 +1989,7 @@ DROPPED_CLAIMS: list[dict[str, str]] = []
 # Issue #26.2: `done` and `ok` said the same thing whether pages were published
 # or only a candidate was quarantined. Each batch returns what it did.
 QUARANTINE_OPERATION_PREFIX = "compile-quarantine:"
+CANDIDATE_DIRECTORY = "knowledge/inbox/claims/"
 
 
 @dataclass(frozen=True)
@@ -2010,7 +2011,9 @@ def _committed_outcome(result: CompileApplyResult) -> BatchOutcome:
             "pending until the candidate is reviewed."
         )
         return BatchOutcome(0, "quarantined", paths)
-    print(f"compile_memory: batch published {paths} page(s).")
+    candidates = sum(1 for path in result.touched if path.startswith(CANDIDATE_DIRECTORY))
+    held = f"; {candidates} claim(s) quarantined under {CANDIDATE_DIRECTORY}" if candidates else ""
+    print(f"compile_memory: batch published {paths - candidates} page(s){held}.")
     return BatchOutcome(0, "published", paths)
 
 
@@ -3140,8 +3143,9 @@ class _ApplyPlan:
         committed = self._existing_receipts()
         if committed is not None:
             return committed
-        if self._quarantined():
-            return self._commit_quarantine()
+        # A quarantined claim is carried on its page as `quarantined` and its
+        # candidate joins this commit; it does not hold back the batch (audit
+        # A-13, docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md).
         return self._publish_changes()
 
     def _publish_changes(self) -> CompileApplyResult:
@@ -3184,13 +3188,6 @@ class _ApplyPlan:
             )
             for source in self.batch.manifest
         ]
-
-    def _quarantined(self) -> bool:
-        return any(
-            assessment.recommendation == "quarantine"
-            for _pipeline, assessments in self.claim_groups
-            for assessment in assessments
-        )
 
     def _commit_quarantine(self) -> CompileApplyResult:
         """A quarantined batch publishes candidates only, and no pages."""
