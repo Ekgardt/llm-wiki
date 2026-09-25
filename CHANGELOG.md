@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The reranker learns its cost once and stops wasting CPU under load: when its cost is unknown the one background run gets the stage ceiling so it can finish and record it, and when its cost is known not to fit the caller's window it is not started at all. Before, the background run was cut at the caller's deadline on every call, never recorded a cost and was never admitted.
 - A failure while the MCP server builds or renders an answer's envelope is answered with the tool's safe error envelope, where it used to escape to the SDK and reach the client as raw text, possibly with a local path.
 - An MCP answer is marked stale when any source its index holds moved after the index was built: a removed or renamed note and a changed project `state.md` or `context.md` now count, where only note contents did.
 - The MCP search keeps one second of its deadline for the lexical fallback: the hybrid pass stops that much early, so when it runs out of time the lexical pass still answers, where before it was handed an expired deadline and failed too.

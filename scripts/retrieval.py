@@ -2189,13 +2189,28 @@ def _run_reranker(
     # scoring, on the same four cores as the answer that is now being built
     # without it. Told when to stop, it stops between batches instead.
     stage_deadline = _optional_stage_deadline(deadline_monotonic)
+    worker_deadline = _rerank_worker_deadline(stage_deadline)
     return _run_optional_bounded(
-        lambda: call(stage_deadline),
+        lambda: call(worker_deadline),
         deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
         observes=_rerank_scored,
     )
+
+
+def _rerank_worker_deadline(stage_deadline: float) -> float:
+    """When the rerank itself stops: the window, once to learn its cost, or never started.
+
+    A straggler told to stop at the caller's window never finished under load,
+    so it never recorded a cost and was started and cut on every call (audit
+    B-17, docs/research/2026-09-25-a-rerank-that-cannot-fit-is-not-started.md).
+    """
+    if _optional_stage_fits("rerank", stage_deadline):
+        return stage_deadline
+    if _observed_optional_stage_cost("rerank") is None:
+        return time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS
+    raise OptionalStageTimeout("the rerank is known not to fit this window")
 
 
 def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
