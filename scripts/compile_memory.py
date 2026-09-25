@@ -3893,18 +3893,47 @@ def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
     """
     compiled = _receipt_predicate(coordinator)
     corrected = {}
+    unreceipted = []
     for path in _canonical_dailies():
         whole = _whole_daily_digest(path.relative_to(ROOT).as_posix(), compiled)
-        if whole is not None:
-            corrected[path.name] = whole
-    if corrected:
-        update_state(lambda state: _apply_mirror_repair(state, corrected))
+        if whole is None:
+            unreceipted.append(path.name)
+            continue
+        corrected[path.name] = whole
+    quarantined = _quarantine_only_days(unreceipted, coordinator)
+    if corrected or quarantined:
+        update_state(lambda state: _apply_mirror_repair(state, corrected, quarantined))
 
 
-def _apply_mirror_repair(state: dict, corrected: dict) -> None:
+def _quarantine_only_days(names: Sequence[str], coordinator: MarkdownCoordinator) -> list[str]:
+    """Days the mirror holds only because a quarantined batch once wrote them there.
+
+    A quarantine commit writes candidates and no receipt, so such a day was
+    skipped for ever. A mirror-only day from before receipts has no quarantine
+    commit behind it and is left alone. See
+    `docs/research/2026-09-25-a-quarantined-day-stays-pending.md`.
+    """
+    commits = load_state().get("compiled_daily_commits", {})
+    if not isinstance(commits, dict):
+        return []
+    return [name for name in names if _committed_by_quarantine(commits.get(name), coordinator)]
+
+
+def _committed_by_quarantine(record: object, coordinator: MarkdownCoordinator) -> bool:
+    if not isinstance(record, dict) or not isinstance(record.get("sequence"), int):
+        return False
+    operation_id = coordinator.operation_id_at(record["sequence"]) or ""
+    return operation_id.startswith(QUARANTINE_OPERATION_PREFIX)
+
+
+def _apply_mirror_repair(state: dict, corrected: dict, quarantined: Sequence[str]) -> None:
     mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    commits = _require_state_mapping(state, "compiled_daily_commits")
     for name, digest in corrected.items():
         mirror[name] = digest
+    for name in quarantined:
+        mirror.pop(name, None)
+        commits.pop(name, None)
 
 
 def select_dailies(
@@ -4470,17 +4499,36 @@ def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> di
     opening the coordinator. A long day is compiled part by part, and recording
     the last part's digest under the file name made every one of those readers
     call a fully compiled day stale for ever. The mirror now names the whole
-    file, and only once every part of it carries a receipt.
+    file, and only once every part of it carries a receipt: a quarantined batch
+    writes no receipt, so it writes nothing here either (audit A-12).
     """
     compiled = _receipt_predicate(coordinator)
     digests = {
-        Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
+        Path(item.logical_path).name: item.sha256
+        for item in batch.inputs.dailies
+        if _receipted_whole_snapshot(item, compiled)
     }
-    for logical_path in sorted({item.logical_path for item in batch.inputs.dailies}):
+    digests.update(_whole_file_digests(batch.inputs.dailies, compiled))
+    return digests
+
+
+def _whole_file_digests(
+    dailies: Sequence[DailySnapshot], compiled: Callable[[str, str], bool]
+) -> dict[str, str]:
+    """The file digest of every day in the batch whose every part now carries a receipt."""
+    digests: dict[str, str] = {}
+    for logical_path in sorted({item.logical_path for item in dailies}):
         whole = _whole_daily_digest(logical_path, compiled)
         if whole is not None:
             digests[Path(logical_path).name] = whole
     return digests
+
+
+def _receipted_whole_snapshot(item: DailySnapshot, compiled: Callable[[str, str], bool]) -> bool:
+    """A one-part snapshot this commit compiled: the file may have grown since."""
+    if item.part_count != 1:
+        return False
+    return compiled(item.logical_path, item.sha256)
 
 
 def _record_batch_diagnostics(

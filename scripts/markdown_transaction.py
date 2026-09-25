@@ -9395,6 +9395,15 @@ class MarkdownCoordinator:
             ).fetchone()
         return row is not None and row["artifacts_pruned_at"] is not None
 
+    def operation_id_at(self, sequence: int) -> str | None:
+        """The operation a committed transaction ran, by its commit sequence (rowid)."""
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT operation_id FROM "transaction" WHERE rowid=? AND state=\'committed\'',
+                (sequence,),
+            ).fetchone()
+        return None if row is None else str(row["operation_id"])
+
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
         with self._connect() as database:
             row = database.execute(
