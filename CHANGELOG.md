@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A failure while the MCP server builds or renders an answer's envelope is answered with the tool's safe error envelope, where it used to escape to the SDK and reach the client as raw text, possibly with a local path.
 - An MCP answer is marked stale when any source its index holds moved after the index was built: a removed or renamed note and a changed project `state.md` or `context.md` now count, where only note contents did.
 - The MCP search keeps one second of its deadline for the lexical fallback: the hybrid pass stops that much early, so when it runs out of time the lexical pass still answers, where before it was handed an expired deadline and failed too.
 - With no active generation a natural question still finds pages: the Markdown fallback drops stop words and ranks pages by how many of the question's words they share, where it required every word, so "почему systemd таймер, а не cron" found nothing. Common Russian function words join the shared stop-word list.

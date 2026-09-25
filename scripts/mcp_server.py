@@ -5941,14 +5941,29 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     try:
         data, limit_clamped = _tool_call_data(name, arguments, operation_deadline)
         _check_deadline(operation_deadline)
-        envelope = _tool_call_envelope(
-            name, data, arguments, limit_clamped, operation_deadline
-        )
+        return _answer_text(name, arguments, data, limit_clamped, started, operation_deadline)
+    finally:
+        _OPERATION_DEADLINE.reset(deadline_token)
+
+
+def _answer_text(
+    name: str, arguments, data, limit_clamped: bool, started: float, operation_deadline: float
+) -> str:
+    """The envelope of a finished tool call, behind the same boundary as the tool.
+
+    A failure while building or rendering it used to leave the handler, and the
+    SDK sent its raw text, paths included (audit B-20,
+    docs/research/2026-09-25-an-envelope-failure-is-a-safe-answer.md).
+    """
+    try:
+        envelope = _tool_call_envelope(name, data, arguments, limit_clamped, operation_deadline)
         _check_deadline(operation_deadline)
         _record_answer_cost(envelope, started, operation_deadline)
         return _rendered_envelope(envelope)
-    finally:
-        _OPERATION_DEADLINE.reset(deadline_token)
+    except TimeoutError:
+        raise
+    except Exception as error:  # noqa: BLE001 - stable answer boundary
+        return _rendered_envelope(_build_operation_envelope(_tool_call_failure(name, arguments, error)))
 
 
 async def _bounded_tool_call(name: str, arguments, execute, render):
