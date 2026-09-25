@@ -945,9 +945,9 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
 
 def _unreported_trace(query: str) -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import analyze_query
+    from retrieval import analyze_query, planned_request
 
-    requested = analyze_query(query).recommended_profile
+    requested, _signals = planned_request(None, analyze_query(query), semantic=True)
     return _reported_trace(
         {
             "requested_mode": requested,
@@ -5253,11 +5253,16 @@ def _index_is_behind(generation: object) -> bool:
 
 
 def _requested_signals(trace: dict) -> tuple[str, ...]:
-    """The signals the requested mode declares; graph is not 'missing' when never asked for."""
+    """The signals the requested mode declares, and any that ran besides.
+
+    Graph is not 'missing' when never asked for; dense that a planned GRAPH run
+    added is reported, not dropped.
+    """
     from retrieval import PROFILE_SIGNALS
 
     mode = str(trace.get("requested_mode") or "").upper()
-    return PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+    declared = PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+    return tuple(dict.fromkeys((*declared, *trace.get("signals_used", ()))))
 
 
 def _recall_trace(data) -> dict | None:

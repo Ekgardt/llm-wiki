@@ -1711,9 +1711,10 @@ def _effective_for_hybrid(signals: set[str], requested: str) -> str:
 
 
 def _effective_for_graph(signals: set[str], requested: str) -> str:
+    """A planned GRAPH run also asks for dense, so without the graph it is HYBRID."""
     if "graph" in signals:
         return "GRAPH"
-    return _lexical_or_requested(signals, requested)
+    return _effective_for_hybrid(signals, requested)
 
 
 def _effective_for_global(signals: set[str], requested: str) -> str:
@@ -1728,7 +1729,7 @@ def _effective_for_graph_profile(signals: set[str], requested: str) -> str:
     """REPO_MAP and IMPACT keep their name only while the graph answered."""
     if "graph" in signals:
         return requested
-    return _lexical_or_requested(signals, requested)
+    return _effective_for_hybrid(signals, requested)
 
 
 def _lexical_or_requested(signals: set[str], requested: str) -> str:
@@ -3993,8 +3994,12 @@ def retrieve(
     graph_per_seed_limit: int = GRAPH_PER_SEED_LIMIT,
     graph_global_limit: int = GRAPH_GLOBAL_LIMIT,
     graph_edge_families: Mapping[str, bool] | None = None,
+    signals: Sequence[str] | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
+
+    `signals`, when given, are the signals the caller planned for the profile;
+    by default the profile's declared ones.
 
     Lexical and dense backends are invoked independently with identical hard
     filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
@@ -4019,7 +4024,7 @@ def retrieve(
         "as_of": as_of,
     }
 
-    wanted = PROFILE_SIGNALS[requested]
+    wanted = _planned_signals(requested, signals)
     _require_bounded_int(graph_per_seed_limit, 1, 100, "graph_per_seed_limit")
     _require_bounded_int(graph_global_limit, 1, 1000, "graph_global_limit")
     _require_known_edge_families(graph_edge_families)
@@ -4282,23 +4287,40 @@ def _backend_hit_from_legacy(
     return hit
 
 
-def _requested_profile(
+def _planned_signals(requested: str, signals: Sequence[str] | None) -> tuple[str, ...]:
+    if signals is None:
+        return PROFILE_SIGNALS[requested]
+    planned = tuple(signals)
+    if not planned or not set(planned) <= {"lexical", "dense", "graph"}:
+        raise ValueError(f"unknown retrieval signals: {planned!r}")
+    return planned
+
+
+def planned_request(
     profile: str | None, analysis: QueryAnalysis, *, semantic: bool
-) -> str:
-    """`semantic=False` forces the lexical profile whatever the planner says."""
+) -> tuple[str, tuple[str, ...]]:
+    """The profile a search runs and the signals it asks for.
+
+    `semantic=False` forces the lexical profile whatever the planner says, and an
+    explicit profile runs as declared. Otherwise a question the planner reads as
+    one about relations (a profile that declares the graph) keeps that profile
+    and adds dense; every other question runs HYBRID. Before 2026-09-25 every
+    semantic search ran HYBRID, so the evidence graph never answered `recall`
+    (audit C-22, docs/research/2026-09-25-recall-asks-the-graph-about-relations.md).
+    """
     if not semantic:
-        return "BASE"
+        return "BASE", ("lexical",)
     requested = _normalize_profile(profile)
     if requested is not None:
-        return requested
-    return "HYBRID"
+        return requested, PROFILE_SIGNALS[requested]
+    return _planned_semantic_request(analysis.recommended_profile)
 
 
-def _wanted_signals(requested: str, *, semantic: bool) -> tuple[str, ...]:
-    wanted = PROFILE_SIGNALS[requested]
-    if semantic:
-        return tuple(wanted)
-    return tuple(signal for signal in wanted if signal != "dense") or ("lexical",)
+def _planned_semantic_request(recommended: str) -> tuple[str, tuple[str, ...]]:
+    declared = PROFILE_SIGNALS[recommended]
+    if "graph" not in declared:
+        return "HYBRID", PROFILE_SIGNALS["HYBRID"]
+    return recommended, tuple(dict.fromkeys(("lexical", "dense", *declared)))
 
 
 def _selected_catalog(catalog: Any, search_memory: Any) -> Any:
@@ -4737,6 +4759,7 @@ class _SearchRun:
             deadline_monotonic=self.deadline,
             max_candidates=self.max_candidates,
             cancelled=self.cancelled,
+            signals=self.wanted,
         )
 
     def run_under_seal(self) -> RetrievalResult:
@@ -4813,7 +4836,7 @@ def retrieve_via_search_memory(
         model_revision=generation_model_revision,
     )
     analysis = analyze_query(query)
-    requested = _requested_profile(profile, analysis, semantic=semantic)
+    requested, wanted = planned_request(profile, analysis, semantic=semantic)
     run = _SearchRun(
         search_memory,
         query,
@@ -4834,7 +4857,7 @@ def retrieve_via_search_memory(
         max_candidates,
         cancelled,
         requested,
-        _wanted_signals(requested, semantic=semantic),
+        wanted,
     )
     run.open()
     result = run.reported(run.run())
