@@ -1,62 +1,40 @@
-"""Flush one session event into knowledge/daily/YYYY-MM-DD.md.
+"""Classify captured sessions: the capture worker's side of the queue.
 
-Run as a detached background process by PreCompact / SessionEnd hooks.
+The adapter publishes a capture intent and a `flush` task for each session event;
+`run_capture_worker_once` claims one, `process_new_capture` asks the provider to
+classify the session into one of three tiers, and the result is written under the
+intent's fence:
+  - FLUSH_MAJOR: decisions, lessons, non-obvious commands worth compiling
+  - FLUSH_MINOR: gotchas, debug notes, open questions — kept, not compiled first
+  - FLUSH_OK:    status chatter — nothing is written
+A provider that does not answer is a stated one-hour wait, and a task that spends
+its attempts is recorded as a loss. The session record under
+`knowledge/raw/sessions/` is written before classification, whatever the tier.
 
-Responsibilities:
-1. Read the transcript at `--transcript` (JSONL Claude Code transcript).
-2. Ask the unified llm_client (auto-detected backend: OpenCode / Codex /
-   Claude CLI / OpenAI / Ollama) to classify + summarize the session
-   into one of three tiers (Phase 0.5 upgrade):
-     - FLUSH_MAJOR: decisions/lessons/non-obvious commands worth compiling
-     - FLUSH_MINOR: only gotchas/debug-notes/open-questions — save but no auto-compile
-     - FLUSH_OK:    pure status/progress chatter — skip entirely
-3. For MAJOR/MINOR: append the structured summary to today's daily log
-   with an `[HH:MM:SS] event | session_id` header block and a `Tier:`
-   metadata line. For OK: do not append anything.
-4. Dedupe: skip if the same (session_id, event) was flushed in the last 60s.
-5. If local time >= MEMORY_COMPILE_AFTER_HOUR (default 18) AND tier is
-   MAJOR AND today's daily log changed since last compile: spawn
-   compile via `maybe_compile` (PID-locked). (MINOR no longer triggers
-   compile — this prevents the compile pipeline from churning on
-   sessions that contain only minor gotchas.)
-
-The 3-tier scale replaces the previous binary FLUSH_OK/no-FLUSH_OK.
-Empirically the old threshold was too aggressive (12 consecutive
-empty flushes recorded in state.json as of 2026-04-23): the LLM
-returned FLUSH_OK for any session that lacked a clean "decisions"
-section, even when useful gotchas or commands were present.
-
-State lives in $LLM_WIKI_STATE_ROOT/run/state.json (default:
-$LLM_WIKI_ROOT/run/state.json — inside the vault, gitignored) so git
-doesn't track runtime churn.
+There is no command line: the one that read a transcript file and queued its own
+work when no provider answered was retired on 2026-09-25
+(docs/research/2026-09-25-the-flush-command-line-is-retired.md).
 """
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
-import os
 import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from maybe_compile import spawn_compile_if_idle  # noqa: E402
 from memory_state import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
     ROOT,
     STATE_ROOT,
-    file_hash,
-    load_state,
-    update_state,
 )
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
-DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.
@@ -145,112 +123,6 @@ def _classify_response(raw: str) -> tuple[str, str]:
     return _untiered_response(stripped)
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--event", required=True, choices=["session-end", "pre-compact"])
-    p.add_argument("--session-id", default="unknown")
-    p.add_argument("--transcript", default="")
-    p.add_argument("--trigger", default="")
-    p.add_argument("--source-event-id", default="")
-    p.add_argument("--checkpoint-reason", default="")
-    p.add_argument(
-        "--agent",
-        choices=("opencode", "codex", "claude", "unknown"),
-        default="unknown",
-    )
-    p.add_argument("--ephemeral-transcript", action="store_true")
-    return p.parse_args()
-
-
-def _transcript_prefixes() -> list[Path]:
-    from host_transcripts import host_transcript_roots
-
-    return [*host_transcript_roots(), STATE_ROOT / "cache" / "transient-transcripts"]
-
-
-def _is_beneath(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
-def _beneath_any(path: Path, prefixes: list[Path]) -> bool:
-    for prefix in prefixes:
-        try:
-            resolved = prefix.resolve()
-        except OSError:
-            continue
-        if _is_beneath(path, resolved):
-            return True
-    return False
-
-
-def _readable_transcript(path: Path) -> Path | None:
-    """The resolved path, or None when it is not a plain file we may read."""
-    try:
-        absolute = path.absolute()
-        if not absolute.is_file():
-            return None
-        if any(candidate.is_symlink() for candidate in (absolute, *absolute.parents)):
-            return None
-        return path.resolve()
-    except OSError:
-        return None
-
-
-def _transcript_path_allowed(path: Path) -> bool:
-    """Only allow transcript paths from known agent session directories.
-
-    `transcript_path` arrives from hook JSON (untrusted input). A broad
-    allowlist (e.g. all of ``$HOME``) would let a crafted payload point
-    at ``~/.ssh/id_rsa`` and ship its contents to the LLM. Instead we
-    restrict to exact Claude/Codex session subtrees and the dedicated
-    state-root transient cache.
-    """
-    resolved = _readable_transcript(path)
-    if resolved is None:
-        return False
-    if resolved.suffix not in (".jsonl", ".json", ".txt", ".log"):
-        return False
-    return _beneath_any(resolved, _transcript_prefixes())
-
-
-def _cleanup_ephemeral_transcript(path: str) -> None:
-    try:
-        candidate = Path(path).resolve()
-        candidate.relative_to((STATE_ROOT / "cache" / "transient-transcripts").resolve())
-        candidate.unlink(missing_ok=True)
-    except (OSError, ValueError):
-        pass
-
-
-def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
-    """The last `max_chars` of the transcript.
-
-    Head-and-tail was tried and measured on 2026-08-25 and not adopted. On the
-    same forty real sessions both windows promoted 24; two sessions changed
-    tier, in opposite directions. The one that got worse is the argument
-    against the change: its decisions sat 31 814 characters from the end —
-    inside a 60 000-character tail, outside a 30 000-character one — so
-    splitting the window dropped exactly the band that carried them.
-
-    So this stays a tail, not because the tail is known to be the right place
-    to look, but because nothing measured says moving it helps. See
-    `knowledge/notes/session-promotion-policy-decision.md`; what the classifier
-    decides was narrowed to one daily-log line in the same change, which is
-    what makes this window cheap to be wrong about.
-    """
-    if not path.exists() or not _transcript_path_allowed(path):
-        return ""
-    try:
-        data = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return ""
-    return data[-max_chars:] if len(data) > max_chars else data
-
-
 CLASSIFICATION_SYSTEM_PROMPT = (
     "You classify and distill Claude Code transcripts into a 3-tier "
     "memory scale. Your default bias is toward FLUSH_OK — most "
@@ -332,48 +204,6 @@ non-blank line MUST be the tier token.
 """
 
 
-def summarize_with_llm(
-    transcript_excerpt: str, event: str, session_id: str = ""
-) -> str | None:
-    """Ask the LLM to classify + distill the transcript into a tier + body.
-
-    Uses the unified llm_client (auto-detected backend — no separate API
-    key required on this machine). Returns None only after deferred work is
-    durably queued. Raises if neither immediate nor deferred persistence works.
-    """
-    if not transcript_excerpt.strip():
-        return ""
-    transcript_excerpt = redact_secrets(transcript_excerpt)
-
-    prompt = build_classification_prompt(transcript_excerpt, event)
-    system_prompt = CLASSIFICATION_SYSTEM_PROMPT
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from llm_client import call_llm
-
-        text = call_llm(prompt, system_prompt, max_tokens=1500)
-    except Exception:
-        text = None
-    if not text:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from memory_queue import enqueue
-
-            enqueue("flush", {
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "max_tokens": 1500,
-                "enqueued_by": "flush_memory",
-                "event": event,
-                "session_id": session_id,
-                "day": datetime.now().strftime("%Y-%m-%d"),
-            })
-        except Exception as exc:
-            raise RuntimeError("flush transcript was not durably persisted") from exc
-        return None
-    return text.strip()
-
-
 def _anchor_date(day: str):
     from datetime import date
 
@@ -406,125 +236,6 @@ def append_daily(day: str, block: str, operation_id: str | None = None) -> Path:
     out = DAILY_DIR / f"{day}.md"
     locked_append(out, _dated_block(day, block), operation_id=operation_id)
     return out
-
-
-def dedupe_key(session_id: str, event: str) -> str:
-    return f"{session_id}::{event}"
-
-
-def should_skip(state: dict, session_id: str, event: str) -> bool:
-    last = state.get("flush_dedupe", {}).get(dedupe_key(session_id, event))
-    if not last:
-        return False
-    return (time.time() - float(last)) < DEDUPE_WINDOW_SECONDS
-
-
-def record_flush(state: dict, session_id: str, event: str) -> None:
-    dedupe = state.setdefault("flush_dedupe", {})
-    dedupe[dedupe_key(session_id, event)] = time.time()
-    # Prune stale entries so the dict doesn't grow unbounded.
-    cutoff = time.time() - DEDUPE_WINDOW_SECONDS * 4
-    stale = [k for k, ts in dedupe.items() if float(ts) < cutoff]
-    for k in stale:
-        del dedupe[k]
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-
-
-def _elapsed_since(text: str) -> float:
-    try:
-        last = datetime.fromisoformat(text)
-    except (ValueError, TypeError):
-        return float("inf")
-    return (datetime.now() - last).total_seconds()
-
-
-def _within_cooldown(state: dict) -> bool:
-    """On a busy day every session-end after the cutoff would else re-spawn compile.
-
-    Tune with MEMORY_COMPILE_COOLDOWN_SECONDS (default 900); 0 disables it.
-    """
-    cooldown_seconds = _env_int("MEMORY_COMPILE_COOLDOWN_SECONDS", 900)
-    if cooldown_seconds <= 0:
-        return False
-    last_spawned = state.get("last_compile_spawned_at")
-    if not last_spawned:
-        return False
-    return _elapsed_since(str(last_spawned)) < cooldown_seconds
-
-
-def _compile_is_due(state: dict, daily_path: Path, tier: str) -> bool:
-    if tier != "major" or datetime.now().hour < _env_int(
-        "MEMORY_COMPILE_AFTER_HOUR", 18
-    ):
-        return False
-    compiled = state.get("compiled_daily_hashes", {}).get(daily_path.name)
-    return compiled != file_hash(daily_path) and not _within_cooldown(state)
-
-
-def _record_compile_trigger(
-    state: dict,
-    daily_path: Path,
-    tier: str,
-    spawned_at: str,
-    spawned: bool,
-    reason: str,
-) -> None:
-    state["last_compile_spawned_trigger"] = "auto"
-    state["last_compile_spawned_daily"] = daily_path.name
-    state["last_compile_spawned_tier"] = tier
-    state["last_compile_spawned_reason"] = reason
-    state.setdefault("compile_triggers", []).append(
-        {
-            "at": spawned_at,
-            "daily": daily_path.name,
-            "trigger": "auto",
-            "tier": tier,
-            "spawned": spawned,
-            "reason": reason,
-        }
-    )
-    state["compile_triggers"] = state["compile_triggers"][-20:]
-
-
-def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
-    """Spawn compile only for FLUSH_MAJOR content, after the hour cutoff.
-
-    Always goes through `maybe_compile.spawn_compile_if_idle` so the PID
-    lock is the single concurrency gate (hooks / wrappers / schedulers
-    must not spawn `compile_memory.py` directly).
-    """
-    if not _compile_is_due(state, daily_path, tier):
-        return
-    spawned_at = datetime.now().isoformat(timespec="seconds")
-    spawned, reason = spawn_compile_if_idle(force=False)
-    if spawned:
-        state["last_compile_spawned_at"] = spawned_at
-    _record_compile_trigger(state, daily_path, tier, spawned_at, spawned, reason)
-
-
-def _flush_summary(args: argparse.Namespace) -> str | None:
-    """Classify the conversation in the transcript, not the JSON around it.
-
-    The whole file, then rendered, then bounded — in that order. Reading a
-    60 000-character tail of raw JSONL first can land inside a single
-    bookkeeping entry and hand the classifier no conversation at all; the
-    rendered conversation of a real session is 2 KB to 32 KB and fits the
-    window whole. Same reasoning as the durable record a few hundred lines
-    down, and the same reasoning as `_readable_evidence`.
-    """
-    if not args.transcript:
-        return ""
-    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
-    if not transcript:
-        return ""
-    readable = _bounded_classifier_evidence(_readable_evidence(transcript))
-    return summarize_with_llm(readable, args.event, args.session_id)
 
 
 def _capture_binding_intent_id(binding: object) -> str:
@@ -1436,13 +1147,6 @@ def _keep_session_record(
     )
 
 
-def _capture_time_text(now: Callable[[], datetime]) -> str:
-    try:
-        return _require_capture_time(now()).isoformat()
-    except Exception:  # noqa: BLE001
-        return datetime.now(timezone.utc).isoformat()
-
-
 # How far from now an intent's own timestamp may sit and still be believed. Beyond
 # this it is a broken clock rather than a late session, and filing by it would
 # scatter entries across arbitrary days. See
@@ -1482,31 +1186,6 @@ def _session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> 
     if occurred is None:
         return moment
     return _believable_session_time(occurred, moment) or moment
-
-
-def _keep_transcript_record(args: argparse.Namespace) -> None:
-    """The same record for the detached flush path, which reads the file itself."""
-    from session_evidence import write_session_evidence
-
-    if not args.transcript:
-        return
-    # The whole file, not the classifier's tail: a transcript's entries can each
-    # be tens of thousands of characters, so a 60k tail can start inside one and
-    # leave no complete line to render. The record is for storage, not for a
-    # context window, and the rendered result is bounded on its own.
-    transcript = read_transcript_tail(Path(args.transcript), max_chars=MAX_RECORD_CHARS)
-    if not transcript:
-        return
-    fields = {
-        "session": args.session_id,
-        "host": getattr(args, "agent", None),
-        "event": args.event,
-        # The queue path's clock: one day for a session whichever path records it.
-        # See `docs/research/2026-09-14-one-day-for-a-session-record.md`.
-        "captured_at": _capture_now().isoformat(),
-        "source_event_id": getattr(args, "source_event_id", None),
-    }
-    write_session_evidence(ROOT, fields, transcript)
 
 
 def process_new_capture(
@@ -1731,24 +1410,6 @@ def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:
         raise DurableWorkExhausted("capture task spent its last attempt") from error
 
 
-def _capture_feedback(tier: str, body: str, args: argparse.Namespace) -> None:
-    if tier not in {"major", "minor"}:
-        return
-    if not body:
-        return
-    try:
-        from feedback_capture import capture_from_text
-
-        capture_from_text(
-            body,
-            session_id=args.session_id,
-            slug="unknown",
-            trigger=args.event,
-        )
-    except Exception as exc:  # noqa: BLE001 - counted, never silent (audit OPS-21)
-        _count_dropped_capture("feedback_capture", exc, args.session_id)
-
-
 def _count_dropped_capture(kind: str, error: BaseException, session_id: str | None) -> None:
     from capture_diagnostics import record_capture_failure
     from secret_redact import describe_error
@@ -1756,129 +1417,3 @@ def _count_dropped_capture(kind: str, error: BaseException, session_id: str | No
     record_capture_failure(kind, describe_error(error), error=error, session_id=session_id)
 
 
-def _record_empty_state(state: dict, args: argparse.Namespace) -> None:
-    record_flush(state, args.session_id, args.event)
-    state["flush_empty_count"] = int(state.get("flush_empty_count", 0)) + 1
-    state["last_flush_empty_at"] = datetime.now().isoformat(timespec="seconds")
-    counts = state.setdefault("flush_tier_counts", {})
-    counts["ok"] = int(counts.get("ok", 0)) + 1
-
-
-def _record_empty_flush(args: argparse.Namespace) -> None:
-    update_state(lambda state: _record_empty_state(state, args))
-
-
-def _flush_body(body: str) -> str:
-    if body:
-        return body + "\n"
-    return "(tier flagged but no structured body - manual review needed)\n"
-
-
-def _flush_block(
-    args: argparse.Namespace, tier: str, body: str, now: datetime
-) -> str:
-    header = f"\n## [{now.strftime('%H:%M:%S')}] {args.event} | {args.session_id}\n"
-    meta = (
-        f"- Trigger: `{args.trigger}`\n"
-        f"- Agent: `{getattr(args, 'agent', 'unknown')}`\n"
-        f"- Transcript: `{args.transcript}`\n"
-        f"- Tier: `{tier}`\n"
-    )
-    return redact_secrets(header + meta + "\n" + _flush_body(body))
-
-
-def _flush_operation_id(args: argparse.Namespace) -> str | None:
-    source_event_id = getattr(args, "source_event_id", "")
-    if not source_event_id:
-        return None
-    return f"flush:{source_event_id}"
-
-
-def _claim_flush(state: dict, args: argparse.Namespace, claimed: list[bool]) -> None:
-    """Record the flush now, so a concurrent one of the same session and event skips."""
-    if should_skip(state, args.session_id, args.event):
-        return
-    record_flush(state, args.session_id, args.event)
-    claimed.append(True)
-
-
-def _release_flush_claim(state: dict, args: argparse.Namespace) -> None:
-    state.get("flush_dedupe", {}).pop(dedupe_key(args.session_id, args.event), None)
-
-
-def _count_flush_tier(state: dict, tier: str) -> None:
-    counts = state.setdefault("flush_tier_counts", {})
-    counts[tier] = int(counts.get(tier, 0)) + 1
-
-
-def _persist_flush(
-    args: argparse.Namespace, tier: str, block: str, day: str
-) -> list[tuple[Path, str]]:
-    """Claim under the state lock, append outside it, then count.
-
-    The append used to run inside the lock, so a busy Markdown writer held every hook's
-    0.1 s state lock. See `docs/research/2026-09-14-no-markdown-write-under-the-state-lock.md`.
-    """
-    claimed: list[bool] = []
-    update_state(lambda state: _claim_flush(state, args, claimed))
-    if not claimed:
-        return []
-    daily_path = _append_claimed_flush(args, day, block)
-    update_state(lambda state: _count_flush_tier(state, tier))
-    return [(daily_path, tier)] if tier == "major" else []
-
-
-def _append_claimed_flush(args: argparse.Namespace, day: str, block: str) -> Path:
-    try:
-        return append_daily(day, block, operation_id=_flush_operation_id(args))
-    except BaseException:
-        update_state(lambda state: _release_flush_claim(state, args))
-        raise
-
-
-def _trigger_deferred_compiles(deferred: list[tuple[Path, str]]) -> None:
-    for daily_path, tier in deferred:
-        update_state(
-            lambda state, path=daily_path, flush_tier=tier: maybe_trigger_compile(
-                state, path, flush_tier
-            )
-        )
-
-
-def _settle_flush(args: argparse.Namespace, raw_summary: str) -> None:
-    """Turn one classified session into whatever it earned, if anything."""
-    tier, body = _classify_response(raw_summary)
-    _capture_feedback(tier, body, args)
-    if tier == "ok":
-        _record_empty_flush(args)
-        return
-    now = datetime.now()
-    block = _flush_block(args, tier, body, now)
-    deferred = _persist_flush(args, tier, block, now.strftime("%Y-%m-%d"))
-    _trigger_deferred_compiles(deferred)
-
-
-def _run_flush(args: argparse.Namespace) -> int:
-    if should_skip(load_state(), args.session_id, args.event):
-        return 0
-    _keep_transcript_record(args)
-    raw_summary = _flush_summary(args)
-    if raw_summary is not None:
-        _settle_flush(args, raw_summary)
-    return 0
-
-
-def main() -> int:
-    args = parse_args()
-    completed = False
-    try:
-        result = _run_flush(args)
-        completed = result == 0
-        return result
-    finally:
-        if completed and args.ephemeral_transcript and args.transcript:
-            _cleanup_ephemeral_transcript(args.transcript)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

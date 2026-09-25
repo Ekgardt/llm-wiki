@@ -181,41 +181,6 @@ def test_broken_evidence_is_survivable(value) -> None:
     assert session_evidence.evidence_text([value]) == ""
 
 
-def test_the_record_is_written_even_when_the_classifier_keeps_nothing(monkeypatch):
-    """The whole point: retention must not depend on the tier.
-
-    Measured on this vault's own sessions, the classifier answered "nothing worth
-    keeping" 39 times out of 40.
-    """
-    import argparse
-
-    import flush_memory
-
-    transcripts = Path(flush_memory.STATE_ROOT) / "cache" / "transient-transcripts"
-    transcripts.mkdir(parents=True, exist_ok=True)
-    transcript = transcripts / "kept.jsonl"
-    transcript.write_text(TRANSCRIPT, encoding="utf-8")
-    written = []
-    monkeypatch.setattr(flush_memory, "should_skip", lambda *_args: False)
-    monkeypatch.setattr(flush_memory, "_flush_summary", lambda _args: "FLUSH_OK")
-    monkeypatch.setattr(flush_memory, "_record_empty_flush", lambda _args: None)
-    monkeypatch.setattr(
-        "session_evidence.write_session_evidence",
-        lambda vault, fields, text: written.append((fields, text)) or Path("written.md"),
-    )
-    args = argparse.Namespace(
-        session_id="session-9",
-        event="session-end",
-        transcript=str(transcript),
-        agent="claude",
-        source_event_id="event-9",
-    )
-
-    assert flush_memory._run_flush(args) == 0
-    assert written, "the session was dropped because the classifier said ok"
-    assert written[0][0]["session"] == "session-9"
-
-
 def test_the_capture_worker_writes_the_record_before_classifying(monkeypatch):
     import flush_memory
 

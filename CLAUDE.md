@@ -456,13 +456,14 @@ contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
-Codex → Claude CLI → OpenAI → Ollama. If none available,
-the call is enqueued in `run/queue.sqlite3` and processed at the next active
-session. A `run/queue/` directory left by a release before v4.0.0 is refused and
-named by `doctor`, never imported (2026-09-23).
+Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
+nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
+its next attempt, and every other caller skips or fails its step; nothing else is
+queued for later (2026-09-25). A `run/queue/` directory left by a release before
+v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
-for tests/e2e.
+for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
 **Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
 an optional local backend; the retired Cognee bridge is not a supported feature.

@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The `flush_memory.py` command line is retired with the 37 definitions only it reached (451 lines): nothing in the product ran it, and its "queue the call when no provider answers" branch was the only thing behind CLAUDE.md §6's claim, which now says what happens.
 - Provider calls fail closed. A `claude --help` that failed once is no longer remembered as "no flags" for the life of the process, and while the isolation flags are unknown the Claude backend is not called; a `MEMORY_LLM_PROVIDER` that names no provider (a typo) calls no provider instead of the automatic chain with its cloud providers, and `doctor` names the value.
 - `doctor` names installed Claude hooks that still pass a delegate retired on 2026-09-17 and says to rerun the installer, instead of reporting them as current.
 - The weekly archive names each day older than the hot window that stays flat and why, goes on past a day that fails, and exits 1 when any did, so the weekly is reported degraded instead of stopping silently.

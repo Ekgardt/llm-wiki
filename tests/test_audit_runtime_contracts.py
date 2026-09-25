@@ -302,24 +302,3 @@ def test_fake_llm_provider_returns_canned_json(monkeypatch):
     assert "COMPILE_AUDIT" in out
 
 
-def test_flush_memory_uses_maybe_compile(monkeypatch, tmp_path):
-    """maybe_trigger_compile must call spawn_compile_if_idle, not spawn_detached."""
-    import flush_memory
-
-    calls = []
-
-    def fake_spawn(force=False):
-        calls.append(force)
-        return True, "spawned compile pid=1"
-
-    monkeypatch.setattr(flush_memory, "spawn_compile_if_idle", fake_spawn)
-    monkeypatch.setattr(flush_memory, "file_hash", lambda p: "abc")
-    monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
-    monkeypatch.setenv("MEMORY_COMPILE_COOLDOWN_SECONDS", "0")
-
-    daily = tmp_path / "2026-07-09.md"
-    daily.write_text("# d\n", encoding="utf-8")
-    state: dict = {"compiled_daily_hashes": {}}
-    flush_memory.maybe_trigger_compile(state, daily, "major")
-    assert calls == [False]
-    assert state["last_compile_spawned_reason"] == "spawned compile pid=1"
