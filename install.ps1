@@ -43,6 +43,13 @@ function Invoke-NativeCommand {
         [switch]$CaptureOutput,
         [switch]$ReturnResult
     )
+    # Windows PowerShell 5.1 drops an empty argument on the way to a native
+    # command (7.3 keeps it), so `--flag ""` arrives as a bare `--flag`. Refuse
+    # it here on every PowerShell, so a caller omits the flag instead. See
+    # docs/research/2026-09-25-an-empty-argument-is-omitted-not-passed.md.
+    if (@($ArgumentList | Where-Object { [string]::IsNullOrEmpty($_) }).Count -gt 0) {
+        throw "$FilePath was given an empty argument; omit the flag instead"
+    }
     if ($CaptureOutput) {
         $output = @(& $FilePath @ArgumentList)
     } else {
@@ -304,10 +311,11 @@ Ok "uv $installedUvVersion"
 # --- 3. Install dependencies --------------------------------------
 
 Info "Installing locked production dependencies..."
-$syncPlanJson = Invoke-NativeCommand python @(
-    (Join-Path $VAULT_ROOT "scripts\installer_config.py"),
-    "sync-args", "--root", $VAULT_ROOT, "--environment", [string]$env:UV_PROJECT_ENVIRONMENT
-) -CaptureOutput
+$syncArguments = @((Join-Path $VAULT_ROOT "scripts\installer_config.py"), "sync-args", "--root", $VAULT_ROOT)
+if (-not [string]::IsNullOrEmpty($env:UV_PROJECT_ENVIRONMENT)) {
+    $syncArguments += @("--environment", $env:UV_PROJECT_ENVIRONMENT)
+}
+$syncPlanJson = Invoke-NativeCommand python $syncArguments -CaptureOutput
 $syncPlan = $syncPlanJson | ConvertFrom-Json
 $env:UV_PROJECT_ENVIRONMENT = $syncPlan.environment
 Invoke-NativeCommand uv @($syncPlan.arguments)

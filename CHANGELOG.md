@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The Windows installer no longer passes `--environment ""` when `UV_PROJECT_ENVIRONMENT` is unset (Windows PowerShell 5.1 drops the empty string and the setup step stopped), and its native-command runner refuses any empty argument.
 - CI runs the real encoder: the `clean-hybrid` job fetches the pinned ONNX encoder (cached), builds a generation with vectors and requires a search to answer with the dense signal. Before, no CI job reached the model session.
 - The user guide names `doctor --rebuild-generation` where it tells how to rebuild the evidence generation; it said `--repair`, which only repairs the generation catalog. A test keeps the docs from saying it again.
 - Failed MCP tool calls and telemetry writes are no longer counted as lost captures: they share the diagnostics trail but have their own count and a doctor `tools` check, so the capture check and the session-start line stop reporting tool errors as capture loss.
