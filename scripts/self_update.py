@@ -126,8 +126,14 @@ def _modified_paths(root: Path) -> set[str]:
     return _diff_paths(root) | _diff_paths(root, "--cached")
 
 
-def _synced_dependencies(root: Path) -> bool:
-    completed = _run(BASELINE_SYNC_COMMAND, cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
+def _sync_command(extras: Sequence[str]) -> tuple[str, ...]:
+    """The baseline sync plus every extra the operator chose, in one inexact call."""
+    chosen = tuple(argument for extra in extras for argument in ("--extra", extra))
+    return (*BASELINE_SYNC_COMMAND, *chosen)
+
+
+def _synced_dependencies(root: Path, extras: Sequence[str]) -> bool:
+    completed = _run(_sync_command(extras), cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
     return completed.returncode == 0
 
 
@@ -172,6 +178,11 @@ def _on_default_branch(root: Path, branch: str, remote: str) -> tuple[str, str] 
 def _fast_forward_block(root: Path, head: str, fetched: str) -> dict | None:
     if head == fetched:
         return _outcome("current", None, commit=head)
+    return _ancestry_block(root, head, fetched)
+
+
+def _ancestry_block(root: Path, head: str, fetched: str) -> dict | None:
+    """A checkout ahead of the remote or diverged from it is not fast-forwarded."""
     if _is_ancestor(root, fetched, head):
         return _outcome("skipped", "ahead_of_remote", commit=head)
     if not _is_ancestor(root, head, fetched):
@@ -247,42 +258,79 @@ def _prepared_update(root: Path) -> tuple[str, str] | dict:
     return _git(root, "rev-parse", "HEAD"), fetched
 
 
-def _dependency_state(root: Path) -> str:
-    if _synced_dependencies(root):
+def _dependency_state(root: Path, extras: Sequence[str]) -> str:
+    if _synced_dependencies(root, extras):
         return "synced"
     return "stale"
 
 
-def _requirement_names(requirements: list) -> set[str]:
-    """The distribution each requirement names, without its version or marker."""
-    heads = [str(requirement).split(";")[0].strip() for requirement in requirements]
-    return {re.split(r"[<>=!~\[ ]", head, maxsplit=1)[0] for head in heads if head}
+def canonical_name(name: str) -> str:
+    """A distribution name as the packaging specification compares it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+_REQUIREMENT_HEAD = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _requirement_name(requirement: object) -> str:
+    """The distribution a requirement names, without extras, version or marker."""
+    match = _REQUIREMENT_HEAD.match(str(requirement).split(";")[0])
+    if match is None:
+        return ""
+    return canonical_name(match.group(1))
 
 
 def _installed_distributions() -> set[str]:
     from importlib.metadata import distributions
 
     named = (distribution.metadata["Name"] for distribution in distributions())
-    return {name for name in named if name}
+    return {canonical_name(name) for name in named if name}
 
 
-def _declared_extras(root: Path) -> dict[str, set[str]]:
-    """Each optional extra and the distributions it names, the project itself aside."""
-    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8")).get("project", {})
-    own = str(project.get("name", ""))
+def _project(root: Path) -> dict:
+    """The `[project]` table; a checkout without one declares no extras to keep."""
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return {}
+    return tomllib.loads(path.read_text(encoding="utf-8")).get("project", {})
+
+
+def _own_names(project: dict) -> dict[str, set[str]]:
+    """Each extra and the distributions it names itself; a self-reference names none."""
+    own = canonical_name(str(project.get("name", "")))
     extras = project.get("optional-dependencies", {})
-    return {name: _requirement_names(list(values)) - {own} for name, values in extras.items()}
+    return {
+        canonical_name(extra): {_requirement_name(value) for value in values} - {own, ""}
+        for extra, values in extras.items()
+    }
 
 
-def _installed_extras(root: Path) -> tuple[str, ...]:
-    """The optional extras the baseline sync leaves behind, because it names none of them.
+def _exclusive_names(project: dict) -> dict[str, set[str]]:
+    """What only one extra brings: not the base, not any other extra.
 
-    Every distribution of the extra must be present, not any: `numpy` alone would
-    report `hybrid` installed on a development checkout, whose dev group holds it.
+    An aggregate (`hybrid`, `full`) brings nothing of its own, so it is never
+    chosen by itself; its parts are.
+    """
+    base = {_requirement_name(value) for value in project.get("dependencies", [])}
+    own = _own_names(project)
+    exclusive: dict[str, set[str]] = {}
+    for extra, names in own.items():
+        others = set().union(*(other for name, other in own.items() if name != extra))
+        exclusive[extra] = names - others - base
+    return exclusive
+
+
+def chosen_extras(root: Path) -> tuple[str, ...]:
+    """The extras the operator chose: those with a distribution only they bring installed.
+
+    Nothing records the choice, so the environment is the record. The update syncs
+    them with the baseline, so a package added to a chosen extra arrives with the
+    code that needs it. See
+    `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
     """
     present = _installed_distributions()
-    declared = _declared_extras(root)
-    return tuple(sorted(name for name, names in declared.items() if names and names <= present))
+    exclusive = _exclusive_names(_project(root))
+    return tuple(sorted(extra for extra, names in exclusive.items() if names & present))
 
 
 # What the installer renders owned resources from — units, plists, task settings,
@@ -304,23 +352,17 @@ def _resource_state(changed: set[str]) -> str:
     return "current"
 
 
-def _stale_extras(root: Path, changed: set[str]) -> tuple[str, ...]:
-    """Extras the baseline sync did not upgrade, named only when the lock moved."""
-    if "uv.lock" not in changed:
-        return ()
-    return _installed_extras(root)
-
-
 def _merged_update(root: Path, head: str, fetched: str) -> dict:
     changed = _changed_paths(root, head, fetched)
     _git(root, "merge", "--ff-only", fetched)
+    extras = chosen_extras(root)
     return _outcome(
         "updated",
         None,
         commit=_git(root, "rev-parse", "HEAD"),
         previous=head,
-        dependencies=_dependency_state(root),
-        extras=_stale_extras(root, changed),
+        dependencies=_dependency_state(root, extras),
+        extras=extras,
         resources=_resource_state(changed),
     )
 

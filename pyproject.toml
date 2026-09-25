@@ -27,7 +27,9 @@ semantic = [
     "onnxruntime>=1.18,<2; python_version >= '3.11'",
     "tokenizers>=0.19,<1",
 ]
-hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
+# Search as documented: the encoder and the reranker, which is on by default
+# (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
+hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic,reranker]"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",

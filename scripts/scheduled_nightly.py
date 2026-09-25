@@ -700,7 +700,7 @@ def _log_update_aftermath(log, outcome: dict) -> None:
     if outcome.get("status") != "updated":
         return
     extras = ", ".join(outcome.get("extras") or ()) or "none"
-    log(f"  update: dependencies {outcome.get('dependencies')}; extras not upgraded: {extras}")
+    log(f"  update: dependencies {outcome.get('dependencies')} with extras: {extras}")
     log(f"  update: owned resources {outcome.get('resources')}")
 
 

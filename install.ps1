@@ -644,12 +644,12 @@ switch ($syncExit) {
 }
 
 # --- 8b. Pinned model weights ------------------------------------
-# The read path loads weights local-only; with the semantic extra installed,
-# fetch the two pinned models now, verified.
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; the script's own lines say which.
 uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
 switch ($LASTEXITCODE) {
-    0 { Ok "Pinned model weights present" }
-    2 { Info "Semantic search not installed; model weights are fetched once it is" }
+    0 { Ok "Model weights step done" }
+    2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
     default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
 }
 

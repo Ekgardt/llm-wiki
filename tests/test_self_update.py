@@ -66,7 +66,7 @@ def test_a_fast_forward_advances_the_checkout(linked_clone, monkeypatch) -> None
 
     upstream, clone = linked_clone
     _commit(upstream, "feature.py", "value = 2\n")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 
@@ -105,7 +105,7 @@ def test_an_unrelated_local_change_does_not_stop_the_update(
     upstream, clone = linked_clone
     _commit(upstream, "feature.py", "value = 2\n")
     (clone / "product.py").write_text("value = 99\n", encoding="utf-8")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 

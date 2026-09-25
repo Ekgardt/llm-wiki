@@ -262,13 +262,12 @@ jobs:
       - run: uv sync --locked --no-default-groups --extra hybrid
       - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
       - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; import numpy as np; path=Path(os.environ['LLM_WIKI_STATE_ROOT'])/'vector.npy'; path.parent.mkdir(parents=True, exist_ok=True); np.save(path, np.array([1,2,3])); assert np.load(path).tolist()==[1,2,3]"
-      # The extra exists for the encoder and for search; the job used to prove
-      # only that NumPy round-trips an array. Model weights are not fetched here:
-      # the read path is local-only and says so when they are absent. The
-      # encoder runs through ONNX Runtime, and the extra must not pull torch
-      # (docs/research/2026-09-25-the-encoder-runs-without-torch.md).
+      # The extra is search: the encoder on ONNX Runtime and the reranker on torch
+      # (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
+      # Model weights are not fetched here: the read path is local-only and says
+      # so when they are absent.
       - run: uv run --locked --no-sync python -c "import onnxruntime, tokenizers, huggingface_hub"
-      - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('torch') is None"
+      - run: uv run --locked --no-sync python -c "import torch, transformers"
       - run: uv run --locked --no-sync python scripts/search_memory.py "installation"
 
   clean-code-graph:

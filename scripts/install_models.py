@@ -76,6 +76,8 @@ class PinnedModel:
     allow_patterns: tuple[str, ...]
     # Files an earlier loader read at this revision and nothing reads now.
     retired_files: tuple[str, ...] = ()
+    # The modules that load this model; without them its weights are not wanted.
+    runtime: tuple[str, ...] = ()
 
 
 def pinned_models() -> tuple[PinnedModel, ...]:
@@ -89,6 +91,7 @@ def pinned_models() -> tuple[PinnedModel, ...]:
             EMBEDDING_WEIGHTS_BYTES,
             EMBEDDING_READ_FILES,
             EMBEDDING_RETIRED_FILES,
+            ("onnxruntime", "tokenizers"),
         ),
         PinnedModel(
             DEFAULT_RERANKER_MODEL,
@@ -97,6 +100,8 @@ def pinned_models() -> tuple[PinnedModel, ...]:
             DEFAULT_RERANKER_WEIGHTS_SHA256,
             DEFAULT_RERANKER_WEIGHTS_BYTES,
             RERANKER_ALLOW_PATTERNS,
+            (),
+            ("torch", "transformers"),
         ),
     )
 
@@ -239,11 +244,25 @@ def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
     return outcome
 
 
+def _runtime_installed(model: PinnedModel) -> bool:
+    import importlib.util
+
+    return all(importlib.util.find_spec(module) is not None for module in model.runtime)
+
+
+def wanted_models() -> list[PinnedModel]:
+    """The pinned models whose runtime is installed: a vault fetches what it can load.
+
+    See `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
+    """
+    return [model for model in pinned_models() if _runtime_installed(model)]
+
+
 def missing_models(hub) -> list[PinnedModel]:
-    """The pinned models whose weights are not in the cache; a cheap probe."""
+    """The wanted models whose weights are not in the cache; a cheap probe."""
     return [
         model
-        for model in pinned_models()
+        for model in wanted_models()
         if cached_weights(model, hub) is None or not _companions_cached(model, hub)
     ]
 
@@ -280,6 +299,10 @@ def _exit_code(outcomes: list[dict]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    wanted = wanted_models()
+    if not wanted:
+        print("install_models: no model runtime is installed; nothing to fetch")
+        return 0
     hub = hub_library()
     if hub is None:
         print(
@@ -289,7 +312,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_NO_LIBRARY
     outcomes = [
-        _settled_and_retired(model, hub, download=not args.check) for model in pinned_models()
+        _settled_and_retired(model, hub, download=not args.check) for model in wanted
     ]
     _print(outcomes, args.json)
     return _exit_code(outcomes)

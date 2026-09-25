@@ -1,11 +1,12 @@
-"""An update names the extras it did not upgrade and the resources it did not re-render.
+"""An update brings the extras the operator chose and names the resources it did not re-render.
 
-`uv sync --locked --inexact` keeps what is installed and names no extra, so a package that
-reaches the vault through `hybrid`, `code-graph` or `reranker` stays at its old version when
-the lock moves. Owned resources — units, task settings, hook blocks — are rendered by the
-installer, never by a maintenance pass. Both were silent.
+`uv sync --locked --inexact` keeps what is installed and names no extra, so a package added
+to an extra never reached an installed vault; names were compared unnormalized and
+self-references were dropped. Owned resources — units, task settings, hook blocks — are
+rendered by the installer, never by a maintenance pass.
 
-Research: `docs/research/2026-09-17-an-update-says-what-it-did-not-bring-into-force.md`.
+Research: `docs/research/2026-09-17-an-update-says-what-it-did-not-bring-into-force.md`,
+`docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
 """
 from __future__ import annotations
 
@@ -22,8 +23,9 @@ name = "llm-wiki"
 version = "0.0.0"
 
 [project.optional-dependencies]
-hybrid = ["numpy>=2.2.6,<3", "sentence-transformers>=2.7,<6"]
-reranker = ["onnxruntime>=1.18,<2; python_version >= '3.11'", "torch>=2.2,<3"]
+semantic = ["huggingface-hub>=0.34,<2", "numpy>=2.2.6,<3", "onnxruntime>=1.18,<2; python_version >= '3.11'"]
+reranker = ["torch>=2.2,<3", "transformers>=4.44,<6"]
+hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic,reranker]"]
 full = ["llm-wiki[hybrid]"]
 """
 
@@ -45,7 +47,7 @@ def _write(root: Path, relative: str, body: bytes) -> None:
 @pytest.fixture
 def checkout(tmp_path: Path, monkeypatch) -> Path:
     """A checkout whose upstream is one commit ahead, ready to fast-forward."""
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
     upstream = tmp_path / "upstream"
     upstream.mkdir()
     _git(upstream, "init", "-q", "-b", "main")
@@ -66,29 +68,43 @@ def _advance(checkout: Path, *changed: str) -> dict:
     return self_update.update_checkout(checkout)
 
 
-def test_a_lock_that_moved_names_the_installed_extras(checkout, monkeypatch) -> None:
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "sentence-transformers"})
+def test_an_extra_is_chosen_by_a_package_only_it_brings_under_its_canonical_name(checkout, monkeypatch) -> None:
+    """`huggingface_hub` is how the environment spells `huggingface-hub`."""
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "huggingface-hub"})
+
+    outcome = _advance(checkout, "scripts/search_memory.py")
+
+    assert (outcome["status"], outcome["extras"], outcome["resources"]) == ("updated", ("semantic",), "current")
+
+
+def test_an_aggregate_is_never_chosen_by_itself_but_its_parts_are(checkout, monkeypatch) -> None:
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "onnxruntime", "torch"})
 
     outcome = _advance(checkout, "uv.lock")
 
-    assert (outcome["status"], outcome["extras"], outcome["resources"]) == ("updated", ("hybrid",), "current")
+    assert outcome["extras"] == ("reranker", "semantic")
 
 
-def test_an_extra_whose_packages_are_not_all_installed_is_not_named(checkout, monkeypatch) -> None:
-    """`numpy` alone must not make `hybrid` look installed."""
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "torch"})
+def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
+    """`numpy` belongs to more than one extra, so it says nothing about the choice."""
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy"})
 
     outcome = _advance(checkout, "uv.lock")
 
     assert outcome["extras"] == ()
 
 
-def test_code_that_moved_without_the_lock_names_no_extra(checkout, monkeypatch) -> None:
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "sentence-transformers"})
+def test_the_sync_names_every_chosen_extra_in_one_inexact_call() -> None:
+    command = self_update._sync_command(("reranker", "semantic"))
 
-    outcome = _advance(checkout, "scripts/search_memory.py")
+    assert command[: len(self_update.BASELINE_SYNC_COMMAND)] == self_update.BASELINE_SYNC_COMMAND
+    assert command[len(self_update.BASELINE_SYNC_COMMAND) :] == ("--extra", "reranker", "--extra", "semantic")
 
-    assert (outcome["extras"], outcome["resources"]) == ((), "current")
+
+def test_names_compare_as_the_packaging_specification_says() -> None:
+    assert {self_update.canonical_name(name) for name in ("Huggingface_Hub", "huggingface.hub", "huggingface--hub")} == {
+        "huggingface-hub"
+    }
 
 
 @pytest.mark.parametrize(
@@ -113,7 +129,7 @@ def test_the_nightly_logs_what_was_not_brought_into_force() -> None:
     scheduled_nightly._log_update_aftermath(lines.append, outcome)
 
     assert lines == [
-        "  update: dependencies synced; extras not upgraded: hybrid",
+        "  update: dependencies synced with extras: hybrid",
         "  update: owned resources rerun_installer",
     ]
 

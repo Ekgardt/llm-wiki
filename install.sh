@@ -759,13 +759,14 @@ case "$SYNC_EXIT" in
 esac
 
 # ─── 8b. Pinned model weights ──────────────────────────────────────
-# The read path loads weights local-only. With the semantic extra installed,
-# fetch the two pinned models now, verified; without it, nothing is expected.
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; with none installed, nothing is expected,
+# and the script's own lines say which it was.
 MODELS_EXIT=0
 uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
 case "$MODELS_EXIT" in
-  0) ok "Pinned model weights present" ;;
-  2) info "Semantic search not installed; model weights are fetched once it is" ;;
+  0) ok "Model weights step done" ;;
+  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
   *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 

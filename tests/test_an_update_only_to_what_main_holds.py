@@ -59,7 +59,7 @@ def test_a_checkout_on_the_default_branch_gets_the_merged_commit(tmp_path, monke
 
     _upstream, clone = _merged_upstream(tmp_path)
     _git(clone, "checkout", "--quiet", "main")
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
 
     outcome = self_update.update_checkout(clone)
 

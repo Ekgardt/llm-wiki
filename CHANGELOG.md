@@ -8,6 +8,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **An update brings the extras the operator chose; `hybrid` has its reranker
+  again; a base install has no failed nights.** `hybrid` is `semantic` plus
+  `reranker` again, as documented (the ONNX change had dropped `torch` from it and
+  turned the reranker off silently). The nightly update syncs every extra the
+  operator chose — one with a package only it brings installed, names compared as
+  the packaging specification normalizes them — so a package added to an extra
+  arrives with the code; before, `huggingface_hub` never matched `huggingface-hub`
+  and no extra was synced at all. `install_models.py` fetches only models whose
+  runtime is installed and exits 0 with nothing to fetch, so a base install's
+  nightly no longer records a failure every night. See
+  `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
 - **The history prune keeps every row something reads back.** The 90-day prune
   of 2026-09-24 would have deleted compile transactions that compile receipts,
   daily archives and evidence resolution read back, from about 2026-11-18. It now
