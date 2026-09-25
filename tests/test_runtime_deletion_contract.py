@@ -1504,6 +1504,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
 
     from tests.test_doctor import (
         _build_root,
+        _cache_pinned_models,
         _create_claim_index,
         _create_generation,
         _qualified_pyright_check,
@@ -1524,6 +1525,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     )
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _cache_pinned_models(tmp_path, monkeypatch)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
