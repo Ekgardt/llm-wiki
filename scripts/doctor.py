@@ -5891,17 +5891,35 @@ def _codex_host_result(root: Path, home: Path, deadline: float) -> dict[str, obj
     return _codex_degraded_result(root, home, reason)
 
 
+# Delegates deleted on 2026-09-17 that an older install's hooks still name; the
+# adapter tolerates them, the installer replaces them (audit C-1,
+# docs/research/2026-09-25-doctor-names-hooks-older-than-the-release.md).
+RETIRED_HOOK_DELEGATES = ("precompact_capture.py", "session_end_capture.py")
+
+
+def _names_a_retired_delegate(configs: list[tuple[Path, tuple[str, ...]]]) -> bool:
+    return any(
+        _contains_markers(path, (name,)) for path, _markers in configs for name in RETIRED_HOOK_DELEGATES
+    )
+
+
 def _generic_host_result(
     host_dir: Path, configs: list[tuple[Path, tuple[str, ...]]]
 ) -> dict[str, object]:
     if not host_dir.exists():
         return {"status": "skipped", "message": "Optional host not installed."}
-    if any(_contains_markers(path, markers) for path, markers in configs):
-        return {"status": "ok", "message": "User integration config detected."}
-    return {
-        "status": "degraded",
-        "message": "Host detected without LLM-Wiki config.",
-    }
+    if not any(_contains_markers(path, markers) for path, markers in configs):
+        return {"status": "degraded", "message": "Host detected without LLM-Wiki config."}
+    return _configured_host_result(configs)
+
+
+def _configured_host_result(configs: list[tuple[Path, tuple[str, ...]]]) -> dict[str, object]:
+    if _names_a_retired_delegate(configs):
+        return {
+            "status": "degraded",
+            "message": "Installed hooks predate this release; rerun the installer to refresh them.",
+        }
+    return {"status": "ok", "message": "User integration config detected."}
 
 
 def _required_host_config(
@@ -5941,7 +5959,7 @@ def _integration_summary(
         return "error", f"{missing_sources} integration source adapter(s) are missing."
     configured_missing = sum(host.get("status") == "degraded" for host in hosts.values())
     if configured_missing:
-        return "degraded", f"{configured_missing} installed host(s) lack integration config."
+        return "degraded", f"{configured_missing} installed host(s) lack current integration config."
     return "ok", "Integration sources are available; optional hosts were checked."
 
 

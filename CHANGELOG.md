@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `doctor` names installed Claude hooks that still pass a delegate retired on 2026-09-17 and says to rerun the installer, instead of reporting them as current.
 - The weekly archive names each day older than the hot window that stays flat and why, goes on past a day that fails, and exits 1 when any did, so the weekly is reported degraded instead of stopping silently.
 - Two stale capture tests no longer write prompt lines into the checkout's daily log, and the test session now fails when any test leaves a daily log behind outside the live vault.
 - A Claude prompt reaches feedback capture like every other host's (a hook that names the event's own capture script now takes the full path), and the delegates behind the 5-second prompt and tool hooks stop at 2.5, 1 and 3.5 seconds, so a hang is recorded before the host kills the hook; a test ties those bounds to the installed hook timeouts.
