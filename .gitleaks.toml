@@ -40,3 +40,14 @@ targetRules = ["jwt"]
 regexTarget = "line"
 paths = ['''^tests/test_security_invariants\.py$''']
 regexes = ['''^\s+jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"$''']
+
+[[allowlists]]
+description = "Synthetic credential used only by the JSON secret-redaction regression and its research note"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = [
+  '''^tests/test_a_secret_in_json_is_still_a_secret\.py$''',
+  '''^docs/research/2026-09-25-a-secret-in-json-is-still-a-secret\.md$''',
+]
+regexes = ['''a8f3k29dkq84mzp1x''']
