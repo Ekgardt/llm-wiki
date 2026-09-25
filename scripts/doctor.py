@@ -8153,11 +8153,17 @@ def _last_snapshot_at(root: Path) -> datetime | None:
     return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
 
 
+def _latest(*moments: datetime | None) -> datetime | None:
+    known = [moment for moment in moments if moment is not None]
+    return max(known, default=None)
+
+
 def _backup_check(home_path: Path, now: datetime) -> dict:
     """Whether the memory's second copy was taken recently."""
-    from snapshot_knowledge import snapshot_root
+    from snapshot_knowledge import last_checked_at, snapshot_root
 
-    taken = _last_snapshot_at(snapshot_root(home_path))
+    root = snapshot_root(home_path)
+    taken = _latest(_last_snapshot_at(root), last_checked_at(root))
     details = {"last_snapshot_at": taken.isoformat() if taken else None}
     if taken is None:
         return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)

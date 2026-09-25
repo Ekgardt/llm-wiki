@@ -134,10 +134,12 @@ evidence or evaluator disagreement enter quarantine; automatic semantic superses
 and eager backfill remain disabled. Do not delete `run/` while doctor reports a
 source failure, any 2-day undo artifact, retained work/result, or live owner. There
 is no persistent daemon, cloud service, remote queue/cache, exactly-once promise, or
-gzip archive tier. The single automatic Git operation is the nightly fast-forward
-update of the checkout, which never pushes, never resolves a conflict, and declines
+gzip archive tier. The single automatic Git operation on the checkout is the nightly
+fast-forward update, which never pushes, never resolves a conflict, and declines
 whenever the update would touch a locally modified file — see
-`knowledge/notes/automatic-code-update-decision.md`.
+`knowledge/notes/automatic-code-update-decision.md`. The knowledge snapshot
+(`scripts/snapshot_knowledge.py`) commits only in its own remote-less repository
+outside the vault (`~/llm-wiki-snapshots/`).
 
 **Reliability v3 (implemented; the installers adopt it):** New
 unprocessed lifecycle evidence is create-only under `run/capture-intents/`
