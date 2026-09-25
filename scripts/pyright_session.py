@@ -3570,6 +3570,25 @@ class LanguageServerSession:
         self._diagnostics.clear()
         self._diagnostic_bytes = 0
         self._clear_wire_state()
+        self._retire_failed_process_locked()
+
+    def _retire_failed_process_locked(self) -> None:
+        """A process that failed for good is handed to cleanup, so a later start may replace it.
+
+        The session kept the dead process as its own, and `_startup_needed_locked`
+        never allowed another start: a key in steady use stayed degraded until the
+        server process was restarted by hand (audit B-40,
+        docs/research/2026-09-25-a-failed-server-is-started-again.md). The same
+        startup retry budget bounds how often that happens.
+        """
+        process = self._process
+        if process is None or process.state is not ProcessState.FAILED:
+            return
+        if self._startup_retries >= len(_STARTUP_RETRY_BACKOFF):
+            return
+        self._startup_retries += 1
+        self._detach_recovered_process_locked(process, None)
+        self._startup_attempted = False
 
     def _process_state_needs_reconciling(self) -> bool:
         """The process has failed or degraded out from under this session."""

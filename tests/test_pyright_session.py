@@ -4265,9 +4265,11 @@ def test_timed_out_lifecycle_promotion_cannot_leave_query_readiness(
         session.close(deadline=time.monotonic() + 5)
 
 
+# FAILED is no longer terminal for the session: the dead process is replaced
+# (audit B-40, tests/test_a_failed_server_is_started_again.py).
 @pytest.mark.parametrize(
     "terminal_state",
-    [ProcessState.DEGRADED, ProcessState.FAILED],
+    [ProcessState.DEGRADED],
 )
 def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
     repository: Path,
