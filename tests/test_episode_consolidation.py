@@ -129,7 +129,7 @@ def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatc
     monkeypatch.setattr(
         consolidation,
         "_record_consolidation",
-        lambda day, count, records, digest: recorded.update(
+        lambda day, count, records, digest, failed=(): recorded.update(
             day=day, count=count, records=records, digest=digest
         ),
     )
@@ -188,7 +188,7 @@ def test_a_day_with_nothing_durable_is_marked_done(vault: Path, monkeypatch) -> 
     monkeypatch.setattr(
         consolidation,
         "_record_consolidation",
-        lambda day, count, records, digest: recorded.update(day=day, count=count),
+        lambda day, count, records, digest, failed=(): recorded.update(day=day, count=count),
     )
 
     outcome = consolidation.consolidate_day(

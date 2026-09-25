@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Episode consolidation: an empty answer for one batch fails that batch instead of stopping every later day, and a day closed with batches it could not read records them with the code revision, so it is opened again once the code changes and only the lost batches are asked again.
 - Tool calls made inside the vault are captured, as prompts have been since 2026-09-24, and neither capture hook runs on a stand-in: a module that cannot import fails the hook visibly instead of a no-op recorder or a different project slug. A test now refuses any module that replaces a failed import with a function.
 - A Codex session is recorded and classified: its rollout lines (`response_item` messages and tool calls) are read as the conversation they record, where before every line rendered to nothing, so a Codex session left no session record and gave the classifier no text.
 - The contradiction check compares what can change its answer: a new claim is compared with every active claim about the same subject (relation-only matches, which were always unrelated, filled the list, and it was cut at 50 without a word); the compile no longer asks a model for a verdict that cannot change the decision, which spent tokens and sent the claim text out; and instants are compared as times, not as text.
