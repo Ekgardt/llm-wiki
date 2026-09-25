@@ -39,7 +39,6 @@ DELEGATE_TIMEOUT_SECONDS = 10
 # docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md).
 DELEGATE_TIMEOUTS = {
     "user_prompt_capture.py": 2.5,
-    "feedback_capture.py": 1.0,
     "post_tool_capture.py": 3.5,
 }
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
@@ -123,7 +122,6 @@ DELEGATES = frozenset(
         "user_prompt_capture.py",
         "post_tool_capture.py",
         "heartbeat_record.py",
-        "feedback_capture.py",
     }
 )
 # The two thin wrappers that used to spawn the detached flush. They were deleted on
@@ -136,9 +134,11 @@ CAPTURE_DELEGATES = {
     "session_end": "session_end_capture.py",
 }
 # The delegate `ingest_event` itself runs for an event. Claude's hooks name it with
-# `--delegate`, and that flag used to take the one-script path, which skipped the
-# feedback capture every other host's prompts reach (audit B-7). See
-# `docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md`.
+# `--delegate`, and the event takes the same ingest path as on every other host
+# (audit B-7, docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md).
+# Feedback candidates were retired on 2026-09-25: corrections are learned by
+# compile from the daily log
+# (docs/research/2026-09-25-corrections-are-learned-by-compile-not-by-candidates.md).
 INGESTED_DELEGATES = {
     **CAPTURE_DELEGATES,
     "user_prompt": "user_prompt_capture.py",
@@ -2596,16 +2596,6 @@ def _ingest_user_prompt(
         "user_prompt_capture.py",
         payload,
         forward_stdout=True,
-        project_dir=project_dir,
-    )
-    _run_delegate(
-        "feedback_capture.py",
-        {
-            "text": payload["prompt"],
-            "session_id": envelope.session or "unknown",
-            "slug": slug or "unknown",
-            "trigger": f"{envelope.agent or 'unknown'}-user-message",
-        },
         project_dir=project_dir,
     )
 

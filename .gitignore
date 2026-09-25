@@ -67,9 +67,8 @@ knowledge/projects/*
 !knowledge/projects/_template/**
 !knowledge/projects/README.md
 
-# === Personal feedback / staging ===
+# === Retired feedback candidates (2026-09-25): old files stay private ===
 knowledge/feedback/*
-!knowledge/feedback/README.md
 knowledge/inbox/**
 !knowledge/inbox/README.md
 knowledge/raw/**

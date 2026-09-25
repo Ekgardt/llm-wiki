@@ -215,7 +215,6 @@ class TestRedactionBeforePersistence:
         "compile_memory.py",
         "query_memory.py",
         "flush_memory.py",
-        "feedback_capture.py",
         "daily_log_append.py",
         "bootstrap_project.py",
     ]
@@ -415,14 +414,6 @@ class TestPathSafety:
         assert evil not in categories
         assert not hasattr(compile_memory, "_execute_plan")
 
-    @pytest.mark.parametrize("evil", TRAVERSAL_INPUTS)
-    def test_feedback_candidate_id_rejects_traversal(self, evil):
-        """feedback_capture must reject non-hex candidate IDs."""
-        import feedback_capture
-
-        result = feedback_capture.promote_candidate(evil)
-        assert result is None, f"Traversal candidate_id {evil!r} was not rejected"
-
     def test_blackboard_project_rejects_traversal(self, tmp_path):
         """blackboard must reject traversal in project slug."""
         import blackboard
@@ -453,15 +444,6 @@ class TestYAMLSafety:
         "value: '\\nmalicious: true'",     # escape sequence
         '"""block string"""',              # YAML block scalar
     ]
-
-    def test_feedback_frontmatter_escapes_newlines(self):
-        """feedback_capture must escape newlines in interpolated fields."""
-
-        src = (SCRIPTS / "feedback_capture.py").read_text(encoding="utf-8")
-        # The _esc function should handle newlines
-        assert "chr(10)" in src or "\\n" in src, (
-            "feedback_capture.py does not escape newlines in YAML frontmatter"
-        )
 
     def test_compile_frontmatter_escapes_quotes(self):
         """compile_memory must escape quotes in title/summary."""

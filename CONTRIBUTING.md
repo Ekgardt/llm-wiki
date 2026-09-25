@@ -88,7 +88,7 @@ The principles below summarize the non-negotiable invariants.
   `monkeypatch.setattr(module, "ROOT", vault)` **and**
   `monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))` — child processes read the
   environment, not the patched global
-- **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
+- **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `archive_stale.py`, `build_guardrails.py`
 - The full regression suite is the release gate; see `tests/` for patterns.
 
 ## Test commands

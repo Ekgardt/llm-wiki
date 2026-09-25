@@ -817,7 +817,6 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 | `knowledge/projects/<slug>/` | KNOWLEDGE | Append-only journal.md + projected state.md |
 | `knowledge/raw/` | KNOWLEDGE | Immutable sources |
 | `knowledge/inbox/` | KNOWLEDGE | Unprocessed staging |
-| `knowledge/feedback/` | KNOWLEDGE | Correction candidates |
 | `cache/` | RUNTIME | FTS5/vector/graph indexes, compile plans, derived claims index |
 | `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
 | `run/` | RUNTIME | transactions, receipts, queue database/results, leases, locks |

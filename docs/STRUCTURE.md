@@ -77,8 +77,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │                                no slug for a directory inside the vault,
 │   │                                a platform temp entry, or $HOME — 2026-09-23)
 │   ├── raw/                         immutable sources
-│   ├── inbox/                       unprocessed staging
-│   └── feedback/                    correction candidates
+│   └── inbox/                       unprocessed staging
 │
 ├── cache/                        RUNTIME — gitignored (FTS5/vector/graph)
 │   ├── evidence-graph/              immutable corpus-generation layout
@@ -599,7 +598,9 @@ or nonzero active state remains fail-closed.
   and decisions included) before it deletes that work from `run/` after
   `queue_result_retention_days` (2026-09-24).
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
-- `knowledge/feedback/` — correction candidates (JSON). Gitignored.
+- `knowledge/feedback/` — retired 2026-09-25 (correction candidates needed a
+  manual promote; compile learns corrections from the daily log). Old files stay
+  gitignored and are read by nothing but the guardrail source manifest.
 
 ### RUNTIME zone (always gitignored, inside vault)
 - Complete corpus generation is implemented by `generation_catalog.py`,

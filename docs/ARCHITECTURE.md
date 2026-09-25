@@ -6,7 +6,7 @@ This document explains **why** the system is shaped the way it is. For **how to 
 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
-KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
+KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox}
 RUNTIME       cache/  logs/  run/   # inside vault, gitignored
               Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 ```

@@ -1,26 +1,22 @@
 """Guard rails — auto-inject learned corrections to prevent repeating mistakes.
 
-When feedback_capture saves a correction ("no, use JWT instead of
-sessions"), it becomes a knowledge page after promotion. But the
-agent doesn't SEE that page when working unless it searches for it.
+A correction the user gives is written verbatim to the daily log; the nightly
+compile turns it into a typed knowledge page. But the agent doesn't SEE that
+page when working unless it searches for it.
 
-This module compiles all promoted corrections + preferences into a
-compact "rules" block that gets injected at SessionStart. The agent
-sees them BEFORE acting — preventing the same mistake.
+This module compiles those corrections + preferences into a compact "rules"
+block that gets injected at SessionStart. The agent sees them BEFORE acting —
+preventing the same mistake.
 
 Think of it as "instincts" (nvk/ECC terminology): rules the agent
 has internalized from past corrections.
 
 Flow:
-  User corrects agent → feedback_capture → promote → knowledge page
+  User corrects agent → daily log → compile → knowledge page
                                                   ↓
                                           build_guardrails reads it
                                                   ↓
                                           SessionStart injection
-                                                  ↓
-                                    Agent sees rule BEFORE acting
-                                                  ↓
-                                    Same mistake NOT repeated
 
 Usage:
     uv run python scripts/build_guardrails.py                    # print rules
@@ -30,7 +26,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from collections.abc import Mapping
@@ -50,7 +45,6 @@ from memory_state import ROOT  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
-FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
 MAX_GUARDRAILS_BYTES = MAX_KNOWLEDGE_TARGET_BYTES
 
@@ -81,14 +75,15 @@ def _collect_corrections(
 
     Sources:
     1. Knowledge pages with type: correction/preference/requirement
-    2. Promoted feedback candidates (from knowledge/feedback/)
-    3. Patterns with 'do not' / 'always' / 'never' in summary
+    2. Patterns with 'do not' / 'always' / 'never' in summary
+
+    Promoted feedback candidates were a third source until 2026-09-25; they
+    needed a manual promote and compile already learns corrections from the
+    daily log (docs/research/2026-09-25-corrections-are-learned-by-compile-not-by-candidates.md).
     """
     if source_contents is None:
         _, source_contents = snapshot_guardrail_sources_with_content(ROOT)
-    notes = _entries(_selected(source_contents, "knowledge/notes/", ".md"), _knowledge_correction, project)
-    feedback = _entries(_selected(source_contents, "knowledge/feedback/", ".json"), _feedback_correction, project)
-    return notes + feedback
+    return _entries(_selected(source_contents, "knowledge/notes/", ".md"), _knowledge_correction, project)
 
 
 def _selected(source_contents: Mapping[str, bytes], prefix: str, suffix: str) -> list[tuple[str, bytes]]:
@@ -167,32 +162,6 @@ def _knowledge_rule(relative: str, content: str, page_type: str) -> dict:
         "authority": _extract(content, AUTHORITY_RE) or "inferred",
         "stated_at": _extract(content, TIMESTAMP_RE) or "",
     }
-
-
-def _feedback_correction(relative: str, source_bytes: bytes, project: str | None) -> dict | None:
-    """Source 2: a promoted feedback candidate of this project (or of any, when unscoped)."""
-    try:
-        candidate = json.loads(source_bytes)
-    except json.JSONDecodeError:
-        return None
-    if candidate.get("status") != "promoted" or not _feedback_in_scope(candidate, project):
-        return None
-    return {
-        "type": candidate.get("type", "feedback"),
-        "title": candidate.get("text", "")[:80],
-        "summary": _clipped(candidate.get("text", "")),
-        "source": "feedback",
-        "path": candidate.get("promoted_to", ""),
-        # A promoted feedback record is the operator's own correction.
-        "authority": "user",
-        "stated_at": str(candidate.get("captured_at", "")),
-    }
-
-
-def _feedback_in_scope(candidate: dict, project: str | None) -> bool:
-    if not project:
-        return True
-    return candidate.get("project", "").lower() == project.lower()
 
 
 def _extract(text: str, pattern: re.Pattern) -> str | None:

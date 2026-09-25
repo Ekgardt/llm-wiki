@@ -48,7 +48,6 @@
   "test_evidence_graph_incremental.py": 2.85,
   "test_evidence_graph_recovery.py": 3.21,
   "test_evidence_resolver.py": 0.5,
-  "test_feedback_capture.py": 0.5,
   "test_flush_classification.py": 0.5,
   "test_generation_catalog.py": 10.41,
   "test_generation_integration.py": 0.5,

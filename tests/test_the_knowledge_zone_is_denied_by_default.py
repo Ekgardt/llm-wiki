@@ -16,7 +16,6 @@ PUBLISHED = {
     "knowledge/index.md",
     "knowledge/log.md",
     "knowledge/daily/README.md",
-    "knowledge/feedback/README.md",
     "knowledge/inbox/README.md",
     "knowledge/notes/README.md",
     "knowledge/projects/README.md",

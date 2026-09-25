@@ -17,7 +17,6 @@ refresh tokens".
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from datetime import datetime
@@ -169,17 +168,14 @@ def _where_we_left_off(content: str) -> str:
 def _detect_agent_strengths(agent: str) -> list[str] | None:
     """Auto-detect what an agent is good at from its history.
 
-    Instead of hardcoding "codex=codegen, opencode=research", we look at:
-    1. Which knowledge page types this agent has contributed to most
-    2. Which feedback types it receives (corrections = weakness,
-       preferences = engagement area)
+    Instead of hardcoding "codex=codegen, opencode=research", we look at
+    which knowledge page types this agent has contributed to most.
 
     Returns: ordered list of knowledge types the agent excels at,
     or None if no data (use balanced view).
     """
     type_counts: dict[str, int] = {}
     _count_authored_types(agent, type_counts)
-    _count_feedback_types(agent, type_counts)
     if not type_counts:
         return None  # no data → balanced view
     # Rank types by frequency (most contributions = strongest area)
@@ -205,28 +201,6 @@ def _authored_page_type(md: Path, agent: str) -> str | None:
     if agent.lower() not in (_frontmatter_value(content, "source_authority") or "").lower():
         return None
     return _frontmatter_value(content, "type")
-
-
-def _count_feedback_types(agent: str, type_counts: dict[str, int]) -> None:
-    """Feedback naming the agent: corrections still mark an area it is active in."""
-    feedback_dir = ROOT / "knowledge" / "feedback"
-    if not feedback_dir.exists():
-        return
-    for path in feedback_dir.glob("*.json"):
-        feedback_type = _agent_feedback_type(path, agent)
-        if feedback_type is not None:
-            key = f"feedback_{feedback_type}"
-            type_counts[key] = type_counts.get(key, 0) + 1
-
-
-def _agent_feedback_type(path: Path, agent: str) -> str | None:
-    try:
-        fb = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if agent.lower() in fb.get("text", "").lower() or agent.lower() in fb.get("project", "").lower():
-        return fb.get("type", "")
-    return None
 
 
 def _project_context_item(
@@ -304,7 +278,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
         slug: Project slug to scope the context.
         max_chars: Emergency byte cap; packed output never exceeds this.
         agent: Agent name. Context is auto-tailored based on the agent's
-               demonstrated strengths (derived from feedback history),
+               demonstrated strengths (derived from the pages it authored),
                NOT hardcoded assumptions about which tool is "better at X".
     """
     parts = [

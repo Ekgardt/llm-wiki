@@ -57,7 +57,6 @@ knowledge/
   projects/   # per-project state.md / context
   raw/        # immutable sources
   inbox/      # unprocessed staging
-  feedback/   # correction candidates
 
 # RUNTIME (inside the vault, gitignored)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).

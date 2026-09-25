@@ -4,7 +4,6 @@ import concurrent.futures
 import hashlib
 import importlib
 import inspect
-import json
 import os
 import sqlite3
 import subprocess
@@ -44,8 +43,6 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/build_context.py:main",
     "scripts/daily_log_append.py:locked_append",
     "scripts/daily_log_append.py:locked_append_once",
-    "scripts/feedback_capture.py:capture_from_text",
-    "scripts/feedback_capture.py:promote_candidate",
     "scripts/flush_memory.py:append_daily",
     "scripts/migrate_to_okf.py:_write_page",
     "scripts/query_memory.py:append_log",
@@ -62,7 +59,6 @@ TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
     "scripts/archive_stale.py:_committed_archive",
     "scripts/archive_stale.py:_committed_restore",
     "scripts/build_guardrails.py:main",
-    "scripts/feedback_capture.py:promote_candidate",
     "scripts/migrate_to_okf.py:_write_page",
     "scripts/rebuild_memory_index.py:main",
     "scripts/reflection.py:reflect_page",
@@ -203,7 +199,6 @@ def test_scanner_writer_set_equals_behavioral_matrix():
                 "build_guardrails.py",
                 "build_context.py",
                 "daily_log_append.py",
-                "feedback_capture.py",
                 "flush_memory.py",
                 "migrate_to_okf.py",
                 "query_memory.py",
@@ -310,7 +305,6 @@ def _drive_build_guardrails(d: _Drive) -> None:
     target.write_bytes(b"old\n")
     monkeypatch.setattr(module, "ROOT", vault)
     monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
-    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
     monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
     monkeypatch.setattr(module, "mutate_knowledge", d.boundary, raising=False)
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
@@ -334,39 +328,6 @@ def _drive_daily_log_append(d: _Drive) -> None:
         d.function(path, d.secret, "event-1")
         return
     d.function(path, d.secret)
-
-
-def _promoted_candidate(d: _Drive) -> None:
-    candidate = d.vault / "knowledge/feedback/abcdef123456.json"
-    candidate.parent.mkdir(parents=True)
-    candidate.write_text(
-        json.dumps(
-            {
-                "id": "abcdef123456",
-                "type": "correction",
-                "confidence": 0.7,
-                "text": d.secret,
-                "session_id": d.secret,
-                "project": d.secret,
-                "trigger": d.secret,
-                "captured_at": "2026-01-01",
-                "status": "candidate",
-            }
-        ),
-        encoding="utf-8",
-    )
-    d.function("abcdef123456")
-
-
-def _drive_feedback_capture(d: _Drive) -> None:
-    module, monkeypatch, vault, secret = d.module, d.monkeypatch, d.vault, d.secret
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
-    monkeypatch.setattr(module, "mutate_knowledge", d.boundary)
-    if d.function_name != "capture_from_text":
-        _promoted_candidate(d)
-        return
-    d.function("No, use safe storage", session_id=secret, slug=secret, trigger=secret)
 
 
 def _drive_flush_memory(d: _Drive) -> None:
@@ -454,7 +415,6 @@ _WRITER_DRIVERS = {
     "build_guardrails": _drive_build_guardrails,
     "build_context": _drive_build_context,
     "daily_log_append": _drive_daily_log_append,
-    "feedback_capture": _drive_feedback_capture,
     "flush_memory": _drive_flush_memory,
     "migrate_to_okf": _drive_migrate_to_okf,
     "query_memory": _drive_query_memory,
@@ -1149,37 +1109,6 @@ def test_public_mutation_retries_initial_recovery_contention_without_dropping_ev
     assert target.read_bytes() == b"event\n"
 
 
-def _conflict_feedback(vault, monkeypatch):
-    import feedback_capture as module
-
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
-    module.FEEDBACK_DIR.mkdir()
-    source = module.FEEDBACK_DIR / "abcdef123456.json"
-    source.write_text(
-        json.dumps(
-            {
-                "id": "abcdef123456",
-                "type": "correction",
-                "confidence": 0.8,
-                "text": "Use safe storage",
-                "session_id": "s1",
-                "project": "demo",
-                "trigger": "test",
-                "captured_at": "2026-01-01",
-                "status": "candidate",
-            }
-        ),
-        encoding="utf-8",
-    )
-    destination = vault / "knowledge/notes/feedback-abcdef12.md"
-
-    def invoke():
-        return module.promote_candidate("abcdef123456")
-
-    return module, source, destination, invoke
-
-
 def _conflict_migration(vault, monkeypatch):
     import migrate_to_okf as module
 
@@ -1212,7 +1141,6 @@ def _conflict_reflection(vault, monkeypatch):
 
 
 _CONFLICT_SETUPS = {
-    "feedback": _conflict_feedback,
     "migration": _conflict_migration,
     "reflection": _conflict_reflection,
 }
@@ -1598,28 +1526,6 @@ def test_append_rejects_oversize_block_and_prospective_target(tmp_path, monkeypa
     path.write_bytes(b"123456")
     with pytest.raises(ValueError, match="size"):
         markdown_transaction.append_knowledge(None, path, b"789")
-
-
-def test_feedback_redacts_all_metadata_before_prepare(tmp_path, monkeypatch):
-    import feedback_capture
-
-    vault, state = _vault(tmp_path)
-    feedback = vault / "knowledge" / "feedback"
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setattr(feedback_capture, "ROOT", vault)
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", feedback)
-    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
-    candidate_id = feedback_capture.capture_from_text(
-        "No, use safe storage instead",
-        session_id=f"session-{secret}",
-        slug=f"project-{secret}",
-        trigger=f"trigger-{secret}",
-    )
-    raw = (feedback / f"{candidate_id}.json").read_text(encoding="utf-8")
-    assert secret not in raw
-    assert raw.count("[REDACTED") == 3
-    assert json.loads(raw)["text"] == "No, use safe storage instead"
 
 
 def test_archive_exception_is_function_and_operation_scoped():

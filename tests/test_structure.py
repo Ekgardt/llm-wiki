@@ -371,7 +371,7 @@ CODE_DIRS = {
     "scripts", "tests", "docs", "skills", "rules", "integrations", "benchmark",
 }
 KNOWLEDGE_DIRS = {
-    "daily", "notes", "projects", "raw", "inbox", "feedback",
+    "daily", "notes", "projects", "raw", "inbox",
 }
 RUNTIME_DIRS = {
     "cache", "logs", "run",

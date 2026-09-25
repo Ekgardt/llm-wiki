@@ -1,8 +1,10 @@
-"""A Claude prompt takes the path that runs feedback capture, inside the host's time.
+"""A Claude prompt takes the same ingest path as every host, inside the host's time.
 
 Claude's hooks name `--delegate user_prompt_capture.py`, and a named delegate ran
-on its own, skipping the feedback capture other hosts' prompts reach; a delegate
-could outlive the hook the host was about to kill. See
+on its own instead of the ingest path other hosts' prompts take; a delegate could
+outlive the hook the host was about to kill. (The feedback capture that path ran
+was retired on 2026-09-25,
+docs/research/2026-09-25-corrections-are-learned-by-compile-not-by-candidates.md.) See
 docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md and
 docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md.
 """
@@ -53,7 +55,7 @@ def test_every_claude_hook_delegate_is_known_to_the_adapter() -> None:
 
 # The delegates the adapter itself runs for each event of the installed Claude hooks.
 EVENT_DELEGATES = {
-    "UserPromptSubmit": ("user_prompt_capture.py", "feedback_capture.py"),
+    "UserPromptSubmit": ("user_prompt_capture.py",),
     "PostToolUse": ("post_tool_capture.py",),
 }
 ADAPTER_START_ALLOWANCE_SECONDS = 1.0

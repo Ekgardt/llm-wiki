@@ -279,7 +279,7 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
     assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
-def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
+def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
     _ensure_scripts_on_path()
     import integration_adapter
 
@@ -308,17 +308,10 @@ def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch
 
     integration_adapter.ingest_event(envelope)
 
-    assert [name for name, _, _ in calls] == [
-        "user_prompt_capture.py",
-        "feedback_capture.py",
-    ]
+    # Feedback candidates were retired on 2026-09-25; the prompt reaches compile
+    # through the daily log.
+    assert [name for name, _, _ in calls] == ["user_prompt_capture.py"]
     assert calls[0][1]["prompt"] == "Preserve this request"
-    assert calls[1][1] == {
-        "text": "Preserve this request",
-        "session_id": "session-1",
-        "slug": "demo",
-        "trigger": "opencode-user-message",
-    }
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():

@@ -2,7 +2,6 @@
 
 Covers:
 - compile_memory no longer exposes heuristic lifecycle mutation
-- feedback_capture stdin JSON (OpenCode plugin)
 - MEMORY_LLM_PROVIDER=fake smoke for compile plan apply
 """
 
@@ -11,9 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import stat
-import subprocess
 import sys
 import tarfile
 import zipfile
@@ -92,46 +89,6 @@ def test_compile_memory_removes_heuristic_lifecycle_mutation():
     assert not hasattr(compile_memory, "_check_contradictions_pre_write")
     assert not hasattr(compile_memory, "_mark_superseded")
     assert not hasattr(compile_memory, "_mark_refined")
-
-
-def test_feedback_capture_stdin_json(tmp_path, monkeypatch):
-    import feedback_capture
-
-    monkeypatch.setattr(feedback_capture, "ROOT", tmp_path)
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path / "knowledge" / "feedback")
-    (tmp_path / "knowledge" / "notes").mkdir(parents=True)
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
-
-    payload = json.dumps(
-        {
-            "text": "No, always use Postgres instead of SQLite for production",
-            "session_id": "sess-test",
-            "slug": "demo",
-            "trigger": "opencode-idle",
-        }
-    )
-    env = dict(os.environ)
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS / "feedback_capture.py")],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        cwd=str(ROOT),
-    )
-    assert result.returncode == 0
-    # Candidate files under vault feedback dir (module uses its ROOT from env at import
-    # in subprocess — script resolves ROOT from memory_state). Check via capture_from_text
-    # unit path as well:
-    cid = feedback_capture.capture_from_text(
-        "No, always use Postgres instead of SQLite for production",
-        session_id="sess-test",
-        slug="demo",
-        trigger="opencode-idle",
-    )
-    assert cid is not None
-    assert (tmp_path / "knowledge" / "feedback" / f"{cid}.json").exists()
 
 
 @pytest.mark.parametrize(

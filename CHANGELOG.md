@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Feedback correction candidates are retired: `feedback_capture.py`, its hook delegate, the guardrails source that read promoted candidates, and the `knowledge/feedback/` zone in the layout are removed. They reached the rules only through a manual `promote`, and compile already learns corrections from the daily log that holds every prompt. Old candidate files stay gitignored and inert.
 - Opening the pre-adoption queue no longer takes the write lock unless a ready task is out of attempts, so a queue opened while another writer holds it no longer fails with `database is locked` (seen on Windows CI).
 - Navigation cleanup (audit C-44): the dead `code_intelligence` text helpers and three unreachable `Capability` members are removed (a test now holds that every capability has a route); `code_graph.py <dir>` no longer writes the unread `cache/code_tools.json` or runs the analysed repository's own `tsc`; live `find_dead_code` answers only for the named symbol; a Git run in `workspace_revision` gets the caller's whole deadline instead of a 5 s cap; `WorkspaceDelta.configuration_changed` (read by nothing) is removed; comments no longer describe the retired legacy index as a fallback. CLAUDE.md and AGENTS.md name `repository_index.py index <dir>` as the indexing command.
 - A worktree its owner marked not to index is no longer a follow candidate, so eight such worktrees can no longer take every nightly follow slot from the rest (audit C-43).
