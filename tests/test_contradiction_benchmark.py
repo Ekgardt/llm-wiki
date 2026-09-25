@@ -38,31 +38,37 @@ def test_frozen_corpus_is_closed_canonical_and_has_required_coverage():
     validate_schema(corpus, SCHEMA)
     negative_controls = sum(case["negative_control"] for case in corpus["cases"])
 
-    assert canonical_json_bytes(corpus) + b"\n" == raw
-    assert {type(value) for value in _validity_bounds(corpus)} == {str, type(None)}
-    assert (len(corpus["cases"]) >= 240, _category_floor(corpus) >= 40) == (True, True)
-    assert negative_controls >= 200
+    assert (
+        canonical_json_bytes(corpus) + b"\n" == raw,
+        {type(value) for value in _validity_bounds(corpus)},
+        len(corpus["cases"]) >= 240,
+        _category_floor(corpus) >= 40,
+        negative_controls >= 200,
+    ) == (True, {str, type(None)}, True, True, True)
 
 
 def test_frozen_benchmark_meets_every_exact_gate():
     from contradiction_pipeline import run_frozen_benchmark
 
-    metrics = run_frozen_benchmark(json.loads(CORPUS.read_text(encoding="utf-8")))
-    assert metrics.extraction_f1 == 1
-    assert metrics.candidate_recall == 1
-    assert metrics.class_macro_f1 == 1
-    assert metrics.lifecycle_macro_f1 == 1
-    assert metrics.provenance_correctness == 1
-    assert metrics.quarantine_risk == 0
-    assert metrics.false_supersession <= 0.01
-    assert 0 <= metrics.quarantine_coverage <= 1
-    assert metrics.semantic_primary_calls == 40
-    assert metrics.semantic_critique_calls == 40
-    assert metrics.semantic_fallback_probes == 80
-    assert metrics.semantic_evaluators_independent is True
-    assert metrics.semantic_benchmark_gate is False
-    assert metrics.quarantine_candidates == 80
-    assert metrics.quarantine_notes_published == 0
+    metrics = run_frozen_benchmark(json.loads(CORPUS.read_text(encoding="utf-8"))).canonical()
+    exact = {
+        "extraction_f1": 1,
+        "candidate_recall": 1,
+        "class_macro_f1": 1,
+        "lifecycle_macro_f1": 1,
+        "provenance_correctness": 1,
+        "quarantine_risk": 0,
+        "semantic_primary_calls": 40,
+        "semantic_critique_calls": 40,
+        "semantic_fallback_probes": 80,
+        "semantic_evaluators_independent": True,
+        "semantic_benchmark_gate": False,
+        "quarantine_candidates": 80,
+        "quarantine_notes_published": 0,
+    }
+
+    assert {name: metrics[name] for name in exact} == exact
+    assert (metrics["false_supersession"] <= 0.01, 0 <= metrics["quarantine_coverage"] <= 1) == (True, True)
 
 
 def test_benchmark_executes_real_extraction_resolver_and_claim_index(monkeypatch):
@@ -89,9 +95,9 @@ def test_benchmark_executes_real_extraction_resolver_and_claim_index(monkeypatch
         calls["rebuild"] += 1
         return original_rebuild(self, sources)
 
-    def candidates(self, item, *, limit=claims.MAX_CANDIDATES):
+    def candidates(self, item):
         calls["candidates"] += 1
-        return original_candidates(self, item, limit=limit)
+        return original_candidates(self, item)
 
     def resolve(self, reference):
         calls["resolve"] += 1

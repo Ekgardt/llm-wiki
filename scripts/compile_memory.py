@@ -3114,7 +3114,10 @@ class _ApplyPlan:
     def _pipeline(self, source_page: str) -> ContradictionPipeline:
         return ContradictionPipeline(
             claim_index=self.claim_index,
-            evaluators=_contradiction_evaluators(),
+            # No model is asked: outside the benchmark gate a semantic answer
+            # cannot change the decision (semantic supersession is disabled), so
+            # the calls only spent tokens and sent claim text out (audit B-3).
+            evaluators=(),
             vault=ROOT,
             coordinator=self.coordinator,
             source_page=source_page,
@@ -3582,13 +3585,6 @@ def _operation_claims(planned: object) -> list[object]:
     if not isinstance(claims, list):
         return []
     return claims
-
-
-def _contradiction_evaluators() -> tuple[object, ...] | None:
-    """The fake provider has no evaluator to call, so none are configured."""
-    if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
-        return ()
-    return None
 
 
 def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, str]:

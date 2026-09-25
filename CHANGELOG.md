@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The contradiction check compares what can change its answer: a new claim is compared with every active claim about the same subject (relation-only matches, which were always unrelated, filled the list, and it was cut at 50 without a word); the compile no longer asks a model for a verdict that cannot change the decision, which spent tokens and sent the claim text out; and instants are compared as times, not as text.
 - A quarantined claim no longer holds back its day. A page that a search happened to find no longer quarantines a new claim — it is evidence, not a contradiction — and a claim that is quarantined stays on its published page as `quarantined` with its candidate beside it, instead of keeping the whole batch unpublished until a manual review nobody performs.
 - A day whose compile batch was quarantined stays pending, as the message says: the quarantine wrote the day into the compiled-days mirror without a receipt, and the day was never offered again. The mirror now records only receipted days, and each pass takes back out a day that an earlier quarantine hid.
 - A capture whose provider does not answer waits an hour between attempts, as intended: the real client's "no answer" was read as an ordinary failure, so the eight attempts were spent in about an hour and the capture was lost.

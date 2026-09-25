@@ -8,6 +8,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -150,11 +151,25 @@ class BenchmarkMetrics:
         return asdict(self)
 
 
-def _time_key(value: object, *, upper: bool) -> str:
+_OPEN_BOUNDS = (
+    datetime.min.replace(tzinfo=timezone.utc),
+    datetime.max.replace(tzinfo=timezone.utc),
+)
+
+
+def _time_key(value: object, *, upper: bool) -> datetime:
+    """An instant, not its text: `.500000Z` sorted before `Z` as text (audit B-5)."""
     if value is None:
-        return "9999-12-31T23:59:59Z" if upper else "0001-01-01T00:00:00Z"
-    text = str(value)
-    return f"{text}T00:00:00Z" if "T" not in text else text
+        return _OPEN_BOUNDS[upper]
+    return _instant(str(value))
+
+
+def _instant(text: str) -> datetime:
+    """Read `Z` as `+00:00`: `fromisoformat` accepts `Z` only from Python 3.11."""
+    if "T" not in text:
+        text = f"{text}T00:00:00+00:00"
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def intervals_overlap(first: Mapping[str, object], second: Mapping[str, object]) -> bool:

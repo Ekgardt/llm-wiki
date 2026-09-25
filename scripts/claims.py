@@ -42,7 +42,6 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 # for three days after the claim tree's own cap had already been raised. See
 # `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
 MAX_CLAIM_PAGE_BYTES = MAX_CLAIM_TREE_FILE_BYTES
-MAX_CANDIDATES = 50
 MAX_ACTIVE_RECORDS = 10_000
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
@@ -924,13 +923,6 @@ def _literal_disagrees(
     return literal != evidence["text"] or literal != record["text"]
 
 
-def _require_candidate_limit(limit: object) -> None:
-    if not isinstance(limit, int) or isinstance(limit, bool):
-        raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
-    if not 0 <= limit <= MAX_CANDIDATES:
-        raise ValueError(f"candidate limit must be between 0 and {MAX_CANDIDATES}")
-
-
 def _require_normalized_candidate(claim: object) -> None:
     if not isinstance(claim, NormalizedClaim):
         raise TypeError("candidate claim must be normalized")
@@ -1185,18 +1177,20 @@ class ClaimIndex:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def candidates(
-        self, claim: NormalizedClaim | None, *, limit: int = MAX_CANDIDATES
-    ) -> list[IndexedClaim]:
-        _require_candidate_limit(limit)
-        if limit == 0:
-            return []
+    def candidates(self, claim: NormalizedClaim | None) -> list[IndexedClaim]:
+        """Every active claim this one could collide with: same subject or same fingerprint.
+
+        A claim about another subject is `unrelated` before its relation is read,
+        so a relation-only match was never a candidate; and a prefix would hide
+        the one that is. See
+        `docs/research/2026-09-25-the-contradiction-check-compares-what-can-matter.md`.
+        """
         _require_normalized_candidate(claim)
         if not self.path.exists():
             return []
         return [
             IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
-            for row in self._candidate_rows(claim, limit)
+            for row in self._candidate_rows(claim)
         ]
 
     def active_records(self, *, subject: str | None = None) -> list[IndexedClaim]:
@@ -1230,27 +1224,25 @@ class ClaimIndex:
         _require_active_bound(rows)
         return rows
 
-    def _candidate_rows(self, claim: NormalizedClaim, limit: int) -> list[object]:
+    def _candidate_rows(self, claim: NormalizedClaim) -> list[object]:
         with closing(self._connect()) as database:
             if not self._schema_compatible(database):
                 return []
-            return database.execute(
+            rows = database.execute(
                 """
                 SELECT page, record_json FROM claim
-                WHERE lifecycle='active' AND (subject=? OR relation=? OR fingerprint=?)
-                ORDER BY CASE WHEN fingerprint=? THEN 0 WHEN subject=? THEN 1 ELSE 2 END,
-                         page, id
-                LIMIT ?
+                WHERE lifecycle='active' AND (subject=:subject OR fingerprint=:fingerprint)
+                ORDER BY CASE WHEN fingerprint=:fingerprint THEN 0 ELSE 1 END, page, id
+                LIMIT :limit
                 """,
-                (
-                    claim.record["subject"],
-                    claim.record["relation"],
-                    claim.record["fingerprint"],
-                    claim.record["fingerprint"],
-                    claim.record["subject"],
-                    limit,
-                ),
+                {
+                    "subject": claim.record["subject"],
+                    "fingerprint": claim.record["fingerprint"],
+                    "limit": MAX_ACTIVE_RECORDS + 1,
+                },
             ).fetchall()
+        _require_active_bound(rows)
+        return rows
 
 
 @contextmanager
