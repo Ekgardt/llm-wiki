@@ -1777,11 +1777,22 @@ def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_p
     assert pointer == "gen-1"
 
 
+def _backdate_tree(root: Path, *, seconds: float) -> None:
+    moment = time.time() - seconds
+    for path in [root, *root.rglob("*")]:
+        os.utime(path, (moment, moment), follow_symlinks=False)
+
+
 def test_open_existing_read_only_avoids_catalog_setup_writes(tmp_path, monkeypatch):
     import generation_catalog
 
     catalog = _catalog(tmp_path)
     _publish(catalog, "gen-1")
+    # Older than the verification cache, as a published generation is: a file
+    # written in the cache's own clock tick is "racily clean" and re-verified,
+    # and the reader then saved the cache, which timing alone decided (clean run
+    # of 8df5bc05, 2026-09-25).
+    _backdate_tree(catalog.generations_path / "gen-1", seconds=60)
     catalog.register("gen-1")
     assert catalog.activate("gen-1", expected_active=None)
     before = catalog.catalog_path.read_bytes()
