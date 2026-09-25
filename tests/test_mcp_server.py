@@ -435,7 +435,8 @@ class TestToolDefinitions:
         assert "clamp" in recall_limit["description"].lower()
         assert "clamp" in decision_limit["description"].lower()
         assert "neighbors" not in include["description"].lower()
-        assert "content_preview" in include["description"]
+        # `content_preview` went with the context compiler on 2026-07-18 (audit C-20).
+        assert "ignored" in include["description"]
 
     def test_retrieval_schemas_declare_hard_string_and_array_bounds(self):
         import mcp_server

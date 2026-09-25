@@ -21,7 +21,7 @@ Tools (task-shaped, not entity-shaped — see repowise design):
   recall(query, limit)       — hybrid search (BM25 + vector + graph + reranker)
   read_page(slug)            — full page content (the only raw-bytes tool)
   wiki_overview()            — vault stats, page count, retrieval tier
-  get_context(slugs, include) — batch page context and compatibility previews
+  get_context(slugs)          — batch page context under a token budget
   get_decisions(query)       — active architectural decisions
   vault_status()             — metacognitive block (gaps, backlog, stale)
   log_decision(summary)      — append a decision to daily log
@@ -661,7 +661,7 @@ TOOL_INPUT_SCHEMAS = {
                 "maxItems": MAX_MCP_CONTEXT_INCLUDE,
                 "uniqueItems": True,
                 "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
-                "description": "Optional strings; 'frontmatter' adds content_preview for backward compatibility",
+                "description": "Accepted for compatibility and ignored; page content is already in `text`",
             },
             "token_budget": {
                 "type": "integer",
