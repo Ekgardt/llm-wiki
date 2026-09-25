@@ -96,17 +96,13 @@ def _indexable(worktree: Worktree) -> bool:
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
-    from repository_scope import GIT_NO_CONFIG_COMMANDS, sanitized_git_environment
+    """The index's own bounded Git run: a slow checkout is a named refusal.
 
-    return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        ["git", *GIT_NO_CONFIG_COMMANDS, "-C", str(root), *arguments],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        shell=False,
-        env=sanitized_git_environment(),
-        timeout=index.GIT_TIMEOUT_SECONDS,
-        check=False,
-    )
+    A copy of it raised `subprocess.TimeoutExpired`, which no deferral catches,
+    and one slow checkout ended the nightly `refresh-all` and `retire` (audit
+    B-37, docs/research/2026-09-25-a-slow-worktree-does-not-end-the-pass.md).
+    """
+    return index._git_completed(root, arguments, index.GIT_TIMEOUT_SECONDS)
 
 
 def _config_bool(root: Path, key: str) -> bool | None:
