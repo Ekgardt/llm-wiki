@@ -895,8 +895,18 @@ def _git_run_outcome(
         run, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
     if run.process.returncode != 0:
-        raise subprocess.CalledProcessError(run.process.returncode, command)
+        raise GitCommandFailed(f"{label} failed with exit code {run.process.returncode}")
     return output
+
+
+class GitCommandFailed(ValueError):
+    """A Git command this module ran exited non-zero.
+
+    It was `subprocess.CalledProcessError`, which is neither the `OSError` nor
+    the `ValueError` the navigation catches to degrade, so a failed `git status`
+    reached the caller as a generic error (audit B-41,
+    docs/research/2026-09-25-a-failed-git-status-is-a-navigation-degradation.md).
+    """
 
 
 def _git_output(
@@ -1579,7 +1589,7 @@ def ignored_top_level_directories(
             deadline=deadline,
             cancelled=cancelled,
         )
-    except (subprocess.CalledProcessError, ValueError, OSError):
+    except (ValueError, OSError):
         return frozenset()
     return frozenset(_top_level_directory(record) for record in output.split(b"\0") if _is_top_level_directory(record))
 
