@@ -2562,7 +2562,6 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
     coordinator = process._coordinator
     recovery = coordinator.recovery_thread
-    assert recovery is not None
     write_failure_record = lsp_process._write_failure_record
     terminate = lsp_process.ProcessTree.terminate
     evidence_started = threading.Event()
@@ -2620,36 +2619,49 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     caller = threading.Thread(target=restart)
     caller.start()
     try:
-        assert evidence_started.wait(LONG_TIMEOUT)
-        assert cleanup_started.wait(LONG_TIMEOUT)
-        assert caller_finished.wait(SHORT_TIMEOUT)
-        assert not caller.is_alive()
-        assert len(restart_errors) == 1
-        assert type(restart_errors[0]) is OSError
-        assert str(restart_errors[0]) == "caller restart candidate failed"
-        assert restart_elapsed[0] < 20
-        assert cleanup_threads[0] is caller
-        assert cleanup_deadlines[0] == caller_deadline
+        waited = (
+            evidence_started.wait(LONG_TIMEOUT),
+            cleanup_started.wait(LONG_TIMEOUT),
+            caller_finished.wait(SHORT_TIMEOUT),
+        )
+        # The event is set in the thread's `finally`, just before it leaves `run()`.
+        caller.join(SHORT_TIMEOUT)
+        assert (recovery is not None, waited, caller.is_alive(), [type(error) for error in restart_errors]) == (
+            True, (True, True, True), False, [OSError],
+        )
+        assert (
+            str(restart_errors[0]),
+            restart_elapsed[0] < 20,
+            cleanup_threads[0] is caller,
+            cleanup_deadlines[0] == caller_deadline,
+        ) == ("caller restart candidate failed", True, True, True)
 
-        assert autonomous_cleanup_started.wait(LONG_TIMEOUT)
-        assert recovery in cleanup_threads[1:]
-        assert recovery.is_alive()
-        assert lsp_process._coordinator_has_ownership(coordinator)
+        assert (
+            autonomous_cleanup_started.wait(LONG_TIMEOUT),
+            recovery in cleanup_threads[1:],
+            recovery.is_alive(),
+            lsp_process._coordinator_has_ownership(coordinator),
+        ) == (True, True, True, True)
 
         allow_autonomous_cleanup.set()
-        assert _coordinator_wait(
+        stopped = _coordinator_wait(
             process,
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=120,
         )
         recovery.join(LONG_TIMEOUT)
-        assert not recovery.is_alive()
-        assert not lsp_process._coordinator_has_ownership(coordinator)
+        assert (stopped, recovery.is_alive(), lsp_process._coordinator_has_ownership(coordinator)) == (
+            True, False, False,
+        )
     finally:
-        allow_autonomous_cleanup.set()
-        caller.join(LONG_TIMEOUT)
-        if lsp_process._coordinator_has_ownership(coordinator):
-            process.close(time.monotonic() + 120)
+        _release_restart_caller(process, coordinator, caller, allow_autonomous_cleanup)
+
+
+def _release_restart_caller(process, coordinator, caller, allow_autonomous_cleanup) -> None:
+    allow_autonomous_cleanup.set()
+    caller.join(LONG_TIMEOUT)
+    if lsp_process._coordinator_has_ownership(coordinator):
+        process.close(time.monotonic() + 120)
 
 
 def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
