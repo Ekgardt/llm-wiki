@@ -159,6 +159,10 @@ def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -
     still exits 0, and that line is not a diff record (research
     2026-09-11-git-warnings-are-not-diff-records.md).
     """
+    # Checked before the child exists: raised after it, between the spawn and the
+    # try below, it left Git running and unreaped (audit C-40,
+    # docs/research/2026-09-25-an-impact-git-child-is-never-orphaned.md).
+    _remaining(deadline)
     with tempfile.TemporaryFile() as stderr:
         process = _start_git(root, arguments, stderr)
         timed_out = threading.Event()
@@ -167,10 +171,10 @@ def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -
             timed_out.set()
             process.kill()
 
-        timer = threading.Timer(_remaining(deadline), stop_at_deadline)
+        timer = threading.Timer(max(0.0, deadline - time.monotonic()), stop_at_deadline)
         timer.daemon = True
-        timer.start()
         try:
+            timer.start()
             stdout = _read_to_ceiling(process, max_bytes)
         finally:
             timer.cancel()

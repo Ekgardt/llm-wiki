@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An impact Git command checks its deadline before the child starts, so an expired deadline no longer leaves an unreaped Git process with an open pipe (audit C-40).
 - The sweep of dead `run/lsp` owner roots reaches every dead root: roots that kept failure evidence no longer use up its window, `owner.json` and `lease.json` record each process's start identity so a reused pid reads as dead, and removal never chmods through a symbolic link (audit C-39).
 - One oversized language-server reply fails only its own request: a result over a client bound or a frame over 8 MiB (consumed, up to 256 MiB) refuses that request with `ResponseRefused`, and an oversized diagnostics notification is dropped with a warning; the server keeps running instead of being killed and replayed into a second fatal failure (audit C-38).
 - A failed language server's stderr tail is redacted before it is cut: no value loses its key to the cut, and a PEM private key block is removed whole, even when the cut took its BEGIN line (audit C-37).
