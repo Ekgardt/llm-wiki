@@ -44,3 +44,9 @@ Date: 2026-09-25. Audit item B-31 (`docs/AUDIT-2026-09-25-full.md`).
 - `tests/test_a_rerun_may_ask_for_fewer_things.py`
 - `tests/test_a_failed_smoke_names_what_failed.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day (CI run 36182427739)
+
+- Fact: on the Ubuntu runners `XDG_CONFIG_HOME` is set, so the installer tests that pass a temporary `home` wrote the OpenCode plugin into the runner's real `~/.config`; the new restore test, running after them, found that file and refused it (`install_resource_ownership_ambiguous`). Locally the variable is unset and the test passed.
+- Decision: an autouse fixture in `tests/conftest.py` unsets it for every test; reproduced green locally with a fake `XDG_CONFIG_HOME`, into which nothing was written.
+- File: `tests/conftest.py`.

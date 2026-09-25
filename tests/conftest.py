@@ -223,6 +223,20 @@ def _unhurried_hook_appends(request, monkeypatch):
         monkeypatch.setattr(budget, LONG_TIMEOUT)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_user_config(monkeypatch):
+    """No test resolves a config path from the machine's `XDG_CONFIG_HOME`.
+
+    GitHub's Ubuntu runners set it, so installer tests that pass a temporary
+    `home` wrote the OpenCode plugin into the runner's real `~/.config`, and a
+    later test found that file and refused it as someone else's
+    (`install_resource_ownership_ambiguous`, CI run 36182427739). A test that
+    wants the variable sets it itself. Research:
+    docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md.
+    """
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 # Default fake provider for any accidental live LLM calls in unit tests.
 os.environ.setdefault("MEMORY_LLM_PROVIDER", "fake")
 
