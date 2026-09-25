@@ -127,3 +127,9 @@ alone. The generation rebuilt with vectors in 33.8 s, a cold command-line search
 took 2.41 s, and `doctor` reported `models: ok` and `generation: ok`. The text
 report said only `fetched`: the removal was visible in the JSON form alone, so
 the text line now names the removed file too.
+
+CI run 36130760394 failed one test on all five Windows shards:
+`test_the_loader_reads_the_pinned_files_on_the_cpu` compared the model path as the
+POSIX string `/cache/model.onnx`, while the loader passes `str(Path(...))`, which
+Windows spells `\cache\model.onnx`. The test now builds the expected path the
+same way; the loader is unchanged.

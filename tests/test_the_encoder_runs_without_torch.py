@@ -117,7 +117,8 @@ def test_the_loader_reads_the_pinned_files_on_the_cpu(monkeypatch) -> None:
 
     encoder = onnx_encoder.load_encoder("org/model", "f" * 40)
 
-    assert (opened, encoder.dimension) == ([("/cache/model.onnx", ["CPUExecutionProvider"])], 2)
+    # The loader passes the path as the platform spells it; Windows writes `\\`.
+    assert (opened, encoder.dimension) == ([(str(Path("/cache/model.onnx")), ["CPUExecutionProvider"])], 2)
 
 
 def test_nothing_in_the_product_loads_the_encoder_through_sentence_transformers() -> None:
