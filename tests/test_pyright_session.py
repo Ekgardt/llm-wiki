@@ -4984,12 +4984,14 @@ def test_qualified_identity_validation_unwinds_start_state_for_retry_and_close(
         state_root=state_root,
     )
 
-    with pytest.raises(TypeError, match="node_executable"):
-        session.start(deadline=time.monotonic() + 1)
-    assert session.active_operations == 0
-    assert session.readiness == "not_ready"
-    with pytest.raises(TypeError, match="node_executable"):
-        session.start(deadline=time.monotonic() + 1)
+    # An unusable install is a named degradation, not an exception that re-arms
+    # the start for every query (audit B-39,
+    # docs/research/2026-09-25-a-broken-install-is-a-named-degradation.md).
+    session.start(deadline=time.monotonic() + 1)
+    first = (session.active_operations, session.readiness, session.degradation_codes)
+    session.start(deadline=time.monotonic() + 1)
+    assert first == (0, "not_ready", ("pyright_install_invalid",))
+    assert session.degradation_codes == ("pyright_install_invalid",)
     session.close(deadline=time.monotonic() + 1)
 
 

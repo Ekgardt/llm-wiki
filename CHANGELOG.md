@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A language server whose install is missing or inconsistent leaves its session degraded with `<profile>_install_invalid` instead of raising and launching again on every query.
 - A structural answer's refresh runs on its checkout's root (a question about a subfolder started a refresh the indexer refused, while the answer said `started`), and each worktree of a repository is asked for on its own.
 - A slow `git` in the worktree helpers is that checkout's named refusal (`repository_git_probe_timed_out`), not the end of the nightly `refresh-all` or `retire`: the helpers now use the index's own bounded Git runner.
 - Impact analysis says `approximate`, not `exact`, when the generation indexed other bytes of a changed file than the diff's old side: its offsets then pointed at other lines.

@@ -2970,6 +2970,21 @@ class LanguageServerSession:
         return ProcessState.PROTOCOL_INITIALIZED
 
     def _validated_qualified_paths(self, *, deadline: float) -> tuple[Path, Path]:
+        """The installed paths, or a named degradation when the install is not usable.
+
+        A missing or inconsistent install raised `ValueError`, which re-armed the
+        start with no backoff and recorded nothing, so every query launched it
+        again (audit B-39,
+        docs/research/2026-09-25-a-broken-install-is-a-named-degradation.md).
+        """
+        try:
+            return self._checked_install_paths(deadline)
+        except (TypeError, ValueError) as error:
+            raise _BootstrapDegradation(
+                f"{self._profile.degradation_prefix}_install_invalid"
+            ) from error
+
+    def _checked_install_paths(self, deadline: float) -> tuple[Path, Path]:
         identity = self._identity
         _check_qualified_identity(identity, self._profile)
         server = _validated_local_file(
