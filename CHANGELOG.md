@@ -7,6 +7,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `install_models` replaces a cached weights file that does not match its pin in the same run (it removed only the link, and the cache re-linked the same bad bytes), and no longer re-hashes 2.3 GB of verified, unchanged weights every night; a file changed within 2 s of its verification is still re-read.
+- `install_models` replaces a cached weights file that does not match its pin in the same run (it removed only the link, and the cache re-linked the same bad bytes), and no longer re-hashes 2.3 GB of verified, unchanged weights every night.
 - Generation retention keeps the generation the fallback would try first — the previous activation — not only the parent: after a full rebuild, which records no parent, the prune removed the only spare.
 - The knowledge snapshot reports a failed `git commit` as a failure (it said "no change"), and records each successful run inside its `.git`, so doctor no longer calls an unchanged memory's backup stale. The contract names the snapshot's own repository beside the one automatic Git operation on the checkout.
 - A rerun of the installer that replaces an outgrown install puts the previous one back when the new install fails, instead of leaving no scheduler and no hooks; the install smoke names the doctor checks that failed (it printed only "RuntimeError"), and the last two places that resolved the uv link keep it.
