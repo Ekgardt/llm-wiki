@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import time
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -186,8 +186,23 @@ def _freshness(components: dict[str, dict[str, Any]]) -> str:
     return "unknown"
 
 
-@lru_cache(maxsize=8)
+# The checkout's commit, read again after this long: cached for the life of the
+# server, it named the commit from before the nightly fast-forward (audit B-34).
+SOURCE_COMMIT_TTL_SECONDS = 5.0
+_SOURCE_COMMITS: dict[str, tuple[float, str | None]] = {}
+
+
 def _source_commit(root: str) -> str | None:
+    cached = _SOURCE_COMMITS.get(root)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    commit = _read_source_commit(root)
+    _SOURCE_COMMITS[root] = (now + SOURCE_COMMIT_TTL_SECONDS, commit)
+    return commit
+
+
+def _read_source_commit(root: str) -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],

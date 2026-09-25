@@ -2607,9 +2607,11 @@ class TestHandleToolCall:
             "dependencies": [3],
             **report,
         }
+        # No generation of tmp_path to compare commits with: not known to be fresh
+        # (audit B-34, docs/research/2026-09-25-a-structural-answer-says-its-own-freshness.md).
         assert envelope["components"]["graph"] == {
             "generation": "graph-17",
-            "freshness": "fresh",
+            "freshness": "unknown",
         }
 
     def test_external_repository_never_receives_active_repository_graph(

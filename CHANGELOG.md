@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A structural answer's `graph` component says `stale` when its generation was built from an older commit of the checkout and `unknown` when no commit could be compared (it always said `fresh`), and the envelope's `source_commit` is read again every 5 s instead of once per server.
 - Every `get_architecture` mode runs on the bounded code-graph workers under the call's deadline, as the summary did: `callers`, `callees`, `dependencies`, `path`, `community` and the symbol view parsed on the tool's own thread with no deadline, and a few hung calls held every MCP slot.
 - The workspace revision behind code navigation no longer walks top-level folders git ignores whole (`node_modules`, `dist`, …): on a TypeScript checkout with dependencies installed it walked for 14.8 s and then refused at its 100 000-entry ceiling.
 - A deleted or renamed top-level folder no longer stops a repository's code index: the refresh uses the recorded roots that still exist (and finds roots again when none does), and `changes` names tracked top-level entries the index does not cover.

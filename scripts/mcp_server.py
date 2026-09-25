@@ -5423,9 +5423,20 @@ _GRAPH_COMPONENT_KEYS = ("source_generation", "graph_complete", "fallback")
 
 
 def _graph_component_freshness(data: dict) -> str:
+    """What the answer's own freshness block says, not a constant.
+
+    It said `fresh` beside `stale_by_commit: true` (audit B-34,
+    docs/research/2026-09-25-a-structural-answer-says-its-own-freshness.md).
+    """
     if "error" in data:
         return "unknown"
-    return "fresh"
+    return _block_freshness(data.get("freshness"))
+
+
+def _block_freshness(block) -> str:
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "unknown"
+    return "stale" if block.get("stale_by_commit") else "fresh"
 
 
 def _graph_components(data) -> dict:
