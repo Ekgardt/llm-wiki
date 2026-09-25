@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The OpenCode plugin and the adapter read the events OpenCode sends: the session id of `session.created` (`info.id`), so the session-start context reaches the system prompt, and a tool's arguments (`args`), so tool lines name their target. The plugin no longer drops sessions inside the vault, and an idle with nothing new is not captured twice. Still open: one classification per OpenCode turn, which needs a measurement on a live OpenCode.
 - A transcript copy the adapter makes for one event is removed when the event ends even if its capture intent could not be published; nothing read a kept copy any more, so it was private text left in the cache.
 - The two plugin helper commands nothing has called since 2026-07-13 are retired: `tool_breadcrumb_append.py` and the command line of `daily_log_append.py` (whose appenders stay). `integrations/README.md` now says the OpenCode plugin ships in `scripts/` and forwards every event to the adapter.
 - The `flush_memory.py` command line is retired with the 37 definitions only it reached (451 lines): nothing in the product ran it, and its "queue the call when no provider answers" branch was the only thing behind CLAUDE.md §6's claim, which now says what happens.

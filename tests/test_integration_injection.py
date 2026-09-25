@@ -4221,7 +4221,8 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
     assert calls == [("observe", "session_start"), ("recover", "session_start_project_state.py")]
 
 
-def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: str):
+def test_opencode_forwards_sessions_inside_and_beside_the_vault(opencode_plugin_url: str):
+    """The in-vault drop was removed on 2026-09-25 (audit C-6); both sessions are forwarded."""
     plugin_url = opencode_plugin_url
     script = textwrap.dedent(
         f"""
@@ -4257,8 +4258,7 @@ def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: s
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "1"
+    assert (result.returncode, result.stdout.strip()) == (0, "2"), result.stderr
 
 
 def test_codex_wrapper_generates_context_file():

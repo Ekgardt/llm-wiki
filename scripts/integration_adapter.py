@@ -171,7 +171,8 @@ def _source_event_id(raw: Mapping[str, Any]) -> str | None:
 
 
 def _session(source: str, raw: Mapping[str, Any]) -> str | None:
-    info = raw.get("sessionInfo")
+    # OpenCode's `session.created` sends `{info: Session}` (SDK types, 2026-09-25).
+    info = raw.get("info", raw.get("sessionInfo"))
     nested = info.get("id") if isinstance(info, Mapping) else None
     if source == "opencode":
         return _first_string(nested, raw.get("sessionId"), raw.get("sessionID"))
@@ -206,7 +207,7 @@ _PATCHED_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULT
 
 def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
     raw_name = _first_string(raw.get("tool_name"), raw.get("tool")) or ""
-    tool_input = raw.get("tool_input") if source != "opencode" else raw.get("input")
+    tool_input = raw.get("tool_input") if source != "opencode" else _opencode_arguments(raw)
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
     target = (
         _first_string(
@@ -221,6 +222,14 @@ def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
         "tool_name": _TOOL_NAMES.get(raw_name.lower(), raw_name),
         "target": _tool_target(raw_name, target),
     }
+
+
+def _opencode_arguments(raw: Mapping[str, Any]) -> object:
+    """`tool.execute.after` sends the call's arguments as `args` (SDK types, 2026-09-25)."""
+    arguments = raw.get("args")
+    if isinstance(arguments, Mapping):
+        return arguments
+    return raw.get("input")
 
 
 def _tool_target(raw_name: str, target: str) -> str:
