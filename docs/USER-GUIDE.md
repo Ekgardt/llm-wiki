@@ -126,7 +126,7 @@ remove v2 state by hand.
    ```bash
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
-   uv sync --locked --extra mcp-server
+   uv sync --locked          # the base install includes MCP
    uv run pytest -q          # inspect the current full regression status
    ```
 
@@ -309,11 +309,16 @@ END OF SESSION (agent idle or you close)
   MAJOR triggers background compile (detached, doesn't block you)
 
 NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
-  Drain deferred queue → consolidate yesterday's session records into the daily
-  log → compile all pending → structural lint → add owed backlinks → rebuild the
-  FTS index → refresh the immutable evidence generation (and its vectors) →
-  fetch any missing pinned model weights → compact retrieval telemetry →
-  prune old reports → fast-forward the checkout
+  Adopt undispatched capture intents → reclaim runtime state (settle quarantines,
+  snapshot the knowledge) → redrive captures that died before a code change →
+  drain the deferred queue → consolidate pending session records into the daily
+  log → compile all pending → post fact keys → structural lint → add owed
+  backlinks → refresh registered repository generations and retire the unread
+  ones → prune superseded evidence generations → clear unsettled checkpoints →
+  retire old LSP evidence, own call transcripts and benchmark runs → fetch any
+  missing pinned model weights → refresh the immutable evidence generation (and
+  its vectors) → compact retrieval telemetry → write the health report → prune
+  old reports → fast-forward the checkout
 
 The fast-forward brings new code in; it does not bring everything into force. Optional
 extras are never upgraded unattended (the `reranker` extra alone pins gigabytes), and owned
@@ -323,8 +328,12 @@ installed, and when it changes what the installer renders it says `owned resourc
 rerun_installer`. Resync an extra with `uv sync --locked --no-default-groups --inexact
 --extra <name>`, and re-render owned resources by running the installer again.
 
-SUNDAY 04:00 (scheduler)
-  Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
+SUNDAY 04:00 (scheduler; its own pass, not a second nightly)
+  OKF conformance sweep → queue status → archive and purge finished queue work
+  past its retention (dead tasks after 30 days) → archive stale pages (>180 days)
+  → archive session records (>90 days) → archive daily logs past the hot window
+  → prune superseded evidence generations → optional LLM contradiction check →
+  page reflection → L1 tier overviews
 ```
 
 Windows tasks run only while the current user is logged on. macOS LaunchAgents use
@@ -339,7 +348,7 @@ pass a session start already spawns runs that day's nightly once, claimed in
 `run/state.json` so two sessions cannot both run it.
 
 Two of the four backends can kill a pass that overruns: the systemd timer carries
-`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 3 hours nightly and 5 hours
+`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 4 hours nightly and 6 hours
 weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
 bounds only how long it waits after asking a job to stop — so there a hung pass ends when its
 maintenance lease is reclaimed, not on a clock. The scheduler's own log
@@ -701,7 +710,7 @@ For hybrid search that finds semantically related pages even when keywords
 don't match:
 
 ```bash
-uv sync --extra semantic
+uv sync --locked --inexact --extra semantic
 ```
 
 This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
@@ -784,7 +793,7 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
   silent unless you check the log
 
 ### "Tests fail on fresh clone"
-- Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
+- Run `uv sync --locked --inexact` first (the base install includes MCP; `--inexact` keeps any extras you added)
 - `uv run pytest -q` — inspect the current full regression status and reported failures
 - If collection or imports fail, update the checkout and rerun `uv sync --locked --dev`
 

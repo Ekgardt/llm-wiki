@@ -187,12 +187,12 @@ Three local tiers share the same Markdown corpus:
 
 No embedding model, vector cache, or optional package is required in this tier.
 
-### Optional semantic tier (`uv sync --extra semantic`)
+### Optional semantic tier (`uv sync --locked --inexact --extra semantic`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 over the generation.
 2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small over the generation's `vectors.npy` (with `vectors.json` beside it).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
-### Hybrid tier (`uv sync --extra hybrid`)
+### Hybrid tier (`uv sync --locked --inexact --extra hybrid`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
 2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
    `intfloat/multilingual-e5-small` embedding as the semantic tier, run through ONNX
@@ -203,8 +203,8 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
 
-The legacy optional vector path remains pinned to `intfloat/multilingual-e5-small` for
-compatibility. `benchmark/model-matrix-v1.json` defines pinned multilingual embedding
+The encoder is pinned to `intfloat/multilingual-e5-small`; the legacy vector cache it once
+fed was retired on 2026-09-23. `benchmark/model-matrix-v1.json` defines pinned multilingual embedding
 and reranker candidates, but its default embedding and reranker are both `null` and
 its status is `awaiting_raw_benchmark`. No new default or superiority claim is
 allowed until raw EN/RU/ZH quality, latency, RAM, license, regression, and Pareto
@@ -332,8 +332,9 @@ no environment variables.
   materialized `.scm` queries, call graph, and impact analysis.
 - **MCP server**: the installer baseline includes the MCP package and exposes
   12 task-shaped tools including `doctor`, a uniform response envelope, and
-  health/context resources. For manual dependency selection from source, use
-  `uv sync --locked --extra mcp-server`; transport remains local stdio.
+  health/context resources. From source, `uv sync --locked` installs it (MCP is a
+  base dependency; `mcp-server` is an empty compatibility alias); transport remains
+  local stdio.
 - **Automatic health**: SessionStart injects only degraded/error findings; healthy
   checks stay quiet. Repairs are explicit and limited to safe, idempotent actions.
 - **All v4.0 features degrade gracefully** — the installed product remains local and zero-daemon.

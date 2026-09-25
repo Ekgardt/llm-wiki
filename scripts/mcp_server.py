@@ -4,7 +4,7 @@ Gives AI agents (Claude Code, OpenCode, Codex) structured
 access to the knowledge vault via Model Context Protocol. No server, no cloud,
 no network — stdio subprocess on the same machine.
 
-Install: uv sync --extra mcp-server
+Install: uv sync --locked (MCP is a base dependency)
 Run:    uv run --locked --no-sync python scripts/mcp_server.py
 
 Agent config (e.g. for Claude Code ~/.claude/.mcp.json):
@@ -6368,7 +6368,7 @@ def run_server() -> int:
     """Start the MCP server (stdio transport). Returns exit code."""
     if not MCP_AVAILABLE:
         print(
-            "MCP package not installed. Run: uv sync --extra mcp-server",
+            "MCP package not installed. Run: uv sync --locked --inexact",
             file=sys.stderr,
         )
         return 1

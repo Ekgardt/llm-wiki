@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The user guide lists the nightly and weekly steps the code runs and the 4 h/6 h scheduler limits it sets; every install hint keeps the other extras (`uv sync --locked --inexact --extra ...`); CONTRIBUTING and ARCHITECTURE no longer describe a check-only repair or a retired vector path. A test ties the guide to the code.
 - The weekly pass counts a failed reflection or tier step (it logged the exception and reported success), and a weekly skipped because maintenance was already running records the skip, which doctor names when the weekly goes stale.
 - Step artifacts under `logs/maintenance/` are kept as long as the reports that point at them (30 days): held to the report count, they lasted about two nights and a report's "full output" link led nowhere.
 - The nightly writes every instant in its state in UTC with an offset (`failed_at` and `skipped_at` were local), and doctor compares a skip with the last run as instants, not as strings that differed by the time zone.

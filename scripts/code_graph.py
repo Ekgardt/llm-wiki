@@ -11,7 +11,7 @@ The graph enables:
 Languages: Python, JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby,
 PHP, C#, and Bash. Each grammar is optional and loaded only when needed.
 
-Install: uv sync --extra code-graph
+Install: uv sync --locked --inexact --extra code-graph
 """
 from __future__ import annotations
 

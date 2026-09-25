@@ -410,7 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if hub is None:
         print(
             "install_models: huggingface_hub is not installed; "
-            "run `uv sync --extra semantic` first",
+            "run `uv sync --locked --inexact --extra semantic` first",
             file=sys.stderr,
         )
         return EXIT_NO_LIBRARY

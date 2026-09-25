@@ -396,7 +396,7 @@ def _require_mcp_available() -> None:
     if mcp_server.MCP_AVAILABLE:
         return
     raise HttpSurfaceError(
-        "MCP package not installed. Run: uv sync --extra mcp-server"
+        "MCP package not installed. Run: uv sync --locked --inexact"
     )
 
 
