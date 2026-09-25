@@ -80,6 +80,19 @@ def list_worktrees(checkout: Path) -> list[Worktree]:
 
 
 def _indexable(worktree: Worktree) -> bool:
+    """A live worktree outside the host's job directory whose owner did not opt out.
+
+    A worktree marked not to index was refused by `follow_worktree` every night
+    while holding one of the pass's slots, so eight of them kept every other
+    worktree from being followed (audit C-43,
+    docs/research/2026-09-25-an-opted-out-worktree-takes-no-follow-slot.md).
+    """
+    if not _live_worktree(worktree):
+        return False
+    return indexing_marked_off(worktree.path) is None
+
+
+def _live_worktree(worktree: Worktree) -> bool:
     """A live worktree outside the host's job directory (`ephemeral_paths`)."""
     from ephemeral_paths import is_throwaway_checkout
 

@@ -118,7 +118,28 @@ def test_a_marked_or_unregistered_worktree_is_not_followed(adopted_vault, tmp_pa
         "repository_not_registered",
         None,
     )
-    assert [row.get("reason") for row in followed] == ["repository_marked_not_indexed"]
+    # A marked worktree is not a candidate at all, so it takes no slot (audit C-43).
+    assert followed == []
+
+
+def test_opted_out_worktrees_do_not_take_every_follow_slot(adopted_vault, tmp_path):
+    """Audit C-43: docs/research/2026-09-25-an-opted-out-worktree-takes-no-follow-slot.md."""
+    import repository_index
+    from repository_worktrees import MAX_FOLLOWED_PER_PASS
+
+    _root, state = adopted_vault
+    repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
+    repository_index.index_repository(repository, state_root=state)
+    for index in range(MAX_FOLLOWED_PER_PASS):
+        marked = _worktree(repository, f"repo-off-{index}", f"off-{index}")
+        _git(marked, "config", f"branch.off-{index}.llmwikiIndex", "false")
+    wanted = _worktree(repository, "repo-wanted", "wanted")
+
+    followed = repository_index.refresh_all_repositories(state_root=state, budget_seconds=300)["followed"]
+
+    assert [(Path(row["directory"]).name, row["status"]) for row in followed] == [
+        (wanted.name, "followed")
+    ]
 
 
 def test_the_first_answer_without_a_generation_starts_the_follow_once(vault, tmp_path, monkeypatch):
