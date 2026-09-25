@@ -47,6 +47,17 @@ The full suite in a clean detached worktree with an external state root gave
    `transformers/utils/logging.py` sets `_tqdm_active = not
    hf_hub_utils.are_progress_bars_disabled()` at import, and `huggingface_hub`
    reads `HF_HUB_DISABLE_PROGRESS_BARS` from the environment.
+6. The next PR run, 36083431199, passed 55 of 57 checks; `pyright-windows` failed
+   `test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks`
+   with `LSP replacement startup failed` caused by a `TimeoutError`. The test gives
+   the first start 30 s, but builds its generation with
+   `_unconfigured_generation()`, whose `bootstrap_timeout_seconds` is `None`, and
+   `lsp_process._fresh_bootstrap_deadline` then gives the replacement
+   `_GRACEFUL_CLEANUP_SECONDS` (2 s). On a loaded hosted Windows runner one of 200
+   replacements took longer. Production sessions configure the bootstrap timeout;
+   the only other crash-restart tests restart once, not two hundred times. Across
+   the last 20 completed runs this job failed twice, the other time on an
+   unrelated ACL deadline.
 
 ## Decision (conclusion)
 
@@ -59,6 +70,9 @@ The full suite in a clean detached worktree with an external state root gave
 - The loader imports only `sentence_transformers` again. The command line, which
   owns its process, sets `HF_HUB_DISABLE_PROGRESS_BARS=1` (unless the operator set
   it) before anything loads the model: `search_memory.quiet_model_loading`.
+- The 200-cycle test gives the replacement the same 30 s as the first start
+  (`bootstrap_timeout_seconds=30.0`); what it measures is leaks and false
+  failures, not startup speed.
 
 ## Edited files
 
@@ -66,3 +80,4 @@ The full suite in a clean detached worktree with an external state root gave
 - `scripts/doctor.py`
 - `tests/test_runtime_deletion_contract.py`
 - `scripts/search_memory.py`, `tests/test_the_query_path_reads_local_weights_only.py`
+- `tests/test_lsp_process.py`

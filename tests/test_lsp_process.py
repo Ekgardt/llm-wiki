@@ -6813,7 +6813,9 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
         )
         # The two-second default startup budget is not what two hundred crash
         # and restart cycles measure, and one cycle that loses it reports a
-        # startup timeout instead of a leaked handle or a false failure.
+        # startup timeout instead of a leaked handle or a false failure. That
+        # holds for the replacement too: without a bootstrap timeout it gets
+        # the two-second default, and run 36083431199 lost one there.
         process = lsp_process._start_lsp_process_impl(
             LspProcess,
             _command(
@@ -6827,7 +6829,9 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
             cwd=tmp_path,
             owner_root=tmp_path / OWNER_NONCE,
             configured_deadline=time.monotonic() + 30,
-            generation_configuration=lsp_process._unconfigured_generation(),
+            generation_configuration=dataclasses.replace(
+                lsp_process._unconfigured_generation(), bootstrap_timeout_seconds=30.0
+            ),
         )
         handles: list[int] = []
         exit_results: list[int] = []
