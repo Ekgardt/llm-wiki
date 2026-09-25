@@ -1319,13 +1319,19 @@ def _get_context(
 
     slugs, include = _validated_context_request(slugs, include, token_budget)
     operation_deadline = _operation_deadline(deadline)
+    collected_at = _utc_now_seconds()
     snapshot = collect_corpus(ROOT, deadline=operation_deadline)
     selection = _context_selection(snapshot, set(slugs))
     compiled = _compiled_context(
         snapshot, selection, token_budget, operation_deadline
     )
     _record_context_injections(selection["selected_paths"])
-    return _context_result(compiled, snapshot, selection, token_budget, include)
+    result = _context_result(compiled, snapshot, selection, token_budget, include)
+    return {**result, "collected_at": collected_at}
+
+
+def _utc_now_seconds() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _slug_exceeds_bound(slug) -> bool:
@@ -5285,13 +5291,18 @@ def _recall_components(data) -> dict:
 def _answer_generation(name: str, data) -> object:
     if name == "recall":
         return (_recall_trace(data) or {}).get("corpus_generation")
-    if name == "get_context" and isinstance(data, dict):
-        return data.get("corpus_generation")
     return None
 
 
 def _index_timestamp(name: str, data) -> str | None:
-    """When the index behind this answer was built, for the answers that read one."""
+    """When the corpus behind this answer was read.
+
+    Recall reads a generation, so its answer is as old as that generation's build.
+    Context collects the Markdown at request time, so its answer is as old as that
+    collection; its `corpus_generation` is a content hash, not a generation id.
+    """
+    if name == "get_context" and isinstance(data, dict):
+        return data.get("collected_at")
     built = _generation_built_ns(_answer_generation(name, data))
     if built is None:
         return None
