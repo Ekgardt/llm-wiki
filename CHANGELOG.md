@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A Codex session is recorded and classified: its rollout lines (`response_item` messages and tool calls) are read as the conversation they record, where before every line rendered to nothing, so a Codex session left no session record and gave the classifier no text.
 - The contradiction check compares what can change its answer: a new claim is compared with every active claim about the same subject (relation-only matches, which were always unrelated, filled the list, and it was cut at 50 without a word); the compile no longer asks a model for a verdict that cannot change the decision, which spent tokens and sent the claim text out; and instants are compared as times, not as text.
 - A quarantined claim no longer holds back its day. A page that a search happened to find no longer quarantines a new claim — it is evidence, not a contradiction — and a claim that is quarantined stays on its published page as `quarantined` with its candidate beside it, instead of keeping the whole batch unpublished until a manual review nobody performs.
 - A day whose compile batch was quarantined stays pending, as the message says: the quarantine wrote the day into the compiled-days mirror without a receipt, and the day was never offered again. The mirror now records only receipted days, and each pass takes back out a day that an earlier quarantine hid.

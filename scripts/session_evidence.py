@@ -121,13 +121,22 @@ def _content_blocks(message: object) -> list[object]:
     return _blocks_of(message.get("content"))
 
 
+def _field_text(value: object) -> str:
+    """A target as text; a command given as a list of words is shown joined."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(word, str) for word in value):
+        return " ".join(value)
+    return ""
+
+
 def _tool_target(block: Mapping[str, object]) -> str:
     payload = block.get("input")
     if not isinstance(payload, Mapping):
         return ""
     for field in _TOOL_INPUT_FIELDS:
-        value = payload.get(field)
-        if isinstance(value, str) and value:
+        value = _field_text(payload.get(field))
+        if value:
             return value
     return ""
 
@@ -257,6 +266,84 @@ def _decoded_entry(line: str) -> Mapping[str, object] | None:
     return value
 
 
+# A Codex rollout line is `{"type": "response_item", "payload": {...}}` with the
+# item tagged by its own `type`; it is read as the entry it stands for. See
+# `docs/research/2026-09-25-a-codex-session-is-read-as-a-conversation.md`.
+CODEX_ITEM_TYPE = "response_item"
+_CODEX_ROLES = frozenset({"user", "assistant"})
+_CODEX_TEXT_PARTS = frozenset({"input_text", "output_text"})
+_CODEX_ARGUMENT_FIELDS = ("arguments", "action", "input")
+
+
+def _codex_text_block(part: object) -> dict[str, object] | None:
+    if not isinstance(part, Mapping) or part.get("type") not in _CODEX_TEXT_PARTS:
+        return None
+    return {"type": "text", "text": part.get("text")}
+
+
+def _codex_message(payload: Mapping[str, object]) -> Mapping[str, object] | None:
+    role = payload.get("role")
+    if role not in _CODEX_ROLES:
+        return None
+    return {"type": role, "message": {"content": _codex_text_blocks(payload.get("content"))}}
+
+
+def _codex_text_blocks(parts: object) -> list[dict[str, object]]:
+    if not isinstance(parts, list):
+        return []
+    blocks = [_codex_text_block(part) for part in parts]
+    return [block for block in blocks if block]
+
+
+def _json_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, Mapping) else None
+
+
+def _codex_arguments(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """The call's arguments: a JSON string, a shell action, or free text (no target)."""
+    for field in _CODEX_ARGUMENT_FIELDS:
+        parsed = _json_mapping(payload.get(field))
+        if parsed is not None:
+            return parsed
+    return {}
+
+
+def _codex_tool_call(payload: Mapping[str, object]) -> Mapping[str, object]:
+    name = payload.get("name") or payload.get("type")
+    call = {"type": "tool_use", "name": name, "input": _codex_arguments(payload)}
+    return {"type": "assistant", "message": {"content": [call]}}
+
+
+_CODEX_ITEMS = {
+    "message": _codex_message,
+    "function_call": _codex_tool_call,
+    "custom_tool_call": _codex_tool_call,
+    "local_shell_call": _codex_tool_call,
+}
+
+
+def _codex_entry(payload: object) -> Mapping[str, object] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    reader = _CODEX_ITEMS.get(str(payload.get("type") or ""))
+    return None if reader is None else reader(payload)
+
+
+def _conversation_entry(entry: Mapping[str, object] | None) -> Mapping[str, object] | None:
+    """A Claude line as it is; a Codex item as the turn or tool call it records."""
+    if entry is None or entry.get("type") != CODEX_ITEM_TYPE:
+        return entry
+    return _codex_entry(entry.get("payload"))
+
+
 CAPTURE_GAP_TYPE = "capture_gap"
 
 
@@ -304,7 +391,7 @@ def _conversation_lines(
 def render_transcript(text: str) -> str:
     """Render a JSONL transcript as conversation; keep anything else verbatim."""
     lines = text.splitlines()
-    entries = list(map(_decoded_entry, lines))
+    entries = [_conversation_entry(_decoded_entry(line)) for line in lines]
     if not any(map(_is_conversation, entries)):
         return "\n".join(map(_verbatim_line, lines)).strip()
     subagent_calls = _subagent_call_ids(entries)
