@@ -716,6 +716,7 @@ requires-dist = [
     { name = "llm-wiki", extras = ["semantic"], marker = "extra == 'hybrid'" },
     { name = "llm-wiki", extras = ["semantic", "hybrid", "code-graph", "mcp-server", "reranker"], marker = "extra == 'full'" },
     { name = "mcp", specifier = ">=1.29,<2" },
+    { name = "numpy", marker = "extra == 'hybrid'", specifier = ">=2.2.6,<3" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2.2.6,<3" },
     { name = "onnxruntime", marker = "python_full_version >= '3.11' and extra == 'semantic'", specifier = ">=1.18,<2" },
     { name = "onnxruntime", marker = "python_full_version < '3.11' and extra == 'semantic'", specifier = ">=1.18,<1.24" },

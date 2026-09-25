@@ -27,7 +27,7 @@ semantic = [
     "onnxruntime>=1.18,<2; python_version >= '3.11'",
     "tokenizers>=0.19,<1",
 ]
-hybrid = ["llm-wiki[semantic]"]
+hybrid = ["numpy>=2.2.6,<3", "llm-wiki[semantic]"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",
