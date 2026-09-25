@@ -490,8 +490,12 @@ def _assert_degraded_search_calls(calls) -> None:
 
 
 def _assert_degraded_search_budget(calls) -> None:
-    assert calls[1][1]["rerank"] is False
-    assert calls[1][1]["deadline_monotonic"] == calls[0][1]["deadline_monotonic"]
+    import mcp_server
+
+    reserve = mcp_server.LEXICAL_FALLBACK_RESERVE_SECONDS
+    assert (calls[1][1]["rerank"], calls[1][1]["deadline_monotonic"] - calls[0][1]["deadline_monotonic"]) == (
+        False, reserve,
+    )
 
 
 def _assert_degraded_result_row(row) -> None:
@@ -1043,8 +1047,9 @@ class TestHelperFunctions:
 
         mcp_server._search_vault("query", deadline=deadline)
 
-        assert len(calls) == 2
-        assert [call["deadline_monotonic"] for call in calls] == [deadline, deadline]
+        # The hybrid pass keeps back the lexical reserve; the fallback runs to the end (B-18).
+        reserve = mcp_server.LEXICAL_FALLBACK_RESERVE_SECONDS
+        assert [call["deadline_monotonic"] for call in calls] == [deadline - reserve, deadline]
 
     def test_search_vault_propagates_second_timeout(self, monkeypatch):
         import mcp_server

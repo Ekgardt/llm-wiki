@@ -76,6 +76,9 @@ MAX_MCP_INCLUDE_LENGTH = 64
 MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
+# What a lexical-only pass needs, kept back from the hybrid run: 0.13-0.19 s
+# measured on the live vault on 2026-09-25, five times over.
+LEXICAL_FALLBACK_RESERVE_SECONDS = 1.0
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
@@ -835,9 +838,14 @@ def _search_vault(
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     operation_deadline = _search_deadline(deadline)
+    # The hybrid run stops a reserved second early, so the lexical fallback has
+    # time left to answer in (audit B-18,
+    # docs/research/2026-09-25-the-lexical-fallback-keeps-its-own-second.md).
+    hybrid_deadline = operation_deadline - LEXICAL_FALLBACK_RESERVE_SECONDS
     try:
+        _check_deadline(hybrid_deadline)
         return _run_vault_search(
-            query, limit, operation_deadline, semantic=True, trace_sink=trace_sink
+            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink
         )
     except TimeoutError:
         return _lexical_after_deadline(query, limit, operation_deadline, trace_sink)
