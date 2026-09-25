@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A telemetry write that fails leaves a record in the capture diagnostics (kind `telemetry_event`: deferred when the database was busy, lost otherwise); the best-effort writer returned False and no caller read it.
 - `recall` and the CLI search ask the evidence graph when the question is about relations ("depends on", "callers", "related to", …), keeping dense search beside it; every semantic search used to run HYBRID, so the graph never answered them. A trace nothing reported names the mode the search would run.
 - `get_context` answers name when their corpus was read: the envelope's `index_timestamp` was always empty because the tool reports a content hash, not a generation id; it now carries `collected_at`, the moment the Markdown snapshot was taken.
 - `get_context` no longer promises a `content_preview` for `include: ["frontmatter"]`: the preview went with the context compiler in July; `include` is accepted for compatibility and ignored, and the page content is in `text`.
