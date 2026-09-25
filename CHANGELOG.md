@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The sweep of dead `run/lsp` owner roots reaches every dead root: roots that kept failure evidence no longer use up its window, `owner.json` and `lease.json` record each process's start identity so a reused pid reads as dead, and removal never chmods through a symbolic link (audit C-39).
 - One oversized language-server reply fails only its own request: a result over a client bound or a frame over 8 MiB (consumed, up to 256 MiB) refuses that request with `ResponseRefused`, and an oversized diagnostics notification is dropped with a warning; the server keeps running instead of being killed and replayed into a second fatal failure (audit C-38).
 - A failed language server's stderr tail is redacted before it is cut: no value loses its key to the cut, and a PEM private key block is removed whole, even when the cut took its BEGIN line (audit C-37).
 - Lookups by a common name are no longer refused: community mode with a symbol, the provenance join, qualified snippets and trace callers ask up to the reader's ceiling and cut on their side, and the provenance answer says how many locations it left out (audit C-36).

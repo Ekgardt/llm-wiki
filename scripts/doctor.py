@@ -2762,6 +2762,10 @@ _LSP_OWNER_FIELDS = {
     "started_at",
     "state",
 }
+# Written since 2026-09-25 when the platform can name a process start (audit C-39).
+_LSP_OWNER_OPTIONAL_FIELDS = {"owner_start_identity"}
+_LSP_LEASE_OPTIONAL_FIELDS = {"manager_start_identity", "server_start_identity"}
+_LSP_START_IDENTITY_CHARS = 128
 _LSP_LEASE_FIELDS = {
     "expires_at",
     "generation_nonce",
@@ -2824,9 +2828,20 @@ def _valid_lsp_owner_process(record: dict[str, Any]) -> bool:
     return record.get("state") == "process_running"
 
 
+def _lsp_fields_valid(record: dict[str, Any], required: set, optional: set) -> bool:
+    """The required fields, and optional start identities that are bounded text."""
+    if not required <= set(record) <= required | optional:
+        return False
+    return all(_lsp_start_identity(record[name]) for name in optional & set(record))
+
+
+def _lsp_start_identity(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= _LSP_START_IDENTITY_CHARS
+
+
 def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
     if not (
-        set(record) == _LSP_OWNER_FIELDS
+        _lsp_fields_valid(record, _LSP_OWNER_FIELDS, _LSP_OWNER_OPTIONAL_FIELDS)
         and _valid_lsp_command(record.get("command_basename"))
         and _valid_lsp_nonces(record, owner_nonce)
     ):
@@ -2856,8 +2871,14 @@ def _lsp_lease_window_valid(record: dict[str, Any]) -> bool:
     return heartbeat < expires
 
 
+def _lsp_lease_shape_valid(record: dict[str, Any]) -> bool:
+    if not _lsp_fields_valid(record, _LSP_LEASE_FIELDS, _LSP_LEASE_OPTIONAL_FIELDS):
+        return False
+    return _lsp_schema_version_one(record)
+
+
 def _lsp_lease_identity_valid(record: dict[str, Any], owner_nonce: str) -> bool:
-    if set(record) != _LSP_LEASE_FIELDS or not _lsp_schema_version_one(record):
+    if not _lsp_lease_shape_valid(record):
         return False
     if record.get("owner_nonce") != owner_nonce:
         return False

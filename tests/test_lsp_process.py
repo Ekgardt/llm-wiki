@@ -3552,14 +3552,17 @@ def test_live_lease_is_bounded_redacted_and_removed_after_graceful_close(
     lease_path = process.owner_root / "lease.json"
     lease = json.loads(lease_path.read_bytes())
 
+    # The start identities name who a pid meant, so a reused pid reads as dead (C-39).
     assert set(lease) == {
         "expires_at",
         "generation_nonce",
         "heartbeat_at",
         "manager_pid",
+        "manager_start_identity",
         "owner_nonce",
         "schema_version",
         "server_pid",
+        "server_start_identity",
         "state",
     }
     assert lease["manager_pid"] == os.getpid()
@@ -4719,6 +4722,7 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
         "generation_nonce",
         "owner_nonce",
         "owner_pid",
+        "owner_start_identity",
         "started_at",
         "state",
     }
