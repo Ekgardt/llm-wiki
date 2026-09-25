@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Every `get_architecture` mode runs on the bounded code-graph workers under the call's deadline, as the summary did: `callers`, `callees`, `dependencies`, `path`, `community` and the symbol view parsed on the tool's own thread with no deadline, and a few hung calls held every MCP slot.
 - The workspace revision behind code navigation no longer walks top-level folders git ignores whole (`node_modules`, `dist`, …): on a TypeScript checkout with dependencies installed it walked for 14.8 s and then refused at its 100 000-entry ceiling.
 - A deleted or renamed top-level folder no longer stops a repository's code index: the refresh uses the recorded roots that still exist (and finds roots again when none does), and `changes` names tracked top-level entries the index does not cover.
 - One Python file too long or too deeply nested to parse is that file's parse error, not the end of the repository's code index: every reader of repository Python now catches the same failures (`python_parse.PARSE_FAILURES`, including `RecursionError`).

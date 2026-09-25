@@ -2231,18 +2231,21 @@ def _get_architecture_mode(
     if argument_error is not None:
         return {"error": argument_error}
     _check_deadline(deadline)
+    operation_deadline = _operation_deadline(deadline)
     query = _ARCHITECTURE_MODE_QUERIES.get(mode, _architecture_symbol)
-    architecture = query(
-        {
-            "resolved": resolved,
-            "symbol": symbol,
-            "target": target,
-            "reverse": reverse,
-            "depth": depth,
-            "live": live,
-            "deadline": deadline,
-        }
-    )
+    request = {
+        "resolved": resolved,
+        "symbol": symbol,
+        "target": target,
+        "reverse": reverse,
+        "depth": depth,
+        "live": live,
+        "deadline": operation_deadline,
+    }
+    try:
+        architecture = _bounded_mode_query(query, request, operation_deadline)
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(str(resolved), reason, completed=("directory_validation",))
     return {
         "directory": str(resolved),
         "mode": mode,
@@ -2250,6 +2253,18 @@ def _get_architecture_mode(
         **_architecture_report(architecture),
         **_freshness_fields(resolved, architecture),
     }
+
+
+def _bounded_mode_query(query, request: dict, deadline: float):
+    """Every mode on the bounded code-graph workers, as the summary always was.
+
+    The modes parsed the tree on the tool's own thread with no deadline; four
+    hung calls held every MCP slot (audit B-33,
+    docs/research/2026-09-25-every-architecture-mode-is-bounded.md).
+    """
+    return _bounded_code_graph_call(
+        contextvars.copy_context().run, query, request, deadline=deadline
+    )
 
 
 def _analyze_impact(
