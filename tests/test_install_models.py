@@ -120,7 +120,7 @@ def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch
     monkeypatch.setattr(install_models, "wanted_models", install_models.pinned_models)
 
     assert install_models.main([]) == install_models.EXIT_NO_LIBRARY
-    assert "uv sync --extra semantic" in capsys.readouterr().err
+    assert "uv sync --locked --inexact --extra semantic" in capsys.readouterr().err
 
 
 def test_the_pins_name_the_two_models_the_read_path_loads():

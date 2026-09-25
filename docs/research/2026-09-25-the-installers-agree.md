@@ -39,3 +39,7 @@ Date: 2026-09-25. Audit item C-34 (`docs/AUDIT-2026-09-25-full.md`).
 - `docs/USER-GUIDE.md`
 - `tests/test_the_installers_agree.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day
+
+- Two existing tests pinned the old texts and were updated with them: `tests/test_integration_injection.py` (the Windows MCP check fragment) and `tests/test_install_models.py` (the extra hint). Caught by the targeted run after the commit, because the run was piped into `tail` without `pipefail`.
