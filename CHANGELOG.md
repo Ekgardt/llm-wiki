@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A structural answer's refresh runs on its checkout's root (a question about a subfolder started a refresh the indexer refused, while the answer said `started`), and each worktree of a repository is asked for on its own.
 - A slow `git` in the worktree helpers is that checkout's named refusal (`repository_git_probe_timed_out`), not the end of the nightly `refresh-all` or `retire`: the helpers now use the index's own bounded Git runner.
 - Impact analysis says `approximate`, not `exact`, when the generation indexed other bytes of a changed file than the diff's old side: its offsets then pointed at other lines.
 - The `get_architecture` summary and the `provenance`, `snippet`, `coverage`, `search`, `query`, `data_flow` and `cross_service` modes carry the generation's freshness block and start its refresh when the checkout moved, as the graph modes did.

@@ -31,7 +31,12 @@ def spawn_results(monkeypatch, tmp_path):
 
 
 def test_a_repository_refresh_is_retried_after_a_failed_spawn(spawn_results, tmp_path):
-    checkout = SimpleNamespace(repository_id="repository:" + "a" * 64, git_commit="c" * 40)
+    checkout = SimpleNamespace(
+        repository_id="repository:" + "a" * 64,
+        checkout_id="checkout:" + "b" * 64,
+        checkout_root=str(tmp_path),
+        git_commit="c" * 40,
+    )
     answers = [mcp_server._request_repository_refresh(tmp_path, checkout) for _ in range(3)]
     assert (answers, spawn_results) == (
         ["spawn_failed", "started", "already_requested"],

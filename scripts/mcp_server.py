@@ -2109,8 +2109,8 @@ def _forget_follow_request(checkout: Path) -> None:
 def _forget_refresh_request(checkout) -> None:
     """Take back this commit's mark, and only this commit's."""
     with _REFRESH_REQUESTED_LOCK:
-        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
-            del _REFRESH_REQUESTED[checkout.repository_id]
+        if _REFRESH_REQUESTED.get(checkout.checkout_id) == checkout.git_commit:
+            del _REFRESH_REQUESTED[checkout.checkout_id]
 
 
 # The freshness block decorates an answer that is already computed, so a
@@ -2204,26 +2204,32 @@ def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
     return _request_repository_refresh(resolved, checkout)
 
 
-def _refresh_log_paths(repository_id: str) -> tuple[Path, Path]:
+def _refresh_log_paths(identity: str) -> tuple[Path, Path]:
     from memory_state import STATE_ROOT
 
     folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
-    stem = repository_id.rsplit(":", 1)[-1][:16]
+    stem = identity.rsplit(":", 1)[-1][:16]
     return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
 
 
 def _request_repository_refresh(resolved: Path, checkout) -> str:
-    """Start the bounded refresh once per (repository, commit); never wait for it."""
+    """Start the bounded refresh once per (checkout, commit); never wait for it.
+
+    It ran on the directory asked about, which a subfolder's refresh refused
+    while the answer said `started`, and one worktree's request stood for every
+    worktree of the repository (audit B-38,
+    docs/research/2026-09-25-a-refresh-runs-on-its-checkout.md).
+    """
     from memory_state import spawn_detached
 
     with _REFRESH_REQUESTED_LOCK:
-        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+        if _REFRESH_REQUESTED.get(checkout.checkout_id) == checkout.git_commit:
             return "already_requested"
-        _REFRESH_REQUESTED[checkout.repository_id] = checkout.git_commit
-    out_log, err_log = _refresh_log_paths(checkout.repository_id)
+        _REFRESH_REQUESTED[checkout.checkout_id] = checkout.git_commit
+    out_log, err_log = _refresh_log_paths(checkout.checkout_id)
     script = Path(__file__).resolve().parent / "repository_index.py"
     pid = spawn_detached(
-        [sys.executable, str(script), "refresh", str(resolved)],
+        [sys.executable, str(script), "refresh", str(checkout.checkout_root)],
         stdout_path=out_log,
         stderr_path=err_log,
     )
