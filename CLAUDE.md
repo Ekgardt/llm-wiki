@@ -372,7 +372,10 @@ three agent runs outright on 2026-08-29 with `Prompt is too long`. Rule 4
 forbids spending tokens like that on the vault's own changelog. Read it when
 you need it: `grep` it, or ask the memory for the decision you are after. Rule
 4 of section 3 still requires appending to it on every important update. See
-`docs/research/2026-08-29-what-belongs-in-every-session.md`.
+`docs/research/2026-08-29-what-belongs-in-every-session.md`. Past 2 MiB a compile
+archives it whole to `knowledge/log-archive/log.local.<date>.md` (gitignored) and
+starts a fresh log that names the archive
+(`docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md`).
 
 ### Default behavior for new material
 When asked to compile or ingest new material:

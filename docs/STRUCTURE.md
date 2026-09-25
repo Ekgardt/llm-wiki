@@ -598,6 +598,8 @@ or nonzero active state remains fail-closed.
   and decisions included) before it deletes that work from `run/` after
   `queue_result_retention_days` (2026-09-24).
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
+- `knowledge/log-archive/` — rotated copies of the private vault log, written by
+  the compile that passes 2 MiB (2026-09-25). Gitignored.
 - `knowledge/feedback/` — retired 2026-09-25 (correction candidates needed a
   manual promote; compile learns corrections from the daily log). Old files stay
   gitignored and are read by nothing but the guardrail source manifest.

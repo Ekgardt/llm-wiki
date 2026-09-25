@@ -146,6 +146,10 @@ MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
+# The log is archived and restarted past half its cap, inside the compile that
+# would pass it (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md).
+LOG_ROTATE_BYTES = MAX_LOG_BYTES // 2
+LOG_ARCHIVE_DIRECTORY = "knowledge/log-archive"
 CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
     "properties"
 ]["claims"]["items"]
@@ -3493,10 +3497,27 @@ class _ApplyPlan:
         )
         log_relative = LOG.relative_to(ROOT).as_posix()
         log_source = sources.get(log_relative)
-        log_bytes = _append_log_bytes(_log_before(log_source), self._log_entry())
-        if len(log_bytes) > MAX_LOG_BYTES:
-            raise ValueError("knowledge log exceeds after-image limit")
+        log_before = _log_before(log_source)
+        log_bytes = _append_log_bytes(log_before, self._log_entry())
+        if len(log_bytes) > LOG_ROTATE_BYTES:
+            log_bytes = self._rotated_log(log_before)
         self._append_vault_file(log_relative, log_bytes, sources, MAX_LOG_BYTES)
+
+    def _rotated_log(self, log_before: bytes) -> bytes:
+        """Archive the whole log in this transaction and start a fresh one naming it.
+
+        The compile rewrote the log whole and refused past 4 MiB, so every compile
+        failed from then on (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md).
+        """
+        archive = f"{LOG_ARCHIVE_DIRECTORY}/log.local.{self.completed_at[:10]}.md"
+        self.coordinator.ensure_target_parent(archive)
+        self.preconditions[archive] = "absent"
+        self.changes.append(MarkdownChange.create(archive, log_before, max_before_bytes=MAX_LOG_BYTES))
+        fresh = (
+            f"# Session Memory Log\n\n- {self.completed_at[:10]} — Rotated: earlier entries are "
+            f"in `{archive}`.\n"
+        ).encode()
+        return _append_log_bytes(fresh, self._log_entry())
 
     def _vault_sources(self) -> dict[str, object]:
         """What is on disk outranks what one prompt had room to carry.

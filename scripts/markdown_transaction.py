@@ -76,6 +76,8 @@ _ALLOWED_DIRECTORIES = (
     "knowledge/projects",
     "knowledge/inbox",
     "knowledge/feedback",
+    # Rotated copies of the private vault log (compile_memory.LOG_ROTATE_BYTES).
+    "knowledge/log-archive",
     # Session records, by the 2026-08-23 retention decision. Only this subtree of
     # `knowledge/raw/` is writable: the rest of raw holds immutable sources that
     # no automatic writer may touch. Without this line every session record was
