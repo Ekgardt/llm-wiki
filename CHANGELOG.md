@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A grounded `recall` through MCP has the grounded budget (120 s) instead of the 10 s every tool got, so it can answer at all; its provider call runs under a ceiling equal to the time left and is ended at the deadline instead of outliving it. The per-call ceiling is kept per context, so a compile's ceiling no longer applies to calls on other server threads.
 - The ownership helpers refuse with `adopted_registry_required` instead of opening the migration-candidate database when called on an adopted vault without its registry.
 - A prune that died after marking its row no longer has its images put back by the next recovery; they are removed, as the row says.
 - A checkpoint reservation whose checkpoint another attempt committed is dropped by the next history prune instead of standing for 90 days (41 on this vault). The checkpoint log itself keeps growing by design: it is what a project journal is rebuilt from.

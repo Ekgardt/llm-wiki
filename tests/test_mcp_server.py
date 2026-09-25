@@ -1840,7 +1840,8 @@ class TestHandleToolCall:
 
         self._run("recall", {"query": "question", "grounded": True})
 
-        assert deadlines[0] <= handler_start + mcp_server.MCP_OPERATION_SECONDS
+        # A grounded answer has the grounded budget, counted from handler entry (A-17).
+        assert deadlines[0] <= handler_start + query_memory.QA_DEADLINE_SECONDS
 
     def test_recall_second_timeout_uses_normal_error_envelope(self, monkeypatch):
         import mcp_server

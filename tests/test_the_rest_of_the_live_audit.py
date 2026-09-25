@@ -188,7 +188,7 @@ def test_consolidation_gives_its_provider_the_compile_ceiling(monkeypatch) -> No
     seen: list[int | None] = []
 
     def fake_call(prompt, system_prompt, max_tokens=0):
-        seen.append(llm_client._CALL_CEILING_S)
+        seen.append(llm_client._CALL_CEILING.get())
         return "ok"
 
     monkeypatch.setattr(llm_client, "call_llm", fake_call)

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import contextvars
 import functools
 import hashlib
 import json
@@ -974,7 +975,12 @@ _PROBES = {
 # A module-level value, not a parameter, because it has to reach every backend
 # without threading a number through five call shapes that do not otherwise
 # differ.
-_CALL_CEILING_S: int | None = None
+# A context variable, not a global: the MCP server runs tools on worker threads,
+# and a module global let one call's ceiling apply to every other thread
+# (docs/research/2026-09-25-a-grounded-recall-has-the-time-it-needs-and-no-more.md).
+_CALL_CEILING: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "llm_call_ceiling", default=None
+)
 
 DEFAULT_TIMEOUT_S = 90
 
@@ -992,14 +998,12 @@ def call_ceiling(seconds: int):
     cannot: raising the default would also make a stuck capture flush wait
     three times longer before anyone heard about it.
     """
-    global _CALL_CEILING_S
     _require_positive_seconds(seconds)
-    previous = _CALL_CEILING_S
-    _CALL_CEILING_S = seconds
+    token = _CALL_CEILING.set(seconds)
     try:
         yield
     finally:
-        _CALL_CEILING_S = previous
+        _CALL_CEILING.reset(token)
 
 
 def _require_positive_seconds(seconds: object) -> None:
@@ -1027,8 +1031,9 @@ def _timeout_s() -> int:
     override = os.environ.get("MEMORY_LLM_TIMEOUT_S")
     if override is not None:
         return _positive_seconds("MEMORY_LLM_TIMEOUT_S", override)
-    if _CALL_CEILING_S is not None:
-        return _CALL_CEILING_S
+    ceiling = _CALL_CEILING.get()
+    if ceiling is not None:
+        return ceiling
     return DEFAULT_TIMEOUT_S
 
 

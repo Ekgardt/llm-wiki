@@ -190,13 +190,34 @@ _LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
 
 
 def _tool_operation_seconds(name: str, arguments: object) -> float:
-    if name != "get_architecture" or not isinstance(arguments, dict):
+    """The budget a tool call gets: the default, unless its tool names a longer one."""
+    budget = _TOOL_BUDGETS.get(name)
+    if budget is None or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
+    return budget(arguments)
+
+
+def _architecture_operation_seconds(arguments: dict) -> float:
     if _is_precise_architecture_request(arguments):
         return MCP_LSP_STARTUP_SECONDS
     return _LONG_ARCHITECTURE_BUDGETS.get(
         arguments.get("mode", "summary"), MCP_OPERATION_SECONDS
     )
+
+
+def _recall_operation_seconds(arguments: dict) -> float:
+    """A grounded answer waits on a provider: one round trip measured 32.5 s (A-17)."""
+    if arguments.get("grounded") is not True:
+        return MCP_OPERATION_SECONDS
+    from query_memory import QA_DEADLINE_SECONDS
+
+    return QA_DEADLINE_SECONDS
+
+
+_TOOL_BUDGETS = {
+    "get_architecture": _architecture_operation_seconds,
+    "recall": _recall_operation_seconds,
+}
 
 
 def _operation_cancelled():
