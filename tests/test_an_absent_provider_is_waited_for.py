@@ -29,13 +29,21 @@ from tests.test_queue_v3_capture_links import (  # noqa: E402
 RECORD = {"event": "session_end", "evidence": "a short session"}
 
 
-def _unanswered(_prompt: str, _system: str, _max_tokens: int):
-    descriptor = llm_client.provider_candidates("fake", max_tokens=1500)[0]
-    return llm_client.LLMResult(descriptor, None, False, "provider_unavailable", "prompt")
+@pytest.fixture(autouse=True)
+def _a_provider_that_cannot_answer(monkeypatch) -> None:
+    """The real chain, forced to a provider with no key: it answers None."""
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 def _ask_absent_provider(*_args, **_kwargs):
-    return flush_memory._call_capture_classifier(RECORD, _unanswered)
+    return flush_memory._call_capture_classifier(RECORD, None)
+
+
+def test_the_real_chain_with_no_provider_is_a_wait() -> None:
+    assert llm_client.call_llm_result("prompt", "system", 100) is None
+    with pytest.raises(flush_memory.CaptureProviderUnavailable):
+        _ask_absent_provider()
 
 
 def _error_code(queue, task_id: str) -> tuple[str, object]:

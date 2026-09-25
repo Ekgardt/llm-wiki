@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A capture whose provider does not answer waits an hour between attempts, as intended: the real client's "no answer" was read as an ordinary failure, so the eight attempts were spent in about an hour and the capture was lost.
 - A long day split into parts is compiled whole: two parts of one day never share a compile batch, and a batch that would hold them is refused instead of silently dropping the second part while writing its receipt.
 
 - **A secret written as JSON is still a secret.** The redactor — the one scrub

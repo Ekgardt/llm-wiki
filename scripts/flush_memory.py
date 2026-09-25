@@ -848,13 +848,25 @@ def _call_capture_classifier(
     from llm_client import LLMResult, call_llm_result
 
     caller = llm_call if llm_call is not None else call_llm_result
-    result = caller(_capture_prompt(record), CLASSIFICATION_SYSTEM_PROMPT, 1500)
+    result = _answered(caller(_capture_prompt(record), CLASSIFICATION_SYSTEM_PROMPT, 1500))
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
-    if (result.available, result.failure_class) != (True, None):
-        raise CaptureProviderUnavailable("capture provider call did not succeed")
     tier, body = _parse_capture_wire_output(result.text)
     return result, tier, body
+
+
+def _answered(result: object) -> object:
+    """A provider that did not answer is waited for, whichever way it said so.
+
+    `call_llm_result` answers None when no provider produced text: failed,
+    rate-limited or absent. See
+    `docs/research/2026-09-25-a-silent-provider-is-a-wait-not-a-failure.md`.
+    """
+    if result is None:
+        raise CaptureProviderUnavailable("no capture provider answered")
+    if (getattr(result, "available", True), getattr(result, "failure_class", None)) != (True, None):
+        raise CaptureProviderUnavailable("capture provider call did not succeed")
+    return result
 
 
 def _capture_tier_outcome(tier: str) -> str:
