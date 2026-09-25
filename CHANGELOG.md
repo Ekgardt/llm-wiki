@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- One oversized language-server reply fails only its own request: a result over a client bound or a frame over 8 MiB (consumed, up to 256 MiB) refuses that request with `ResponseRefused`, and an oversized diagnostics notification is dropped with a warning; the server keeps running instead of being killed and replayed into a second fatal failure (audit C-38).
 - A failed language server's stderr tail is redacted before it is cut: no value loses its key to the cut, and a PEM private key block is removed whole, even when the cut took its BEGIN line (audit C-37).
 - Lookups by a common name are no longer refused: community mode with a symbol, the provenance join, qualified snippets and trace callers ask up to the reader's ceiling and cut on their side, and the provenance answer says how many locations it left out (audit C-36).
 - An impact answer keeps its graph result when the note scan fails: a note changed mid-scan or a scan ceiling becomes a warning instead of losing the answer (audit C-35).

@@ -68,7 +68,8 @@ class FakeLspPeer:
 
 def _send_oversized_frame(peer: FakeLspPeer, request_id: object) -> None:
     del request_id
-    peer.send_raw(b"Content-Length: 8388609\r\n\r\n")
+    # Past the skippable bound: a frame this large is a broken peer, not an answer.
+    peer.send_raw(b"Content-Length: 268435457\r\n\r\n")
 
 
 def _send_invalid_header(peer: FakeLspPeer, request_id: object) -> None:
