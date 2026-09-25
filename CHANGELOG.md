@@ -7,6 +7,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The weekly archive names each day older than the hot window that stays flat and why, goes on past a day that fails, and exits 1 when any did, so the weekly is reported degraded instead of stopping silently.
+- Two stale capture tests no longer write prompt lines into the checkout's daily log, and the test session now fails when any test leaves a daily log behind outside the live vault.
 - A Claude prompt reaches feedback capture like every other host's (a hook that names the event's own capture script now takes the full path), and the delegates behind the 5-second prompt and tool hooks stop at 2.5, 1 and 3.5 seconds, so a hang is recorded before the host kills the hook; a test ties those bounds to the installed hook timeouts.
 - Episode consolidation: an empty answer for one batch fails that batch instead of stopping every later day, and a day closed with batches it could not read records them with the code revision, so it is opened again once the code changes and only the lost batches are asked again.
 - Tool calls made inside the vault are captured, as prompts have been since 2026-09-24, and neither capture hook runs on a stand-in: a module that cannot import fails the hook visibly instead of a no-op recorder or a different project slug. A test now refuses any module that replaces a failed import with a function.

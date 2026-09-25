@@ -2004,6 +2004,7 @@ def _archive_one(
         transaction_retention_days=args.transaction_retention_days,
     )
     if not status.eligible:
+        _report_kept(source, status.reasons)
         return None
     if not args.commit:
         print(f"Would archive: {source.name}")
@@ -2015,20 +2016,51 @@ def _archive_one(
     )
 
 
+# Reasons every day inside the hot window has; naming them would list 90 normal days.
+_HOT_REASONS = frozenset({"today", "hot_retention"})
+
+
+def _report_kept(source: Path, reasons: tuple[str, ...]) -> None:
+    """A day that should have left the hot window says why it stays (audit B-9)."""
+    if not reasons or _HOT_REASONS.intersection(reasons):
+        return
+    print(f"Kept flat: {source.stem}: {', '.join(reasons)}")
+
+
+@dataclass
+class _ArchiveRun:
+    archived: int = 0
+    failed: int = 0
+
+
+def _archive_reported(
+    archiver: DailyArchiver, source: Path, args: argparse.Namespace, run: _ArchiveRun
+) -> None:
+    """One day; its failure is named and the run goes on to the next day."""
+    try:
+        receipt = _archive_one(archiver, source, args)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+        from secret_redact import describe_error
+
+        run.failed += 1
+        print(f"Failed: {source.stem}: {describe_error(error)}", file=sys.stderr)
+        return
+    run.archived += receipt is not None
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Archive what is eligible; exit 1 when any day failed, so the weekly says so.
+
+    See `docs/research/2026-09-25-the-weekly-archive-says-why-and-goes-on.md`.
+    """
     args = parse_args(argv)
     archiver = DailyArchiver(ROOT, STATE_ROOT)
-    results = [
-        receipt
-        for receipt in (
-            _archive_one(archiver, source, args)
-            for source in _flat_daily_sources(archiver)
-        )
-        if receipt is not None
-    ]
+    run = _ArchiveRun()
+    for source in _flat_daily_sources(archiver):
+        _archive_reported(archiver, source, args, run)
     if args.commit:
-        print(f"Archived {len(results)} log(s).")
-    return 0
+        print(f"Archived {run.archived} log(s); {run.failed} failed.")
+    return 1 if run.failed else 0
 
 
 if __name__ == "__main__":
