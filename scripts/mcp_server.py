@@ -1738,7 +1738,28 @@ def _get_architecture(
         return _code_graph_timeout_data(
             str(resolved), reason, completed=("directory_validation",)
         )
-    return _architecture_summary_data(resolved, architecture)
+    return _with_generation_freshness(resolved, _architecture_summary_data(resolved, architecture))
+
+
+def _with_generation_freshness(resolved: Path, answer):
+    """The generation's freshness block on an answer that read one, and its refresh.
+
+    The summary and six other modes never compared commits nor started a
+    refresh (audit B-35,
+    docs/research/2026-09-25-every-structural-answer-carries-its-freshness.md).
+    """
+    if not _wants_freshness(answer):
+        return answer
+    freshness = _repository_freshness(resolved)
+    if freshness is None:
+        return answer
+    return {**answer, "freshness": freshness}
+
+
+def _wants_freshness(answer) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    return "error" not in answer and "freshness" not in answer
 
 
 # What the summary says instead of naming 300 community members. The counts
@@ -5884,7 +5905,7 @@ def _checked_directory_call(call, arguments: dict, deadline: float):
     resolved, error = _validated_code_directory(arguments.get("directory"), deadline=deadline)
     if error:
         return {"error": error}
-    return call({**arguments, "directory": str(resolved)}, deadline)
+    return _with_generation_freshness(resolved, call({**arguments, "directory": str(resolved)}, deadline))
 
 
 def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
