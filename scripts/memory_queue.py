@@ -5447,10 +5447,24 @@ class MemoryQueue:
         _harden_owner_only(self.results_dir, 0o700)
         with self._connect() as connection:
             self._create_schema(connection)
-            with begin_immediate(connection):
-                self._retire_exhausted_ready(
-                    connection, _as_utc(self._clock()), self._max_attempts
-                )
+            self._retire_exhausted_on_open(connection)
+
+    def _retire_exhausted_on_open(self, connection: sqlite3.Connection) -> None:
+        """Take the write lock only when a ready task is out of attempts.
+
+        Every construction opened `BEGIN IMMEDIATE`, so opening a queue while a
+        writer held it failed with `database is locked` although there was
+        nothing to retire (docs/research/2026-09-25-opening-the-legacy-queue-takes-no-write-lock.md).
+        """
+        # fetchall steps the statement to its end, so no read lock outlives it.
+        exhausted = connection.execute(
+            "SELECT 1 FROM tasks WHERE state='ready' AND attempts >= ? LIMIT 1",
+            (self._max_attempts,),
+        ).fetchall()
+        if not exhausted:
+            return
+        with begin_immediate(connection):
+            self._retire_exhausted_ready(connection, _as_utc(self._clock()), self._max_attempts)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
