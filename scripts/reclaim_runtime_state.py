@@ -123,11 +123,31 @@ def prune_transaction_history() -> dict[str, int]:
 
 
 def remove_empty_intent_shards(directory: Path | None = None) -> int:
-    """Shard directories a capture intent left empty when it moved on."""
-    root = directory if directory is not None else STATE_ROOT / "run" / "capture-intents" / "pending"
+    """Shard directories a capture intent left empty when it moved on.
+
+    Intents move from `pending/` to `ready/` and on; both leave empty shards,
+    and only `pending/` was swept (136 empty under `ready/` on 2026-09-25, C-13).
+    """
+    intents = STATE_ROOT / "run" / "capture-intents"
+    roots = [directory] if directory is not None else [intents / "pending", intents / "ready"]
+    return sum(_empty_shards_removed(root) for root in roots)
+
+
+def _empty_shards_removed(root: Path) -> int:
     if not root.is_dir():
         return 0
     return sum(_removed_if_empty(shard) for shard in root.iterdir())
+
+
+def settle_rolled_back_quarantines() -> dict[str, int]:
+    """Quarantined transactions that left nothing behind become discarded (B-16)."""
+    from markdown_transaction import active_or_legacy_coordinator
+
+    try:
+        coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
+        return {"settled": coordinator.settle_rolled_back_quarantines(), "failed": 0}
+    except Exception as error:  # noqa: BLE001
+        return {"settled": 0, "failed": 1, "reason": str(error)[:120]}
 
 
 def _removed_if_empty(shard: Path) -> int:
@@ -176,6 +196,7 @@ def rebuild_co_activation() -> dict[str, object]:
 def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
+        "quarantines": settle_rolled_back_quarantines(),
         "transactions": prune_settled_transactions(),
         "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
@@ -193,6 +214,7 @@ def _report(result: dict[str, object]) -> str:
     snapshot = result["snapshot"]
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
+        f"settled {result['quarantines']['settled']} rolled-back quarantine(s); "
         f"pruned {transactions['pruned']} settled transaction(s); "
         f"dropped {result['history']['transactions']} transaction row(s) and "
         f"{result['history']['attempts']} attempt row(s) past the history window; "
