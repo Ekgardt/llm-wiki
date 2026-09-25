@@ -631,8 +631,10 @@ retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.
 `redrive` creates a linked new task without resetting dead history. `purge` requires
 a terminal cutoff and verified export path before deleting terminal rows/results.
 Succeeded and cancelled results default to 30 days. A dead task — one whose attempts
-are exhausted — is kept until you ask for it by name with `--include-dead`, because it
-is evidence that work never happened. `restore --export <path>` reads one export back,
+are exhausted — leaves only with `--include-dead`, which the weekly pass passes after
+30 days. A dead capture is different: once the code has changed after it died, the
+nightly redrives it once (`redrive-dead-captures`), and a capture without a terminal
+record is never purged — the purge names it as retained and doctor reports it. `restore --export <path>` reads one export back,
 verifies its manifest and every digest, and re-enqueues the work as new ready tasks;
 it refuses the whole export if anything fails to verify.
 

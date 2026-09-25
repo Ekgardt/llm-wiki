@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dead capture gets its second chance after a fix, and the weekly purge no
+  longer aborts on one.** The nightly redrives every dead capture task that died
+  before the checkout's HEAD commit, once, before the queue worker runs
+  (`memory_queue.py redrive-dead-captures`). A redrive counts as spent only when
+  its child could reach the capture worker; the 23 children of 2026-09-06 carried
+  no capture link, so their parents still get theirs. The ordinary purge leaves a
+  capture without a terminal record in place and names it as retained instead of
+  failing the whole plan. See
+  `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+
 ## [5.0.0] — 2026-09-24
 
 Everything since 4.0.0, found and fixed by the audits of 2026-09-17 and

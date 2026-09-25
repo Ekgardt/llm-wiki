@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -231,6 +232,58 @@ def _reclaim_step() -> _Step:
 # The queue worker's wall time ends a margin before this step is killed. See
 # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
 QUEUE_STEP_SECONDS = 600
+
+
+# How long reading the checkout's HEAD commit time may take.
+HEAD_TIME_TIMEOUT_SECONDS = 10
+
+
+def head_commit_time(root: Path = ROOT) -> str | None:
+    """The committer time of the checkout's HEAD, or None when it cannot be read."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "log", "-1", "--format=%cI", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=HEAD_TIME_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _dead_capture_redrive_steps() -> list[_Step]:
+    """Give dead captures their one redrive once the code changed after they died.
+
+    Runs before the queue worker so the redriven captures are worked the same
+    night. No readable HEAD means no known code change, so no step. See
+    `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+    """
+    changed_after = head_commit_time()
+    if changed_after is None:
+        return []
+    return [
+        _Step(
+            "redriving dead captures the code has changed since...",
+            "dead_capture_redrive",
+            _script("memory_queue.py") + ["redrive-dead-captures", "--changed-after", changed_after],
+            120,
+        )
+    ]
+
+
+def _intake_steps() -> list[_Step]:
+    """The steps that take in what arrived since the last pass, in order."""
+    return [
+        _capture_adoption_step(),
+        _reclaim_step(),
+        *_dead_capture_redrive_steps(),
+        _queue_step(),
+        _episode_step(),
+    ]
 
 
 def _queue_step() -> _Step:
@@ -593,8 +646,7 @@ def worst_case_seconds() -> float:
     """
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
-    steps = [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()]
-    steps += [_compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS + _compile_wait_seconds()
     budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
@@ -660,11 +712,7 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
-    failures = _run_steps(
-        run_step,
-        log,
-        [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()],
-    )
+    failures = _run_steps(run_step, log, _intake_steps())
 
     # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)

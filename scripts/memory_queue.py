@@ -2796,6 +2796,19 @@ class WorkerSummary:
 class PurgeReceipt:
     purged: int
     task_ids: tuple[str, ...]
+    # Finished rows the purge left in place because their capture has no terminal
+    # record yet; see `_rows_with_resolved_captures`.
+    retained: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeadCaptureRedrive:
+    redriven: tuple[tuple[str, str], ...]
+    refused: tuple[tuple[str, str], ...]
+
+
+# How many dead captures one nightly pass redrives: each becomes a model call.
+DEAD_CAPTURE_REDRIVES_PER_PASS = 50
 
 
 @dataclass(frozen=True)
@@ -2829,6 +2842,7 @@ class _OrdinaryPurgePlan:
     records_bytes: bytes
     capture_evidence: tuple[_CapturePurgeEvidence, ...]
     manifest_bytes: bytes | None
+    retained: tuple[str, ...] = ()
 
 
 def _utc_now() -> datetime:
@@ -4533,8 +4547,10 @@ _ORDINARY_PURGEABLE_STATES = frozenset({"succeeded", "cancelled", "dead"})
 def _ordinary_purge_selection(include_dead: bool) -> str:
     """Which finished rows an ordinary purge takes; one query for both readers.
 
-    Attempts-exhausted work is retained by default and leaves only when an
-    operator asks for it by name (`--include-dead`). A row demoted to
+    Attempts-exhausted work is retained by default and leaves only when asked
+    for with `--include-dead`, which the weekly pass does after 30 days; a dead
+    capture whose capture has no terminal record stays even then
+    (`_rows_with_resolved_captures`). A row demoted to
     `dead / payload_hash_mismatch` is never taken here whatever the caller asks:
     its payload no longer hashes to its record, so it cannot be exported, and
     `quarantine-corrupt` is the route the product has for it. See
@@ -5263,6 +5279,7 @@ def _require_dead_task(database: sqlite3.Connection, task_id: str) -> sqlite3.Ro
         raise KeyError(task_id)
     _require_redrivable(row)
     _require_lineage_budget(database, row)
+    _require_unspent_redrive(database, row)
     return row
 
 
@@ -5287,7 +5304,28 @@ def _unblock_in(database: sqlite3.Connection, task_id: str, now: datetime) -> No
 def _require_redrivable(row: sqlite3.Row) -> None:
     if row["state"] != "dead":
         raise QueueOperationError("redrive_requires_dead")
-    if int(row["lineage_generation"] or 0) >= MAX_REDRIVE_GENERATIONS:
+
+
+# A redrive that could reach the worker: its child carries the parent's capture
+# link, or the parent was not a capture. `lineage_generation` counts every change
+# to a lineage and is the version its compare-and-set reads, not a count of
+# chances: a child created on 2026-09-06, before a redrive carried the link, never
+# reached the capture worker and still raised it.
+_SPENT_REDRIVES = (
+    "SELECT COUNT(*) FROM tasks AS child WHERE child.redrive_of=? AND ("
+    "NOT EXISTS (SELECT 1 FROM capture_task_links WHERE task_id=?) "
+    "OR EXISTS (SELECT 1 FROM capture_task_links WHERE task_id=child.id))"
+)
+
+
+def _require_unspent_redrive(database: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """The dead row gets one redrive, and only one the worker could reach counts.
+
+    See `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+    """
+    task_id = str(row["id"])
+    spent = database.execute(_SPENT_REDRIVES, (task_id, task_id)).fetchone()[0]
+    if int(spent) >= MAX_REDRIVE_GENERATIONS:
         raise QueueOperationError("redrive_generations_exhausted")
 
 
@@ -11694,7 +11732,7 @@ class _QueueV3CandidateReader:
         self._cleanup_ordinary_purge_artifacts(plan, capture_evidence)
         self._publish_ordinary_purge_receipt(plan, manifest_bytes)
         self._clear_ordinary_purge_authorizations(plan, manifest_bytes)
-        return PurgeReceipt(len(plan.task_ids), plan.task_ids)
+        return PurgeReceipt(len(plan.task_ids), plan.task_ids, plan.retained)
 
     def _ordinary_purge_plan(
         self, terminal_before: datetime, export_path: Path, *, include_dead: bool
@@ -11731,10 +11769,11 @@ class _QueueV3CandidateReader:
         self._demote_corrupt_finished_tasks(cutoff, include_dead)
         with closing(self._connect()) as database:
             database.execute("BEGIN")
-            rows = database.execute(
+            selected = database.execute(
                 f"{_ordinary_purge_selection(include_dead)} ORDER BY created_at,id",
                 (cutoff,),
             ).fetchall()
+            rows, retained = self._rows_with_resolved_captures(database, selected)
             records = tuple(
                 self._export_task_in_transaction(database, row) for row in rows
             )
@@ -11753,7 +11792,88 @@ class _QueueV3CandidateReader:
             records_bytes,
             capture_evidence,
             None,
+            retained,
         )
+
+    def _rows_with_resolved_captures(
+        self, database: sqlite3.Connection, rows: list[sqlite3.Row]
+    ) -> tuple[list[sqlite3.Row], tuple[str, ...]]:
+        """The rows the purge can prove, and the ids of those it keeps.
+
+        A capture task without a terminal record used to abort the whole plan, so
+        one unresolved capture kept every finished row in the queue. It is left
+        in place and named instead. See
+        `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+        """
+        kept: list[sqlite3.Row] = []
+        retained: list[str] = []
+        for row in rows:
+            task_id = str(row["id"])
+            if self._capture_resolved(database, task_id):
+                kept.append(row)
+                continue
+            retained.append(task_id)
+        return kept, tuple(retained)
+
+    def _capture_resolved(self, database: sqlite3.Connection, task_id: str) -> bool:
+        link = database.execute(
+            "SELECT 1 FROM capture_task_links WHERE task_id=?", (task_id,)
+        ).fetchone()
+        if link is None:
+            return True
+        binding = self.active_capture_binding(database, task_id)
+        return self._capture_terminal_blocker(database, task_id, binding) is None
+
+    def redrive_dead_captures(
+        self,
+        *,
+        changed_after: datetime,
+        limit: int = DEAD_CAPTURE_REDRIVES_PER_PASS,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> DeadCaptureRedrive:
+        """Give every dead capture that died before the code changed its one redrive.
+
+        A fix arriving is the event a dead-letter redrive waits for, and nobody
+        else here would ever ask. A redriven capture that dies again is final. See
+        `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+        """
+        before = _timestamp(_as_utc(changed_after))
+        redriven: list[tuple[str, str]] = []
+        refused: list[tuple[str, str]] = []
+        for task_id in self._dead_captures_before(before, limit):
+            _require_active(deadline, cancelled)
+            outcome = self._redrive_or_refusal(task_id, deadline, cancelled)
+            target = redriven if outcome[0] == "redriven" else refused
+            target.append((task_id, outcome[1]))
+        return DeadCaptureRedrive(tuple(redriven), tuple(refused))
+
+    def _redrive_or_refusal(
+        self,
+        task_id: str,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[str, str]:
+        try:
+            return "redriven", self.redrive(task_id, deadline=deadline, cancelled=cancelled)
+        except QueueOperationError as exc:
+            return "refused", exc.code
+
+    def _dead_captures_before(self, before: str, limit: int) -> list[str]:
+        """Dead capture tasks at redrive depth 0 that died before `before`."""
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """SELECT t.id FROM tasks AS t
+                   JOIN capture_task_links AS l ON l.task_id=t.id
+                   WHERE t.state='dead' AND t.error_code IS NOT 'payload_hash_mismatch'
+                     AND t.redrive_of IS NULL AND t.updated_at<?
+                     AND NOT EXISTS (SELECT 1 FROM tasks AS c
+                                     JOIN capture_task_links AS cl ON cl.task_id=c.id
+                                     WHERE c.redrive_of=t.id)
+                   ORDER BY t.updated_at, t.id LIMIT ?""",
+                (before, limit),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def _ordinary_capture_evidence_for_rows(
         self, database: sqlite3.Connection, rows: list[sqlite3.Row]
@@ -14883,6 +15003,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
             "redrive",
             "unblock",
             "purge",
+            "redrive-dead-captures",
             "restore",
             "quarantine-corrupt",
             "purge-corrupt",
@@ -14905,6 +15026,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
         "--retry-cap-seconds", type=int, default=DEFAULTS.retry_cap_seconds
     )
     parser.add_argument("--terminal-before")
+    parser.add_argument("--changed-after")
     parser.add_argument("--export", type=Path)
     parser.add_argument(
         "--include-dead",
@@ -15061,7 +15183,31 @@ def _cli_purge(args, _parser) -> int:
     )
     print(
         json.dumps(
-            {"counts": {"purged": receipt.purged}, "ids": list(receipt.task_ids)},
+            {
+                "counts": {"purged": receipt.purged, "retained": len(receipt.retained)},
+                "ids": list(receipt.task_ids),
+                "retained": list(receipt.retained),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _cli_redrive_dead_captures(args, _parser) -> int:
+    if args.changed_after is None:
+        raise QueueOperationError("changed_after_required")
+    try:
+        changed_after = datetime.fromisoformat(args.changed_after)
+    except ValueError:
+        raise QueueOperationError("changed_after_invalid") from None
+    outcome = _v3_queue_for_cli().redrive_dead_captures(changed_after=changed_after)
+    print(
+        json.dumps(
+            {
+                "redriven": [{"dead": dead, "ready": ready} for dead, ready in outcome.redriven],
+                "refused": [{"dead": dead, "code": code} for dead, code in outcome.refused],
+            },
             sort_keys=True,
         )
     )
@@ -15097,6 +15243,7 @@ _CLI_COMMANDS = {
     "redrive": _cli_redrive,
     "unblock": _cli_unblock,
     "purge": _cli_purge,
+    "redrive-dead-captures": _cli_redrive_dead_captures,
     "restore": _cli_restore,
 }
 
