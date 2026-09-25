@@ -5205,10 +5205,34 @@ def _generation_built_ns(generation: object) -> int | None:
 
 
 def _newest_page_ns() -> int:
+    """The latest change to anything the generation indexes (audit B-19).
+
+    Notes and their directories (a removed or renamed page moves only its
+    directory's mtime), and each project's `state.md` and `context.md`, the
+    project files the corpus collects. See
+    `docs/research/2026-09-25-an-answer-is-stale-when-any-indexed-source-moved.md`.
+    """
     from memory_state import ROOT
 
-    notes = ROOT / "knowledge" / "notes"
-    return max((page.stat().st_mtime_ns for page in notes.rglob("*.md")), default=0)
+    knowledge = ROOT / "knowledge"
+    notes = knowledge / "notes"
+    sources = [*notes.rglob("*.md"), *_directories(notes), *_project_sources(knowledge / "projects")]
+    return max((_mtime_ns(path) for path in sources), default=0)
+
+
+def _directories(root: Path) -> list[Path]:
+    return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
+
+
+def _project_sources(projects: Path) -> list[Path]:
+    return [path for name in ("state.md", "context.md") for path in projects.glob(f"*/{name}")]
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 def _index_is_behind(generation: object) -> bool:

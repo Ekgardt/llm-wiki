@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An MCP answer is marked stale when any source its index holds moved after the index was built: a removed or renamed note and a changed project `state.md` or `context.md` now count, where only note contents did.
 - The MCP search keeps one second of its deadline for the lexical fallback: the hybrid pass stops that much early, so when it runs out of time the lexical pass still answers, where before it was handed an expired deadline and failed too.
 - With no active generation a natural question still finds pages: the Markdown fallback drops stop words and ranks pages by how many of the question's words they share, where it required every word, so "почему systemd таймер, а не cron" found nothing. Common Russian function words join the shared stop-word list.
 - The MCP supervisor waits 35 s for a worker whose input closed before it signals it, so the worker's own 30-second wait for model inference is not cut short; and a server source removed while the supervisor fingerprints the code (the nightly update) changes the fingerprint instead of crashing the supervisor.
