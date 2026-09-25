@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The workspace revision behind code navigation no longer walks top-level folders git ignores whole (`node_modules`, `dist`, …): on a TypeScript checkout with dependencies installed it walked for 14.8 s and then refused at its 100 000-entry ceiling.
 - A deleted or renamed top-level folder no longer stops a repository's code index: the refresh uses the recorded roots that still exist (and finds roots again when none does), and `changes` names tracked top-level entries the index does not cover.
 - One Python file too long or too deeply nested to parse is that file's parse error, not the end of the repository's code index: every reader of repository Python now catches the same failures (`python_parse.PARSE_FAILURES`, including `RecursionError`).
 - The Windows installer says when the `llm-wiki` MCP entry in `~/.claude.json` points at another vault, as the POSIX one does; a macOS uninstall no longer fails on a LaunchAgent launchd has already unloaded; the guide says the Linux timers run while you are logged in and how to enable lingering.

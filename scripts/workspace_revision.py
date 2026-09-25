@@ -1523,8 +1523,14 @@ def _relevant_files(
     relevant_paths: set[str] | None = None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    skipped_top_level: frozenset[str] = frozenset(),
 ) -> Iterator[Path]:
-    """Every relevant file under the root, in a deterministic walk order."""
+    """Every relevant file under the root, in a deterministic walk order.
+
+    `skipped_top_level` names top-level directories git ignores whole; the
+    corpus never walks them either, because it takes only tracked top-level
+    entries (audit A-16).
+    """
     scan = _RelevantScan(
         root=root,
         resolved_root=resolved_root,
@@ -1541,8 +1547,49 @@ def _relevant_files(
     while stack:
         _check_stop(deadline, cancelled)
         directories: list[Path] = []
-        yield from _scan_directory(scan, stack.pop(), directories)
-        stack.extend(reversed(directories))
+        current = stack.pop()
+        yield from _scan_directory(scan, current, directories)
+        stack.extend(reversed(_walkable(root, current, directories, skipped_top_level)))
+
+
+def _walkable(
+    root: Path, current: Path, directories: list[Path], skipped_top_level: frozenset[str]
+) -> list[Path]:
+    if current != root:
+        return directories
+    return [directory for directory in directories if directory.name not in skipped_top_level]
+
+
+def ignored_top_level_directories(
+    root: Path, *, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> frozenset[str]:
+    """Top-level directories git ignores whole, e.g. `node_modules`, `dist`.
+
+    Walking them cost 14.8 s and then refused at the 100 000-entry ceiling on a
+    TypeScript checkout with its dependencies installed (audit A-16,
+    docs/research/2026-09-25-a-revision-walks-no-ignored-top-level-folder.md).
+    Git cannot answer (no repository, a failed command): none is skipped.
+    """
+    try:
+        output = _git_output(
+            root,
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+            maximum_bytes=MAX_GIT_STATUS_BYTES,
+            label="Git ignored directories",
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except (subprocess.CalledProcessError, ValueError, OSError):
+        return frozenset()
+    return frozenset(_top_level_directory(record) for record in output.split(b"\0") if _is_top_level_directory(record))
+
+
+def _is_top_level_directory(record: bytes) -> bool:
+    return record.endswith(b"/") and b"/" not in record[:-1]
+
+
+def _top_level_directory(record: bytes) -> str:
+    return os.fsdecode(record[:-1])
 
 class _VerificationDigests:
     """The SHA-256 every hash needs, plus git's blob hash when one is wanted."""
@@ -3867,6 +3914,9 @@ def _add_relevant_files(build: _RevisionBuild) -> None:
         private_inventory_safe=build.private_safe,
         deadline=build.deadline,
         cancelled=build.cancelled,
+        skipped_top_level=ignored_top_level_directories(
+            build.root, deadline=build.deadline, cancelled=build.cancelled
+        ),
     ):
         _check_stop(build.deadline, build.cancelled)
         _add_relevant_file(build, path)
@@ -4660,6 +4710,7 @@ def _walk_relevant_files(
         relevant_paths=state.relevant,
         deadline=deadline,
         cancelled=cancelled,
+        skipped_top_level=ignored_top_level_directories(root, deadline=deadline, cancelled=cancelled),
     ):
         normalized = _normalized_path(current_path.relative_to(root).as_posix())
         if normalized in state.paths:
