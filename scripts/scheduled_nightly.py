@@ -686,10 +686,24 @@ def _update_code(log) -> None:
 
     log.step("updating the vault code...")
     outcome = update_checkout(ROOT)
+    update_state(lambda state: state.__setitem__("last_update", update_record(outcome)))
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
         log(f"  update: {outcome['detail']}")
     _log_update_aftermath(log, outcome)
+
+
+UPDATE_RECORD_FIELDS = ("status", "reason", "dependencies", "resources")
+
+
+def update_record(outcome: dict) -> dict:
+    """What the code update did, kept for doctor; before, only the night's log knew.
+
+    See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
+    """
+    record = {field: outcome.get(field) for field in UPDATE_RECORD_FIELDS}
+    record["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return record
 
 
 def _log_update_aftermath(log, outcome: dict) -> None:

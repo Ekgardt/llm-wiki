@@ -45,10 +45,13 @@ def _limit_seconds(value: str) -> int:
     return int(value[: len(value) - len(unit)]) * UNIT_SECONDS[unit]
 
 
-def test_each_systemd_pass_is_stopped_only_above_its_worst_case(tmp_path):
+def test_each_systemd_pass_is_stopped_only_above_its_worst_case(tmp_path, monkeypatch):
+    """Measured in auto provider mode, the mode an installed scheduler runs in."""
     import install_control
     import scheduled_nightly
     import scheduled_weekly
+
+    monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
 
     definitions = install_control.render_systemd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "uv")
     worst = {"nightly": scheduled_nightly.worst_case_seconds(), "weekly": scheduled_weekly.worst_case_seconds()}

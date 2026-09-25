@@ -1620,13 +1620,19 @@ def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[s
     """
     if status != "ok" or not details.get("truncated_scans"):
         return status, message
-    totals = ", ".join(f"{state} {count}" for state, count in sorted((details.get("state_totals") or {}).items()))
     return (
         "ok",
         "Transaction state is healthy within the scanned rows; the scan stopped at "
         "its row bound, so its counts are a lower bound. Rows by state, counted "
-        f"whole: {totals or 'unknown'}.",
+        f"whole: {_state_totals_text(details.get('state_totals'))}.",
     )
+
+
+def _state_totals_text(totals: object) -> str:
+    """`committed 3, quarantined 1`, or `unknown` when the whole-table count failed."""
+    if not isinstance(totals, dict) or not totals:
+        return "unknown"
+    return ", ".join(f"{state} {count}" for state, count in sorted(totals.items()))
 
 
 def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
@@ -5013,7 +5019,9 @@ def _hook_error_check(state_root: Path, now: datetime) -> dict:
     return _hook_error_result(live, len(records), details)
 
 
-def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
+def _scheduler_check(
+    root: Path, state_root: Path, now: datetime, deadline: float, home: Path | None = None
+) -> dict:
     scripts = {
         "scheduled_nightly": (root / "scripts" / "scheduled_nightly.py").is_file(),
         "search_memory": (root / "scripts" / "search_memory.py").is_file(),
@@ -5040,7 +5048,108 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         )
     details["last_weekly_status"] = state.get("last_weekly_status")
     details["last_weekly_at"] = state.get("last_weekly_at")
-    return _with_weekly(_nightly_result(state, now, details), _weekly_verdict(state, now))
+    details["last_update"] = state.get("last_update")
+    verdicts = (
+        _weekly_verdict(state, now),
+        _update_verdict(state.get("last_update")),
+        _unit_limit_verdict(home or Path.home()),
+    )
+    return _with_findings(_nightly_result(state, now, details), verdicts)
+
+
+# What a recorded code update outcome means for the operator, by field and value.
+_UPDATE_ATTENTION = {
+    ("status", "error"): "The nightly code update failed; see the nightly log.",
+    ("reason", "fetch_failed"): "The nightly code update could not fetch the remote.",
+    ("reason", "not_on_default_branch"): (
+        "The vault is not on its default branch, so the nightly never updates it."
+    ),
+    ("reason", "diverged_branch"): "The vault's branch has diverged from the remote.",
+    ("reason", "local_changes_conflict"): (
+        "A local change stops the nightly code update; see the nightly log."
+    ),
+    ("dependencies", "stale"): (
+        "The code was updated but its dependencies were not synced; run `uv sync`."
+    ),
+    ("resources", "rerun_installer"): (
+        "The update changed what the installer renders; rerun the installer."
+    ),
+}
+
+
+def _update_verdict(record: object) -> tuple[str, str] | None:
+    """(status, message) when the last code update needs the operator, else None.
+
+    The nightly records the outcome since 2026-09-25; before, only its log did. See
+    `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
+    """
+    if not isinstance(record, dict):
+        return None
+    messages = [message for (field, value), message in _UPDATE_ATTENTION.items() if record.get(field) == value]
+    if not messages:
+        return None
+    return "degraded", " ".join(messages)
+
+
+def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
+    """(status, message) when an installed systemd unit lacks this release's time limit."""
+    stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
+    if not stale:
+        return None
+    return (
+        "degraded",
+        "Installed maintenance units are older than this release ("
+        + ", ".join(stale)
+        + " time limit); rerun the installer.",
+    )
+
+
+def _expected_unit_limit(kind: str) -> str:
+    from install_control import SYSTEMD_START_LIMITS
+
+    return SYSTEMD_START_LIMITS[kind]
+
+
+def _installed_unit_limits(home: Path) -> dict[str, str | None]:
+    """`TimeoutStartSec` of each installed llm-wiki systemd service; none installed, none read."""
+    directory = _systemd_user_directory(home)
+    limits: dict[str, str | None] = {}
+    for kind in ("nightly", "weekly"):
+        text = _read_small_text(directory / f"llm-wiki-{kind}.service")
+        if text is not None:
+            limits[kind] = _unit_setting(text, "TimeoutStartSec")
+    return limits
+
+
+def _systemd_user_directory(home: Path) -> Path:
+    """Where the installer puts user units: `$XDG_CONFIG_HOME`, else under `home`."""
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    if configured and Path(configured).is_absolute():
+        return Path(configured) / "systemd" / "user"
+    return home / ".config" / "systemd" / "user"
+
+
+def _read_small_text(path: Path) -> str | None:
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
+def _unit_setting(text: str, name: str) -> str | None:
+    prefix = f"{name}="
+    values = [line[len(prefix):].strip() for line in text.splitlines() if line.startswith(prefix)]
+    return values[-1] if values else None
+
+
+def _with_findings(nightly: dict, verdicts: tuple[tuple[str, str] | None, ...]) -> dict:
+    """The scheduler finding: the nightly's, joined by every other verdict that has one."""
+    result = nightly
+    for verdict in verdicts:
+        result = _with_weekly(result, verdict)
+    return result
 
 
 # A seven-day period plus a day of grace. The weekly keeps its own record since
@@ -7922,7 +8031,7 @@ def _deferrable_checks(
         (
             "scheduler",
             lambda budget: _scheduler_check(
-                root_path, state_path, generated_at, budget
+                root_path, state_path, generated_at, budget, home_path
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),

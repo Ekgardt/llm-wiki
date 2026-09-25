@@ -8,6 +8,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The scheduler check says what the night could not do.** One table of limits
+  (`SCHEDULER_LIMIT_HOURS`, 4 h and 6 h) now renders both the systemd units and the
+  Windows tasks; the systemd nightly limit was 3 h, below the pass's 3.19 h worst
+  case in auto provider mode, which the test missed because it measured the `fake`
+  provider. The nightly records its code update outcome, and doctor's `scheduler`
+  check names a failed fetch, stale dependencies, a needed installer run, a branch
+  that is not the default, and installed units older than this release's time
+  limit. See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
 - **An update brings the extras the operator chose; `hybrid` has its reranker
   again; a base install has no failed nights.** `hybrid` is `semantic` plus
   `reranker` again, as documented (the ONNX change had dropped `torch` from it and

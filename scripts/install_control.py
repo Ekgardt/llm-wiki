@@ -609,10 +609,17 @@ def _scheduled_path(uv_path: Path) -> str:
     return scheduled_path(uv_path, _SYSTEMD_USER_PATH)
 
 
+# How long a scheduler lets each pass run: above each pass's own worst case in auto
+# provider mode, which counts the checkout update and the whole provider order one
+# model call may walk (about 3.2 h and 4.9 h). One table for every scheduler; the
+# systemd units once said 3 h and 5 h while the Windows tasks said 4 h and 6 h.
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md,
+# docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md
+SCHEDULER_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+
 # A oneshot service has no start timeout by default, so a hung pass would hold its
-# lease forever. The limits match the Windows tasks and sit above each pass's own worst
-# case. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
-SYSTEMD_START_LIMITS = {"nightly": "3h", "weekly": "5h"}
+# lease forever. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
+SYSTEMD_START_LIMITS = {kind: f"{hours}h" for kind, hours in SCHEDULER_LIMIT_HOURS.items()}
 
 
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
@@ -1643,10 +1650,7 @@ def windows_environment_resources(
 # installed manifests record it, and uninstall and rollback have to take it back.
 # See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
 WINDOWS_TASK_SPEC_VERSION = 2
-# Above each pass's own worst case, which now counts the checkout update and
-# the whole provider order one model call may walk (about 3.2 h and 4.9 h).
-# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-WINDOWS_TASK_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+WINDOWS_TASK_LIMIT_HOURS = SCHEDULER_LIMIT_HOURS
 
 
 def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> bytes:
