@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `get_decisions` returns up to `limit` decision pages, one row each, in the agent row shape `recall` uses: it asked the search for exactly `limit` rows and filtered afterwards, so other pages and repeated chunks took the places.
 - The health resource and `vault_status` count only past days as compile backlog: today's log is still being written and the nightly compiles it, so it made every answer partial from the first capture of the day.
 - A telemetry write that fails leaves a record in the capture diagnostics (kind `telemetry_event`: deferred when the database was busy, lost otherwise); the best-effort writer returned False and no caller read it.
 - `recall` and the CLI search ask the evidence graph when the question is about relations ("depends on", "callers", "related to", …), keeping dense search beside it; every semantic search used to run HYBRID, so the graph never answered them. A trace nothing reported names the mode the search would run.

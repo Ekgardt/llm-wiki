@@ -1255,21 +1255,37 @@ def _open_days() -> set[str]:
 def _get_decisions(
     query: str | None = None, limit: int = 10, *, deadline: float | None = None
 ) -> list[dict]:
-    """Get active decisions from the vault."""
-    from search_memory import search
+    """Get active decisions from the vault: up to `limit` decision pages, one row each.
+
+    The search is asked for a wider pool than the answer, because the filter to
+    decisions runs after it and several chunks of one page are one decision; the
+    rows are the agent's shape, as `recall` returns them (audit C-25,
+    docs/research/2026-09-25-get-decisions-returns-what-was-asked.md).
+    """
+    from retrieval import CANDIDATE_FANOUT
+    from search_memory import MAX_SEARCH_LIMIT, search
 
     _require_decision_query(query)
     effective_query = query or "decision"
     candidates = search(
         effective_query,
-        limit=limit,
+        limit=min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
         source_tool="mcp.get_decisions",
         emit_telemetry=False,
         deadline_monotonic=deadline,
     )
-    results = [result for result in candidates if _is_decision_result(result)]
+    results = _decision_pages(candidates, limit)
     _record_decision_impressions(effective_query, results)
     return results
+
+
+def _decision_pages(candidates: list[dict], limit: int) -> list[dict]:
+    """The first row of each decision page, in search order, shaped for an agent."""
+    pages: dict[str, dict] = {}
+    for row in candidates:
+        if _is_decision_result(row):
+            pages.setdefault(row.get("path", ""), {**_agent_row(row), "type": "decision"})
+    return list(pages.values())[:limit]
 
 
 def _require_decision_query(query) -> None:
