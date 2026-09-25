@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Step artifacts under `logs/maintenance/` are kept as long as the reports that point at them (30 days): held to the report count, they lasted about two nights and a report's "full output" link led nowhere.
 - The nightly writes every instant in its state in UTC with an offset (`failed_at` and `skipped_at` were local), and doctor compares a skip with the last run as instants, not as strings that differed by the time zone.
 - One generation the weekly prune cannot remove is its own `ERROR:` line and the pass goes on (an oversized abandoned tree stopped the whole step), and `install_models` gives each model its own boundary: offline, the first fetch no longer keeps the second model from being tried.
 - `install_models` replaces a cached weights file that does not match its pin in the same run (it removed only the link, and the cache re-linked the same bad bytes), and no longer re-hashes 2.3 GB of verified, unchanged weights every night; a file changed within 2 s of its verification is still re-read.
