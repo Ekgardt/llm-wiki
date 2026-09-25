@@ -77,10 +77,10 @@ def test_a_worktree_in_the_job_directory_is_not_followed(tmp_path: Path, monkeyp
 # --- transaction history ----------------------------------------------------
 
 
-def _append(coordinator: MarkdownCoordinator, day: str):
+def _append(coordinator: MarkdownCoordinator, day: str, family: str = "post-tool"):
     return markdown_transaction._append_until_committed(
         coordinator,
-        f"daily-header:{day}",
+        f"{family}:{day}",
         f"knowledge/daily/{day}.md",
         f"# {day}\n".encode(),
         deadline=time.monotonic() + 60,
@@ -109,6 +109,21 @@ def test_settled_rows_past_the_window_are_dropped_and_recent_ones_kept(tmp_path:
 
     assert (unpruned["transactions"], kept["transactions"], dropped["transactions"]) == (0, 0, 2)
     assert _transaction_count(coordinator) == 0
+
+
+def test_a_row_something_reads_back_is_never_pruned(tmp_path: Path) -> None:
+    """Compile receipts and archives read their transaction back; only breadcrumbs go."""
+    root = tmp_path / "vault"
+    (root / "knowledge/daily").mkdir(parents=True)
+    coordinator = MarkdownCoordinator(root, tmp_path / "state")
+    _append(coordinator, "2026-01-01", family="compile")
+    _append(coordinator, "2026-01-02", family="user-prompt")
+    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+
+    later = datetime.now(timezone.utc) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
+    dropped = coordinator.prune_history(now=later)
+
+    assert (dropped["transactions"], _transaction_count(coordinator)) == (1, 1)
 
 
 def test_doctor_counts_every_row_by_state_in_one_aggregate(tmp_path: Path) -> None:

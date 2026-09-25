@@ -648,9 +648,17 @@ _PRUNE_COMMITTED_ATTEMPTS = (
     "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
     "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
 )
+# The only operation families the prune may remove: hook breadcrumbs, which
+# nothing reads back after their own replay window. Compile, archive, capture,
+# session and episode rows are authority for receipts, bags and terminal records
+# that outlive the window. See
+# `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md`.
+PRUNABLE_OPERATION_FAMILIES = ("post-tool", "user-prompt")
+
 _PRUNE_SETTLED_TRANSACTIONS = (
     'DELETE FROM "transaction" WHERE state IN (\'committed\', \'discarded\') '
     "AND artifacts_pruned_at IS NOT NULL AND updated_at < ? "
+    "AND (" + " OR ".join("operation_id LIKE ?" for _ in PRUNABLE_OPERATION_FAMILIES) + ") "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
 )
@@ -7507,14 +7515,18 @@ class MarkdownCoordinator:
     ) -> dict[str, int]:
         """Drop settled history past its window: committed attempts, then settled rows.
 
-        Attempts first, so the transactions they named are no longer named. A
-        transaction a checkpoint row names stays, and so does every quarantined
-        one; operations go with their transaction (`ON DELETE CASCADE`).
+        Attempts first, so the transactions they named are no longer named. Only
+        breadcrumb families go (`PRUNABLE_OPERATION_FAMILIES`); a transaction a
+        checkpoint row names stays, and so does every quarantined one; operations
+        go with their transaction (`ON DELETE CASCADE`).
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
             attempts = database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
-            transactions = database.execute(_PRUNE_SETTLED_TRANSACTIONS, (cutoff,)).rowcount
+            families = tuple(f"{family}:%" for family in PRUNABLE_OPERATION_FAMILIES)
+            transactions = database.execute(
+                _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
+            ).rowcount
         return {"attempts": attempts, "transactions": transactions}
 
     def _recover_interrupted_prunes(self) -> None:

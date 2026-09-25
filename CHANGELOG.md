@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The history prune keeps every row something reads back.** The 90-day prune
+  of 2026-09-24 would have deleted compile transactions that compile receipts,
+  daily archives and evidence resolution read back, from about 2026-11-18. It now
+  removes only the hook breadcrumb families `post-tool` and `user-prompt` (16 414
+  of 23 457 rows on the live vault). See
+  `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md`.
 - **A dead capture gets its second chance after a fix, and the weekly purge no
   longer aborts on one.** The nightly redrives every dead capture task that died
   before the checkout's HEAD commit, once, before the queue worker runs
