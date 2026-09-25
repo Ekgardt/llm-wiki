@@ -11822,7 +11822,12 @@ class _QueueV3CandidateReader:
         if link is None:
             return True
         binding = self.active_capture_binding(database, task_id)
-        return self._capture_terminal_blocker(database, task_id, binding) is None
+        blocker = self._capture_terminal_blocker(database, task_id, binding)
+        if blocker in (None, "capture_intent_unresolved"):
+            return blocker is None
+        # A terminal record that exists but does not bind this task is damage,
+        # not a capture still waiting: the purge refuses rather than keeping it.
+        raise QueueOperationError(blocker)
 
     def redrive_dead_captures(
         self,
