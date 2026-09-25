@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A deleted or renamed top-level folder no longer stops a repository's code index: the refresh uses the recorded roots that still exist (and finds roots again when none does), and `changes` names tracked top-level entries the index does not cover.
 - One Python file too long or too deeply nested to parse is that file's parse error, not the end of the repository's code index: every reader of repository Python now catches the same failures (`python_parse.PARSE_FAILURES`, including `RecursionError`).
 - The Windows installer says when the `llm-wiki` MCP entry in `~/.claude.json` points at another vault, as the POSIX one does; a macOS uninstall no longer fails on a LaunchAgent launchd has already unloaded; the guide says the Linux timers run while you are logged in and how to enable lingering.
 - The user guide lists the nightly and weekly steps the code runs and the 4 h/6 h scheduler limits it sets; every install hint keeps the other extras (`uv sync --locked --inexact --extra ...`); CONTRIBUTING and ARCHITECTURE no longer describe a check-only repair or a retired vector path. A test ties the guide to the code.

@@ -1017,12 +1017,40 @@ def detect_repository_changes(
 
 def _detected(catalog, admission: Admission, generation_id, manifest, deadline):
     source_manifest = _verified_source_manifest(catalog, generation_id, manifest)
-    roots = tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
-    snapshot = _collect(admission.root, roots, deadline)
+    recorded = tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
+    roots = _live_roots(admission.root, recorded) or ()
     difference = _difference(
-        _recorded_hashes(source_manifest), _current_hashes(snapshot)
+        _recorded_hashes(source_manifest), _current_root_hashes(admission.root, roots, deadline)
     )
-    return _change_report(admission, generation_id, roots, difference)
+    report = _change_report(admission, generation_id, roots, difference)
+    return {**report, "uncovered_roots": _uncovered_roots(admission.root, recorded)}
+
+
+def _live_roots(root: Path, recorded: tuple[str, ...]) -> tuple[str, ...] | None:
+    """The recorded roots still on disk; None when none is, so the roots are found again.
+
+    A deleted or renamed top-level folder made every detect and refresh refuse
+    with `repository_root_missing`, the nightly `refresh-all` included (audit
+    A-15, docs/research/2026-09-25-a-gone-top-level-folder-does-not-stop-the-index.md).
+    """
+    present = tuple(name for name in recorded if os.path.lexists(root / name))
+    return present or None
+
+
+def _current_root_hashes(root: Path, roots: tuple[str, ...], deadline) -> dict:
+    """Current digests under the live roots; none left means everything recorded was removed."""
+    if not roots:
+        return {}
+    return _current_hashes(_collect(root, roots, deadline))
+
+
+def _uncovered_roots(root: Path, recorded: tuple[str, ...]) -> list[str]:
+    """Tracked top-level entries this index does not cover, named rather than silent."""
+    try:
+        discovered = _discovered_code_roots(root).selected
+    except RepositoryIndexRefused:
+        return []
+    return [name for name in discovered if name not in recorded and name != MEMORY_ROOT]
 
 
 # --------------------------------------------------------------------------
@@ -1140,7 +1168,7 @@ def _recorded_roots(catalog, generation_id, manifest) -> tuple[str, ...]:
 def _rebuilt(admission, catalog, generation_id, manifest, root, deadline, cancelled) -> dict:
     receipt = index_repository(
         admission.root,
-        roots=_recorded_roots(catalog, generation_id, manifest),
+        roots=_live_roots(admission.root, _recorded_roots(catalog, generation_id, manifest)),
         state_root=root,
         deadline=deadline,
         cancelled=cancelled,
