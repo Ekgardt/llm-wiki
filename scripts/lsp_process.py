@@ -43,7 +43,7 @@ from lsp_protocol import (
     _LocalRequestViolation,
     _ProtocolStartupCleanupError,
 )
-from lsp_security import redact_lsp_text
+from lsp_security import redact_lsp_text, redact_private_key_blocks
 from process_liveness import process_state
 
 ProcessTree = _lsp_process_tree.ProcessTree
@@ -89,6 +89,8 @@ _MAX_EVIDENCE_BYTES = 4096
 # The redacted last words of a failed server, as JSON encodes them. The rest of
 # the record is under 300 bytes, so the whole file stays well inside its bound.
 _STDERR_TAIL_BYTES = 1024
+# Redacted before the tail is cut, so no line reaches the redactor without its key.
+_STDERR_REDACTION_WINDOW_BYTES = 64 * 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
@@ -4292,18 +4294,31 @@ def _failure_stderr_tail(generation: _Generation | None) -> str | None:
         return None
     with generation.stderr_lock:
         written = b"".join(generation.stderr)
-    return _bounded_stderr_tail(written[-_STDERR_TAIL_BYTES:])
+    return _bounded_stderr_tail(_whole_line_window(written))
+
+
+def _whole_line_window(written: bytes) -> bytes:
+    """The last lines that fit the redaction window, none of them cut at its start.
+
+    The tail was cut to its record bound first, so a `token=` just before the cut
+    left its value to a redactor that needs the key (audit C-37,
+    docs/research/2026-09-25-a-stderr-tail-is-redacted-before-it-is-cut.md).
+    """
+    if len(written) <= _STDERR_REDACTION_WINDOW_BYTES:
+        return written
+    window = written[-_STDERR_REDACTION_WINDOW_BYTES:]
+    return window.partition(b"\n")[2]
 
 
 def _redacted_lines(tail: bytes) -> str:
-    """Every non-empty line, redacted on its own.
+    """Every non-empty line, redacted on its own, after any private key block.
 
     A credential assignment runs to the end of its line, so the redactor is
     given one line at a time: one `authorization:` must not swallow every
-    message the server printed after it.
+    message the server printed after it. A key spans lines, so it goes first.
     """
-    lines = tail.decode("utf-8", errors="replace").splitlines()
-    return "\n".join(redact_lsp_text(line) for line in lines if line)
+    text = redact_private_key_blocks(tail.decode("utf-8", errors="replace"))
+    return "\n".join(redact_lsp_text(line) for line in text.splitlines() if line)
 
 
 def _bounded_stderr_tail(tail: bytes) -> str | None:

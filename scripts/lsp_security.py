@@ -62,6 +62,12 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"private[_.-]?key|secret|token)"
     r"(?P=quote)\s*[:=]\s*"
 )
+# RFC 7468 section 2: a key is the base64 between a BEGIN and an END boundary line.
+_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
+)
+_PRIVATE_KEY_ORPHAN_END = re.compile(r"\A[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_PRIVATE_KEY_MARKER = "<redacted private key>"
 # Secrets whose own shape names them, with no key written beside them.
 _STANDALONE_SECRET = re.compile(
     r"(?ai)(?<![a-z0-9_.-])"
@@ -3203,11 +3209,24 @@ def redact_lsp_text(
     return _normalize_log_text(_redact_home(redacted))[:1024]
 
 
+def redact_private_key_blocks(value: str) -> str:
+    """Every PEM private key block in multi-line text, whole or cut at either end.
+
+    A per-line redactor sees a key's body as base64 with nothing naming it (audit
+    C-37, docs/research/2026-09-25-a-stderr-tail-is-redacted-before-it-is-cut.md).
+    An END boundary left after the blocks are gone lost its BEGIN to a cut, so the
+    text before it is body.
+    """
+    whole = _PRIVATE_KEY_BLOCK.sub(_PRIVATE_KEY_MARKER, value)
+    return _PRIVATE_KEY_ORPHAN_END.sub(_PRIVATE_KEY_MARKER, whole)
+
+
 __all__ = [
     "PathContainmentError",
     "RepositorySource",
     "normalize_provider_uri",
     "redact_lsp_text",
+    "redact_private_key_blocks",
     "resolve_repository_source",
     "validate_repository_relative_path",
 ]
