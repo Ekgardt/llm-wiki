@@ -43,3 +43,7 @@ Date: 2026-09-25. Audit item C-33 (`docs/AUDIT-2026-09-25-full.md`).
 - `scripts/install_models.py`
 - `tests/test_the_guide_matches_the_passes.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day
+
+- `tests/test_quality_guards.py` requires ARCHITECTURE to keep the phrase "manual dependency selection"; the rewrite had dropped it. Restored with the correct command. File: `docs/ARCHITECTURE.md`.

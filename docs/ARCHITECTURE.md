@@ -332,9 +332,9 @@ no environment variables.
   materialized `.scm` queries, call graph, and impact analysis.
 - **MCP server**: the installer baseline includes the MCP package and exposes
   12 task-shaped tools including `doctor`, a uniform response envelope, and
-  health/context resources. From source, `uv sync --locked` installs it (MCP is a
-  base dependency; `mcp-server` is an empty compatibility alias); transport remains
-  local stdio.
+  health/context resources. For manual dependency selection from source,
+  `uv sync --locked` installs it (MCP is a base dependency; `mcp-server` is an empty
+  compatibility alias); transport remains local stdio.
 - **Automatic health**: SessionStart injects only degraded/error findings; healthy
   checks stay quiet. Repairs are explicit and limited to safe, idempotent actions.
 - **All v4.0 features degrade gracefully** — the installed product remains local and zero-daemon.
