@@ -8,6 +8,7 @@ library only. See `docs/research/2026-09-14-no-model-running-at-exit.md`.
 """
 from __future__ import annotations
 
+import atexit
 import threading
 import time
 from collections.abc import Callable
@@ -15,6 +16,10 @@ from collections.abc import Callable
 _RUNNING: set[threading.Thread] = set()
 _LOCK = threading.Lock()
 stopping = threading.Event()
+# Every process that starts inference settles it at exit, not only the server
+# (audit C-18, docs/research/2026-09-25-every-process-settles-its-inference-at-exit.md).
+EXIT_SETTLE_SECONDS = 30.0
+_EXIT_HANDLER: list[bool] = []
 
 
 def _tracked(target: Callable[[], object]) -> Callable[[], None]:
@@ -40,12 +45,21 @@ def start(target: Callable[[], object], *, name: str) -> threading.Thread:
     thread = threading.Thread(target=_tracked(target), name=name, daemon=True)
     with _LOCK:
         _RUNNING.add(thread)
+        _register_exit_settle()
     try:
         thread.start()
     except BaseException:
         _forget(thread)
         raise
     return thread
+
+
+def _register_exit_settle() -> None:
+    """Once per process; called under `_LOCK`."""
+    if _EXIT_HANDLER:
+        return
+    atexit.register(settle, EXIT_SETTLE_SECONDS)
+    _EXIT_HANDLER.append(True)
 
 
 def running() -> list[threading.Thread]:

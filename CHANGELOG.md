@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Every process that starts model inference waits for it at exit (up to 30 s), not only the MCP server: a one-shot search or query whose deadline abandoned a rerank could otherwise exit mid-inference and abort.
 - The reranker learns its cost once and stops wasting CPU under load: when its cost is unknown the one background run gets the stage ceiling so it can finish and record it, and when its cost is known not to fit the caller's window it is not started at all. Before, the background run was cut at the caller's deadline on every call, never recorded a cost and was never admitted.
 - A failure while the MCP server builds or renders an answer's envelope is answered with the tool's safe error envelope, where it used to escape to the SDK and reach the client as raw text, possibly with a local path.
 - An MCP answer is marked stale when any source its index holds moved after the index was built: a removed or renamed note and a changed project `state.md` or `context.md` now count, where only note contents did.
