@@ -871,7 +871,7 @@ def _first_sync_delta(
     deleted = tuple(
         sorted(path for path in open_by_path if _entry_missing(entries.get(path)))
     )
-    return WorkspaceDelta((), changed, (), deleted, False)
+    return WorkspaceDelta((), changed, (), deleted)
 
 
 def _entry_missing(entry: object) -> bool:

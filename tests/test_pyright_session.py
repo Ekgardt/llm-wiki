@@ -2930,7 +2930,7 @@ def test_document_lock_post_acquire_interruption_releases_and_remains_usable(
         assert session.synchronize(
             revision,
             deadline=time.monotonic() + 10,
-        ) == WorkspaceDelta((), (), (), (), False)
+        ) == WorkspaceDelta((), (), (), ())
         assert session._documents[document.source.uri] is document
     finally:
         interrupting_lock.cleanup_failed_test()
@@ -5284,7 +5284,7 @@ def test_first_synchronize_establishes_retained_workspace_revision(
         scope = resolve_repository_scope(repository)
         revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
         delta = session.synchronize(revision, deadline=time.monotonic() + 10)
-        assert delta == WorkspaceDelta((), (), (), (), False)
+        assert delta == WorkspaceDelta((), (), (), ())
         assert session._workspace_revision is revision
     finally:
         session.close(deadline=time.monotonic() + 5)

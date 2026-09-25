@@ -2950,8 +2950,8 @@ class GenerationCatalog:
         never writes activation history and never repairs anything. The single
         pointer belongs to the vault. Were a foreign repository allowed to
         activate, indexing one would make the vault's own scope unresolvable and
-        every knowledge query would fall back to the legacy index -- NEW-65,
-        recreated deliberately.
+        every knowledge query would lose its generation and read Markdown
+        directly (`no_active_generation`) -- NEW-65, recreated deliberately.
 
         The pointer path answers memory questions, so a code generation is
         never its answer: a code reader asks `code_generations_for_repository`.

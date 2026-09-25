@@ -3051,12 +3051,6 @@ def _patch_early_revision(monkeypatch, early_stage: str, revision) -> None:
     monkeypatch.setattr(code_navigation, "_compute_revision", replacement)
 
 
-def _early_capability(early_stage: str) -> Capability:
-    if early_stage == "unsupported":
-        return Capability.DECLARATIONS
-    return Capability.DEFINITIONS
-
-
 def _early_deadline(early_stage: str) -> float:
     if early_stage == "expired":
         return 0.0
@@ -3065,7 +3059,7 @@ def _early_deadline(early_stage: str) -> float:
 
 @pytest.mark.parametrize(
     "early_stage",
-    ["unsupported", "expired", "revision_timeout", "revision_error", "empty_revision"],
+    ["expired", "revision_timeout", "revision_error", "empty_revision"],
 )
 def test_early_results_preserve_live_session_readiness(
     repository: Path,
@@ -3079,11 +3073,10 @@ def test_early_results_preserve_live_session_readiness(
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     session._readiness = "query_ready"
     _patch_early_revision(monkeypatch, early_stage, revision)
-    capability = _early_capability(early_stage)
     deadline = _early_deadline(early_stage)
     try:
         result = navigation.query(
-            NavigationRequest(scope, capability, "pkg/service.py", 10, 20),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=deadline,
         )
         assert result.readiness == "query_ready"
@@ -3316,53 +3309,9 @@ def test_navigation_interruption_propagates_from_every_callback_boundary(
         session.close(deadline=time.monotonic() + 5)
 
 
-@pytest.mark.parametrize("capability", [Capability.DECLARATIONS, Capability.IMPORTS, Capability.INHERITANCE])
-def test_unrouted_capabilities_do_not_invoke_provider_or_structural_fallback(
-    repository: Path,
-    state_root: Path,
-    semantic_pyright: SemanticPyrightFixture,
-    monkeypatch: pytest.MonkeyPatch,
-    capability: Capability,
-) -> None:
-    scope = resolve_repository_scope(repository)
-    revision = _revision(repository, "a")
-    document = _open_document(scope, "pkg/service.py")
-    calls: list[str] = []
-    navigation, session = _navigation(
-        repository,
-        state_root,
-        semantic_pyright,
-        structural=lambda request, deadline: (
-            calls.append("structural") or _graph_location("pkg/api.py", 6, 15),
-        ),
-    )
-    monkeypatch.setattr(
-        code_navigation,
-        "_compute_revision",
-        lambda repository, *, deadline: calls.append("revision") or revision,
-    )
-    monkeypatch.setattr(
-        session,
-        "synchronize",
-        lambda value, *, deadline: calls.append("synchronize"),
-    )
-    monkeypatch.setattr(
-        session,
-        "open_document",
-        lambda path, *, deadline: calls.append("open") or document,
-    )
-    try:
-        result = navigation.query(
-            NavigationRequest(scope, capability, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 5,
-        )
-        assert result.status is NavigationStatus.UNSUPPORTED
-        assert result.effective_capability is None
-        assert result.resolution is ResolutionLabel.UNSUPPORTED
-        assert result.locations == ()
-        assert calls == []
-    finally:
-        session.close(deadline=time.monotonic() + 5)
+def test_every_capability_has_a_route() -> None:
+    """Audit C-44: no `Capability` exists that a query would have to refuse."""
+    assert set(Capability) == set(code_navigation._CAPABILITY_DIRECTION)
 
 
 @pytest.mark.parametrize(

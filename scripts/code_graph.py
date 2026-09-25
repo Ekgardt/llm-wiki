@@ -17,21 +17,13 @@ from __future__ import annotations
 
 import ast
 import importlib
-import json
 import math
 import os
 import re
-import shutil
 import sqlite3
 import stat
-import subprocess
-import sys
-import tempfile
-import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
-from importlib import metadata
 from pathlib import Path, PurePath
 
 try:
@@ -94,8 +86,6 @@ MAX_CALL_PAIR_ROWS = 200_000
 # candidate set from 8,546 of 10,000 rows (17% headroom) to 3,621 (2.8x).
 DEAD_CODE_NAME_PREFIXES = ("test_",)
 
-CODE_TOOLS_SCHEMA_VERSION = 1
-_MANIFEST_WRITE_LOCK = threading.Lock()
 
 QUERY_DIR = Path(__file__).with_name("queries")
 
@@ -135,163 +125,6 @@ def _get_parser(lang: str):
 def detect_language(file_path: Path) -> str | None:
     """Detect language from file extension."""
     return language_for_path(file_path)
-
-
-def _probe_version(args: list[str], timeout: float = 2) -> tuple[str | None, str | None]:
-    """Return a tool's first version line without invoking a shell."""
-    try:
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, check=False
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, str(exc)
-    output = (result.stdout or result.stderr).strip().splitlines()
-    if result.returncode != 0 or not output:
-        return None, f"version probe exited {result.returncode}"
-    return output[0], None
-
-
-def _command_tool(provider: str, path: str | None, args: list[str], semantic: bool) -> dict:
-    if not path:
-        return {
-            "provider": provider, "available": False, "version": None, "path": None,
-            "capabilities": {"semantic": semantic}, "failure": "executable not found",
-        }
-    version, failure = _probe_version([path, *args], timeout=2)
-    return {
-        "provider": provider,
-        "available": failure is None,
-        "version": version,
-        "path": str(Path(path).resolve()),
-        "capabilities": {"semantic": semantic},
-        "failure": failure,
-    }
-
-
-def _jedi_tool() -> dict:
-    """Jedi's availability, reported as one tool record either way."""
-    try:
-        version = metadata.version("jedi")
-        importlib.import_module("jedi")
-    except (ImportError, metadata.PackageNotFoundError) as exc:
-        return {
-            "provider": "jedi", "available": False, "version": None, "path": None,
-            "capabilities": {"semantic": False},
-            "failure": str(exc) or "package not found",
-        }
-    return {
-        "provider": "jedi", "available": True, "version": version,
-        "path": None, "capabilities": {"semantic": True}, "failure": None,
-    }
-
-
-def _tsc_names() -> tuple[str, ...]:
-    if sys.platform == "win32":
-        return ("tsc.cmd", "tsc")
-    return ("tsc", "tsc.cmd")
-
-
-def _local_tsc(directory: Path) -> Path | None:
-    binaries = directory / "node_modules" / ".bin"
-    candidates = (binaries / name for name in _tsc_names())
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-
-def _tsc_command(directory: Path) -> str | None:
-    """A workspace-local tsc outranks one on PATH."""
-    local = _local_tsc(directory)
-    if local is None:
-        return shutil.which("tsc")
-    return str(local)
-
-
-def _command_tools(directory: Path) -> dict:
-    """Probe the optional command-line servers in parallel."""
-    specifications = {
-        "typescript": ("typescript", _tsc_command(directory), ["--version"], False),
-        "rust": ("rust-analyzer", shutil.which("rust-analyzer"), ["--version"], False),
-        "go": ("gopls", shutil.which("gopls"), ["version"], False),
-    }
-    with ThreadPoolExecutor(max_workers=len(specifications)) as pool:
-        futures = {
-            name: pool.submit(_command_tool, *specification)
-            for name, specification in specifications.items()
-        }
-        return {name: futures[name].result() for name in specifications}
-
-
-def _manifest_destination(cache_path: Path | None) -> Path:
-    if cache_path is not None:
-        return cache_path
-    try:
-        from . import memory_state
-    except ImportError:
-        import memory_state
-    return memory_state.STATE_ROOT / "cache" / "code_tools.json"
-
-
-def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
-    """Detect optional semantic tools and atomically refresh their manifest."""
-    from datetime import datetime, timezone
-
-    directory = directory.resolve()
-    manifest = {
-        "schema_version": CODE_TOOLS_SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "tools": {"python": _jedi_tool(), **_command_tools(directory)},
-    }
-    _write_tool_manifest(_manifest_destination(cache_path), manifest)
-    return manifest
-
-
-_MANIFEST_REPLACE_ATTEMPTS = 20
-
-
-def _staged_manifest(path: Path, manifest: dict) -> Path:
-    """Write the manifest to a sibling temp file, removing it if the write fails.
-
-    The caller owns the returned path, so a failed write must not leave behind a
-    file whose name nobody holds: clean up here and re-raise.
-    """
-    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w", encoding="utf-8", dir=path.parent,
-        prefix=f"{path.name}.", suffix=".tmp", delete=False,
-    )
-    temporary = Path(handle.name)
-    try:
-        with handle:
-            json.dump(manifest, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
-
-
-def _sleep_before_retry(attempt: int) -> None:
-    if attempt < _MANIFEST_REPLACE_ATTEMPTS - 1:
-        time.sleep(0.01)
-
-
-def _replace_with_retry(temporary: Path, path: Path) -> None:
-    """Windows refuses os.replace while another writer still holds the target."""
-    for attempt in range(_MANIFEST_REPLACE_ATTEMPTS):
-        try:
-            os.replace(temporary, path)
-            return
-        except PermissionError:
-            _sleep_before_retry(attempt)
-
-
-def _write_tool_manifest(path: Path, manifest: dict) -> None:
-    """Atomically replace a manifest using a writer-unique sibling temp file."""
-    with _MANIFEST_WRITE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = _staged_manifest(path, manifest)
-        try:
-            _replace_with_retry(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 def _jedi_script(file_path: Path, workspace_root: Path):
@@ -953,9 +786,11 @@ def _print_index_stats(stats: dict) -> None:
 def index_directory(directory: Path, verbose: bool = True) -> dict:
     """Index all source files in a directory.
 
-    Returns stats: {files, functions, classes, calls, imports}
+    Returns stats: {files, functions, classes, calls, imports}. Read-only: the
+    code index is `repository_index.py index <dir>`; the tool manifest this wrote
+    was read by nothing and ran the repository's own `tsc` (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
     """
-    detect_code_tools(directory)
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
     if not directory.exists():
         return stats
@@ -2008,6 +1843,14 @@ def _live_dead_candidates_in_file(path: Path, result: dict, incoming) -> list[di
     return [item for item in found if item is not None]
 
 
+def _named_dead_candidates(candidates: list[dict], symbol: str | None) -> list[dict]:
+    """Only the candidates the named symbol could be, as the stored path selects."""
+    if not symbol:
+        return candidates
+    wanted = str(symbol).rsplit(".", 1)[-1]
+    return [item for item in candidates if item.get("name") == wanted]
+
+
 def _stored_dead_code_result(directory: Path, with_report: bool, symbol=None):
     if with_report:
         return _store_find_dead_code(directory, with_report=True, symbol=symbol)
@@ -2023,11 +1866,13 @@ def find_dead_code(
 ) -> list[dict] | dict:
     """Return conservative dead-code candidates from the incomplete static graph.
 
-    `symbol` narrows the question to one name, and with it the reference scan:
-    asking about one function used to parse every Python source in the
-    repository (11 s, measured 2026-09-12) to answer about one of them. The
-    verdict for that name is unchanged — a file that does not mention the name
-    cannot reference it — and the report says how many sources were skipped.
+    `symbol` narrows the question to one name. On the stored path it narrows the
+    reference scan too: asking about one function used to parse every Python
+    source in the repository (11 s, measured 2026-09-12). The verdict for that
+    name is unchanged — a file that does not mention the name cannot reference it
+    — and the report says how many sources were skipped. The live path must parse
+    the workspace to see its calls; it answers only for the name (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
     """
     stored, reason = None, NO_GENERATION
     if not live:
@@ -2041,7 +1886,7 @@ def find_dead_code(
     candidates: list[dict] = []
     for path, result in parsed:
         candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
-    candidates = _ordered_dead_candidates(candidates)
+    candidates = _ordered_dead_candidates(_named_dead_candidates(candidates, symbol))
     report = {
         **_live_report(directory, parsed, reason),
         **_dead_code_counts(candidates),
@@ -3518,7 +3363,9 @@ def _cli_callers(function_name: str, directory: Path, *, live: bool) -> int:
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Code graph — tree-sitter code intelligence.")
-    p.add_argument("directory", nargs="?", default=".", help="Directory to index.")
+    p.add_argument(
+        "directory", nargs="?", default=".", help="Directory to summarize (read-only)."
+    )
     p.add_argument("--callers", type=str, default=None, help="Find callers of a function.")
     p.add_argument(
         "--live",

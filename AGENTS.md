@@ -484,7 +484,8 @@ uv run python scripts/lookup_mode.py               # show retrieval tier
 uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
 # v4.0 optional features (require --extra flags):
-uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
+uv run python scripts/repository_index.py index .  # index a repository's code (a generation)
+uv run python scripts/code_graph.py .              # read-only live parse summary
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation
 uv run python scripts/access_tracking.py --flush   # flush access counts

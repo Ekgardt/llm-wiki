@@ -118,7 +118,6 @@ class WorkspaceDelta:
     changed: tuple[str, ...]
     renamed: tuple[tuple[str, str], ...]
     deleted: tuple[str, ...]
-    configuration_changed: bool
 
 
 _Identity = tuple[int, int, int, int, int, int]
@@ -937,13 +936,7 @@ def _git_output(
     command = _git_command(root, arguments, executable)
     process = subprocess.Popen(command, **_git_popen_options(environment, pass_fds))
     holds_fds = bool(pass_fds) and os.name != "nt"
-    local_deadline = time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
-    run = _GitRun(
-        process,
-        maximum_bytes,
-        local_deadline if deadline is None else min(local_deadline, deadline),
-        cancelled,
-    )
+    run = _GitRun(process, maximum_bytes, _git_run_deadline(deadline), cancelled)
     try:
         run.wait_for_output()
         output = run.output()
@@ -955,6 +948,18 @@ def _git_output(
     return _git_run_outcome(
         run, command, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
+
+
+def _git_run_deadline(deadline: float | None) -> float:
+    """The caller's deadline; `GIT_STATUS_TIMEOUT_SECONDS` only when it gave none.
+
+    A 5 s cap under every budget failed a large checkout's `git status` inside a
+    deadline that would have fit it (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
+    """
+    if deadline is None:
+        return time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
+    return deadline
 
 
 def _git_state_head_identity(output: bytes) -> bytes:
@@ -5001,11 +5006,6 @@ def _changed_paths(
     }
 
 
-def _any_configuration(paths: Iterable[str]) -> bool:
-    """Whether any of these paths is one of the checkout's configuration files."""
-    return any(_is_configuration(path) for path in paths)
-
-
 def diff_workspace_revisions(
     before: WorkspaceRevision, after: WorkspaceRevision
 ) -> WorkspaceDelta:
@@ -5020,13 +5020,10 @@ def diff_workspace_revisions(
     created = set(after_entries) - set(before_entries)
     deleted = set(before_entries) - set(after_entries)
     changed = _changed_paths(before_entries, after_entries)
-    configuration_changed = _any_configuration(created | changed | deleted)
     renames = _unambiguous_renames(deleted, created, before_entries, after_entries)
     return WorkspaceDelta(
         created=tuple(sorted(created)),
         changed=tuple(sorted(changed)),
         renamed=tuple(sorted(renames)),
         deleted=tuple(sorted(deleted)),
-        configuration_changed=configuration_changed
-        or _any_configuration(path for pair in renames for path in pair),
     )

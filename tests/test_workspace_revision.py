@@ -262,7 +262,6 @@ def test_public_contract_has_exact_constants_dataclass_fields_and_signatures() -
             "changed",
             "renamed",
             "deleted",
-            "configuration_changed",
         ],
     )
     assert (
@@ -300,11 +299,10 @@ def test_revision_changes_for_dirty_untracked_deleted_and_config(repository: Pat
         _entries(after)["pkg/base.py"],
     ) == (True, True, RevisionEntry("pkg/base.py", "deleted", None, 0))
     delta = diff_workspace_revisions(before, after)
-    assert (delta.created, delta.changed, delta.deleted, delta.configuration_changed) == (
+    assert (delta.created, delta.changed, delta.deleted) == (
         ("pkg/new.py",),
         ("pkg/api.py", "pyrightconfig.json"),
         ("pkg/base.py",),
-        True,
     )
 
 
@@ -3061,7 +3059,7 @@ def test_delta_detects_content_identical_rename(repository: Path) -> None:
         ("pkg/settings.py", "pyrightconfig.json"),
     ],
 )
-def test_content_rename_reports_configuration_change_for_either_path(
+def test_a_content_rename_of_a_configuration_file_is_paired(
     source: str, destination: str
 ) -> None:
     digest = "a" * 64
@@ -3083,7 +3081,6 @@ def test_content_rename_reports_configuration_change_for_either_path(
     delta = diff_workspace_revisions(before, after)
 
     assert delta.renamed == ((source, destination),)
-    assert delta.configuration_changed is True
 
 
 def test_ambiguous_content_matches_remain_created_and_deleted(repository: Path) -> None:

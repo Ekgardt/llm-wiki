@@ -1439,7 +1439,7 @@ def _is_real_digest(sha: object) -> bool:
 def _source_sha256(row: Mapping[str, Any]) -> str:
     """The digest of the row's source.
 
-    The legacy FTS index stores no digest, so a row from it carried sixty-four
+    The legacy FTS index (retired 2026-09-23) stored no digest, so a row from it carried sixty-four
     zeros — a value that passes the citation schema while identifying nothing.
     The page is right there, so it is hashed instead, and the placeholder is
     left for the case where the file genuinely cannot be read.

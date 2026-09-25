@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Navigation cleanup (audit C-44): the dead `code_intelligence` text helpers and three unreachable `Capability` members are removed (a test now holds that every capability has a route); `code_graph.py <dir>` no longer writes the unread `cache/code_tools.json` or runs the analysed repository's own `tsc`; live `find_dead_code` answers only for the named symbol; a Git run in `workspace_revision` gets the caller's whole deadline instead of a 5 s cap; `WorkspaceDelta.configuration_changed` (read by nothing) is removed; comments no longer describe the retired legacy index as a fallback. CLAUDE.md and AGENTS.md name `repository_index.py index <dir>` as the indexing command.
 - A worktree its owner marked not to index is no longer a follow candidate, so eight such worktrees can no longer take every nightly follow slot from the rest (audit C-43).
 - Vault code generations built before their manifest named their code roots are now collected: repository retention asks the catalog's own `holds_code`, the predicate prune uses, so no generation falls between the two collectors (audit C-42).
 - The live code graph parses only regular files of its own tree up to 8 MiB (a symbolic link to a file elsewhere is no longer read), and no longer starts one unused `git log` per file (about 836 processes per live answer on this repository); the unread `git_commit`/`valid_from`/`author` parse fields are removed (audit C-41).

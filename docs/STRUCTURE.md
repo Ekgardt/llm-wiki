@@ -101,9 +101,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── typescript-language-server/6.0.0/   with tsserver 5.9.3
 │   │   ├── gopls/v0.23.0/             built from the pinned Go 1.27.1 toolchain
 │   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
-│   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
-│   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
-│   └── code_tools.json               v4.0: atomic code-tool capability manifest
+│   └── code-hints/                  #24 C1: per-checkout hook-time symbol table
+│       └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
 │   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
@@ -613,8 +612,9 @@ or nonzero active state remains fail-closed.
   changes the requirement to publish a complete generation. POSIX collection is
   descriptor-authoritative; Windows reparse and identity checks are best effort.
   This adds no daemon or automatic legacy-cache removal.
-- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph),
-  `code_tools.json` (fresh code-tool detection and active semantic capabilities).
+- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph). The
+  `code_tools.json` tool manifest was retired on 2026-09-25: read by nothing, it
+  ran the analysed repository's own `tsc`; an old copy is disposable cache.
   `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
   roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
   `rust-analyzer/1.98.1`); `scripts/install_pyright.py` and

@@ -1461,16 +1461,8 @@ class CodeNavigation:
     def _query_refusal(
         self, request: NavigationRequest, deadline: float
     ) -> NavigationResult | None:
-        if request.capability not in _CAPABILITY_DIRECTION:
-            return _empty_result(
-                request,
-                NavigationStatus.UNSUPPORTED,
-                revision_before="",
-                revision_after="",
-                readiness=self._session.readiness,
-                resolution=ResolutionLabel.UNSUPPORTED,
-                warnings=("capability is unsupported",),
-            )
+        # Every `Capability` has a route (tests/test_code_navigation.py holds it),
+        # so no request is refused for its capability (audit C-44).
         if time.monotonic() >= deadline:
             return _empty_result(
                 request,

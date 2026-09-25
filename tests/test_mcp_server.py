@@ -5151,11 +5151,6 @@ def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
         "index_directory",
         lambda *_args, **_kwargs: pytest.fail("adapter must never index"),
     )
-    monkeypatch.setattr(
-        code_graph,
-        "detect_code_tools",
-        lambda *_args, **_kwargs: pytest.fail("adapter must never write tool cache"),
-    )
     deadline = time.monotonic() + 5
     definition_request = NavigationRequest(
         scope,

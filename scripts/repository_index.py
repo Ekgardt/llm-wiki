@@ -14,8 +14,9 @@ under the vault's own state root.
 
 **A foreign generation is registered, never activated.** The catalog has one
 active pointer and it belongs to the vault. Activating a foreign generation
-would make the vault's own scope unresolvable and send every knowledge query
-back to the legacy index -- NEW-65, recreated on purpose. Selection for a
+would make the vault's own scope unresolvable, and every knowledge query would
+lose its generation and read Markdown directly (`no_active_generation`) --
+NEW-65, recreated on purpose. Selection for a
 foreign scope is `GenerationCatalog._scoped_generation`, which never moves the
 pointer.
 
