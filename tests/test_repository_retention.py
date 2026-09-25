@@ -124,8 +124,28 @@ def test_the_vault_and_every_activated_generation_are_never_grouped(adopted_vaul
     vault = {"repository_scope": {"checkout_id": "checkout:v", "checkout_root": str(root)}}
     manifests = [("g-foreign", "t", foreign), ("g-vault", "t", vault), ("g-active", "t", foreign), ("g-none", "t", {})]
 
-    groups = repository_retention._foreign_groups(manifests, frozenset({"g-active"}))
+    groups = repository_retention._foreign_groups(manifests, frozenset({"g-active"}), _code_roots_only)
     assert {key: value["generations"] for key, value in groups.items()} == {"checkout:f": ["g-foreign"]}
+
+
+def _code_roots_only(_identifier, manifest) -> bool:
+    return bool(manifest.get("code_roots"))
+
+
+def test_a_vault_code_generation_without_code_roots_is_retentions_to_collect(adopted_vault):
+    """Audit C-42: the catalog's `holds_code` decides, not the manifest field alone."""
+    import repository_retention
+
+    root, _state = adopted_vault
+    vault = {"repository_scope": {"checkout_id": "checkout:v", "checkout_root": str(root)}}
+    manifests = [("g-legacy-code", "t", vault), ("g-memory", "t", vault)]
+
+    groups = repository_retention._foreign_groups(
+        manifests, frozenset(), lambda identifier, _manifest: identifier == "g-legacy-code"
+    )
+    assert {key: value["generations"] for key, value in groups.items()} == {
+        "checkout:v": ["g-legacy-code"]
+    }
 
 
 def test_the_nightly_retires_after_refreshing_and_before_pruning():

@@ -61,23 +61,28 @@ def _is_vault(scope: Mapping, vault: Path) -> bool:
     return Path(str(scope.get("checkout_root", ""))).resolve() == vault
 
 
-def _vault_memory(manifest: Mapping, scope: Mapping, vault: Path) -> bool:
-    """A vault generation holding no code: a memory publication, `prune_generations`' to judge."""
-    return _is_vault(scope, vault) and not manifest.get("code_roots")
+def _vault_memory(identifier: str, manifest: Mapping, scope: Mapping, holds_code) -> bool:
+    """A vault generation holding no code: a memory publication, `prune_generations`' to judge.
+
+    Asked through the catalog's own `holds_code`, the predicate prune uses: reading
+    only `code_roots` left a vault code generation built before 2026-09-12 to prune,
+    which leaves code to retention, so neither removed it (audit C-42,
+    docs/research/2026-09-25-retention-and-prune-share-one-code-predicate.md).
+    """
+    return _is_vault(scope, _vault_root()) and not holds_code(identifier, manifest)
 
 
-def _foreign_groups(manifests, activated: frozenset[str]) -> dict[str, dict]:
+def _foreign_groups(manifests, activated: frozenset[str], holds_code) -> dict[str, dict]:
     """checkout_id -> {scope, generations newest first}; vault memory and activated excluded.
 
     The vault's code generations are grouped like any checkout's: nothing else
     collects them. See
     `docs/research/2026-09-17-the-vault-code-generations-have-a-collector.md`.
     """
-    vault = _vault_root()
     groups: dict[str, dict] = {}
     for identifier, _registered_at, manifest in manifests:
         scope = _scope_of(manifest)
-        if scope is None or identifier in activated or _vault_memory(manifest, scope, vault):
+        if scope is None or identifier in activated or _vault_memory(identifier, manifest, scope, holds_code):
             continue
         group = groups.setdefault(str(scope.get("checkout_id")), {"scope": scope, "generations": []})
         group["generations"].append(identifier)
@@ -127,7 +132,9 @@ def _planned(checkout_id: str, group: dict) -> dict:
 def plan_retention(catalog, *, deadline: float | None = None) -> list[dict]:
     """What each foreign checkout keeps and retires; nothing is removed here."""
     manifests = catalog.registered_manifests(deadline=deadline)
-    groups = _foreign_groups(manifests, catalog.activated_generation_ids(deadline=deadline))
+    groups = _foreign_groups(
+        manifests, catalog.activated_generation_ids(deadline=deadline), catalog.holds_code
+    )
     return [_planned(checkout_id, group) for checkout_id, group in sorted(groups.items())]
 
 
