@@ -17,6 +17,11 @@ from pathlib import PurePosixPath
 from typing import Protocol
 
 try:
+    from .python_parse import PARSE_FAILURES
+except ImportError:
+    from python_parse import PARSE_FAILURES
+
+try:
     from .graph_storable import storable_identity_key, storable_metadata
 except ImportError:
     from graph_storable import storable_identity_key, storable_metadata
@@ -2202,7 +2207,7 @@ class _Collector:
             self.check_stop()
             tree = ast.parse(source.content, filename=source.record.relative_path)
             self.check_stop()
-        except (SyntaxError, ValueError, UnicodeError) as exc:
+        except PARSE_FAILURES as exc:
             self.add_observation(
                 self.source_modules[source.record.logical_id],
                 "PARSES", str(exc), "parse_error", source, _whole_span(source),

@@ -8,6 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from .python_parse import PARSE_FAILURES
+except ImportError:
+    from python_parse import PARSE_FAILURES
+
 
 @dataclass(frozen=True)
 class SymbolRegistry:
@@ -94,7 +99,7 @@ class _ReExport:
 def _parsed_module(path: Path) -> ast.Module | None:
     try:
         return ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, SyntaxError):
+    except (OSError, *PARSE_FAILURES):
         return None
 
 
@@ -213,16 +218,22 @@ def resolve_python_imports_and_calls(
     workspace_root: Path | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Return Python imports and calls with lexical and workspace evidence."""
-    try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, SyntaxError):
+    tree = _parsed_module(file_path)
+    if tree is None:
         return [], []
-
     root = workspace_root or file_path.parent
     module_name = _module_name(file_path, root)
     package_name = module_name if file_path.name == "__init__.py" else module_name.rpartition(".")[0]
     visitor = _CallVisitor(module_name, package_name, workspace_symbols or EMPTY_REGISTRY)
-    visitor.visit(tree)
+    return _visited(visitor, tree)
+
+
+def _visited(visitor: _CallVisitor, tree: ast.Module) -> tuple[list[dict], list[dict]]:
+    """A tree deeper than the visitor's recursion is a file this reader cannot read."""
+    try:
+        visitor.visit(tree)
+    except RecursionError:
+        return [], []
     return visitor.imports, visitor.calls
 
 

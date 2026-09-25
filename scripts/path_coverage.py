@@ -23,6 +23,11 @@ import ast
 import hashlib
 from pathlib import Path
 
+try:
+    from .python_parse import PARSE_FAILURES
+except ImportError:
+    from python_parse import PARSE_FAILURES
+
 NODE_CEILING = 10_000
 PARSE_ERROR_LIMIT = 20
 PARSE_NODE_CEILING = 200_000
@@ -186,7 +191,7 @@ def _python_parse(content: bytes) -> dict:
             "message": str(exc.msg)[:200],
         }
         return {"status": "error", "language": "python", "errors": [error], "errors_truncated": False}
-    except (ValueError, UnicodeError) as exc:
+    except PARSE_FAILURES as exc:
         error = {"kind": type(exc).__name__, "line_start": 1, "line_end": 1, "message": str(exc)[:200]}
         return {"status": "error", "language": "python", "errors": [error], "errors_truncated": False}
     return {"status": "ok", "language": "python", "errors": [], "errors_truncated": False}

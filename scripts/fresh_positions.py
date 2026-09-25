@@ -17,6 +17,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+try:
+    from .python_parse import PARSE_FAILURES
+except ImportError:
+    from python_parse import PARSE_FAILURES
+
 MAX_FILES = 20
 # One source file re-read for fresh positions; a snippet reads at most 1 MiB.
 MAX_FILE_BYTES = 4 * 1024 * 1024
@@ -106,7 +111,7 @@ def definition_spans(path: Path) -> dict[str, tuple[int, int]]:
         spans: dict[str, tuple[int, int]] = {}
         _record_spans_body(ast.parse(path.read_text(encoding="utf-8")), "", spans)
         return spans
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError):
+    except (OSError, *PARSE_FAILURES):
         return {}
 
 
@@ -134,7 +139,7 @@ def definition_lines(path: Path) -> dict[str, int]:
         if path.stat().st_size > MAX_FILE_BYTES:
             return {}
         return _parsed_definitions(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError):
+    except (OSError, *PARSE_FAILURES):
         return {}
 
 
