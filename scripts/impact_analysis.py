@@ -1183,7 +1183,7 @@ def analyze_impact(
     run.map_changes(graph, root)
     fallback: list[dict] = []
     if textual_fallback:
-        fallback = _textual_fallback(run.textual_names, bounds, deadline, cancelled)
+        fallback = run.textual_fallback()
     return run.report(comparison, fallback)
 
 
@@ -1280,6 +1280,21 @@ class _ImpactRun:
         self.textual_names.update(str(item["name"]) for item in self.changed_symbols)
         if self.changes and not self.changed_symbols:
             self.warn("Changed ranges did not resolve to canonical symbols in the active graph.")
+
+    def textual_fallback(self) -> list[dict]:
+        """The word-match pages, or none with a warning when the note scan fails.
+
+        A note that changed during the scan, or a scan ceiling, raised out of
+        `analyze_impact` and lost the graph answer already computed (audit C-35,
+        docs/research/2026-09-25-an-impact-answer-outlives-its-note-scan.md).
+        """
+        try:
+            return _textual_fallback(self.textual_names, self.bounds, self.deadline, self.cancelled)
+        except TimeoutError:
+            raise
+        except (OSError, ValueError) as exc:
+            self.warn(f"Textual fallback unavailable: {exc}")
+            return []
 
     def _reached_ids(self, graph) -> set[str]:
         symbol_ids = {item["node_id"] for item in self.changed_symbols}

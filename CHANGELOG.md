@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An impact answer keeps its graph result when the note scan fails: a note changed mid-scan or a scan ceiling becomes a warning instead of losing the answer (audit C-35).
 - rust-analyzer and gopls answer queries offline (`CARGO_NET_OFFLINE=true`, `GOPROXY=off`): they could fetch crates or modules into the managed cache while a query waited.
 - The workspace revision behind code navigation holds only relevant files and sees nested server configuration: an edited `README.md` no longer enters it while dirty (its commit made the server receive a `deleted` event for a file that exists), and a nested `go.mod` or `Cargo.toml` is now watched.
 - A language-server process that failed for good is replaced by the next query, within the startup retry budget: the session kept the dead process and never started another, so a key in steady use stayed degraded.
