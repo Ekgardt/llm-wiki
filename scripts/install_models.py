@@ -63,6 +63,7 @@ STATE_PRESENT = "present"
 STATE_FETCHED = "fetched"
 STATE_MISSING = "missing"
 STATE_MISMATCH = "mismatch"
+STATE_UNREACHABLE = "unreachable"
 EXIT_INCOMPLETE = 1
 EXIT_NO_LIBRARY = 2
 
@@ -322,11 +323,28 @@ def retire_superseded(model: PinnedModel, hub) -> list[str]:
 
 
 def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
-    """Ensure the weights; only verified weights retire what they replace."""
-    outcome = ensure(model, hub, download=download)
+    """Ensure the weights; only verified weights retire what they replace.
+
+    A fetch that fails (offline, a server error) is this model's outcome, not the
+    run's end: the next model is still tried (audit C-29 class,
+    docs/research/2026-09-25-one-bad-generation-does-not-stop-the-prune.md).
+    """
+    try:
+        outcome = ensure(model, hub, download=download)
+    except _fetch_failures() as error:
+        return _outcome(model, STATE_UNREACHABLE, None, f"{type(error).__name__}: fetch failed")
     if download and outcome["state"] in {STATE_PRESENT, STATE_FETCHED}:
         outcome["retired"] = retire_superseded(model, hub)
     return outcome
+
+
+def _fetch_failures() -> tuple[type[BaseException], ...]:
+    """OSError (the Hub's own errors derive from it) and the transport's, when installed."""
+    try:
+        import httpx
+    except ImportError:
+        return (OSError,)
+    return (OSError, httpx.HTTPError)
 
 
 def _runtime_installed(model: PinnedModel) -> bool:

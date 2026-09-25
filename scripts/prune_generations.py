@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -199,15 +201,28 @@ def _discard_one(
     return f"removed {identifier} ({reclaimed} bytes)", reclaimed
 
 
-def _discard_reporting_failure(
-    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
-) -> tuple[str, int]:
+# What one generation's removal may raise without stopping the pass: the next
+# generation is still tried and this one is named `ERROR:` (audit C-29,
+# docs/research/2026-09-25-one-bad-generation-does-not-stop-the-prune.md).
+_ONE_GENERATION_FAILURES = (OSError, ValueError, TimeoutError, RuntimeError, sqlite3.Error)
+
+
+def _attempted(identifier: str, deadline: float, removal: Callable[[], tuple[str, int]]) -> tuple[str, int]:
+    """One removal inside the pass's deadline; its failure is its own line."""
     if time.monotonic() >= deadline:
         return f"DEFERRED: {identifier}: the pass's budget is spent", 0
     try:
-        return _discard_one(catalog, identifier, retained_ancestors, deadline)
-    except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+        return removal()
+    except _ONE_GENERATION_FAILURES as error:
         return f"ERROR: {identifier}: {error}", 0
+
+
+def _discard_reporting_failure(
+    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
+) -> tuple[str, int]:
+    return _attempted(
+        identifier, deadline, lambda: _discard_one(catalog, identifier, retained_ancestors, deadline)
+    )
 
 
 def _planned(plan: PrunePlan) -> list[str]:
@@ -217,13 +232,12 @@ def _planned(plan: PrunePlan) -> list[str]:
 
 def _discard_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
     """A publication no writer touched for a day, removed the way an aborted build removes its own."""
-    if time.monotonic() >= deadline:
-        return f"DEFERRED: {identifier}: the pass's budget is spent", 0
+    return _attempted(identifier, deadline, lambda: _discard_one_abandoned(catalog, identifier, deadline))
+
+
+def _discard_one_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
     reclaimed = _directory_bytes(catalog.generations_path / identifier)
-    try:
-        catalog.discard_unactivated(identifier, deadline=deadline)
-    except (OSError, ValueError, TimeoutError, RuntimeError) as error:
-        return f"ERROR: {identifier}: {error}", 0
+    catalog.discard_unactivated(identifier, deadline=deadline)
     return f"removed abandoned {identifier} ({reclaimed} bytes)", reclaimed
 
 

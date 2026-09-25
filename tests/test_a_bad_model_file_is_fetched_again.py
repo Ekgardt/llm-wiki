@@ -61,3 +61,23 @@ def test_a_verified_unchanged_file_is_not_read_again(tmp_path, monkeypatch) -> N
     outcome = install_models.ensure(model, hub, download=True)
 
     assert (outcome["state"], reads) == (install_models.STATE_PRESENT, [])
+
+
+def test_an_unreachable_hub_fails_one_model_and_the_next_is_still_tried(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
+    contents = {"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"}
+    hub = _CachingHub(tmp_path / "hub", contents)
+    real_download = hub.snapshot_download
+
+    def offline_for_the_encoder(repo_id, **options):
+        if repo_id == "org/encoder":
+            raise OSError("connection refused")
+        return real_download(repo_id, **options)
+
+    hub.snapshot_download = offline_for_the_encoder
+    states = [
+        install_models._settled_and_retired(model, hub, download=True)["state"]
+        for model in _pinned_to(contents)
+    ]
+
+    assert states == [install_models.STATE_UNREACHABLE, install_models.STATE_FETCHED]
