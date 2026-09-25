@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- With no active generation a natural question still finds pages: the Markdown fallback drops stop words and ranks pages by how many of the question's words they share, where it required every word, so "почему systemd таймер, а не cron" found nothing. Common Russian function words join the shared stop-word list.
 - The MCP supervisor waits 35 s for a worker whose input closed before it signals it, so the worker's own 30-second wait for model inference is not cut short; and a server source removed while the supervisor fingerprints the code (the nightly update) changes the fingerprint instead of crashing the supervisor.
 - A grounded `recall` through MCP has the grounded budget (120 s) instead of the 10 s every tool got, so it can answer at all; its provider call runs under a ceiling equal to the time left and is ended at the deadline instead of outliving it. The per-call ceiling is kept per context, so a compile's ceiling no longer applies to calls on other server threads.
 - The ownership helpers refuse with `adopted_registry_required` instead of opening the migration-candidate database when called on an adopted vault without its registry.

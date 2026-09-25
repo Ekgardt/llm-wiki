@@ -2969,6 +2969,8 @@ _QUERY_STOPWORDS = frozenset(
         "в", "во", "для", "до", "за", "и", "из", "или", "как", "какой", "когда",
         "мне", "мой", "моя", "на", "не", "о", "от", "по", "при", "с", "у",
         "что", "чтобы", "это", "я",
+        "а", "но", "почему", "зачем", "ли", "же", "бы", "то", "так", "где",
+        "кто", "чем", "мы", "вы", "ты", "он", "она", "они", "его", "её", "ее",
     }
 )
 
@@ -3993,6 +3995,12 @@ def _direct_match_score(
     return score * trust_weight(read.authority, read.page_type)
 
 
+def _evidence_terms(query: str) -> set[str]:
+    """The question's words without stop words, or all of them when that is all it has."""
+    words = re.findall(r"\w+", query.casefold())
+    return {word for word in words if _carries_evidence(word)} or set(words)
+
+
 def _direct_page_hit(
     page: Path,
     *,
@@ -4006,12 +4014,12 @@ def _direct_page_hit(
     if read is None:
         return None
     body = _strip_frontmatter(read.content)
-    terms = _document_terms(page, read.title, read.summary, body)
-    if not query_terms.issubset(terms) or not _page_read_eligible(
+    shared = query_terms & _document_terms(page, read.title, read.summary, body)
+    if not shared or not _page_read_eligible(
         read, project=project, since=since, as_of=as_of
     ):
         return None
-    score = round(_direct_match_score(page, read.title, read, query_terms), 2)
+    score = round(_direct_match_score(page, read.title, read, shared), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "no_active_generation",
@@ -4030,8 +4038,14 @@ def _direct_markdown_hits(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> list[dict]:
-    """Return bounded literal matches from authoritative Markdown only."""
-    query_terms = set(re.findall(r"\w+", query.casefold()))
+    """Return bounded literal matches from authoritative Markdown only.
+
+    A page qualifies on any word of the question that carries evidence and ranks
+    by how many it shares; requiring every word, stop words included, found
+    nothing for a natural question (audit B-22,
+    docs/research/2026-09-25-a-question-finds-pages-without-a-generation.md).
+    """
+    query_terms = _evidence_terms(query)
     if not query_terms:
         return []
     results: list[dict] = []
