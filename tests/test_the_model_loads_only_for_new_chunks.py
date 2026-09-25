@@ -52,7 +52,7 @@ def test_an_unchanged_corpus_builds_its_vectors_without_the_model(tmp_path, monk
     import search_memory
 
     snapshot, parent = _parent_generation(tmp_path)
-    monkeypatch.setattr(search_memory, "_have_sentence_transformers", lambda: True)
+    monkeypatch.setattr(search_memory, "_have_encoder_runtime", lambda: True)
     monkeypatch.setattr(search_memory, "_get_embedder", lambda: pytest.fail("the model must not load"))
     child = tmp_path / "gen-2"
     child.mkdir()
@@ -66,7 +66,7 @@ def test_a_model_that_cannot_load_when_needed_still_means_no_vectors(tmp_path, m
     import search_memory
 
     snapshot = _snapshot_from(tmp_path / "vault", {"a.md": _PAGE.format(title="Alpha", body="alpha body")})
-    monkeypatch.setattr(search_memory, "_have_sentence_transformers", lambda: True)
+    monkeypatch.setattr(search_memory, "_have_encoder_runtime", lambda: True)
     monkeypatch.setattr(search_memory, "_get_embedder", lambda: None)
     child = tmp_path / "gen-1"
     child.mkdir()

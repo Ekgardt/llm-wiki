@@ -79,7 +79,7 @@ provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama �
 ### 搜索与检索
 - **Generation-consistent retrieval**：一个经过验证的不可变 generation 可将 FTS、vectors、graph、tiers 和 evidence 绑定到同一 source snapshot
 - **如实的 retrieval trace**：结果报告 requested/effective mode、实际使用的 signals、generation、reranker 状态和 fallback 原因
-- **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（sentence-transformers）+ evidence-backed Graph-neighbor RRF
+- **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（ONNX Runtime 上的多语言 E5）+ evidence-backed Graph-neighbor RRF
 - **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
 - **Typed-provenance 排序**——同一张权重表（`user` 1.35、`web` 1.1、`ai-derived` 1.0、`inferred` 0.8）在每条路径上乘以决定顺序的分数：BM25、融合 RRF 与重排序之后

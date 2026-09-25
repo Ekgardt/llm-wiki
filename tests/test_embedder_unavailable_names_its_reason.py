@@ -3,7 +3,7 @@
 `_get_embedder` was `except Exception: return None`. Returning None is the
 right answer — the generation reader treats an unusable query vector as "no
 dense signal" by contract — but it was the *only* answer. A missing
-`sentence-transformers`, a model that was never downloaded, and a corrupt
+encoder runtime, a model that was never downloaded, and a corrupt
 weight file were indistinguishable from one another and from a vault that
 simply had no vectors yet.
 
@@ -18,8 +18,7 @@ once per process rather than once per call.
 
 from __future__ import annotations
 
-import builtins
-
+import onnx_encoder
 import pytest
 import search_memory
 
@@ -34,39 +33,17 @@ def _fresh_embedder_state(monkeypatch):
     monkeypatch.setattr(search_memory, "_embedder_announced", set(), raising=False)
 
 
-def _import_raises(exc: BaseException):
-    real_import = builtins.__import__
-
-    def _fake_import(name, *args, **kwargs):
-        if name == "sentence_transformers" or name.startswith("sentence_transformers."):
-            raise exc
-        return real_import(name, *args, **kwargs)
-
-    return _fake_import
-
-
 def _loader_raises(monkeypatch, exc: BaseException):
-    class _Module:
-        @staticmethod
-        def SentenceTransformer(*args, **kwargs):
-            raise exc
+    def _raise(*_args, **_kwargs):
+        raise exc
 
-    real_import = builtins.__import__
-
-    def _fake_import(name, *args, **kwargs):
-        if name == "sentence_transformers":
-            return _Module
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    monkeypatch.setattr(onnx_encoder, "load_encoder", _raise)
 
 
 def test_a_missing_dependency_names_itself_and_still_yields_no_dense_signal(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        builtins, "__import__", _import_raises(ImportError("No module named x"))
-    )
+    _loader_raises(monkeypatch, ImportError("No module named 'onnxruntime'"))
 
     assert search_memory._get_embedder() is None
     reason = search_memory.embedder_unavailable_reason()
@@ -77,7 +54,7 @@ def test_a_missing_dependency_names_itself_and_still_yields_no_dense_signal(
 def test_a_model_that_is_not_on_disk_is_not_the_same_as_a_missing_package(
     monkeypatch,
 ):
-    _loader_raises(monkeypatch, OSError("model files not found locally"))
+    _loader_raises(monkeypatch, FileNotFoundError("onnx/model.onnx is not in the local cache"))
 
     assert search_memory._get_embedder() is None
     reason = search_memory.embedder_unavailable_reason()
@@ -117,14 +94,11 @@ def test_the_reason_is_redacted_and_bounded(monkeypatch):
 
 
 def test_the_import_probe_records_the_same_reason(monkeypatch):
-    monkeypatch.setattr(
-        builtins,
-        "__import__",
-        _import_raises(ImportError("No module named 'sentence_transformers'")),
-    )
+    monkeypatch.setattr(search_memory, "ENCODER_PACKAGES", ("a_package_nobody_installed",))
 
-    assert search_memory._have_sentence_transformers() is False
-    assert "import_failed" in (search_memory.embedder_unavailable_reason() or "")
+    assert search_memory._have_encoder_runtime() is False
+    reason = search_memory.embedder_unavailable_reason() or ""
+    assert "import_failed" in reason and "a_package_nobody_installed" in reason
 
 
 def test_no_dense_signal_is_still_not_an_exception(monkeypatch):

@@ -81,3 +81,10 @@ The full suite in a clean detached worktree with an external state root gave
 - `tests/test_runtime_deletion_contract.py`
 - `scripts/search_memory.py`, `tests/test_the_query_path_reads_local_weights_only.py`
 - `tests/test_lsp_process.py`
+
+## Superseded the same day
+
+The encoder moved to ONNX Runtime later on 2026-09-25
+(`docs/research/2026-09-25-the-encoder-runs-without-torch.md`). It imports
+neither `transformers` nor `sentence-transformers`, so there is no loading bar to
+silence, and `search_memory.quiet_model_loading` was removed with its test.

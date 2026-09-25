@@ -79,7 +79,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Search and retrieval
 - **Generation-consistent retrieval**: one validated immutable generation can bind FTS, vectors, graph, tiers, and evidence to the same source snapshot
 - **Truthful retrieval traces**: results report requested/effective mode, signals actually used, generation, reranker state, and fallback reason
-- **Triple-fusion when available**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
+- **Triple-fusion when available**: BM25 (FTS5) + Vector (multilingual E5 on ONNX Runtime) + evidence-backed Graph-neighbor RRF
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked

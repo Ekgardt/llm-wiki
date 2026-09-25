@@ -293,6 +293,18 @@ the legacy index files are no longer read (see Removed).
 
 ### Changed
 
+- **The encoder runs through ONNX Runtime, without torch.** The search loaded
+  `intfloat/multilingual-e5-small` through `sentence-transformers` on `torch`:
+  6.5 s before the first query, 8.2 s for a cold command-line search. It now
+  reads the model's own `onnx/model.onnx` at the same pinned revision with
+  `onnxruntime` and `tokenizers` (`scripts/onnx_encoder.py`): a cold search takes
+  2.3 s, a batch of 402 vault texts encodes in 4.8 s instead of 5.9 s, and the
+  vectors equal the old ones to 1.4e-07, so no index is rebuilt. The `semantic`
+  and `hybrid` extras no longer pull `torch`; only the reranker does.
+  `install_models.py` fetches and verifies the ONNX weights and then removes the
+  encoder's retired PyTorch weights (470 MB) from the cache. See
+  `docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+
 - **One classification prompt.** The capture path sent three lines that named
   `FLUSH_OK`, `FLUSH_MAJOR` and `FLUSH_MINOR` and never said what a tier meant,
   while the measurement stand scored `build_classification_prompt`, which no
@@ -441,6 +453,12 @@ the legacy index files are no longer read (see Removed).
   prints one line saying it does nothing and will be removed.
 
 ### Removed
+
+- **`optimum` and the encoder's `sentence-transformers`.** `optimum` was declared
+  in the `reranker` extra and imported nowhere; the reranker's comment said "via
+  ONNX", which it has not done since it moved to `transformers`. The search
+  extras no longer name `sentence-transformers`; only the retrieval benchmark,
+  which measures the native library on purpose, keeps it.
 
 - **Code no product path reaches.** Seven functions nothing called; twelve that
   only their own tests called (`MemoryQueue.export_task`,

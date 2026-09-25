@@ -80,7 +80,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 ### Поиск и извлечение
 - **Generation-consistent retrieval**: одно проверенное неизменяемое поколение связывает FTS, vectors, graph, tiers и evidence с одним source snapshot
 - **Правдивые retrieval traces**: результаты сообщают requested/effective mode, реально использованные signals, generation, состояние reranker и причину fallback
-- **Triple-fusion при доступности**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
+- **Triple-fusion при доступности**: BM25 (FTS5) + Vector (многоязычная E5 на ONNX Runtime) + evidence-backed Graph-neighbor RRF
 - **Взвешенный RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — предотвращает регрессию на known-item запросах
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
 - **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера

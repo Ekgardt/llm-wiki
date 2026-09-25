@@ -701,7 +701,7 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers`; the encoder is `intfloat/multilingual-e5-small`
+This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
 — 384 dimensions over 100 languages, so a question in one language reaches a page
 written in another. The English-only model it replaces scored every candidate alike
 on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
@@ -714,13 +714,16 @@ uv run python scripts/install_models.py --check  # report only
 ```
 
 Each model is fetched at its pinned commit, only the files the loaders read,
-and `model.safetensors` is checked against the size and SHA-256 recorded beside
-the revision; a file that does not match is removed and the command fails.
+and its weights file (`onnx/model.onnx` for the encoder, `model.safetensors`
+for the reranker) is checked against the size and SHA-256 recorded beside the
+revision; a file that does not match is removed and the command fails. Once the
+encoder's ONNX weights are verified, the PyTorch weights it read before are
+removed from the cache.
 Present files are never fetched again. Until the weights are there, `doctor`
 reports `models: degraded` with that command and search stays lexical.
-A first query in a fresh process loads the model: measured on one host, about
-11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
-it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
+A first query in a fresh process loads the model: measured on this vault on
+2026-09-25, a cold CLI query takes 2.3 s (it was 8.2 s when the encoder ran on
+`torch`), while the MCP server loads it once and answers warm afterwards.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or

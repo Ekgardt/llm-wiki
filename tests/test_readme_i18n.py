@@ -422,7 +422,7 @@ def test_ci_closes_the_gaps_the_third_audit_named():
     facts = (
         "shellcheck install.sh" in lint,
         "System.Management.Automation.Language.Parser" in lint,
-        "import sentence_transformers" in hybrid,
+        "import onnxruntime, tokenizers, huggingface_hub" in hybrid,
         "scripts/search_memory.py" in hybrid,
         "-k jieba" in lexical,
         "install_language_server.py" in lexical,

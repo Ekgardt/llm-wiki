@@ -28,7 +28,7 @@ class _FakeHub(ModuleType):
         self.downloads: list[tuple[str, str, list[str]]] = []
 
     def _snapshot(self, repo_id: str, revision: str) -> Path:
-        return self.root / repo_id.replace("/", "--") / revision
+        return self.root / repo_id.replace("/", "--") / "snapshots" / revision
 
     def try_to_load_from_cache(self, repo_id, filename, *, revision):
         path = self._snapshot(repo_id, revision) / filename
@@ -39,15 +39,26 @@ class _FakeHub(ModuleType):
     def snapshot_download(self, repo_id, *, revision, allow_patterns):
         self.downloads.append((repo_id, revision, list(allow_patterns)))
         snapshot = self._snapshot(repo_id, revision)
-        snapshot.mkdir(parents=True, exist_ok=True)
-        (snapshot / install_models.WEIGHTS_FILE).write_bytes(self.contents[repo_id])
+        for name in allow_patterns:
+            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+            (snapshot / name).write_bytes(self.contents[repo_id] if name == WEIGHTS else b"companion")
         return str(snapshot)
+
+
+WEIGHTS = "onnx/model.onnx"
+COMPANION = "tokenizer.json"
 
 
 def _pinned_to(contents: dict[str, bytes]) -> tuple[install_models.PinnedModel, ...]:
     return tuple(
         install_models.PinnedModel(
-            repo_id, "f" * 40, hashlib.sha256(blob).hexdigest(), len(blob)
+            repo_id,
+            "f" * 40,
+            WEIGHTS,
+            hashlib.sha256(blob).hexdigest(),
+            len(blob),
+            (WEIGHTS, COMPANION),
+            ("model.safetensors",),
         )
         for repo_id, blob in contents.items()
     )
@@ -70,7 +81,7 @@ def test_missing_weights_are_fetched_at_the_pinned_commit_and_verified(two_model
         ("org/encoder", "f" * 40),
         ("org/reranker", "f" * 40),
     ]
-    assert all(patterns == list(install_models.ALLOW_PATTERNS) for _, _, patterns in two_models.downloads)
+    assert all(patterns == [WEIGHTS, COMPANION] for _, _, patterns in two_models.downloads)
     assert capsys.readouterr().out.count("fetched") == 2
 
 
@@ -90,7 +101,7 @@ def test_a_file_that_does_not_match_its_pin_is_removed_and_the_run_fails(
 
     assert install_models.main([]) == install_models.EXIT_INCOMPLETE
     assert two_models.try_to_load_from_cache(
-        "org/reranker", install_models.WEIGHTS_FILE, revision="f" * 40
+        "org/reranker", WEIGHTS, revision="f" * 40
     ) is None
     out = capsys.readouterr().out
     assert "mismatch org/reranker" in out and "fetched org/encoder" in out
@@ -153,8 +164,51 @@ def test_doctor_expects_no_weights_without_the_semantic_extra(monkeypatch):
 def test_the_nightly_fetches_missing_weights_after_its_index_work():
     import scheduled_nightly
 
-    labels = [step.label for step in scheduled_nightly._post_compile_steps()]
+    steps = {step.label: step for step in scheduled_nightly._post_compile_steps()}
+    labels = list(steps)
 
-    assert labels.index("models") > labels.index("lint")
-    step = next(step for step in scheduled_nightly._post_compile_steps() if step.label == "models")
-    assert step.command[-1].endswith("install_models.py")
+    assert (labels.index("models") > labels.index("lint"), steps["models"].command[-1].endswith("install_models.py")) == (
+        True,
+        True,
+    )
+
+
+def test_weights_without_their_companion_file_are_fetched_again(two_models):
+    install_models.main([])
+    (two_models._snapshot("org/encoder", "f" * 40) / COMPANION).unlink()
+    two_models.downloads.clear()
+
+    assert install_models.main([]) == 0
+    assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
+
+
+def _retired_link(hub: _FakeHub, repo_id: str) -> tuple[Path, Path]:
+    """A retired file as the Hub cache holds it: a snapshot link to a blob."""
+    blob = hub.root / repo_id.replace("/", "--") / "blobs" / "old-weights"  # the Hub's layout
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(b"torch weights")
+    link = hub._snapshot(repo_id, "f" * 40) / "model.safetensors"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(blob)
+    return link, blob
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Hub cache links files only where symlinks work")
+def test_verified_weights_retire_the_file_they_replace_and_its_blob(two_models, capsys):
+    link, blob = _retired_link(two_models, "org/encoder")
+
+    assert install_models.main(["--json"]) == 0
+    assert (link.exists(), link.is_symlink(), blob.exists()) == (False, False, False)
+    assert '"retired": ["model.safetensors"]' in capsys.readouterr().out
+
+
+def test_a_check_or_a_failed_fetch_retires_nothing(two_models):
+    link = two_models._snapshot("org/reranker", "f" * 40) / "model.safetensors"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.write_bytes(b"torch weights")
+    two_models.contents["org/reranker"] = b"not the pinned bytes"
+
+    install_models.main(["--check"])
+    install_models.main([])
+
+    assert link.exists()

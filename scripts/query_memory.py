@@ -857,7 +857,7 @@ def _sentence_encoder():
         return None
 
     def encode(texts, is_query):
-        return embedder.encode(prefixed_texts(list(texts), is_query), show_progress_bar=False, convert_to_numpy=True)
+        return embedder.encode(prefixed_texts(list(texts), is_query))
 
     return encode
 

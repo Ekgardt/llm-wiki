@@ -18,8 +18,16 @@ retrieval-benchmark = [
     "usearch==2.26.0",
     "jieba==0.42.1",
 ]
-semantic = ["sentence-transformers>=2.7,<6"]
-hybrid = ["numpy>=2.2.6,<3", "sentence-transformers>=2.7,<6"]
+# The E5 encoder through ONNX Runtime, without torch (2026-09-25; see
+# docs/research/2026-09-25-the-encoder-runs-without-torch.md).
+semantic = [
+    "huggingface-hub>=0.34,<2",
+    "numpy>=2.2.6,<3",
+    "onnxruntime>=1.18,<1.24; python_version < '3.11'",
+    "onnxruntime>=1.18,<2; python_version >= '3.11'",
+    "tokenizers>=0.19,<1",
+]
+hybrid = ["llm-wiki[semantic]"]
 # v4.0: tree-sitter code graph (12 languages; grammars remain optional as a group).
 code-graph = [
     "jedi>=0.19,<1",
@@ -39,11 +47,9 @@ code-graph = [
 ]
 # v4.0: MCP server (12 task-shaped tools, stdio transport, 100% local).
 mcp-server = []
-# v4.0: Cross-encoder reranker (mxbai-rerank via ONNX, local CPU).
+# Cross-encoder reranker (bge-reranker-v2-m3 through transformers on torch,
+# local CPU, int8 dynamic quantisation).
 reranker = [
-    "onnxruntime>=1.18,<1.24; python_version < '3.11'",
-    "onnxruntime>=1.18,<2; python_version >= '3.11'",
-    "optimum>=1.20,<2",
     "tokenizers>=0.19,<1",
     "torch>=2.2,<3",
     "transformers>=4.44,<6",

@@ -15,10 +15,18 @@ from __future__ import annotations
 
 EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
 EMBEDDING_MODEL_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
-# The weights file at that revision, as `scripts/install_models.py` verifies it
-# after a download; the Hub cache names the blob by this digest too.
-EMBEDDING_WEIGHTS_SHA256 = "1a55775f53449dac10a2bcbc312469fac40b96d53198c407081a831f81c98477"
-EMBEDDING_WEIGHTS_BYTES = 470641600
+# The ONNX export the repository ships at that revision, which
+# `scripts/onnx_encoder.py` reads and `scripts/install_models.py` verifies after
+# a download; the Hub cache names the blob by this digest too. See
+# `docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+EMBEDDING_WEIGHTS_FILE = "onnx/model.onnx"
+EMBEDDING_WEIGHTS_SHA256 = "ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665"
+EMBEDDING_WEIGHTS_BYTES = 470268510
+# Everything the encoder reads, and so everything the installer fetches.
+EMBEDDING_READ_FILES = (EMBEDDING_WEIGHTS_FILE, "tokenizer.json")
+# The PyTorch weights the encoder read through `sentence-transformers` until
+# 2026-09-25; the installer removes them once the ONNX weights are verified.
+EMBEDDING_RETIRED_FILES = ("model.safetensors",)
 EMBEDDING_DIM = 384
 
 # E5 is trained with these two prefixes and loses accuracy without them, so both
