@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Generation retention keeps the generation the fallback would try first — the previous activation — not only the parent: after a full rebuild, which records no parent, the prune removed the only spare.
 - The knowledge snapshot reports a failed `git commit` as a failure (it said "no change"), and records each successful run inside its `.git`, so doctor no longer calls an unchanged memory's backup stale. The contract names the snapshot's own repository beside the one automatic Git operation on the checkout.
 - A rerun of the installer that replaces an outgrown install puts the previous one back when the new install fails, instead of leaving no scheduler and no hooks; the install smoke names the doctor checks that failed (it printed only "RuntimeError"), and the last two places that resolved the uv link keep it.
 - Scheduled runs call uv by the path the shell found, links kept: resolving it pinned Homebrew's versioned Cellar target, which `brew upgrade` deletes, and every scheduled run then failed to start. Doctor now says when an installed unit or LaunchAgent calls a uv that is gone.
