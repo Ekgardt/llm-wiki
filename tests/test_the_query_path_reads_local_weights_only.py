@@ -69,3 +69,14 @@ def test_weights_that_are_not_on_disk_degrade_to_no_dense_signal(
     assert search_memory.embedder_unavailable_reason().startswith(
         "model_unavailable"
     )
+
+
+def test_the_command_silences_the_loading_bar_without_importing_the_library() -> None:
+    """The bar is switched off by the variable the library reads at import."""
+    environ: dict[str, str] = {}
+    chosen = {"HF_HUB_DISABLE_PROGRESS_BARS": "0"}
+
+    search_memory.quiet_model_loading(environ)
+    search_memory.quiet_model_loading(chosen)
+
+    assert (environ, chosen) == ({"HF_HUB_DISABLE_PROGRESS_BARS": "1"}, {"HF_HUB_DISABLE_PROGRESS_BARS": "0"})

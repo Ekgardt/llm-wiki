@@ -255,10 +255,7 @@ def _get_embedder():
         return _embedder_cache
     try:
         from sentence_transformers import SentenceTransformer
-        from transformers.utils import logging as transformers_logging
 
-        # A "Loading weights" bar on every command-line search is not output.
-        transformers_logging.disable_progress_bar()
         _embedder_cache = SentenceTransformer(
             EMBEDDING_MODEL,
             revision=EMBEDDING_MODEL_REVISION,
@@ -4118,8 +4115,20 @@ def _notes_first(row: dict) -> int:
 _PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MULTILINE)
 
 
+def quiet_model_loading(environ: dict[str, str] | os._Environ) -> None:
+    """A "Loading weights" bar on every command-line search is not output.
+
+    `transformers` reads `HF_HUB_DISABLE_PROGRESS_BARS` when it is imported, so
+    the command sets it before the embedder is loaded; importing the library's
+    own logging module for this made loading depend on its internals. See
+    `docs/research/2026-09-25-the-clean-run-after-the-audit-fixes.md`.
+    """
+    environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description="Built-in FTS5 search over the vault.")
+    quiet_model_loading(os.environ)
+    p = argparse.ArgumentParser(description="Hybrid search over the vault's knowledge.")
     p.add_argument("query", nargs="?", default=None, help="Search query")
     p.add_argument("--scope", choices=["all", "wiki", "memory", "knowledge"], default="all")
     p.add_argument("--limit", type=_cli_search_limit, default=10)
