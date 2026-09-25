@@ -730,8 +730,8 @@ A first query in a fresh process loads the model: measured on this vault on
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or
-`uv run python scripts/doctor.py --repair` — not at install and not when a
-page changes. Until a refresh has run with the model installed, `doctor`
+`uv run python scripts/doctor.py --rebuild-generation` (`--repair` alone only
+repairs the generation catalog) — not at install and not when a page changes. Until a refresh has run with the model installed, `doctor`
 reports `vector_state: absent` and search stays lexical. (Issue #29.)
 
 ## Reranker (on by default)
@@ -775,7 +775,7 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - See what the search reads: `uv run python scripts/search_memory.py --status`
   (the active generation; without one, Markdown directly)
 - Check health and rebuild the generation: `uv run python scripts/doctor.py`,
-  then `uv run python scripts/doctor.py --repair`
+  then `uv run python scripts/doctor.py --rebuild-generation`
 - `search_memory.py --rebuild` rebuilds the evidence generation, the one index
 
 ### "Hook errors"

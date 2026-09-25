@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The user guide names `doctor --rebuild-generation` where it tells how to rebuild the evidence generation; it said `--repair`, which only repairs the generation catalog. A test keeps the docs from saying it again.
 - Failed MCP tool calls and telemetry writes are no longer counted as lost captures: they share the diagnostics trail but have their own count and a doctor `tools` check, so the capture check and the session-start line stop reporting tool errors as capture loss.
 - Doctor says a check did not finish when its budget ran out mid-read, instead of `error` with advice to run `--repair`: under the default 5 s budget `queue` and `claims` were reported broken on a healthy vault. The check keeps its deletion codes.
 - Three stale docstrings corrected: `answer_cost` (the wire is compact JSON, not `indent=2`), the lazy query encoder (a 2.7 s cold load, a tracked straggler) and `lookup_mode` (relation questions run GRAPH).
