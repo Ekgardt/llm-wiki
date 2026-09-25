@@ -577,15 +577,17 @@ def _context_sources(
 def _deduplicated_sources(
     selected: Sequence[DailySnapshot],
 ) -> list[SourceSnapshot]:
-    """Two parts of the same day would otherwise appear twice under one path."""
-    seen_paths: set[str] = set()
-    sources: list[SourceSnapshot] = []
-    for item in selected:
-        if item.logical_path in seen_paths:
-            continue
-        seen_paths.add(item.logical_path)
-        sources.append(SourceSnapshot(item.logical_path, item.content, item.sha256))
-    return sources
+    """One source per selected part; two parts of one day in one batch is refused.
+
+    Sources are keyed by path downstream, so a second part used to be dropped here
+    while its receipt was still written, and its text was never compiled. The
+    planner keeps one part of a day per batch (`_group_dailies`); this is the
+    guard behind it. See `docs/research/2026-09-25-one-part-of-a-day-per-batch.md`.
+    """
+    paths = [item.logical_path for item in selected]
+    if len(set(paths)) != len(paths):
+        raise ValueError("two parts of one day in one compile batch")
+    return [SourceSnapshot(item.logical_path, item.content, item.sha256) for item in selected]
 
 
 MAX_FAILURE_DETAIL_CHARS = 300
@@ -675,20 +677,35 @@ def _group_dailies(
     budget: ContextBudget,
     measure: Callable[..., int],
 ) -> list[set[str]]:
-    """Pack whole days into the largest groups the input budget allows."""
+    """Pack days into the largest groups the input budget allows, one part of a day each."""
     groups: list[set[str]] = []
     current: set[str] = set()
+    days: set[str] = set()
     for daily in inputs.dailies:
         _require_daily_fits(daily, budget, measure)
-        prospective = {*current, daily.part_key}
-        if current and measure(prospective) > budget.available_input_tokens:
+        if _starts_a_new_group(current, days, daily, budget, measure):
             groups.append(current)
-            current = {daily.part_key}
-            continue
-        current = prospective
+            current, days = set(), set()
+        current.add(daily.part_key)
+        days.add(daily.logical_path)
     if current:
         groups.append(current)
     return groups
+
+
+def _starts_a_new_group(
+    current: set[str],
+    days: set[str],
+    daily: DailySnapshot,
+    budget: ContextBudget,
+    measure: Callable[..., int],
+) -> bool:
+    """A full group, or one already holding another part of this day, is closed."""
+    if not current:
+        return False
+    if daily.logical_path in days:
+        return True
+    return measure({*current, daily.part_key}) > budget.available_input_tokens
 
 
 def _require_daily_fits(

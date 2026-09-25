@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A long day split into parts is compiled whole: two parts of one day never share a compile batch, and a batch that would hold them is refused instead of silently dropping the second part while writing its receipt.
 
 - **A secret written as JSON is still a secret.** The redactor — the one scrub
   before a provider, the daily log and the session record — passed `{"api_key":
