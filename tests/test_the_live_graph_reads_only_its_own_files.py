@@ -5,6 +5,7 @@ docs/research/2026-09-25-the-live-graph-reads-only-its-own-files.md
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def test_a_parse_starts_no_git_process(tmp_path, monkeypatch):
     source = tmp_path / "a.py"
     source.write_text("def a():\n    return 1\n", encoding="utf-8")
     started: list[object] = []
-    monkeypatch.setattr(code_graph.subprocess, "run", lambda *args, **kwargs: started.append(args))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: started.append(args))
 
     parsed = code_graph.parse_file(source)
 
