@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -350,39 +351,6 @@ def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: 
     return [_enriched_call(script, call, workspace) for call in calls]
 
 
-def _git_log_line(file_path: Path) -> str:
-    """The one-line git record for this file, or empty when git cannot answer."""
-    parent = file_path.parent
-    cwd = str(parent) if parent.exists() else None
-    try:
-        result = subprocess.run(  # noqa: S603, S607
-            ["git", "log", "-1", "--format=%H|%cI|%an", "--", str(file_path)],
-            capture_output=True, text=True, timeout=5, cwd=cwd,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
-def _get_git_info(file_path: Path) -> dict:
-    """Get git commit info for a file (bi-temporal tracking).
-
-    Returns dict with commit_hash, commit_date, author.
-    Falls back to empty strings if not in a git repo.
-    """
-    line = _git_log_line(file_path)
-    if not line:
-        return {"commit_hash": "", "commit_date": "", "author": ""}
-    padded = (*line.split("|"), "", "")
-    return {
-        "commit_hash": padded[0],
-        "commit_date": padded[1],
-        "author": padded[2],
-    }
-
-
 def parse_file(file_path: Path) -> dict:
     """Parse a single source file and extract symbols.
 
@@ -442,8 +410,6 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
         # Fallback: regex-based extraction (less accurate but no deps).
         return _regex_parse(file_path, lang, registry, workspace_root)
     functions, classes, calls, imports = symbols
-    # Bi-temporal: attach git commit info (valid_from = commit date).
-    git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
         "language": lang,
@@ -451,9 +417,6 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
         "classes": classes,
         "calls": calls,
         "imports": imports,
-        "git_commit": git_info["commit_hash"],
-        "valid_from": git_info["commit_date"],
-        "author": git_info["author"],
     }
 
 
@@ -746,7 +709,6 @@ def _regex_parse(
         imports,
     )
     _close_regex_blocks(content.splitlines(), lang, [*functions, *classes])
-    git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
         "language": lang,
@@ -754,9 +716,6 @@ def _regex_parse(
         "classes": classes,
         "calls": calls,
         "imports": imports,
-        "git_commit": git_info["commit_hash"],
-        "valid_from": git_info["commit_date"],
-        "author": git_info["author"],
     }
 
 
@@ -922,12 +881,28 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
         imports.append({"name": name.strip(), "line": line_number})
 
 
+# The LSP document bound (`lsp_protocol.MAX_FRAME_BYTES`): nothing larger is a
+# source a live answer should read.
+LIVE_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+
+
 def _parsable_names(parent: Path, names: list[str]) -> list[Path]:
     found = [parent / name for name in names]
-    return [
-        path for path in found
-        if path.suffix.lower() in LANGUAGE_MAP and path.is_file()
-    ]
+    return [path for path in found if path.suffix.lower() in LANGUAGE_MAP and _own_source(path)]
+
+
+def _own_source(path: Path) -> bool:
+    """A regular file of this tree within the bound; never a link out of it.
+
+    `is_file()` followed a link to any file on the machine, and nothing bounded a
+    file's size (audit C-41,
+    docs/research/2026-09-25-the-live-graph-reads-only-its-own-files.md).
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size <= LIVE_SOURCE_MAX_BYTES
 
 
 def _live_source_files(directory: Path) -> list[Path]:
