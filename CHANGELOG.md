@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Impact analysis says `approximate`, not `exact`, when the generation indexed other bytes of a changed file than the diff's old side: its offsets then pointed at other lines.
 - The `get_architecture` summary and the `provenance`, `snippet`, `coverage`, `search`, `query`, `data_flow` and `cross_service` modes carry the generation's freshness block and start its refresh when the checkout moved, as the graph modes did.
 - A structural answer's `graph` component says `stale` when its generation was built from an older commit of the checkout and `unknown` when no commit could be compared (it always said `fresh`), and the envelope's `source_commit` is read again every 5 s instead of once per server.
 - Every `get_architecture` mode runs on the bounded code-graph workers under the call's deadline, as the summary did: `callers`, `callees`, `dependencies`, `path`, `community` and the symbol view parsed on the tool's own thread with no deadline, and a few hung calls held every MCP slot.

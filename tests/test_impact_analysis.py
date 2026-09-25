@@ -280,6 +280,13 @@ class _Graph:
     def find_nodes(self, *, path=None, kinds=None, **_options):
         return [node for node in self.nodes.values() if _node_selected(node, path, kinds)]
 
+    # The bytes this generation indexed: the committed `alpha.py` of `_repository`.
+    indexed = {"alpha.py": b"def alpha():\n    return 1\n"}
+
+    def source_by_path(self, relative_path, **_options):
+        content = self.indexed.get(relative_path)
+        return None if content is None else {"relative_path": relative_path, "content": content}
+
     def occurrences(self, node_id, **_options):
         if node_id == "symbol":
             return [{"relative_path": "alpha.py", "byte_start": 0, "byte_end": 29, "line_start": 1, "line_end": 2}]

@@ -881,7 +881,9 @@ def _overlaps(occurrence: dict, changed: dict) -> bool:
     return int(occurrence["line_start"]) <= line <= int(occurrence["line_end"])
 
 
-def _symbol_record(node: dict, occurrence: dict, side: str, changed: dict) -> dict:
+def _symbol_record(
+    node: dict, occurrence: dict, side: str, changed: dict, classification: str = "exact"
+) -> dict:
     metadata = node.get("metadata", {})
     return {
         "node_id": node["node_id"],
@@ -889,7 +891,7 @@ def _symbol_record(node: dict, occurrence: dict, side: str, changed: dict) -> di
         "kind": node["kind"],
         "path": occurrence["relative_path"],
         "sides": [side],
-        "classification": "exact",
+        "classification": classification,
         "evidence": {
             "path": occurrence["relative_path"],
             "line_start": occurrence["line_start"],
@@ -920,10 +922,12 @@ def _changed_occurrence(graph, node: dict, path: str, old_range: dict, deadline:
     return None
 
 
-def _note_symbol(symbols: dict, node: dict, occurrence: dict, side: str, old_range: dict) -> None:
+def _note_symbol(
+    symbols: dict, node: dict, occurrence: dict, side: str, old_range: dict, classification: str
+) -> None:
     existing = symbols.get(node["node_id"])
     if existing is None:
-        symbols[node["node_id"]] = _symbol_record(node, occurrence, side, old_range)
+        symbols[node["node_id"]] = _symbol_record(node, occurrence, side, old_range, classification)
     elif side not in existing["sides"]:
         existing["sides"].append(side)
 
@@ -940,13 +944,28 @@ def _map_side(graph, symbols: dict, change: dict, changed_range: dict, side: str
     if path is None:
         return
     old_range = changed_range["old"]
+    classification = _offset_classification(graph, path, change, deadline)
     for node in graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline):
         if node["kind"] not in _SYMBOL_KINDS:
             continue
         occurrence = _changed_occurrence(graph, node, path, old_range, deadline)
         if occurrence is not None:
-            _note_symbol(symbols, node, occurrence, side, old_range)
+            _note_symbol(symbols, node, occurrence, side, old_range, classification)
             _require_symbol_ceiling(symbols, bounds)
+
+
+def _offset_classification(graph, path: str, change: dict, deadline: float) -> str:
+    """`exact` only when the generation indexed the very bytes the diff's old side holds.
+
+    The hunk's offsets are into the old side; a generation built from other
+    content of the file matched them against different lines and still said
+    `exact` (audit B-36,
+    docs/research/2026-09-25-impact-is-exact-only-on-the-bytes-it-indexed.md).
+    """
+    source = graph.source_by_path(path, deadline=deadline)
+    if source is not None and source.get("content") == change.get("old_blob"):
+        return "exact"
+    return "approximate"
 
 
 def _require_symbol_ceiling(symbols: dict, bounds: ImpactLimits) -> None:
@@ -1298,10 +1317,12 @@ class _ImpactRun:
 
 
 def _resolution(changes: list[dict], changed_symbols: list[dict]) -> str:
-    """Exact when nothing changed or the changes resolved to symbols."""
-    if not changes or changed_symbols:
-        return "exact"
-    return "unresolved"
+    """Exact when nothing changed or the changes resolved to symbols on the indexed bytes."""
+    if changes and not changed_symbols:
+        return "unresolved"
+    if any(symbol.get("classification") == "approximate" for symbol in changed_symbols):
+        return "approximate"
+    return "exact"
 
 
 def _selected_graph(graph, root: Path, deadline: float):
