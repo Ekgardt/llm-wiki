@@ -3122,10 +3122,13 @@ def _materialize_event_transcript(
     return path
 
 
-def _cleanup_durable_transcript(path: Path | None, intent_id: str | None) -> None:
+def _cleanup_transient_transcript(path: Path | None) -> None:
+    """The copy ends with its event, published or not (audit C-5).
+
+    Nothing reads a kept copy since the flush command line was retired; see
+    `docs/research/2026-09-25-a-transient-transcript-never-outlives-its-event.md`.
+    """
     if path is None:
-        return
-    if intent_id is None:
         return
     _cleanup_runtime_transient(path)
 
@@ -3182,7 +3185,7 @@ def _ingest_precompact(
             envelope, payload, slug, project_dir, result, intent_id
         )
     finally:
-        _cleanup_durable_transcript(transient_path, intent_id)
+        _cleanup_transient_transcript(transient_path)
 
 
 def _session_end_trigger(trigger: str | None, payload: Mapping[str, Any]) -> Any:
@@ -3311,7 +3314,7 @@ def _ingest_session_end(
             envelope, payload, slug, project_dir, result, force_stub, intent_id
         )
     finally:
-        _cleanup_durable_transcript(transient_path, intent_id)
+        _cleanup_transient_transcript(transient_path)
 
 
 def ingest_event(
