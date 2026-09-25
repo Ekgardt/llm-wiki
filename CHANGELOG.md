@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The Windows installer says when the `llm-wiki` MCP entry in `~/.claude.json` points at another vault, as the POSIX one does; a macOS uninstall no longer fails on a LaunchAgent launchd has already unloaded; the guide says the Linux timers run while you are logged in and how to enable lingering.
 - The user guide lists the nightly and weekly steps the code runs and the 4 h/6 h scheduler limits it sets; every install hint keeps the other extras (`uv sync --locked --inexact --extra ...`); CONTRIBUTING and ARCHITECTURE no longer describe a check-only repair or a retired vector path. A test ties the guide to the code.
 - The weekly pass counts a failed reflection or tier step (it logged the exception and reported success), and a weekly skipped because maintenance was already running records the skip, which doctor names when the weekly goes stale.
 - Step artifacts under `logs/maintenance/` are kept as long as the reports that point at them (30 days): held to the report count, they lasted about two nights and a report's "full output" link led nowhere.

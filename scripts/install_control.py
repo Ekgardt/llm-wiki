@@ -1294,9 +1294,18 @@ def _uninstall_launchd(
     domain: str,
 ) -> None:
     for name in reversed(definitions):
-        label = _launchd_label(name)
-        _require_command(runner, (launchctl, "bootout", f"{domain}/{label}"))
+        _bootout_if_loaded(runner, launchctl, domain, _launchd_label(name))
     _remove_systemd_files(launch_agents_directory, definitions)
+
+
+def _bootout_if_loaded(runner: CommandRunner, launchctl: str, domain: str, label: str) -> None:
+    """A job launchd no longer has is already out; `bootout` of it fails and blocked the uninstall.
+
+    Audit C-34, docs/research/2026-09-25-the-installers-agree.md.
+    """
+    if _launchd_job_state(runner, launchctl, domain, label) != "active":
+        return
+    _require_command(runner, (launchctl, "bootout", f"{domain}/{label}"))
 
 
 def _write_launchd(

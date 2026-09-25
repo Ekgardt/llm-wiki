@@ -340,7 +340,9 @@ Windows tasks run only while the current user is logged on. macOS LaunchAgents u
 the same login-scoped policy.
 `StartWhenAvailable` runs a missed Windows task after the machine wakes and the user
 signs in; it does not run under a logged-out account. Linux user-systemd timers use
-persistent catch-up after the user manager starts. The product does not claim
+persistent catch-up after the user manager starts; the installer does not enable
+lingering, so they run while you are logged in (`loginctl enable-linger` keeps your user
+manager running without a session, if you want that). The product does not claim
 wake-from-sleep or logged-out execution. Explicit cron fallback follows the host's
 cron and sleep policy.
 When a night is missed entirely, the next session start asks for it: the maintenance

@@ -34,6 +34,31 @@ function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Blue }
 function Ok($msg)   { Write-Host "[OK] $msg"   -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg"  -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "[FAIL] $msg"  -ForegroundColor Red; exit 1 }
+# The llm-wiki entry in ~/.claude.json, judged as install.sh judges it: an entry that
+# points at another vault is not this install's (audit C-34,
+# docs/research/2026-09-25-the-installers-agree.md). The file is only read.
+function Get-ClaudeMcpState {
+    param([string]$Config, [string]$VaultRoot)
+    if (-not (Test-Path -LiteralPath $Config)) { return "missing" }
+    try {
+        $parsed = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+    } catch {
+        return "unreadable"
+    }
+    $entry = $null
+    if ($null -ne $parsed.mcpServers) { $entry = $parsed.mcpServers.'llm-wiki' }
+    if ($null -eq $entry) { return "absent" }
+    if (@($entry.args) -contains $VaultRoot) { return "current" }
+    return "elsewhere"
+}
+
+function Get-ClaudeStatusLine {
+    param([bool]$Automatic, [string]$McpState)
+    if (-not $Automatic) { return "Claude Code: not wired (install transaction failed)" }
+    if ($McpState -eq "elsewhere") { return "Claude Code: hooks active; MCP entry points at another vault" }
+    return "Claude Code: active automatic"
+}
+
 function Invoke-NativeCommand {
     [CmdletBinding()]
     param(
@@ -547,6 +572,7 @@ if ($claudeDetected) {
         Warn "Claude settings not written: the install ownership transaction failed"
     }
     $claudeMcp = $claudeUserConfig
+    $claudeMcpState = "missing"
     $claudeEntryObject = [ordered]@{
         command = "uv"
         args = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
@@ -560,17 +586,18 @@ if ($claudeDetected) {
         Write-Utf8NoBom $claudeMcp $claudeJson
         Ok "Claude MCP config created -> $claudeMcp"
     } else {
-        $claudeExisting = Get-Content -LiteralPath $claudeMcp -Raw
-        if ($claudeExisting -notmatch '"llm-wiki"\s*:') {
+        $claudeMcpState = Get-ClaudeMcpState -Config $claudeMcp -VaultRoot $VAULT_ROOT
+        if ($claudeMcpState -eq "absent") {
             Warn 'Existing ~/.claude.json found without llm-wiki; merge this under top-level "mcpServers":'
             Warn "  $claudeMerge"
         }
+        if ($claudeMcpState -eq "elsewhere") {
+            Warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
+            Warn "  claude mcp remove --scope user llm-wiki"
+            Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+        }
     }
-    if ($claudeAutomatic) {
-        $agents += "Claude Code: active automatic"
-    } else {
-        $agents += "Claude Code: not wired (install transaction failed)"
-    }
+    $agents += Get-ClaudeStatusLine -Automatic $claudeAutomatic -McpState $claudeMcpState
 }
 
 if ($agents.Count -eq 0) {
