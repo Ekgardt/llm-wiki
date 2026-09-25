@@ -38,6 +38,9 @@ from typing import BinaryIO
 WORKER_ENV = "LLM_WIKI_MCP_WORKER"
 INIT_ID_PREFIX = "llm-wiki-supervisor:initialize:"
 STOP_SECONDS = 5.0
+# After its input closes the worker waits up to 30 s for model inference
+# (`mcp_server.SHUTDOWN_INFERENCE_SECONDS`); a signal before that lands mid-settle.
+GRACEFUL_STOP_SECONDS = 35.0
 EXIT_ERROR_CODE = -32603
 SCRIPTS = Path(__file__).resolve().parent
 FINGERPRINT_SUFFIXES = (".py", ".json")
@@ -47,9 +50,17 @@ def code_fingerprint(scripts: Path) -> str:
     """Every server source file by path, size and modification time."""
     digest = hashlib.sha256()
     for path in sorted(_source_files(scripts)):
-        stat = path.stat()
-        digest.update(f"{path.relative_to(scripts)}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+        digest.update(f"{path.relative_to(scripts)}\0{_file_identity(path)}\n".encode())
     return digest.hexdigest()
+
+
+def _file_identity(path: Path) -> str:
+    """Size and time, or `gone` for a file removed after it was listed (B-21)."""
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return "gone"
+    return f"{stat.st_size}\0{stat.st_mtime_ns}"
 
 
 def _source_files(scripts: Path) -> list[Path]:
@@ -279,16 +290,19 @@ def stop_process(process: subprocess.Popen) -> None:
         process.stdin.close()
     except OSError:
         pass
-    for signal_it in (None, process.terminate, process.kill):
-        if _stopped_after(process, signal_it):
+    steps = ((None, GRACEFUL_STOP_SECONDS), (process.terminate, STOP_SECONDS), (process.kill, STOP_SECONDS))
+    for signal_it, seconds in steps:
+        if _stopped_after(process, signal_it, seconds):
             return
 
 
-def _stopped_after(process: subprocess.Popen, signal_it: Callable[[], None] | None) -> bool:
+def _stopped_after(
+    process: subprocess.Popen, signal_it: Callable[[], None] | None, seconds: float
+) -> bool:
     if signal_it is not None:
         signal_it()
     try:
-        process.wait(timeout=STOP_SECONDS)
+        process.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
         return False
     return True
