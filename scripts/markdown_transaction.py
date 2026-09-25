@@ -655,6 +655,12 @@ _PRUNE_COMMITTED_ATTEMPTS = (
 # `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md`.
 PRUNABLE_OPERATION_FAMILIES = ("post-tool", "user-prompt")
 
+# A reservation on a checkpoint another attempt committed will never run (C-11).
+_PRUNE_SPENT_RESERVATIONS = (
+    "DELETE FROM project_checkpoint_attempts WHERE state = 'reserved' AND EXISTS ("
+    "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
+    "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
+)
 _PRUNE_SETTLED_TRANSACTIONS = (
     'DELETE FROM "transaction" WHERE state IN (\'committed\', \'discarded\') '
     "AND artifacts_pruned_at IS NOT NULL AND updated_at < ? "
@@ -7555,7 +7561,8 @@ class MarkdownCoordinator:
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
-            attempts = database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
+            spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
+            attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
             families = tuple(f"{family}:%" for family in PRUNABLE_OPERATION_FAMILIES)
             transactions = database.execute(
                 _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
