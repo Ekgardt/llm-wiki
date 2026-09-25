@@ -649,7 +649,7 @@ class TestHelperFunctions:
 
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
         monkeypatch.setattr(lookup_mode, "count_wiki_pages", lambda: 0)
-        monkeypatch.setattr(lookup_mode, "tier_for", lambda count: "direct")
+        monkeypatch.setattr(lookup_mode, "index_status", lambda: {"available": False})
 
         result = _wiki_overview()
 
@@ -2507,11 +2507,12 @@ class TestHandleToolCall:
             trace["fallback_reason"],
             trace["partial"],
         ) == ("gen-17", ["lexical", "dense"], None, False)
+        # HYBRID declares lexical and dense only, so graph is not reported at all.
         assert (
             components["dense"],
-            components["graph"]["freshness"],
+            "graph" in components,
             _named_generations(components),
-        ) == ({"generation": "gen-17", "freshness": "fresh"}, "missing", {"gen-17"})
+        ) == ({"generation": "gen-17", "freshness": "fresh"}, False, {"gen-17"})
 
     def test_recall_rejects_trace_outside_the_closed_schema(self, monkeypatch):
         import mcp_server
@@ -3410,7 +3411,7 @@ class TestResources:
         server = FakeServer()
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
-        monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
+        monkeypatch.setattr(mcp_server, "ReadResourceContents", Model)
 
         assert mcp_server._register_resources(server) is True
         resources = asyncio.run(server.callbacks["list"]())
@@ -3420,7 +3421,7 @@ class TestResources:
             "llm-wiki://health",
             "llm-wiki://context",
         }
-        assert json.loads(contents[0].text)["data"]["last_compile_status"]
+        assert json.loads(contents[0].content)["data"]["last_compile_status"]
 
     @pytest.mark.parametrize(
         "uri", ["llm-wiki://health", "llm-wiki://context"]
@@ -3480,7 +3481,7 @@ class TestResources:
         server = FakeServer()
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
-        monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
+        monkeypatch.setattr(mcp_server, "ReadResourceContents", Model)
         monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
@@ -3489,7 +3490,7 @@ class TestResources:
         loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
 
         _assert_resource_timeout(
-            json.loads(contents[0].text), loop_progressed, seen
+            json.loads(contents[0].content), loop_progressed, seen
         )
 
         status = {"last_compile": "fresh", "last_compile_status": "ok"}
@@ -3499,7 +3500,7 @@ class TestResources:
             lambda *, deadline: status,
         )
         sentinel_contents = asyncio.run(server.callbacks["read"](uri))
-        sentinel = json.loads(sentinel_contents[0].text)
+        sentinel = json.loads(sentinel_contents[0].content)
         expected = status
         if uri == mcp_server.CONTEXT_RESOURCE_URI:
             expected = {"overview": {"ok": True}, "status": status}

@@ -44,10 +44,10 @@ def commit_of(ref: str) -> str:
     return result.stdout.strip()
 
 
-def _blob(ref: str, path: str) -> bytes:
+def _blob(ref: str, path: str, root: Path) -> bytes:
     result = subprocess.run(
         ["git", "show", f"{ref}:{path}"],
-        cwd=str(ROOT),
+        cwd=str(root),
         capture_output=True,
         check=False,
     )
@@ -56,14 +56,15 @@ def _blob(ref: str, path: str) -> bytes:
     return result.stdout
 
 
-def manifest(ref: str) -> dict[str, str]:
+def manifest(ref: str, root: Path = ROOT) -> dict[str, str]:
     """SHA-256 of every pinned file as that ref has it."""
     return {
-        path: hashlib.sha256(_blob(ref, path)).hexdigest() for path in PINNED_FILES
+        path: hashlib.sha256(_blob(ref, path, root)).hexdigest() for path in PINNED_FILES
     }
 
 
-def _markdown(ref: str, oid: str, hashes: dict[str, str]) -> str:
+def markdown(ref: str, oid: str, hashes: dict[str, str]) -> str:
+    """The release-note form of a manifest."""
     rows = "\n".join(f"| `{path}` | `{digest}` |" for path, digest in hashes.items())
     return (
         f"# Release {ref}\n\n"
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     oid = commit_of(arguments.ref)
     hashes = manifest(arguments.ref)
-    render = _markdown if arguments.markdown else _plain
+    render = markdown if arguments.markdown else _plain
     print(render(arguments.ref, oid, hashes))
     return 0
 

@@ -3429,12 +3429,6 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         node["depth"] = depth
         return node
 
-    def code_to_doc(self, node_id: str, **options: object):
-        return self.neighbors(node_id, direction="in", edge_types=("DOCUMENTS",), **options)
-
-    def doc_to_code(self, node_id: str, **options: object):
-        return self.neighbors(node_id, direction="out", edge_types=("DOCUMENTS",), **options)
-
     def path(
         self,
         source_node_id: str,

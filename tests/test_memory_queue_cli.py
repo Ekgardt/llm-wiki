@@ -22,6 +22,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
+from tests.pid_files import read_pid, write_pid  # noqa: E402
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
 
@@ -90,6 +91,12 @@ def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
 
 
+# Long enough for a Windows runner to start the `spawn` child and its grandchild
+# and write the pid before the deadline; the 1 s it was raced the write (CI run
+# 36023732204, 2026-09-24).
+GRANDCHILD_DEADLINE_SECONDS = 10
+
+
 def _grandchild_processor(task: dict) -> bool:
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -97,8 +104,8 @@ def _grandchild_processor(task: dict) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
-    time.sleep(30)
+    write_pid(task["payload"]["pid_path"], child.pid)
+    time.sleep(120)
     return True
 
 
@@ -109,7 +116,7 @@ def _exiting_grandchild_processor(task: dict) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    write_pid(task["payload"]["pid_path"], child.pid)
     return True
 
 
@@ -120,7 +127,7 @@ def _malformed_grandchild_processor(task: dict) -> str:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    write_pid(task["payload"]["pid_path"], child.pid)
     return "malformed"
 
 
@@ -131,7 +138,7 @@ def _crashing_grandchild_processor(task: dict) -> bool:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    write_pid(task["payload"]["pid_path"], child.pid)
     raise RuntimeError("processor crash")
 
 
@@ -346,10 +353,9 @@ def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
         memory_queue._run_processor_child(
             _grandchild_processor,
             {"payload": {"pid_path": str(pid_path)}},
-            1,
+            GRANDCHILD_DEADLINE_SECONDS,
         )
-    assert pid_path.exists()
-    pid = int(pid_path.read_text(encoding="ascii"))
+    pid = read_pid(pid_path, SHORT_TIMEOUT)
     try:
         assert not memory_queue._pid_is_alive(pid)
     finally:
@@ -365,7 +371,7 @@ def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path)
             {"payload": {"pid_path": str(pid_path)}},
             60,
         )
-        pid = int(pid_path.read_text(encoding="ascii"))
+        pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert result is True
         assert not memory_queue._pid_is_alive(pid)
     finally:
@@ -385,7 +391,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
                 {"payload": {"pid_path": str(pid_path)}},
                 60,
             )
-        pid = int(pid_path.read_text(encoding="ascii"))
+        pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_result_malformed"
         assert not memory_queue._pid_is_alive(pid)
     finally:
@@ -405,7 +411,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
                 {"payload": {"pid_path": str(pid_path)}},
                 60,
             )
-        pid = int(pid_path.read_text(encoding="ascii"))
+        pid = read_pid(pid_path, SHORT_TIMEOUT)
         assert raised.value.code == "processor_exception"
         assert not memory_queue._pid_is_alive(pid)
     finally:
@@ -423,7 +429,9 @@ def test_deferred_compile_completes_before_queue_ack(
     script.write_text(
         "import os, time\n"
         "from pathlib import Path\n"
-        "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
+        "staged = Path(os.environ['TEST_COMPILE_PID'] + '.tmp')\n"
+        "staged.write_text(str(os.getpid()), encoding='ascii')\n"
+        "os.replace(staged, os.environ['TEST_COMPILE_PID'])\n"
         "time.sleep(0.2)\n"
         "Path(os.environ['TEST_COMPILE_DONE']).write_text('done', encoding='ascii')\n",
         encoding="ascii",
@@ -442,7 +450,7 @@ def test_deferred_compile_completes_before_queue_ack(
         idle_seconds=0,
     )
 
-    compiler_pid = int(pid_path.read_text(encoding="ascii"))
+    compiler_pid = read_pid(pid_path, SHORT_TIMEOUT)
     assert summary.succeeded == 1
     assert queue.get(task_id).state == "succeeded"
     assert done_path.read_text(encoding="ascii") == "done"
@@ -458,7 +466,9 @@ def test_deferred_compile_timeout_kills_compiler_tree(
     script.write_text(
         "import os, time\n"
         "from pathlib import Path\n"
-        "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
+        "staged = Path(os.environ['TEST_COMPILE_PID'] + '.tmp')\n"
+        "staged.write_text(str(os.getpid()), encoding='ascii')\n"
+        "os.replace(staged, os.environ['TEST_COMPILE_PID'])\n"
         "time.sleep(300)\n",
         encoding="ascii",
     )
@@ -477,7 +487,7 @@ def test_deferred_compile_timeout_kills_compiler_tree(
         idle_seconds=0,
     )
 
-    compiler_pid = int(pid_path.read_text(encoding="ascii"))
+    compiler_pid = read_pid(pid_path, SHORT_TIMEOUT)
     task = queue.get(task_id)
     # The subject is the kill, so it is asserted first and unconditionally.
     assert not memory_queue._pid_is_alive(compiler_pid)

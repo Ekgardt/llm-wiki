@@ -273,7 +273,15 @@ def _lesson_headline(lesson: Lesson) -> str:
     """A rule states its situation first, because that is when it must be read."""
     if lesson.kind != "rule":
         return f"  - **{lesson.kind.capitalize()}** — {lesson.text}"
-    return f"  - **Rule** — When {lesson.trigger}: {lesson.text}"
+    return f"  - **Rule** — When {_situation(lesson.trigger)}: {lesson.text}"
+
+
+def _situation(trigger: str) -> str:
+    """The trigger without its own leading "When": the model often writes one."""
+    words = trigger.strip()
+    if words[:5].casefold() == "when ":
+        return words[5:].lstrip()
+    return words
 
 
 def _lesson_shape(lesson: Lesson) -> list[str]:

@@ -1270,9 +1270,17 @@ def _hints_confirm(meta: Mapping, scope, generation_id: str) -> bool:
 
 
 def _refresh_row(row: Mapping, state_root: Path | None, deadline: float) -> dict:
+    from ephemeral_paths import is_throwaway_checkout
+
     checkout = row.get("checkout_root")
     if not checkout or not Path(str(checkout)).is_dir():
         return {"checkout_root": checkout, "status": "checkout_missing"}
+    if is_throwaway_checkout(Path(str(checkout))):
+        return {"checkout_root": checkout, "status": "throwaway_not_refreshed"}
+    return _refreshed_row(checkout, state_root, deadline)
+
+
+def _refreshed_row(checkout: object, state_root: Path | None, deadline: float) -> dict:
     try:
         return refresh_repository(checkout, state_root=state_root, deadline=deadline)
     except RepositoryIndexRefused as refusal:

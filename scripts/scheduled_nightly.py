@@ -3,15 +3,17 @@
 The scheduler is Task Scheduler on Windows, a user LaunchAgent on macOS, a
 user systemd timer on Linux, cron as the explicit degraded fallback
 (`install_control.py`). The pass runs, in order: capture-intent adoption,
-runtime reclaim, the deferred memory queue, yesterday's session
-consolidation; the compile (spawned through `maybe_compile`, followed until
-it finishes or the wait bound passes) and user-turn keying; then the steps
-that read the compile's output — orphaned-checkpoint clearing, structural
-lint, backlink repair, the FTS5 index, registered-repository refresh,
-generation pruning, model weights, the bounded generation refresh —
-telemetry compaction, the health report, report pruning and the bounded
-fast-forward of the checkout. Never requires user interaction. All output
-goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
+runtime reclaim, the deferred memory queue, pending session consolidation;
+the compile (spawned through `maybe_compile`, followed until it finishes or
+the wait bound passes) and user-turn keying; then the steps that read the
+compile's output — structural lint, backlink repair, registered-repository
+refresh and retention, generation pruning, orphaned-checkpoint clearing, LSP
+failure-evidence retirement, retirement of the memory's own call transcripts,
+retirement of old benchmark runs, model weights, the bounded memory-generation refresh, telemetry compaction
+and the health report; last, report pruning and the bounded fast-forward of
+the checkout. The log numbers the steps in the order they ran (`StepLog`).
+Never requires user interaction. All output goes to
+$LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 """
 
 from __future__ import annotations
@@ -159,6 +161,26 @@ def _record_nightly_skip(today: str, reason: str) -> None:
     update_state(_mutate)
 
 
+class StepLog:
+    """A log that numbers each step it announces, in the order the steps run.
+
+    The labels used to be written by hand beside each step and drifted: on
+    2026-09-24 "Step 3c" named three different steps. See
+    `docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md`.
+    """
+
+    def __init__(self, log: Callable[[str], None]) -> None:
+        self._log = log
+        self._count = 0
+
+    def __call__(self, message: str) -> None:
+        self._log(message)
+
+    def step(self, message: str) -> None:
+        self._count += 1
+        self._log(f"Step {self._count}: {message}")
+
+
 @dataclass(frozen=True)
 class _Step:
     """One nightly subprocess step: what to announce, run, and how long to wait."""
@@ -182,7 +204,7 @@ def _capture_adoption_step() -> _Step:
     depend on another capture arriving. This is the pass that does not.
     """
     return _Step(
-        "Step 0: adopting undispatched capture intents...",
+        "adopting undispatched capture intents...",
         "capture_adoption",
         _script("capture_adoption.py"),
         120,
@@ -199,7 +221,7 @@ def _reclaim_step() -> _Step:
     file this one shrinks.
     """
     return _Step(
-        "Step 0b: reclaiming runtime state...",
+        "reclaiming runtime state...",
         "reclaim",
         _script("reclaim_runtime_state.py"),
         180,
@@ -213,7 +235,7 @@ QUEUE_STEP_SECONDS = 600
 
 def _queue_step() -> _Step:
     return _Step(
-        "Step 1: working deferred memory queue...",
+        "working deferred memory queue...",
         "work",
         _script("memory_queue.py")
         + ["work", "--max-seconds", str(QUEUE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
@@ -251,7 +273,7 @@ def _episode_step() -> _Step:
     `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
     """
     return _Step(
-        "Step 1b: consolidating pending sessions...",
+        "consolidating pending sessions...",
         "episodes",
         _script("episode_consolidation.py")
         + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
@@ -261,7 +283,7 @@ def _episode_step() -> _Step:
 
 def _compile_step() -> _Step:
     return _Step(
-        "Step 2: triggering compile (if needed)...",
+        "triggering compile (if needed)...",
         "maybe_compile",
         _script("maybe_compile.py"),
         60,
@@ -277,7 +299,7 @@ def _fact_keys_step() -> _Step:
     from fact_keys import DEFAULT_BUDGET_SECONDS
 
     return _Step(
-        "Step 2a: keying new user turns...",
+        "keying new user turns...",
         "fact_keys",
         _script("fact_keys.py"),
         int(DEFAULT_BUDGET_SECONDS) + provider_margin_seconds(),
@@ -303,7 +325,7 @@ def _checkpoint_step() -> _Step:
     nothing on a vault that has none.
     """
     return _Step(
-        "Step 3c: clearing checkpoints nothing will settle...",
+        "clearing checkpoints nothing will settle...",
         "checkpoints",
         _script("repair_orphaned_checkpoint_names.py"),
         120,
@@ -318,10 +340,24 @@ def _own_calls_step() -> _Step:
     operator's chore. See `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
     """
     return _Step(
-        "Step 3e: retiring the memory's own call transcripts...",
+        "retiring the memory's own call transcripts...",
         "own_calls",
         _script("retire_own_call_transcripts.py"),
         60,
+    )
+
+
+def _benchmark_runs_step() -> _Step:
+    """Retire benchmark run directories untouched for a month; dataset caches stay.
+
+    1.5 GB under `cache/benchmarks/` on 2026-09-24 with nothing removing any of it.
+    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+    """
+    return _Step(
+        "retiring old benchmark run directories...",
+        "benchmark_runs",
+        _script("retire_benchmark_runs.py"),
+        120,
     )
 
 
@@ -332,7 +368,7 @@ def _lsp_evidence_step() -> _Step:
     2026-09-23. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
     """
     return _Step(
-        "Step 3c'': retiring old LSP failure evidence...",
+        "retiring old LSP failure evidence...",
         "lsp_evidence",
         _script("retire_lsp_evidence.py"),
         60,
@@ -342,13 +378,13 @@ def _lsp_evidence_step() -> _Step:
 def _post_compile_steps() -> list[_Step]:
     return [
         _Step(
-            "Step 3: structural lint...",
+            "structural lint...",
             "lint",
             _script("lint_memory.py"),
             120,
         ),
         _Step(
-            "Step 3a: repairing owed backlinks...",
+            "repairing owed backlinks...",
             "backlinks",
             _script("repair_backlinks.py") + ["--apply"],
             120,
@@ -358,7 +394,7 @@ def _post_compile_steps() -> list[_Step]:
             # Every registered repository whose checkout still exists is looked
             # at and rebuilt incrementally only when its sources changed, each
             # under its own per-repository fence.
-            "Step 3c: refreshing registered repository generations...",
+            "refreshing registered repository generations...",
             "repositories",
             _script("repository_index.py")
             + ["refresh-all", "--budget-seconds", str(REFRESH_ALL_BUDGET_SECONDS)],
@@ -370,7 +406,7 @@ def _post_compile_steps() -> list[_Step]:
             # This retires, per checkout, every generation of a checkout that
             # is gone or marked not indexed and all but the newest two of the
             # rest, each repository under its own fence.
-            "Step 3c': retiring repository generations no checkout reads...",
+            "retiring repository generations no checkout reads...",
             "repository_retention",
             _script("repository_index.py") + ["retire"],
             RETIRE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
@@ -379,7 +415,7 @@ def _post_compile_steps() -> list[_Step]:
             # Every refresh publishes a new immutable generation and nothing
             # removed the old ones: five in one day, 1.05 GB, on the vault of
             # issue #29. The pruner keeps the active generation and one ancestor.
-            "Step 3d: pruning superseded evidence generations...",
+            "pruning superseded evidence generations...",
             "prune_generations",
             _script("prune_generations.py")
             + ["--apply", "--budget-seconds", str(PRUNE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
@@ -388,11 +424,12 @@ def _post_compile_steps() -> list[_Step]:
         _checkpoint_step(),
         _lsp_evidence_step(),
         _own_calls_step(),
+        _benchmark_runs_step(),
         _Step(
             # The read path loads weights local-only; a cache that lacks the
             # two pinned models answers by words alone. Present files are not
             # fetched again, so this is a no-op on every night but the first.
-            "Step 3f: fetching missing model weights...",
+            "fetching missing model weights...",
             "models",
             _script("install_models.py"),
             1800,
@@ -404,7 +441,7 @@ def _run_steps(run_step, log, steps: list[_Step]) -> int:
     """Run each step in order and count the ones that failed."""
     failures = 0
     for step in steps:
-        log(step.message)
+        log.step(step.message)
         failures += int(bool(run_step(step.command, log, step.label, timeout=step.timeout)))
     return failures
 
@@ -514,16 +551,16 @@ def _compact_telemetry(log) -> None:
 def _post_compile_pass(run_step, log) -> int:
     failures = _run_steps(run_step, log, _post_compile_steps())
 
-    # Step 3c: refresh one immutable generation under the shared fence.
-    log("Step 3c: refreshing immutable evidence generation...")
+    # refresh one immutable generation under the shared fence.
+    log.step("refreshing immutable evidence generation...")
     failures += _refresh_generation(log)
 
-    # Step 3d: compact disposable telemetry without touching knowledge.
-    log("Step 3d: compacting retrieval telemetry...")
+    # compact disposable telemetry without touching knowledge.
+    log.step("compacting retrieval telemetry...")
     _compact_telemetry(log)
 
-    # Step 3e: one full health report, read at session start instead of measured there.
-    log("Step 3e: writing the health report...")
+    # one full health report, read at session start instead of measured there.
+    log.step("writing the health report...")
     _write_health_report(log)
     return failures
 
@@ -595,7 +632,7 @@ def _update_code(log) -> None:
     """
     from self_update import update_checkout
 
-    log("Step 5: updating the vault code...")
+    log.step("updating the vault code...")
     outcome = update_checkout(ROOT)
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
@@ -617,7 +654,7 @@ def _log_update_aftermath(log, outcome: dict) -> None:
 
 def _prune_reports(log) -> None:
     """Retention over every maintenance report family and its artifacts."""
-    log("Step 4: pruning maintenance reports and artifacts...")
+    log.step("pruning maintenance reports and artifacts...")
     log(f"  pruned {prune_maintenance_output()} old file(s)")
     log(f"  trimmed {trim_scheduler_logs()} byte(s) from the scheduler logs")
 
@@ -629,13 +666,13 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()],
     )
 
-    # Step 2 must not skip compile just because a hook-triggered one runs.
+    # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
     before = _last_compile_finished()
     started_before = _last_compile_started()
     failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
 
-    log("Step 2b: waiting for compile to finish...")
+    log.step("waiting for compile to finish...")
     if not _wait_compile_finished():
         # A compile that is still running is deferred, not failed: its outcome
         # is unknown, and the steps that read its output wait for the next
@@ -701,9 +738,9 @@ def _report_compile_outcome(log, before: str | None, started_before: str | None 
 def _require_nightly_owner(ownership: OwnerLease | None) -> None:
     if ownership is None:
         return
-    if ownership.role in {"nightly", "weekly"} and ownership.scope == "global":
+    if ownership.role == "nightly" and ownership.scope == "global":
         return
-    raise ValueError("nightly work requires a nightly or weekly global owner")
+    raise ValueError("nightly work requires a nightly global owner")
 
 
 def _nightly_logger(log_file: Path):
@@ -783,7 +820,7 @@ def _nightly_pass(
     deadline: float | None = None,
 ) -> int:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = _nightly_logger(REPORTS_DIR / f"nightly-{today}.md")
+    log = StepLog(_nightly_logger(REPORTS_DIR / f"nightly-{today}.md"))
     log(f"=== Nightly consolidation pass — {today} ===")
     failures = _nightly_steps(run_step, log, ownership)
     _require_fence(fence)
@@ -805,11 +842,10 @@ def run_nightly(
     *,
     ownership: OwnerLease | None,
     registry: object | None = None,
-    fence: threading.Event | None = None,
 ) -> int:
-    """Run the pass; a nightly lease is refreshed here, a weekly one by its caller."""
-    if ownership is None or ownership.role == "weekly":
-        return _run_nightly_body(ownership=ownership, fence=fence)
+    """Run the pass, refreshing its nightly lease while it runs."""
+    if ownership is None:
+        return _run_nightly_body(ownership=None)
     lost = threading.Event()
     with heartbeat_owner(ownership, registry=registry, lost=lost):
         return _run_nightly_body(ownership=ownership, fence=lost)

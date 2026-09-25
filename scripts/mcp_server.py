@@ -52,6 +52,14 @@ from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Run as a program, this file is the supervisor that restarts the server when its
+# code changes; the server itself runs in a child with LLM_WIKI_MCP_WORKER=1. See
+# `docs/research/2026-09-24-the-memory-server-reloads-its-own-code.md`.
+if __name__ == "__main__" and os.environ.get("LLM_WIKI_MCP_WORKER") != "1":
+    import mcp_supervisor
+
+    raise SystemExit(mcp_supervisor.main(sys.argv[1:]))
+
 from bounded_io import read_stable_bytes  # noqa: E402
 
 # A queue commit locks readers out for milliseconds; wait it out instead of
@@ -105,7 +113,7 @@ MCP_RESOURCES_AVAILABLE = False
 MCP_STRUCTURED_OUTPUT_AVAILABLE = False
 MCP_CALL_TOOL_RESULT_AVAILABLE = False
 Resource = None
-TextResourceContents = None
+ReadResourceContents = None
 CallToolResult = None
 TextContent = None
 try:
@@ -132,14 +140,17 @@ if MCP_AVAILABLE:
 
 if MCP_AVAILABLE:
     try:
-        from mcp.types import Resource, TextResourceContents
+        # The read handler returns the SDK's own helper type; the SDK builds the
+        # protocol content from it (docs/research/2026-09-25-the-health-resource-is-readable.md).
+        from mcp.server.lowlevel.helper_types import ReadResourceContents
+        from mcp.types import Resource
 
         MCP_RESOURCES_AVAILABLE = all(
             (
                 hasattr(Server, "list_resources"),
                 hasattr(Server, "read_resource"),
                 Resource is not None,
-                TextResourceContents is not None,
+                ReadResourceContents is not None,
             )
         )
     except ImportError:
@@ -1131,17 +1142,17 @@ def _count_dropped_telemetry(error: BaseException) -> None:
 
 
 def _wiki_overview(*, deadline: float | None = None) -> dict:
-    """Get vault statistics and retrieval tier recommendation."""
-    from lookup_mode import count_wiki_pages, tier_for
+    """Get vault statistics and the retrieval mode search runs in."""
+    from lookup_mode import count_wiki_pages, index_status, search_mode
     from memory_state import ROOT
 
     _check_deadline(deadline)
     count = count_wiki_pages()
     _check_deadline(deadline)
-    tier = tier_for(count)
+    mode = search_mode(index_status())
     return {
         "page_count": count,
-        "retrieval_tier": tier,
+        "retrieval_tier": mode,
         "vault_root": str(ROOT),
     }
 
@@ -5103,8 +5114,11 @@ def _build_operation_envelope(
     quality: dict | None = None,
     *,
     components: dict[str, dict[str, object]] | None = None,
+    index_timestamp: str | None = None,
 ) -> dict:
-    envelope = build_envelope(data, components=components, **(quality or {}))
+    envelope = build_envelope(
+        data, components=components, index_timestamp=index_timestamp, **(quality or {})
+    )
     if components and envelope["freshness"] == "stale":
         _degrade_stale_envelope(envelope)
     envelope["warnings"] = _sanitize_diagnostic(envelope["warnings"])
@@ -5127,10 +5141,13 @@ def _degrade_stale_envelope(envelope: dict) -> None:
         envelope["warnings"].append(warning)
 
 
-def _signal_freshness(signal: str, signals: set) -> str:
-    if signal in signals:
-        return "fresh"
-    return "missing"
+def _signal_freshness(signal: str, signals: set, behind: bool) -> str:
+    """Fresh only when the signal ran on an index no page has moved past."""
+    if signal not in signals:
+        return "missing"
+    if behind:
+        return "stale"
+    return "fresh"
 
 
 def _reranker_freshness(trace: dict) -> str:
@@ -5141,26 +5158,91 @@ def _reranker_freshness(trace: dict) -> str:
     return "unknown"
 
 
-def _recall_components(data) -> dict:
+def _generation_manifest(generation: object) -> Path | None:
+    from memory_state import STATE_ROOT
+
+    if not isinstance(generation, str) or not generation:
+        return None
+    return STATE_ROOT / "cache" / "evidence-graph" / "generations" / generation / "manifest.json"
+
+
+def _generation_built_ns(generation: object) -> int | None:
+    """When the generation an answer came from was written, or None."""
+    manifest = _generation_manifest(generation)
+    try:
+        return None if manifest is None else manifest.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _newest_page_ns() -> int:
+    from memory_state import ROOT
+
+    notes = ROOT / "knowledge" / "notes"
+    return max((page.stat().st_mtime_ns for page in notes.rglob("*.md")), default=0)
+
+
+def _index_is_behind(generation: object) -> bool:
+    """A page changed after the generation was built, so search cannot see it yet.
+
+    See `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    """
+    built = _generation_built_ns(generation)
+    if built is None:
+        return False
+    return _newest_page_ns() > built
+
+
+def _requested_signals(trace: dict) -> tuple[str, ...]:
+    """The signals the requested mode declares; graph is not 'missing' when never asked for."""
+    from retrieval import PROFILE_SIGNALS
+
+    mode = str(trace.get("requested_mode") or "").upper()
+    return PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+
+
+def _recall_trace(data) -> dict | None:
     if not isinstance(data, dict):
-        return {}
+        return None
     trace = data.get("retrieval_trace")
-    if not isinstance(trace, dict):
+    return trace if isinstance(trace, dict) else None
+
+
+def _recall_components(data) -> dict:
+    trace = _recall_trace(data)
+    if trace is None:
         return {}
     generation = trace.get("corpus_generation")
     signals = set(trace.get("signals_used", []))
+    behind = _index_is_behind(generation)
     components = {
         signal: {
             "generation": generation,
-            "freshness": _signal_freshness(signal, signals),
+            "freshness": _signal_freshness(signal, signals, behind),
         }
-        for signal in ("lexical", "dense", "graph")
+        for signal in _requested_signals(trace)
     }
     components["reranker"] = {
         "generation": generation,
         "freshness": _reranker_freshness(trace),
     }
     return components
+
+
+def _answer_generation(name: str, data) -> object:
+    if name == "recall":
+        return (_recall_trace(data) or {}).get("corpus_generation")
+    if name == "get_context" and isinstance(data, dict):
+        return data.get("corpus_generation")
+    return None
+
+
+def _index_timestamp(name: str, data) -> str | None:
+    """When the index behind this answer was built, for the answers that read one."""
+    built = _generation_built_ns(_answer_generation(name, data))
+    if built is None:
+        return None
+    return dt.datetime.fromtimestamp(built / 1e9, tz=dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _context_components(data) -> dict:
@@ -5774,7 +5856,9 @@ def _tool_call_envelope(
     _check_deadline(operation_deadline)
     components = _components_for(name, data)
     _check_deadline(operation_deadline)
-    return _build_operation_envelope(data, quality, components=components)
+    return _build_operation_envelope(
+        data, quality, components=components, index_timestamp=_index_timestamp(name, data)
+    )
 
 
 def _record_answer_cost(envelope: dict, started: float, operation_deadline: float) -> None:
@@ -5919,13 +6003,7 @@ def _register_resources(server) -> bool:
             text = _busy_envelope_text()
         except TimeoutError:
             text = _timeout_envelope_text()
-        return [
-            TextResourceContents(
-                uri=uri,
-                mimeType="application/json",
-                text=text,
-            )
-        ]
+        return [ReadResourceContents(content=text, mime_type="application/json")]
 
     return True
 

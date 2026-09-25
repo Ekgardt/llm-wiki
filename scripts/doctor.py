@@ -56,25 +56,11 @@ VALID_REPAIR_ACTIONS = frozenset(
     {"runtime", "transactions", "queue", "indexes", "archives", "generations"}
 )
 RUNTIME_DIRECTORIES = ("run", "logs", "cache")
-# A stray pre-adoption candidate is moved here by `--repair`, never deleted; the
-# directory is retained evidence for the `run/` deletion contract like
-# `run/queue-quarantine`. See
-# `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+# A stray pre-adoption candidate is moved into a quarantine directory, never
+# deleted; both directories are retained evidence for the `run/` deletion
+# contract. The rule lives in `installed_memory_repair.retire_stray_candidates`.
+# See `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
 COORDINATOR_QUARANTINE = "run/coordinator-quarantine"
-COORDINATOR_CANDIDATE = "run/markdown-transactions-v3.candidate.sqlite3"
-QUEUE_CANDIDATE = "run/queue-v3.candidate.sqlite3"
-# Every row-bearing coordinator table except `maintenance_owners`, whose rows
-# are judged by expiry instead.
-_CANDIDATE_ROW_TABLES = (
-    "transaction",
-    "operation",
-    "intent_fences",
-    "project_leases",
-    "writer_owners",
-    "project_checkpoints",
-    "blackboard_claims",
-    "capture_binding_projections",
-)
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
 # The hook configuration is read under the bound the installer writes it with.
@@ -1634,10 +1620,12 @@ def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[s
     """
     if status != "ok" or not details.get("truncated_scans"):
         return status, message
+    totals = ", ".join(f"{state} {count}" for state, count in sorted((details.get("state_totals") or {}).items()))
     return (
         "ok",
         "Transaction state is healthy within the scanned rows; the scan stopped at "
-        "its row bound, so every count is a lower bound.",
+        "its row bound, so its counts are a lower bound. Rows by state, counted "
+        f"whole: {totals or 'unknown'}.",
     )
 
 
@@ -1693,7 +1681,21 @@ def _transaction_check(
         return _unreadable_transactions(details, "Transaction state is unreadable.")
     if incomplete is not None:
         return incomplete
+    details["state_totals"] = _transaction_state_totals(path)
     return _transaction_result(details, states)
+
+
+def _transaction_state_totals(path: Path) -> dict[str, int]:
+    """Exact rows per state from one aggregate, whatever the scan bound read.
+
+    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+    """
+    try:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as database:
+            rows = database.execute('SELECT state, COUNT(*) FROM "transaction" GROUP BY state')
+            return {str(state): int(count) for state, count in rows}
+    except sqlite3.Error:
+        return {}
 
 
 _QUEUE_COUNT_QUERIES = {
@@ -4359,7 +4361,14 @@ def _generation_message(degraded: bool, extraction_faults: int) -> str:
 
 
 def _generation_is_stale(facts: _GenerationFacts, age: float, complete_v2: bool) -> bool:
-    if facts.delta or age > GENERATION_FRESH_SECONDS:
+    """Stale when its identity is, or when sources changed and a day passed unrefreshed.
+
+    Not for a delta alone: every capture appends to a daily log, so that made the
+    vault degraded for most of every day. Not for age alone: an unchanged vault's
+    refresh builds nothing, so its age grows while it is current. See
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    """
+    if facts.delta and age > GENERATION_FRESH_SECONDS:
         return True
     return _identity_stale(facts, complete_v2)
 
@@ -4893,14 +4902,19 @@ CHECKPOINT_STUCK_SECONDS = 3600.0
 
 
 def _checkpoint_head_rows(path: Path) -> list[dict[str, Any]]:
-    """The lowest unfinished sequence per project, or nothing we can read."""
+    """The lowest unfinished sequence per project, aged from its first attempt.
+
+    From the first, not the latest: the nightly's own re-attempt used to reset the
+    age, so the report written at 03:09 said `ok` about a project stuck for a day.
+    See `docs/research/2026-09-24-a-vanished-project-is-rebuilt-by-the-night.md`.
+    """
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
             "SELECT c.project AS project, c.sequence AS sequence, c.state AS state, "
             "COALESCE(("
-            "  SELECT MAX(a.created_at) FROM project_checkpoint_attempts a"
+            "  SELECT MIN(a.created_at) FROM project_checkpoint_attempts a"
             "   WHERE a.project = c.project AND a.sequence = c.sequence"
             "), ("
             '  SELECT t.created_at FROM "transaction" t'
@@ -4970,7 +4984,7 @@ def _checkpoint_check(state_root: Path, now: datetime) -> dict:
     except sqlite3.Error as error:
         details["error"] = str(error)[:200]
         return _result(
-            "checkpoints", "ok", "The checkpoint database could not be read.", details
+            "checkpoints", "degraded", "The checkpoint database could not be read.", details
         )
     stuck = [row for row in rows if _checkpoint_stuck(row, now)]
     details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
@@ -5024,7 +5038,42 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         return _result(
             "scheduler", "error", "Maintenance source or local state is invalid.", details
         )
-    return _nightly_result(state, now, details)
+    details["last_weekly_status"] = state.get("last_weekly_status")
+    details["last_weekly_at"] = state.get("last_weekly_at")
+    return _with_weekly(_nightly_result(state, now, details), _weekly_verdict(state, now))
+
+
+# A seven-day period plus a day of grace. The weekly keeps its own record since
+# 2026-09-24; a vault on which it has never recorded a run is not degraded for
+# that. See docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md.
+WEEKLY_FRESH_SECONDS = 8 * 24 * 3600
+_SEVERITY = {"ok": 0, "skipped": 1, "degraded": 2, "error": 3}
+
+
+def _weekly_verdict(state: dict, now: datetime) -> tuple[str, str] | None:
+    """(status, message) when the weekly pass needs attention, else None."""
+    if state.get("last_weekly_status") == "failed":
+        return "error", "Last weekly maintenance failed."
+    if _weekly_is_stale(_parse_utc(state.get("last_weekly_at")), now):
+        return "degraded", "Weekly maintenance is stale."
+    return None
+
+
+def _weekly_is_stale(ran_at: datetime | None, now: datetime) -> bool:
+    """Stale only once it has run: the first Sunday of an install is not late."""
+    if ran_at is None:
+        return False
+    return (now - ran_at).total_seconds() > WEEKLY_FRESH_SECONDS
+
+
+def _with_weekly(nightly: dict, weekly: tuple[str, str] | None) -> dict:
+    """The scheduler finding: the worse of the two passes, both messages named."""
+    if weekly is None:
+        return nightly
+    status, message = weekly
+    worse = max(nightly["status"], status, key=lambda name: _SEVERITY.get(name, 0))
+    combined = message if nightly["status"] == "ok" else f"{nightly['message']} {message}"
+    return _result("scheduler", worse, combined, nightly["details"])
 
 
 # A day plus slack for a run that starts late or takes long. Freshness of a
@@ -7706,11 +7755,27 @@ def _release_unentered_maintenance(
 
 def _stray_candidates(state_root: Path) -> list[str]:
     """The pre-adoption candidate paths that still exist, by their plain names."""
+    from installed_memory_repair import STRAY_CANDIDATE_NAMES
+
     return [
-        relative
-        for relative in (COORDINATOR_CANDIDATE, QUEUE_CANDIDATE)
-        if _safe_kind(state_root / relative, state_root)[0] != "missing"
+        f"run/{name}"
+        for name in STRAY_CANDIDATE_NAMES
+        if _safe_kind(state_root / "run" / name, state_root)[0] != "missing"
     ]
+
+
+def _quarantined_candidates(state_root: Path) -> int:
+    """How many stray candidates have been moved aside so far."""
+    from installed_memory_repair import QUARANTINE_DIRECTORIES, STRAY_CANDIDATE_NAMES
+
+    run = state_root / "run"
+    return sum(_candidates_in(run / name, STRAY_CANDIDATE_NAMES) for name in QUARANTINE_DIRECTORIES)
+
+
+def _candidates_in(directory: Path, names: tuple[str, ...]) -> int:
+    if not directory.is_dir():
+        return 0
+    return len([entry for entry in directory.iterdir() if entry.name.endswith(names)])
 
 
 def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
@@ -7739,7 +7804,11 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
         message = "Reliability V3 is not adopted here; writers use the legacy path."
         return _result("adoption", "ok", message, {"adopted": False})
     strays = _stray_candidates(state_root)
-    details: dict[str, Any] = {"adopted": True, "stray_candidates": strays}
+    details: dict[str, Any] = {
+        "adopted": True,
+        "stray_candidates": strays,
+        "quarantined_candidates": _quarantined_candidates(state_root),
+    }
     try:
         require_reliability_v3_adopted(root=root, state_root=state_root)
     except ReliabilityV3ValidationError as exc:
@@ -7749,80 +7818,20 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
     return _result("adoption", "ok", "The adoption record admits writers.", details)
 
 
-def _candidate_rows_held(database: sqlite3.Connection) -> str | None:
-    """The first table that still holds a row, or None when all are empty."""
-    for table in _CANDIDATE_ROW_TABLES:
-        held = database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
-        if held is not None:
-            return f"holds a row in {table}"
-    return None
-
-
-def _live_maintenance_owner(database: sqlite3.Connection, now: datetime) -> str | None:
-    from operational_ownership import _parse_timestamp
-
-    for row in database.execute("SELECT actor_id, expires_at FROM maintenance_owners"):
-        if _parse_timestamp(row[1]) > now:
-            return f"maintenance owner {row[0]} is live until {row[1]}"
-    return None
-
-
-def _candidate_content_reason(state_root: Path, candidate: Path, now: datetime) -> str | None:
-    """Why the candidate's contents forbid retiring it, or None when it is empty."""
-    from markdown_transaction import _COORDINATOR_V3_CONTRACT
-
-    with closing(
-        reliable_memory.open_readonly_operational_db(
-            candidate,
-            state_root,
-            max_bytes=MAX_OPERATIONAL_DB_BYTES,
-            contract=_COORDINATOR_V3_CONTRACT,
-        )
-    ) as database:
-        return _candidate_rows_held(database) or _live_maintenance_owner(database, now)
-
-
-def _stray_candidate_retention_reason(
-    state_root: Path, candidate: Path, now: datetime
-) -> str | None:
-    """Why the candidate must stay: an adoption in flight, or content it still holds."""
-    from installed_memory_repair import _operation_artifacts
-
-    if _safe_kind(state_root / "run" / "reliability-v3-adopted.json", state_root)[0] != "regular":
-        return "no complete adoption record"
-    artifacts, _truncated = _operation_artifacts(state_root / "run")
-    if artifacts:
-        return "an adoption operation is in flight: " + ", ".join(sorted(artifacts))
-    try:
-        return _candidate_content_reason(state_root, candidate, now)
-    except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
-        return f"its contents could not be read: {describe_error(exc)}"
-
-
 def _retire_stray_candidate(context: _RepairContext) -> None:
-    """Move an empty, ownerless pre-adoption coordinator candidate out of the way.
+    """Move every provably stray pre-adoption candidate out of the way.
 
-    It runs before the maintenance owner is taken because while the stray exists
-    no owner can be taken at all. The file is renamed, never deleted.
+    It runs before the maintenance owner is taken because while a stray exists
+    no owner can be taken at all. Writers apply the same rule where they are
+    refused (`markdown_transaction._retire_strays_before_validation`).
     """
-    candidate = context.state_path / COORDINATOR_CANDIDATE
-    if _safe_kind(candidate, context.state_path)[0] != "regular":
-        return
-    reason = _stray_candidate_retention_reason(
-        context.state_path, candidate, context.generated_at
-    )
-    if reason is not None:
-        context.repair_errors.setdefault("runtime", []).append(
-            f"Stray candidate kept: {reason}"
-        )
-        return
-    stamp = context.generated_at.strftime("%Y%m%dT%H%M%SZ")
-    destination = context.state_path / COORDINATOR_QUARANTINE / f"{stamp}-{candidate.name}"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    candidate.rename(destination)
-    context.repaired.append(
-        {"action": "retire_stray_candidate", "path": destination.relative_to(context.state_path).as_posix()}
-    )
+    from installed_memory_repair import retire_stray_candidates
+
+    outcome = retire_stray_candidates(context.state_path, context.generated_at)
+    for path in outcome.retired:
+        context.repaired.append({"action": "retire_stray_candidate", "path": path})
+    for reason in outcome.kept:
+        context.repair_errors.setdefault("runtime", []).append(f"Stray candidate kept: {reason}")
 
 
 def _run_repairs(context: _RepairContext) -> None:
@@ -7853,6 +7862,47 @@ def _run_repairs(context: _RepairContext) -> None:
         _release_unentered_maintenance(maintenance, guard_entered, context)
 
 
+# The nightly snapshot of `knowledge/` is the memory's second copy
+# (`snapshot_knowledge.py`); a nightly period plus a day of grace. See
+# `docs/research/2026-09-24-the-documents-say-what-the-code-does.md`.
+BACKUP_FRESH_SECONDS = 2 * 24 * 3600
+BACKUP_GIT_TIMEOUT_SECONDS = 5
+
+
+def _last_snapshot_at(root: Path) -> datetime | None:
+    """The time of the snapshot repository's newest commit, or None."""
+    if not (root / ".git").exists():
+        return None
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "log", "-1", "--format=%ct"],
+            capture_output=True,
+            text=True,
+            timeout=BACKUP_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    stamp = completed.stdout.strip()
+    if completed.returncode != 0 or not stamp.isdigit():
+        return None
+    return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
+
+
+def _backup_check(home_path: Path, now: datetime) -> dict:
+    """Whether the memory's second copy was taken recently."""
+    from snapshot_knowledge import snapshot_root
+
+    taken = _last_snapshot_at(snapshot_root(home_path))
+    details = {"last_snapshot_at": taken.isoformat() if taken else None}
+    if taken is None:
+        return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
+    age_days = (_as_utc(now) - taken).total_seconds() / 86400
+    if age_days * 86400 > BACKUP_FRESH_SECONDS:
+        return _result("backup", "degraded", f"The last knowledge snapshot is {age_days:.1f} days old.", details)
+    return _result("backup", "ok", "The knowledge snapshot is current.", details)
+
+
 def _deferrable_checks(
     root_path: Path,
     state_path: Path,
@@ -7876,6 +7926,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("backup", lambda _budget: _backup_check(home_path, generated_at)),
         ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
         ("checkpoints", lambda _budget: _checkpoint_check(state_path, generated_at)),

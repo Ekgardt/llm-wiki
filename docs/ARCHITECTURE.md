@@ -195,9 +195,11 @@ No embedding model, vector cache, or optional package is required in this tier.
 ### Hybrid tier (`uv sync --extra hybrid`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
 2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
-   `intfloat/multilingual-e5-small` embedding as the semantic tier (embedded, no daemon).
+   `intfloat/multilingual-e5-small` embedding as the semantic tier, run through ONNX
+   Runtime without `torch` (embedded, no daemon).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
-4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
+4. **Cross-encoder reranker**: `BAAI/bge-reranker-v2-m3` (optional, `transformers` on `torch`,
+   int8 dynamic quantisation on the CPU), re-scores the head of the list.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
 
@@ -309,7 +311,9 @@ to quarantine, and automatic semantic supersession remains disabled until the fr
 benchmark demonstrates no more than 1% false supersession. There is no eager backfill
 of claim ledgers.
 
-The system performs no automatic Git staging, commit, branch, or remote operation.
+The system performs no automatic Git staging, commit or push; its one automatic Git
+operation is the nightly fetch and fast-forward of the checkout on its default branch,
+which declines when it would touch a locally modified file.
 It adds no cloud service, remote queue/cache, or persistent daemon. Runtime databases
 coordinate local work only. Operational defaults are 10-second transaction and
 5-second queue busy timeouts; 2-day transaction/undo retention; 90-day archive hot
@@ -322,7 +326,7 @@ no environment variables.
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
 - **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
-- **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
+- **Cross-encoder reranker** (`--extra reranker`): `BAAI/bge-reranker-v2-m3` on `torch`, re-ranks the head of the list.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;
   materialized `.scm` queries, call graph, and impact analysis.

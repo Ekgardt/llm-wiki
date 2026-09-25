@@ -10,10 +10,11 @@ Design constraints (Phase 1):
 - Rate-limited: at most one line per (slug, prompt_hash) per 30s window
   to avoid log explosion during rapid re-prompts.
 - Skips empty/whitespace prompts.
-- Never fails the hook (exits 0 always) — hook failures break sessions.
-- Only writes for sessions OUTSIDE the vault itself. Vault-internal
-  sessions (where cwd = LLM_WIKI_ROOT) are typically maintenance and
-  would create a feedback loop.
+- Never fails the hook once it runs (a failure is recorded, exit 0); a module
+  that cannot import exits non-zero and the adapter records the loss.
+- Writes for sessions anywhere, the vault included: the memory's own processes
+  are filtered by the adapter's reentry marker, which is what the old
+  "vault-internal sessions are maintenance" rule stood in for (2026-09-24).
 
 Input (Claude Code UserPromptSubmit hook JSON on stdin):
     {"session_id": "...", "prompt": "user text", "cwd": "..."}
@@ -38,33 +39,15 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from memory_state import (  # noqa: E402
-        ROOT as _MS_ROOT,
-    )
-    from memory_state import (
-        STATE_ROOT as _MS_STATE,
-    )
-    from memory_state import (
-        spawn_detached,
-        update_state,
-    )
-    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
-    STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
-except Exception:  # noqa: BLE001
-    # memory_state unavailable — resolve paths but skip state writes (no
-    # unlocked fallback writer that could clobber concurrent locked writes).
-    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-    STATE_ROOT = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-    ).resolve()
+# A missing `memory_state` used to be replaced by no-op stand-ins, so the hook ran
+# and silently wrote nothing; now the import fails, the process exits non-zero,
+# and the adapter records the lost capture (`_record_failed_delegate`).
+from memory_state import ROOT as _MS_ROOT  # noqa: E402
+from memory_state import STATE_ROOT as _MS_STATE  # noqa: E402
+from memory_state import spawn_detached, update_state  # noqa: E402
 
-    def update_state(mutator, *, lock_timeout=10.0):  # type: ignore[misc]
-        """No-op stub — safe skip when memory_state is unavailable."""
-        pass
-
-    def spawn_detached(args):  # type: ignore[misc]
-        return None
+ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
+STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
 from capture_operation import claim_operation, complete_operation  # noqa: E402
 
@@ -297,16 +280,15 @@ def _hook_session(hook: dict) -> str:
     return str(hook.get("session_id") or "unknown")
 
 
-def _inside_vault(cwd: str) -> bool:
-    """Sessions run inside the vault are maintenance loops, not user work."""
-    try:
-        return Path(cwd).resolve().is_relative_to(ROOT)
-    except Exception:  # noqa: BLE001
-        return False
+def _should_skip(prompt: str) -> bool:
+    """Too short to be a prompt worth a line.
 
-
-def _should_skip(prompt: str, cwd: str) -> bool:
-    return len(prompt) < MIN_PROMPT_CHARS or _inside_vault(cwd)
+    It also skipped every prompt inside the vault, as "maintenance loops"; the
+    adapter's reentry marker has named the memory's own processes exactly since
+    2026-09-17, and the vault rule only hid the owner's own sessions there. See
+    `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
+    """
+    return len(prompt) < MIN_PROMPT_CHARS
 
 
 def _prompt_envelope(hook: dict, safe_prompt: str, slug: str):
@@ -371,7 +353,7 @@ def main() -> int:
     try:
         hook = _read_hook_input()
         prompt = str(hook.get("prompt") or "").strip()
-        if _should_skip(prompt, _hook_cwd(hook)):
+        if _should_skip(prompt):
             return 0
         _record_prompt(hook, prompt)
     except Exception as error:  # noqa: BLE001

@@ -604,21 +604,6 @@ def _render_handoff_items(
         return error.failure.render(max_bytes=max_chars)
 
 
-def build_handoff(
-    project: ProjectProjection,
-    *,
-    max_actions: int = 3,
-    max_chars: int = 2400,
-) -> str:
-    """Render the bounded operational subset used for SessionStart handoff."""
-    if max_chars < 1:
-        raise ValueError("handoff bounds must be positive")
-    return _render_handoff_items(
-        build_handoff_items(project, max_actions=max_actions),
-        max_chars=max_chars,
-    )
-
-
 def _legacy_or_current_projection(
     store: ProjectStore, slug: str, project_root: Path | str | None
 ) -> tuple[ProjectProjection, bool]:

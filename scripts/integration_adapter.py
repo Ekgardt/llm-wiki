@@ -501,7 +501,23 @@ def _run_delegate(
         timeout=DELEGATE_TIMEOUT_SECONDS,
     )
     _forward_delegate_stdout(result, forward_stdout)
+    _record_failed_delegate(name, result)
     return result
+
+
+def _record_failed_delegate(name: str, result: subprocess.CompletedProcess[str]) -> None:
+    """A delegate that exited non-zero is a lost capture, and says why.
+
+    Its exit status used to be read only to decide whether to forward its
+    output, so a delegate that could not even import died without a trace. See
+    `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
+    """
+    if result.returncode == 0:
+        return
+    from capture_diagnostics import record_capture_failure
+
+    last = (result.stderr or "").strip().splitlines()[-1:] or ["no error output"]
+    record_capture_failure(f"delegate_{Path(name).stem}", f"exit {result.returncode}: {last[0]}")
 
 
 def _forward_delegate_stdout(

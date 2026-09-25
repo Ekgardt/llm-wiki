@@ -3,7 +3,7 @@
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
 **A local-first memory system for AI agents. Markdown files, git-tracked, and owned by you.**
 
@@ -79,7 +79,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Search and retrieval
 - **Generation-consistent retrieval**: one validated immutable generation can bind FTS, vectors, graph, tiers, and evidence to the same source snapshot
 - **Truthful retrieval traces**: results report requested/effective mode, signals actually used, generation, reranker state, and fallback reason
-- **Triple-fusion when available**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
+- **Triple-fusion when available**: BM25 (FTS5) + Vector (multilingual E5 on ONNX Runtime) + evidence-backed Graph-neighbor RRF
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
@@ -166,13 +166,13 @@ branch and tag names are rejected — together with the SHA-256 of every file th
 bootstrap runs. Print them for any tag from a local checkout:
 
 ```bash
-uv run python scripts/release_manifest.py v4.0.0 --markdown
+uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
 Install that exact commit:
 
 ```bash
-git checkout --detach "$(git rev-parse 'v4.0.0^{commit}')"
+git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
 bash ./install.sh
 ```
 
@@ -290,9 +290,9 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 `cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
 
-Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. A fallback answer names its reason: `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
+Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild (`uv run python scripts/doctor.py --rebuild-generation`) before expecting generation-backed retrieval. The generation is the only index: the legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json` were retired on 2026-09-23 and are read by nothing. Until a generation exists, memory search reads Markdown directly within its deadline and every hit says `no_active_generation`; a code answer names its own reason, `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
 
-The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. No new embedding model or reranker is selected yet: **evidence pending**. Existing optional vector compatibility still uses its pinned legacy model. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
+The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. The defaults are `intfloat/multilingual-e5-small` for vectors and `BAAI/bge-reranker-v2-m3` for reranking, both pinned; replacing either needs the matrix's evidence, which is pending. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
 
 Real Graphify comparison and model-superiority evidence are pending. The deterministic comparative smoke validates orchestration only and supports no quality or token-ratio claim.
 

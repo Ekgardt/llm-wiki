@@ -1,12 +1,18 @@
-"""Weekly deep maintenance — runs Sunday 04:00 via Windows Task Scheduler.
+"""Weekly deep maintenance — started Sunday 04:00 by the installed scheduler.
 
-What it does:
-1. Everything the nightly pass does (queue work + compile + lint).
-2. OKF conformance sweep — backfills frontmatter on any new pages.
-3. Retention — stale pages, session records, and the superseded evidence-graph
-   generations nothing reads any more (`prune_generations.py`).
-4. LLM-judged contradiction check (optional, opt-in via env var).
-5. Report queue status without deleting retained tasks.
+The scheduler is the same one that starts the nightly pass (`install_control.py`).
+The nightly ran at 03:00, so the weekly does not repeat it; it runs only its own
+steps, in order: the OKF conformance sweep, a queue status report, the queue
+purge (finished work past its retention, exported to the private raw archive
+first), stale-page archiving, session-record archiving, daily-log archiving past
+the hot window,
+superseded-generation pruning, the opt-in contradiction check, A-MEM reflection
+and the L1 tier overviews.
+
+It keeps its own terminal record in `run/state.json` (`last_weekly_status`,
+`last_weekly_at`, `last_weekly_failure`), which doctor's scheduler check reads;
+it never writes the nightly's. See
+`docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md`.
 
 Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.md.
 """
@@ -16,17 +22,18 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scheduled_nightly  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import REPORTS_DIR, ROOT  # noqa: E402
+from memory_state import REPORTS_DIR, ROOT, update_state  # noqa: E402
 from operational_ownership import (  # noqa: E402
     OwnerLease,
     heartbeat_owner,
 )
+from scheduled_nightly import StepLog  # noqa: E402
 
 # Reflection calls the model once per page; the pass stops starting pages after this.
 # See `docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md`.
@@ -34,30 +41,60 @@ REFLECTION_BUDGET_SECONDS = 1800
 CONTRADICTIONS_STEP_SECONDS = 1800
 
 
+# The queue keeps finished work for `queue_result_retention_days`; the designed
+# purge exports it (intents and decisions included) to the private raw archive and
+# only then deletes it from `run/`. Nothing ran it until 2026-09-24. See
+# `docs/research/2026-09-24-every-store-has-a-bound.md`.
+QUEUE_ARCHIVE = ROOT / "knowledge" / "raw" / "queue-archive"
+
+
+def _queue_purge_command(script: Path) -> list[str]:
+    from reliable_memory import DEFAULTS
+
+    now = datetime.now(timezone.utc)
+    before = now - timedelta(days=DEFAULTS.queue_result_retention_days)
+    return [
+        sys.executable,
+        str(script / "memory_queue.py"),
+        "purge",
+        "--terminal-before",
+        before.isoformat(timespec="seconds"),
+        "--export",
+        str(QUEUE_ARCHIVE / now.strftime("%Y-%m-%d")),
+        "--include-dead",
+    ]
+
+
 def _script_steps() -> list[tuple[str, str, list[str], int]]:
     """(message, label, command, timeout) for every subprocess step, in order."""
     script = ROOT / "scripts"
     return [
         (
-            "Step 2: OKF conformance sweep (migrate_to_okf --apply)...",
+            "OKF conformance sweep (migrate_to_okf --apply)...",
             "okf",
             [sys.executable, str(script / "migrate_to_okf.py"), "--apply"],
             120,
         ),
         (
-            "Step 3: reporting memory queue status...",
+            "reporting memory queue status...",
             "status",
             [sys.executable, str(script / "memory_queue.py"), "status"],
             60,
         ),
         (
-            "Step 3b: auto-archiving stale pages (>180 days)...",
+            "archiving and purging queue work finished past its retention...",
+            "queue_purge",
+            _queue_purge_command(script),
+            600,
+        ),
+        (
+            "auto-archiving stale pages (>180 days)...",
             "archive",
             [sys.executable, str(script / "archive_stale.py"), "--days", "180", "--apply"],
             120,
         ),
         (
-            "Step 3c: archiving session records (>90 days)...",
+            "archiving session records (>90 days)...",
             "sessions",
             [sys.executable, str(script / "archive_sessions.py"), "--apply"],
             300,
@@ -67,13 +104,13 @@ def _script_steps() -> list[tuple[str, str, list[str], int]]:
             # archiver, so `knowledge/daily/` grew without bound and every
             # compile trigger hashed all of it. Research:
             # docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-            "Step 3c2: archiving daily logs past the hot window...",
+            "archiving daily logs past the hot window...",
             "daily_archive",
             [sys.executable, str(script / "archive_daily.py"), "--commit"],
             600,
         ),
         (
-            "Step 3d: pruning superseded evidence-graph generations...",
+            "pruning superseded evidence-graph generations...",
             "generations",
             # Its own budget ends two minutes before this step is killed. See
             # `docs/research/2026-09-14-a-prune-inside-its-step.md`.
@@ -113,26 +150,26 @@ def _logger(log_file: Path):
     return log
 
 
-def _run_script_steps(run_step, log) -> int:
+def _run_script_steps(run_step, log: StepLog) -> int:
     failures = 0
     for message, label, command, timeout in _script_steps():
-        log(message)
+        log.step(message)
         failures += int(bool(run_step(command, log, label, timeout=timeout)))
     return failures
 
 
-def _run_contradictions(run_step, log) -> int:
+def _run_contradictions(run_step, log: StepLog) -> int:
     if not _contradictions_wanted():
-        log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
+        log.step("contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
         return 0
-    log("Step 4: LLM contradiction check (opt-in)...")
+    log.step("LLM contradiction check (opt-in)...")
     command = [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"]
     return int(bool(run_step(command, log, "contradictions", timeout=CONTRADICTIONS_STEP_SECONDS)))
 
 
-def _reflect(log) -> None:
+def _reflect(log: StepLog) -> None:
     """A-MEM reflection — consolidate pages with multiple updates (v4.0)."""
-    log("Step 5: A-MEM reflection (page consolidation)...")
+    log.step("A-MEM reflection (page consolidation)...")
     try:
         _reflect_candidates(log)
     except Exception as error:  # noqa: BLE001 - best effort by design
@@ -161,13 +198,13 @@ def worst_case_seconds() -> float:
 
     steps = sum(timeout for _message, _label, _command, timeout in _script_steps())
     reflection = REFLECTION_BUDGET_SECONDS + DEFAULT_TIMEOUT_S
-    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS + scheduled_nightly.worst_case_seconds()
+    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS
     return float(waits + steps + CONTRADICTIONS_STEP_SECONDS + reflection)
 
 
-def _build_tiers(log) -> None:
+def _build_tiers(log: StepLog) -> None:
     """Generate L1 tier overviews (v4.0, best-effort)."""
-    log("Step 6: generating L1 tier overviews...")
+    log.step("generating L1 tier overviews...")
     try:
         from build_tiers import build_all_tiers
 
@@ -177,6 +214,42 @@ def _build_tiers(log) -> None:
         log(f"  tiers: failed ({error}) — skipping")
 
 
+def record_weekly_result(failures: int, error: str | None = None) -> None:
+    """The weekly's own terminal record; a failure never overwrites the nightly's."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _mutate(state: dict) -> None:
+        if not failures:
+            state["last_weekly_status"] = "success"
+            state["last_weekly_at"] = now
+            state.pop("last_weekly_failure", None)
+            return
+        state["last_weekly_status"] = "failed"
+        state["last_weekly_failure"] = {
+            "failed_at": now,
+            "failures": failures,
+            **({"error": error} if error else {}),
+        }
+
+    update_state(_mutate)
+
+
+def _record_quietly(failures: int, error: str | None = None) -> None:
+    try:
+        record_weekly_result(failures, error)
+    except Exception as exc:  # noqa: BLE001 - the pass's own outcome is what matters
+        print(f"scheduled_weekly: could not record result: {exc}", file=sys.stderr)
+
+
+def _run_weekly_steps(run_step, log: StepLog) -> int:
+    _wait_for_compile_idle(log)
+    failures = _run_script_steps(run_step, log)
+    failures += _run_contradictions(run_step, log)
+    _reflect(log)
+    _build_tiers(log)
+    return failures
+
+
 def _run_weekly_body(
     *, ownership: OwnerLease | None, fence: threading.Event | None = None
 ) -> int:
@@ -184,16 +257,14 @@ def _run_weekly_body(
     run_step = _step_runner(fence)
     today = datetime.now().strftime("%Y-%m-%d")
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = _logger(REPORTS_DIR / f"weekly-{today}.md")
+    log = StepLog(_logger(REPORTS_DIR / f"weekly-{today}.md"))
 
     log(f"=== Weekly deep maintenance — {today} ===")
-    _wait_for_compile_idle(log)
-    log("Step 1: work queue + compile + structural lint...")
-    failures = int(bool(scheduled_nightly.run_nightly(ownership=ownership, fence=fence)))
-    failures += _run_script_steps(run_step, log)
-    failures += _run_contradictions(run_step, log)
-    _reflect(log)
-    _build_tiers(log)
+    failures = 1
+    try:
+        failures = _run_weekly_steps(run_step, log)
+    finally:
+        _record_quietly(failures)
     log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
     return 1 if failures else 0
 
@@ -211,6 +282,7 @@ def run_weekly(
 def main() -> int:
     """The weekly fence: canonical on an adopted vault, the legacy marker otherwise."""
     from operational_ownership import OperationalOwnershipError
+    from secret_redact import describe_error_chain
 
     try:
         fence = scheduled_nightly.take_scheduled_fence("weekly")
@@ -218,8 +290,7 @@ def main() -> int:
         print(f"scheduled_weekly: maintenance already running ({exc.code}), skipping.", file=sys.stderr)
         return 0
     except Exception as exc:
-        # The failure lands in the nightly's record: one field for both passes.
-        scheduled_nightly.record_scheduled_failure(datetime.now().strftime("%Y-%m-%d"), exc)
+        _record_quietly(1, describe_error_chain(exc))
         raise
     if fence is None:
         print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)

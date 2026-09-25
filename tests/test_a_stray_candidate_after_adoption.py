@@ -82,7 +82,7 @@ def test_a_healthy_adopted_vault_passes_the_adoption_check(tmp_path: Path) -> No
 
     assert (adoption["status"], adoption["details"]) == (
         "ok",
-        {"adopted": True, "stray_candidates": []},
+        {"adopted": True, "stray_candidates": [], "quarantined_candidates": 0},
     )
 
 

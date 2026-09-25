@@ -362,8 +362,9 @@ uv run python scripts/search_memory.py --project my-app "decisions"
 uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-`search_memory.py` reads the active evidence generation first and falls back
-to the legacy BM25 index. Vectors are on by default when the optional model is
+`search_memory.py` reads the active evidence generation; without one it reads
+Markdown directly within its deadline and every hit says `no_active_generation`.
+Vectors are on by default when the optional model is
 available; `--no-semantic` turns them off. Graph-neighbor fusion applies only
 when graph evidence is available. If optional signals are unavailable, search
 returns the lexical result instead of claiming triple-fusion.
@@ -434,8 +435,8 @@ Per-project brief — the decisions, patterns and open threads of one project,
 written to `knowledge/projects/<slug>/context.md`:
 
 ```bash
-uv run python scripts/build_context.py --slug my-project           # print it
-uv run python scripts/build_context.py --slug my-project --write   # write the page
+uv run python scripts/build_context.py my-project                  # print it
+uv run python scripts/build_context.py my-project --write          # write the page
 ```
 
 ### Bounded synchronization
@@ -495,15 +496,13 @@ Migration is additive and non-destructive:
    from a fresh snapshot, not overwrite.
 5. Exercise lexical, optional vector, graph, code, impact, and citation reads and
    confirm their generation/fallback fields.
-6. Keep the legacy caches until installed-vault migration evidence proves removal
-   safe. That evidence is currently pending.
 
 To roll back, stop active commands. Either reactivate a previously validated
 generation through the catalog API or delete only `cache/evidence-graph/` and rebuild
-later. Never remove `knowledge/`, `.git/`, project journals, or `run/`. With legacy
-caches retained, retrieval resumes through legacy FTS/vector/Lance paths. If graph
-state is absent, code tools use bounded live extraction and report `fallback=true`,
-`graph_complete=false`.
+later. Never remove `knowledge/`, `.git/`, project journals, or `run/`. Until a
+generation is active again, memory search reads Markdown directly and says
+`no_active_generation`. If graph state is absent, code tools use bounded live
+extraction and report `fallback=true`, `graph_complete=false`.
 
 Deleting all `cache/` is also knowledge-safe but removes every derived index and model
 cache, so retrieval is degraded until rebuild. It does not relax the separate `run/`
@@ -514,8 +513,9 @@ deletion contract.
 The model matrix pins candidate revisions and forbids a predetermined winner. A new
 embedding or reranker default requires complete raw EN/RU/ZH quality and resource
 measurements, license checks, no parent-recall regression, material improvement, and
-Pareto efficiency. The matrix currently selects neither: **evidence pending**. The
-legacy optional vector path remains a compatibility path, not proof of superiority.
+Pareto efficiency. The pinned defaults are `intfloat/multilingual-e5-small` and
+`BAAI/bge-reranker-v2-m3`; evidence that any candidate should replace them is
+pending.
 
 Token fields must be read with their labels. `reported` comes from a provider;
 `tokenizer` from a model adapter; `estimated` currently uses UTF-8 byte length;
@@ -671,9 +671,10 @@ inside the 2-day undo window; no retained queue task/result or legacy queue arti
    and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
    retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never
-remove it automatically. The system also performs no automatic Git operation and
-provides no persistent daemon, cloud service, remote queue/cache, or SQLite knowledge
-source.
+remove it automatically. Its one automatic Git operation is the nightly
+fast-forward of the checkout on its default branch, which never pushes and declines
+when it would touch a locally modified file; it provides no persistent daemon, cloud
+service, remote queue/cache, or SQLite knowledge source.
 
 ### Skills (agent-side workflows)
 
@@ -700,7 +701,7 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers`; the encoder is `intfloat/multilingual-e5-small`
+This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
 — 384 dimensions over 100 languages, so a question in one language reaches a page
 written in another. The English-only model it replaces scored every candidate alike
 on non-English questions. The weights themselves (0.5 GB, plus 2.2 GB for the
@@ -713,13 +714,16 @@ uv run python scripts/install_models.py --check  # report only
 ```
 
 Each model is fetched at its pinned commit, only the files the loaders read,
-and `model.safetensors` is checked against the size and SHA-256 recorded beside
-the revision; a file that does not match is removed and the command fails.
+and its weights file (`onnx/model.onnx` for the encoder, `model.safetensors`
+for the reranker) is checked against the size and SHA-256 recorded beside the
+revision; a file that does not match is removed and the command fails. Once the
+encoder's ONNX weights are verified, the PyTorch weights it read before are
+removed from the cache.
 Present files are never fetched again. Until the weights are there, `doctor`
 reports `models: degraded` with that command and search stays lexical.
-A first query in a fresh process loads the model: measured on one host, about
-11 s for a cold CLI query against 4.5 s lexical-only, while the MCP server loads
-it once and answers warm afterwards. Prefer the MCP tools for repeated questions.
+A first query in a fresh process loads the model: measured on this vault on
+2026-09-25, a cold CLI query takes 2.3 s (it was 8.2 s when the encoder ran on
+`torch`), while the MCP server loads it once and answers warm afterwards.
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or

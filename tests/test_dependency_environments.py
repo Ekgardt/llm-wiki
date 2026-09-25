@@ -33,14 +33,16 @@ def test_reranker_extra_owns_every_direct_import() -> None:
     reranker = _project()["project"]["optional-dependencies"]["reranker"]
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in reranker}
 
-    assert names == {
-        "onnxruntime",
-        "optimum",
-        "tokenizers",
-        "torch",
-        "transformers",
-    }
-    assert sum(value.startswith("onnxruntime") for value in reranker) == 2
+    assert names == {"tokenizers", "torch", "transformers"}
+
+
+def test_semantic_extra_owns_every_import_of_the_encoder() -> None:
+    """The encoder runs through ONNX Runtime; torch belongs to the reranker alone."""
+    semantic = _project()["project"]["optional-dependencies"]["semantic"]
+    names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in semantic}
+
+    assert names == {"huggingface-hub", "numpy", "onnxruntime", "tokenizers"}
+    assert sum(value.startswith("onnxruntime") for value in semantic) == 2
 
 
 @pytest.mark.parametrize("override", [None, "relative environment"])

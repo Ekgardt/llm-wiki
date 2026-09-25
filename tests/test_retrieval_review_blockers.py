@@ -1,6 +1,7 @@
 """Review-blocker regressions for Task 11–13 retrieval contract."""
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -147,6 +148,7 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
 
 
 def test_trace_includes_reranker_diagnostics(monkeypatch):
+    import mcp_server
     import reranker
     import retrieval
     from reliable_memory import validate_schema
@@ -197,7 +199,7 @@ def test_trace_includes_reranker_diagnostics(monkeypatch):
     assert result.trace.reranker_model_revision == "rev"
     assert result.trace.reranker_depth == 20
     assert result.trace.reranker_duration_ms == 3
-    payload = retrieval.trace_to_dict(result.trace)
+    payload = mcp_server._reported_trace(dataclasses.asdict(result.trace))
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
     rows = retrieval.candidates_to_legacy(result, display_meta=result.display_meta)
     assert rows[0]["reranker_applied"] is True

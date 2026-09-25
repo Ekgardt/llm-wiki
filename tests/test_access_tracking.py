@@ -72,8 +72,8 @@ def _read_at(slug: str, stamp: str, db_path) -> None:
     import access_tracking
     import retrieval_telemetry
 
-    retrieval_telemetry.record_event(
-        retrieval_telemetry.RetrievalEvent(
+    retrieval_telemetry.record_events(
+        [retrieval_telemetry.RetrievalEvent(
             schema_version=1,
             event_id=secrets.token_hex(16),
             event_kind="page_read",
@@ -84,7 +84,7 @@ def _read_at(slug: str, stamp: str, db_path) -> None:
             generation="legacy",
             source_tool="search",
             timestamp=retrieval_telemetry._utc_timestamp(stamp),
-        ),
+        )],
         db_path=db_path,
     )
 

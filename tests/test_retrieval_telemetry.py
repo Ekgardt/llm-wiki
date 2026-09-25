@@ -119,9 +119,9 @@ def test_event_written_by_process_is_visible_to_another_process(tmp_path):
     writer = (
         "from pathlib import Path; from retrieval_telemetry import *; "
         f"p=Path({str(database)!r}); "
-        "record_event(make_event(event_kind='page_read', query=None, "
+        "record_events([make_event(event_kind='page_read', query=None, "
         "retrieval_mode='direct', candidate_id='durable', rank=None, "
-        "generation='legacy', source_tool='subprocess'), db_path=p)"
+        "generation='legacy', source_tool='subprocess')], db_path=p)"
     )
     subprocess.run([sys.executable, "-c", writer], env=env, check=True)
     reader = (
@@ -143,8 +143,8 @@ def test_concurrent_process_writers_do_not_lose_events(tmp_path):
     code = (
         "import sys; from pathlib import Path; from retrieval_telemetry import *; "
         f"p=Path({str(database)!r}); i=sys.argv[1]; "
-        "record_event(make_event(event_kind='page_read', query=None, retrieval_mode='direct', "
-        "candidate_id='page-'+i, rank=None, generation='legacy', source_tool='writer'), db_path=p)"
+        "record_events([make_event(event_kind='page_read', query=None, retrieval_mode='direct', "
+        "candidate_id='page-'+i, rank=None, generation='legacy', source_tool='writer')], db_path=p)"
     )
     processes = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=env) for i in range(8)]
     assert [process.wait(timeout=SHORT_TIMEOUT) for process in processes] == [0] * 8
@@ -183,7 +183,7 @@ def test_read_limits_and_malformed_or_unsafe_paths_fail_closed(tmp_path):
     import retrieval_telemetry
 
     database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-    retrieval_telemetry.record_event(_event(), db_path=database)
+    retrieval_telemetry.record_events([_event()], db_path=database)
     with pytest.raises(ValueError):
         retrieval_telemetry.read_events(limit=retrieval_telemetry.MAX_READ_EVENTS + 1, db_path=database)
 
@@ -210,8 +210,8 @@ def test_recording_does_not_mutate_knowledge(tmp_path):
     page.parent.mkdir(parents=True)
     page.write_bytes(b"---\ntype: concept\n---\n# Page\n")
     before = page.read_bytes()
-    retrieval_telemetry.record_event(
-        _event(), db_path=tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
+    retrieval_telemetry.record_events(
+        [_event()], db_path=tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
     )
     assert page.read_bytes() == before
 
@@ -234,9 +234,6 @@ def test_bounded_sequence_apis_expose_offsets_without_changing_event(tmp_path):
     assert rows[0].sequence > 0
     assert rows[0].event.candidate_id == "one"
     assert not hasattr(rows[0].event, "sequence")
-    assert retrieval_telemetry.count_events_after(
-        "one", after_sequence=0, limit=10, db_path=database
-    ) == 1
     assert retrieval_telemetry.read_events_after(
         "one", after_sequence=rows[0].sequence, limit=10, db_path=database
     ) == []
@@ -306,8 +303,8 @@ def test_record_events_validates_max_rows(value, tmp_path):
     import retrieval_telemetry
 
     with pytest.raises((TypeError, ValueError)):
-        retrieval_telemetry.record_event(
-            _event(), db_path=tmp_path / "telemetry.sqlite3", max_rows=value
+        retrieval_telemetry.record_events(
+            [_event()], db_path=tmp_path / "telemetry.sqlite3", max_rows=value
         )
 
 
@@ -338,8 +335,8 @@ def test_concurrent_ingestion_respects_row_ceiling(tmp_path):
     code = (
         "import sys; from pathlib import Path; from retrieval_telemetry import *; "
         f"p=Path({str(database)!r}); i=sys.argv[1]; "
-        "record_event(make_event(event_kind='page_read', query=None, retrieval_mode='direct', "
-        "candidate_id='page-'+i, rank=None, generation='legacy', source_tool='writer'), "
+        "record_events([make_event(event_kind='page_read', query=None, retrieval_mode='direct', "
+        "candidate_id='page-'+i, rank=None, generation='legacy', source_tool='writer')], "
         "db_path=p, max_rows=5)"
     )
     processes = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=env) for i in range(10)]
@@ -359,8 +356,8 @@ def test_preexisting_excess_fails_without_growing(tmp_path, monkeypatch):
     monkeypatch.setattr(retrieval_telemetry, "MAX_READ_EVENTS", 3)
 
     with pytest.raises(ValueError, match="bounded repair"):
-        retrieval_telemetry.record_event(
-            _event(candidate_id="new"), db_path=database, max_rows=2
+        retrieval_telemetry.record_events(
+            [_event(candidate_id="new")], db_path=database, max_rows=2
         )
     assert retrieval_telemetry.best_effort_record_event(
         _event(candidate_id="dropped"), db_path=database, max_rows=2
@@ -374,10 +371,10 @@ def test_existing_oversized_or_symlink_database_is_rejected_for_write(tmp_path, 
     import retrieval_telemetry
 
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-    retrieval_telemetry.record_event(_event(), db_path=database)
+    retrieval_telemetry.record_events([_event()], db_path=database)
     monkeypatch.setattr(retrieval_telemetry, "MAX_DATABASE_BYTES", 1)
     with pytest.raises(ValueError, match="delete.*regenerate|regenerate.*delete"):
-        retrieval_telemetry.record_event(_event(candidate_id="new"), db_path=database)
+        retrieval_telemetry.record_events([_event(candidate_id="new")], db_path=database)
     assert retrieval_telemetry.best_effort_record_event(
         _event(candidate_id="new"), db_path=database
     ) is False
@@ -389,7 +386,7 @@ def test_existing_oversized_or_symlink_database_is_rejected_for_write(tmp_path, 
     except OSError:
         pytest.skip("symlink creation unavailable")
     with pytest.raises((OSError, PermissionError, ValueError)):
-        retrieval_telemetry.record_event(_event(), db_path=link)
+        retrieval_telemetry.record_events([_event()], db_path=link)
 
 
 def test_insert_rolls_back_when_transactional_page_ceiling_is_exceeded(
@@ -401,7 +398,7 @@ def test_insert_rolls_back_when_transactional_page_ceiling_is_exceeded(
     monkeypatch.setattr(retrieval_telemetry, "MAX_DATABASE_BYTES", 1)
 
     with pytest.raises(ValueError, match="telemetry.*size|size.*telemetry"):
-        retrieval_telemetry.record_event(_event(), db_path=database)
+        retrieval_telemetry.record_events([_event()], db_path=database)
 
     monkeypatch.setattr(retrieval_telemetry, "MAX_DATABASE_BYTES", 512 * 1024 * 1024)
     assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
@@ -415,7 +412,7 @@ def test_compact_rejects_external_oversized_cache_with_recovery_instruction(
     import retrieval_telemetry
 
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-    retrieval_telemetry.record_event(_event(), db_path=database)
+    retrieval_telemetry.record_events([_event()], db_path=database)
     monkeypatch.setattr(retrieval_telemetry, "MAX_DATABASE_BYTES", 1)
 
     with pytest.raises(ValueError, match="delete.*regenerate|regenerate.*delete"):

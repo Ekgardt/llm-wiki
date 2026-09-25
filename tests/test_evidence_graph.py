@@ -734,8 +734,8 @@ def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(t
     assert _ids(graph.callers("callee")) == ["caller"]
     assert _ids(graph.callees("caller")) == ["callee"]
     assert _ids(graph.dependencies("decision")) == ["caller"]
-    assert _ids(graph.code_to_doc("caller")) == ["decision"]
-    assert _ids(graph.doc_to_code("decision")) == ["caller"]
+    assert _ids(graph.neighbors("caller", direction="in", edge_types=("DOCUMENTS",))) == ["decision"]
+    assert _ids(graph.neighbors("decision", direction="out", edge_types=("DOCUMENTS",))) == ["caller"]
     assert graph.evidence(assertion_id="call")[0]["span_sha256"] == _sha(b"callee()")
     graph.close()
 

@@ -1504,6 +1504,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
 
     from tests.test_doctor import (
         _build_root,
+        _cache_pinned_models,
         _create_claim_index,
         _create_generation,
         _qualified_pyright_check,
@@ -1524,6 +1525,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     )
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _cache_pinned_models(tmp_path, monkeypatch)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -1539,9 +1541,10 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     assert checks["generation"]["status"] == "ok"
     # A legacy pair is a vault that has not adopted Reliability V3, and that
     # is the one finding here (issue #17): capture is disabled until it does.
-    # Retention itself degrades nothing.
+    # Retention itself degrades nothing; a test vault has no scheduler and has
+    # never taken a knowledge snapshot.
     degraded = {check["id"] for check in report["checks"] if check["status"] != "ok"}
-    assert degraded <= {"capture", "scheduler"}, degraded
+    assert degraded <= {"backup", "capture", "scheduler"}, degraded
     assert "Session capture is disabled" in checks["capture"]["message"]
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     assert "Session capture is disabled" in session_start_context.health_block()

@@ -77,8 +77,13 @@ def build_envelope(
     partial: bool = False,
     warnings: list[Any] | None = None,
     components: dict[str, dict[str, Any]] | None = None,
+    index_timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """Build one conservative response envelope from local metadata."""
+    """Build one conservative response envelope from local metadata.
+
+    `index_timestamp` is when the index behind the answer was built, for the
+    answers that read one; None otherwise.
+    """
     coverage = _bounded("coverage", coverage)
     confidence = _bounded("confidence", confidence)
     generated_at = _as_utc(now or datetime.now(timezone.utc))
@@ -94,7 +99,7 @@ def build_envelope(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
-        "index_timestamp": None,
+        "index_timestamp": index_timestamp,
         "source_commit": source_commit,
         "freshness": freshness,
         "coverage": coverage,

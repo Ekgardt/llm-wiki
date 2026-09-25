@@ -1,15 +1,15 @@
-"""Built-in hybrid search over the vault — zero external dependencies.
+"""Hybrid search over the vault's knowledge.
 
-Uses Python's built-in sqlite3 + FTS5 for BM25 full-text search.
-Optionally uses sentence-transformers for semantic (vector) search
-when the library is installed. Results are fused via Reciprocal
-Rank Fusion (RRF) for hybrid ranking.
+Uses Python's built-in sqlite3 + FTS5 for BM25 full-text search over the active
+generation. When the `semantic` extra is installed, the pinned E5 encoder runs
+through ONNX Runtime (`scripts/onnx_encoder.py`) for the dense leg. Results are
+fused via Reciprocal Rank Fusion (RRF) for hybrid ranking.
 
-Costs measured on this vault (2026-09-10, `docs/ISSUES-2026-09-10.md`):
+Costs measured on this vault:
 - lexical only: tens of milliseconds, zero optional dependencies
-- with vectors: the dense leg costs seconds on a cold process and about a
-  second warm (`sentence-transformers`), and finds semantically related pages
-  ("database performance" → "N+1 query fix")
+- with vectors: loading the encoder costs about 1.5 s once per process
+  (2026-09-25; it was 6.5 s through `sentence-transformers` and `torch`), and
+  finds semantically related pages ("database performance" → "N+1 query fix")
 
 Usage:
     uv run python scripts/search_memory.py "auth decision"
@@ -178,7 +178,7 @@ def embedder_unavailable_reason() -> str | None:
 def _embedder_failure_kind(exc: BaseException) -> str:
     if isinstance(exc, ImportError):
         return "import_failed"
-    if isinstance(exc, OSError) or "NotFound" in type(exc).__name__:
+    if isinstance(exc, OSError):
         return "model_unavailable"
     return "load_failed"
 
@@ -221,46 +221,42 @@ def _note_embedder_unavailable(kind: str, detail: str) -> None:
     )
 
 
-def _have_sentence_transformers() -> bool:
-    """Check if sentence-transformers is importable."""
-    try:
-        import sentence_transformers  # noqa: F401
-        return True
-    except ImportError as exc:
-        _note_embedder_unavailable("import_failed", str(exc))
-        return False
+ENCODER_PACKAGES = ("onnxruntime", "tokenizers", "huggingface_hub", "numpy")
+
+
+def _have_encoder_runtime() -> bool:
+    """Whether the encoder's packages are installed, without importing them."""
+    import importlib.util
+
+    missing = [name for name in ENCODER_PACKAGES if importlib.util.find_spec(name) is None]
+    if missing:
+        _note_embedder_unavailable("import_failed", f"not installed: {', '.join(missing)}")
+    return not missing
 
 
 def _get_embedder():
     """Lazily load the embedding model. Returns None if unavailable.
 
-    The model is cached at module level — loading ~90MB model once,
-    not per-query. This is critical for benchmark latency.
+    The model is cached at module level: the 470 MB session is built once per
+    process, not per query.
 
     Unavailable still means None, never an exception: the generation reader
     treats an unusable query vector as "no dense signal" by contract and that
     is exactly what an unavailable model means. What changed is that the
     reason is recorded and named — see `embedder_unavailable_reason`.
 
-    The load is local-only. Without that flag every cold search opened a
-    connection to huggingface.co before it read a single local byte — the
-    reranker and the retrieval benchmark had both been local-only from the
-    start, and only the runtime query path still reached out. A vault that
-    does not have the weights now says `model_unavailable` and degrades to
-    lexical, which is the same answer it already gave for weights it could
-    not read.
+    The load is local-only: the files come from the Hugging Face cache and
+    never the network (`scripts/install_models.py` fetches them). A vault that
+    does not have the weights says `model_unavailable` and degrades to lexical,
+    which is the same answer it gives for weights it cannot read.
     """
     global _embedder_cache, _embedder_unavailable_reason
     if _embedder_cache is not None:
         return _embedder_cache
     try:
-        from sentence_transformers import SentenceTransformer
-        _embedder_cache = SentenceTransformer(
-            EMBEDDING_MODEL,
-            revision=EMBEDDING_MODEL_REVISION,
-            local_files_only=True,
-            trust_remote_code=False,
-        )
+        from onnx_encoder import load_encoder
+
+        _embedder_cache = load_encoder(EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION)
     except Exception as exc:  # noqa: BLE001 - no dense signal is not an error
         _note_embedder_unavailable(
             _embedder_failure_kind(exc), f"{type(exc).__name__}: {exc}"
@@ -585,7 +581,7 @@ def _call_generation_embedder(embedder: object, texts: list[str]):
     encode = getattr(embedder, "encode", None)
     if not callable(encode):
         raise TypeError("embedder must be callable or provide encode()")
-    return encode(texts, show_progress_bar=False, convert_to_numpy=True)
+    return encode(texts)
 
 
 def _require_positive_int(value: object, message: str) -> None:
@@ -666,7 +662,7 @@ def _reused_matrix(
     What this does *not* claim: that the row equals what a fresh full build
     would emit here. It does not, and neither does another full build — measured
     on 400 real chunks, re-batching the same texts moves float32 results by up
-    to 8.6e-08, because sentence-transformers pads and sorts by length. See
+    to 8.6e-08, because the encoder pads and sorts by length. See
     `docs/research/2026-08-28-what-a-rebuild-may-reuse.md`.
     """
     import numpy as np
@@ -952,12 +948,7 @@ def _generation_embedder(embedder, *, is_query: bool):
     """
 
     def encode(texts) -> list[list[float]]:
-        vectors = embedder.encode(
-            prefixed_texts(list(texts), is_query),
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        return vectors.tolist()
+        return embedder.encode(prefixed_texts(list(texts), is_query)).tolist()
 
     return encode
 
@@ -1055,7 +1046,7 @@ def build_generation_vectors_if_available(
     lexical search alone.
     """
     _check_generation_stop(deadline, cancelled)
-    if not snapshot.chunks or not _have_sentence_transformers():
+    if not snapshot.chunks or not _have_encoder_runtime():
         return None
     try:
         artifacts, reused = _built_generation_vectors(
@@ -4115,7 +4106,7 @@ _PAGE_STATUS_RE = re.compile(r"^status:\s*[\"\']?([^\"\'\n]+)[\"\']?\s*$", re.MU
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Built-in FTS5 search over the vault.")
+    p = argparse.ArgumentParser(description="Hybrid search over the vault's knowledge.")
     p.add_argument("query", nargs="?", default=None, help="Search query")
     p.add_argument("--scope", choices=["all", "wiki", "memory", "knowledge"], default="all")
     p.add_argument("--limit", type=_cli_search_limit, default=10)
@@ -4211,7 +4202,7 @@ def _active_generation_line() -> str:
 def _print_status() -> int:
     """The generation the search reads and the pages it would index."""
     print(_active_generation_line())
-    print(f"Pages on disk: {len(_collect_pages('all'))}")
+    print(f"Searchable pages (superseded excluded): {len(_collect_pages('all'))}")
     return 0
 
 
@@ -4256,9 +4247,41 @@ def _print_search_results(query: str, results: list[dict], elapsed: float) -> No
         ts_tag = f" ({r['timestamp']})" if r["timestamp"] else ""
         print(f"{i}. [{r['score']}] {r['title']}{proj_tag}{ts_tag}")
         print(f"   {r['path']}")
-        if r["summary"]:
-            print(f"   {r['summary']}")
+        snippet = result_snippet(r)
+        if snippet:
+            print(f"   {snippet}")
         print()
+
+
+SNIPPET_CHARS = 240
+
+
+def result_snippet(result: dict) -> str:
+    """The first words of the hit's text after its heading; the summary otherwise.
+
+    A chunk's summary is its heading, and a heading such as "Consequences" says
+    nothing on its own line. See
+    `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+    """
+    text = _body_text(str(result.get("content") or ""))
+    if not text:
+        return str(result.get("summary") or "")
+    return _clipped(text, SNIPPET_CHARS)
+
+
+def _body_text(content: str) -> str:
+    lines = [line.strip() for line in content.splitlines()]
+    return " ".join(line for line in lines if _is_body_line(line))
+
+
+def _is_body_line(line: str) -> bool:
+    return bool(line) and not line.startswith("#")
+
+
+def _clipped(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 if __name__ == "__main__":

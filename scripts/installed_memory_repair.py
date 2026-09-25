@@ -780,6 +780,163 @@ def _validate_upgrade_retired(
         raise ValueError("retired database differs from migration source")
 
 
+class _StraySpec(NamedTuple):
+    """One pre-adoption candidate: where it lives and what makes it stray."""
+
+    key: str
+    contract: OperationalDatabaseContract
+    data_tables: tuple[str, ...]
+    owner_table: str
+    owner_label: str
+    quarantine: str
+
+
+# A candidate is stray when none of these holds a row and no owner is live. The
+# epoch tables only count and are left out, as `doctor` always left them out.
+_STRAY_SPECS = (
+    _StraySpec(
+        "coordinator_candidate",
+        _COORDINATOR_CONTRACT,
+        (
+            "transaction",
+            "operation",
+            "intent_fences",
+            "project_leases",
+            "writer_owners",
+            "project_checkpoints",
+            "blackboard_claims",
+            "capture_binding_projections",
+        ),
+        "maintenance_owners",
+        "maintenance owner",
+        "coordinator-quarantine",
+    ),
+    _StraySpec(
+        "queue_candidate",
+        _QUEUE_CONTRACT,
+        (
+            "tasks",
+            "attempt_history",
+            "capture_intents",
+            "capture_task_links",
+            "semantic_decisions",
+            "source_fences",
+            "task_fences",
+            "task_source_links",
+        ),
+        "queue_ownership",
+        "queue owner",
+        "queue-quarantine",
+    ),
+)
+STRAY_CANDIDATE_NAMES = (
+    "markdown-transactions-v3.candidate.sqlite3",
+    "queue-v3.candidate.sqlite3",
+)
+QUARANTINE_DIRECTORIES = tuple(spec.quarantine for spec in _STRAY_SPECS)
+
+
+class StrayRetirement(NamedTuple):
+    """What `retire_stray_candidates` moved, and why it left anything in place."""
+
+    retired: tuple[str, ...]
+    kept: tuple[str, ...]
+
+
+def _adoption_in_flight(paths: dict[str, Path]) -> str | None:
+    """Why no candidate may be retired now, or None when adoption is complete."""
+    if _kind(paths["adoption"]) != "file":
+        return "no complete adoption record"
+    artifacts, _overflow = _operation_artifacts(paths["run"])
+    if artifacts:
+        return "an adoption operation is in flight: " + ", ".join(artifacts)
+    return None
+
+
+def _first_held_table(database: sqlite3.Connection, spec: _StraySpec) -> str | None:
+    for table in spec.data_tables:
+        if database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None:
+            return f"holds a row in {table}"
+    return None
+
+
+def _live_owner(database: sqlite3.Connection, spec: _StraySpec, now: datetime) -> str | None:
+    from operational_ownership import _parse_timestamp
+
+    for actor, expires in database.execute(
+        f'SELECT actor_id, expires_at FROM "{spec.owner_table}"'
+    ):
+        if expires is not None and _parse_timestamp(expires) > now:
+            return f"{spec.owner_label} {actor} is live until {expires}"
+    return None
+
+
+def _content_reason(candidate: Path, state_root: Path, spec: _StraySpec, now: datetime) -> str | None:
+    """Why the candidate's contents forbid retiring it, or None when it is empty."""
+    if _kind(candidate.with_name(candidate.name + "-journal")) != "missing":
+        return "a rollback journal is beside it"
+    try:
+        with contextlib.closing(
+            open_readonly_operational_db(
+                candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, contract=spec.contract
+            )
+        ) as database:
+            return _first_held_table(database, spec) or _live_owner(database, spec, now)
+    except Exception as exc:  # noqa: BLE001 - unreadable means keep, and say why
+        return f"its contents could not be read: {type(exc).__name__}: {exc}"
+
+
+def _quarantined(candidate: Path, directory: Path, now: datetime) -> Path:
+    """Rename the candidate into an owner-only quarantine directory; never delete it."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    destination = directory / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{candidate.name}"
+    candidate.rename(destination)
+    return destination
+
+
+def _retire_one(
+    paths: dict[str, Path], spec: _StraySpec, now: datetime, blocker: str | None
+) -> tuple[str, str]:
+    candidate = paths[spec.key]
+    if _kind(candidate) != "file":
+        return "kept", f"{candidate.name}: not a regular file"
+    reason = blocker or _content_reason(candidate, paths["run"].parent, spec, now)
+    if reason is not None:
+        return "kept", f"{candidate.name}: {reason}"
+    try:
+        destination = _quarantined(candidate, paths["run"] / spec.quarantine, now)
+    except FileNotFoundError:
+        return "gone", candidate.name
+    return "retired", destination.relative_to(paths["run"].parent).as_posix()
+
+
+def retire_stray_candidates(state_root: Path, now: datetime) -> StrayRetirement:
+    """Quarantine every pre-adoption candidate that is provably stray.
+
+    A stray candidate refuses every writer; on 2026-09-17 one left by a test run
+    stopped capture, the nightly and the weekly for six days, and the repair ran
+    only when a person ran `doctor --repair`. The rule here is the one doctor
+    applied, for both candidates, and it runs where the refusal happens. See
+    `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
+    """
+    paths = _paths(Path(state_root).absolute())
+    present = _present_candidates(paths)
+    if not present:
+        return StrayRetirement((), ())
+    blocker = _adoption_in_flight(paths)
+    outcomes = [_retire_one(paths, spec, now, blocker) for spec in present]
+    return StrayRetirement(_details(outcomes, "retired"), _details(outcomes, "kept"))
+
+
+def _present_candidates(paths: dict[str, Path]) -> list[_StraySpec]:
+    return [spec for spec in _STRAY_SPECS if _kind(paths[spec.key]) != "missing"]
+
+
+def _details(outcomes: list[tuple[str, str]], wanted: str) -> tuple[str, ...]:
+    return tuple(detail for kind, detail in outcomes if kind == wanted)
+
+
 def require_reliability_v3_adopted(
     *, root: Path, state_root: Path
 ) -> dict[str, object]:

@@ -9,6 +9,9 @@ decides per checkout, by identity, never by age:
 * the checkout root is gone - retire every generation of it;
 * its branch or repository turned indexing off (`repository_worktrees`) -
   retire every generation of it;
+* it lives in the host's job directory (`ephemeral_paths.is_throwaway_checkout`)
+  - retire every generation of it, as throwaway work
+  (`docs/research/2026-09-24-every-store-has-a-bound.md`);
 * otherwise keep the newest generation and the one behind it (the depth and
   the reason are the vault's: `RETAINED_ANCESTOR_GENERATIONS`, a reader that
   resolved just before the last refresh) and retire the rest.
@@ -82,11 +85,18 @@ def _foreign_groups(manifests, activated: frozenset[str]) -> dict[str, dict]:
 
 
 def _verdict(scope: Mapping) -> str:
+    from ephemeral_paths import is_throwaway_checkout
     from repository_worktrees import indexing_marked_off
 
     root = Path(str(scope.get("checkout_root", "")))
     if not root.is_dir():
         return "checkout_missing"
+    if is_throwaway_checkout(root):
+        return "throwaway_checkout"
+    return _indexing_verdict(root, indexing_marked_off)
+
+
+def _indexing_verdict(root: Path, indexing_marked_off) -> str:
     if indexing_marked_off(root) is not None:
         return "marked_not_indexed"
     return "kept"

@@ -15,15 +15,20 @@ Research: `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ephemeral_paths import (  # noqa: E402
+    ephemeral_roots,
+    host_directory,
+    is_under,
+    resolved,
+    spellings,
+)
 from retire_lsp_evidence import SCAN_BUDGET_SECONDS  # noqa: E402
 
 OWN_CALL_ENTRYPOINT = "sdk-cli"
@@ -32,24 +37,21 @@ MAX_TRANSCRIPTS_PER_PASS = 2000
 
 
 def projects_directory() -> Path:
-    config = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(config) if config else Path.home() / ".claude"
-    return base / "projects"
+    return host_directory() / "projects"
 
 
 def _raw_roots(vault_root: Path) -> tuple[Path, ...]:
-    return (Path(vault_root), Path(tempfile.gettempdir()), Path.home() / ".claude" / "jobs")
+    return (Path(vault_root), *ephemeral_roots())
 
 
 def own_call_roots(vault_root: Path) -> tuple[Path, ...]:
     """Where the memory runs its calls from; a transcript from elsewhere is not ours."""
-    return tuple(_resolved(root) for root in _raw_roots(vault_root))
+    return tuple(resolved(root) for root in _raw_roots(vault_root))
 
 
 def root_spellings(vault_root: Path) -> tuple[Path, ...]:
     """Every way a root is written: as given and resolved (macOS `/var` is `/private/var`)."""
-    candidates = [c for root in _raw_roots(vault_root) for c in (root, _resolved(root))]
-    return tuple(dict.fromkeys(candidates))
+    return spellings(_raw_roots(vault_root))
 
 
 def _decoded(line: str) -> dict:
@@ -73,21 +75,6 @@ def _first_entry(path: Path) -> dict:
     return {}
 
 
-def _under(path: Path, roots: tuple[Path, ...]) -> bool:
-    """Resolved on both sides: macOS spells its temporary directory two ways
-    (`/var/...` in a record, `/private/var/...` resolved) and Windows spells a
-    user's directory short and long (CI, 2026-09-23)."""
-    resolved = _resolved(path)
-    return any(resolved == root or root in resolved.parents for root in roots)
-
-
-def _resolved(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except OSError:
-        return path
-
-
 def is_own_call(path: Path, roots: tuple[Path, ...]) -> bool:
     """`sdk-cli` from one of the memory's working directories; anything else is kept."""
     try:
@@ -97,7 +84,7 @@ def is_own_call(path: Path, roots: tuple[Path, ...]) -> bool:
     if entry.get("entrypoint") != OWN_CALL_ENTRYPOINT:
         return False
     cwd = entry.get("cwd")
-    return isinstance(cwd, str) and _under(Path(cwd), roots)
+    return isinstance(cwd, str) and is_under(Path(cwd), roots)
 
 
 def _encoded(root: Path) -> str:

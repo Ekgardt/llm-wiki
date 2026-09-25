@@ -1,5 +1,9 @@
 # v5.0 Roadmap
 
+> **History, not the current state (marked 2026-09-24).** This document describes
+> the system as of its own date; branches, tags and files it names may be gone.
+> The current state is `docs/AUDIT-2026-09-24-live.md`.
+
 The 2026-07-16 audit defined a 30-task generation-consistent retrieval program.
 Tasks 1-29 are integrated on the current development branch: immutable generations,
 truthful retrieval, token-aware context, grounded QA, persistent evidence/code/

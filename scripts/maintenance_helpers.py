@@ -57,6 +57,9 @@ SCHEDULER_LOG_NAMES = (
     "scheduled-weekly.log",
     "cron-nightly.log",
     "cron-weekly.log",
+    # Appended by every hook that fails; 924 KB on 2026-09-24 with nothing
+    # bounding it. See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+    "hook-errors.log",
 )
 SCHEDULER_LOG_KEEP_BYTES = 2 * 1024 * 1024
 

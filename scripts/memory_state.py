@@ -573,6 +573,10 @@ def _keep_previous(readable: bool) -> None:
         os.link(STATE_FILE, staged)
         os.replace(staged, _previous_state_file())
     except OSError:
+        pass
+    finally:
+        # When `.previous` already is this inode, POSIX rename "does nothing, and
+        # returns a success status" (rename(2)) and the staged link stays behind.
         staged.unlink(missing_ok=True)
 
 

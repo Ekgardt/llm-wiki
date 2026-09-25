@@ -6,116 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Removed
+## [5.0.0] — 2026-09-24
 
-- **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
-  its verdict sidecar are gone: the owner does no manual labelling, and the two
-  automatic readings above replace the step it existed for. Corpus schema v2
-  (`label_reviewed`, `human_tier`) is refused; the only v2 corpus was the private
-  live one, rebuilt under v3 (2026-09-23).
-- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
-  reader (no writer since 2026-08-20, no file on the live vault), the
-  positional `git_range` of `analyze_impact` (every caller names its
-  endpoints), and the readers for incremental-manifest versions v1–v4 (every
-  generation on the live vault is v5; a fresh install builds v5). A parent
-  whose manifest cannot be read is now rebuilt in full instead of failing the
-  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
-  queue migration stay, with the evidence and the plan for each in
-  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
-- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
-  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
-  are read and written by nothing: their builders, readers, swap lock and
-  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
-  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
-  a hundred functions with them. On the live vault the legacy index answered
-  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
-  it by design until now. The evidence generation is the only index: without
-  one a search reads Markdown directly, bounded by its deadline, and every
-  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
-  the generation and `--status` names it. See
-  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
-- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
-  per task under `run/queue/`; the importer, its marker, quarantine, lease
-  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
-  installers still created. Measured before removal: the installer's adoption
-  already refused such a vault and never ran the import. A `run/queue/` holding
-  records is now refused by the queue (`legacy_json_queue_unsupported`) and
-  named by `doctor`, which keeps `run/` from deletion while they exist. See
-  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
-
-### Changed
-
-- **One classification prompt.** The capture path sent three lines that named
-  `FLUSH_OK`, `FLUSH_MAJOR` and `FLUSH_MINOR` and never said what a tier meant,
-  while the measurement stand scored `build_classification_prompt`, which no
-  installed hook reached. The capture worker now sends that prompt with its
-  system prompt, so the stand measures what the product sends; the wire grammar
-  and its parser are unchanged. Measured on the same 21 confirmed real cases:
-  the short prompt named the tier right 0.857 of the time and kept 0.667 of the
-  marker terms; the rich prompt 0.905 and 0.476, because "be terse" dropped
-  terms; with one added sentence — keep names exactly as the transcript spells
-  them — 0.952 and 0.714 (2026-09-23).
-- **A fresh install builds its first generation.** `doctor` reports a missing
-  generation as degraded and repairable instead of "legacy retrieval remains
-  available", so the installer's `sync_memory.py --apply` builds it (measured:
-  48.9 s for the live vault's 189 pages with vectors, into a scratch state
-  root), `doctor --rebuild-generation` builds it on demand, and a
-  generation reason (`generation_corrupt`, …) is reported ahead of the
-  Markdown read's `no_active_generation` when both apply.
-
-### Deprecated
-
-- **`compile_memory.py --all`.** It has never changed anything: every daily log
-  without a committed receipt is compiled anyway, and a day with one is never
-  compiled again. The flag is still accepted, is hidden from `--help`, and now
-  prints one line saying it does nothing and will be removed.
-
-### Changed
-
-- **One limit, one place.** Fifteen numeric bounds that were copied into a
-  second module now have one owner each (the 64 KiB I/O chunk, the archive
-  installers' bounds, the extractors' bounds, the capture-intent bound, the
-  hook lock timeout, the index bound, the hook-configuration bound, the
-  generation-manifest bound, the ninety hot days); doctor reads the hook
-  configuration and a generation's manifest under the writers' own bounds
-  instead of smaller ones of its own. Every remaining name reused for a
-  different bound says what it bounds, and `tests/test_one_limit_one_place.py`
-  refuses a new copy. `docs/LIMITS-2026-09-23.md` lists every limit with no
-  recorded reason. `docs/research/2026-09-23-one-limit-one-place.md`.
-- **The memory generation carries a project's claim pages, not its journal.**
-  On the live vault of 2026-09-23 `journal.md` was 94 % of the search index's
-  bytes — one checkpoint event per chunk — and most of the reranker's time;
-  the accepted 2026-09-10 decision already names `state.md`/`context.md` as the
-  claim pages and the journal as the event log. The journal stays on disk,
-  consolidated nightly and greppable, as session records do.
-- **A directory is a project only if the owner could be working in it.** The
-  slug rule refuses a directory inside the vault, a direct child of the
-  platform's temporary directory (what `mkdtemp` and the provider CLI make) and
-  the home directory, for every caller at once. The audit found 85 project
-  directories, minted for a benchmark run under `cache/`, a transaction under
-  `run/`, `/tmp`, the provider's temp directory, `$HOME` and the vault itself.
-  `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
-
-- **The navigation gate measures our share, not the machine.**
-  `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
-  `direct_pyright_p95_ms` — Pyright itself, which no change of ours can reach —
-  rose 27.6% in the same three hours; our share of the work moved 2.4%. The
-  bound is now `max(30 ms, 0.90 x direct_pyright_p95_ms)`: the approved 30 ms
-  floor, or, on a slower machine, 90% of what the language server took on the
-  same queries in the same run. A uniformly slower runner can no longer fail the
-  gate; our layer growing its share still does, and an absent or non-positive
-  control makes the evidence incomplete. The August runs, where our share was
-  0.48-0.50 against today's 0.72-0.74, show what the single absolute number was
-  blind to. See `docs/CODE-NAVIGATION.md` and
-  `docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md`.
-- **The test tree comes under the complexity law.** `lizard -C 5` reported 88
-  functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
-  in the navigation tests become tables of runners and builders, the
-  121-line AST walk over the benchmark fixture becomes one function per module
-  and per block, the fake LSP server's two 300-line loops become
-  `_SemanticServer` and `_LifecycleServer` with one method per protocol
-  request, and the runtime-deletion guard resolves paths through a dispatch on
-  node type. No test lost an assertion: each file was run before and after.
+Everything since 4.0.0, found and fixed by the audits of 2026-09-17 and
+2026-09-24. A major release: Cursor and Antigravity are no longer supported
+platforms, an upgrade from v3.3.0–v3.4.0 no longer imports the JSON queue, and
+the legacy index files are no longer read (see Removed).
 
 ### Added
 
@@ -149,19 +45,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `-v` was tried first and cost two runs: a 40-minute and then a 65-minute cap on
   Windows shards that normally take 22-26 minutes.
 
-### Changed
-
-- **The reader is named by configuration, and this machine names Sonnet.** With
-  `MEMORY_CLAUDE_MODEL` unset the claude CLI call carries no `--model` flag, so the
-  pipeline read with whatever the operator's own session was set to — on this
-  machine Opus, which refused the grounded-QA prompt and failed 18 of 19
-  LongMemEval questions. The code still invents no model; the docstring says why,
-  and the machine is configured instead (agent sessions and both maintenance
-  units). Verified on the installed vault: answered in 59.1 s where it refused
-  before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
-
-### Added
-
 - **The memory retires its own residue.** The nightly removes the transcripts the
   memory's own provider calls left under `~/.claude/projects` before
   `--no-session-persistence` (2026-09-14): `sdk-cli` records from the vault, the
@@ -180,211 +63,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   a person reviews it". The corpus now carries the rendered, bounded conversation
   the product classifies, not the raw host JSONL it stopped reading on 2026-09-06.
   Schema v3 replaces v2. See `docs/research/2026-09-23-the-corpus-labels-itself.md`.
-
-### Fixed
-
-- **Telemetry schema is created inside the write transaction.** Eight processes
-  recording into a fresh telemetry database on Windows: five failed at once with
-  `database is locked` although the connection had a busy timeout, because
-  `CREATE … IF NOT EXISTS` outside a transaction promotes a read lock to a write
-  lock, the one wait SQLite refuses. `record_events` and `trace_ingest.open_store`
-  now create their schema under `BEGIN IMMEDIATE` (CI run 35941975284, 2026-09-24).
-- **A pinned download that meets a transient network error is tried again.**
-  `pinned_download.retry_transient` runs a download up to three times, after 1 s
-  and 4 s, for a connection reset, a timeout, HTTP 408, 429 or 5xx, inside the
-  install deadline; a 4xx, a redirect or a digest mismatch is raised at once. The
-  language-server installer uses it, truncating the target between attempts; one
-  reset had ended a CI install (run 35926589114, 2026-09-23). See
-  `docs/research/2026-09-24-two-post-merge-failures-on-main.md`.
-- **The adoption gate names its cause and the queue waits out a busy
-  database.** `reliability_v3_record_invalid` now carries what the validation
-  saw (`code: Cause: message`), and the adopted queue validates adoption
-  through the coordinator's retried, cached check instead of a bare call:
-  on the live vault a `doctor --rebuild-generation` at 18:27 UTC failed its
-  queue repair with the bare code while a later run and a standalone check
-  passed. See
-  `docs/research/2026-09-23-the-adoption-gate-names-its-cause-and-waits-out-contention.md`.
-- **A barrier proves concurrency; a stopwatch measured the machine.** The
-  three parallel version probes of `detect_code_tools` were asserted to finish
-  under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run
-  35857662331) with nothing wrong. They now meet at one `threading.Barrier`,
-  which a sequential probe would break. See
-  `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
-- **A dead task names its reason.** Every exception a processor raised became
-  the one code `processor_failed`; on the live vault 225 failed attempts of 25
-  dead `flush` tasks said only that, while the failure trail held the actual
-  reason (`intent_fence_lost`) for seven of them. A failed attempt now carries
-  a queue error's own code, or `processor_failed:<reason>` naming the
-  exception's type or its code-shaped message, bounded to the column's 64
-  bytes and never the message text. See
-  `docs/research/2026-09-23-a-dead-task-names-its-reason.md`.
-- **A scheduled pass that fails before it starts is recorded as failed.** The
-  nightly and weekly passes take their fence first; a refusal there exited 1
-  and left `last_nightly_status = success` for six nights while session start
-  said nothing. Doctor also says when a transaction scan stopped at its row
-  bound (its counts are lower bounds), admits a `run/state.json` up to 4 MiB (the writer's
-  own bound exceeds the old 256 KiB), and rebuilds the legacy index with the
-  same page collector its freshness check uses, so the repair can succeed.
-  Session start counts daily logs at the top level (receipts are not logs), the
-  guard-rails block joins a wrapped one-sentence summary, a compile dry run moves
-  no clock, pending checkpoint events older than 30 days of vault activity are
-  dropped and noted, and the nightly retires LSP failure roots older than 14 days
-  beyond the newest 20 (`scripts/retire_lsp_evidence.py`). Session
-  consolidation gives its provider the compile's 300 s ceiling instead of the
-  client's 90 s default, and `install_pyright.py` reinstalls over a receipt that
-  predates the tree digest instead of refusing the repair it is recommended for,
-  and re-validates an installed tree by its files only (pyright ships
-  `dist/typeshed-fallback/` as a directory, which every re-run had read as a file).
-  `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
-- **A stray pre-adoption candidate no longer stops the memory in silence.** A
-  pytest session whose state root resolved to the live vault left an empty
-  `run/markdown-transactions-v3.candidate.sqlite3` there on 2026-09-17; the
-  adoption boundary refused every capture, checkpoint and compile for six days
-  while doctor named only the symptoms. Doctor now has an `adoption` check that
-  reports the refusal as an error with its cause and the stray path, and
-  `--repair` moves an empty, ownerless candidate to `run/coordinator-quarantine/`
-  (retained evidence, never deleted) once no adoption is in flight. The test
-  harness refuses an external state root that is the vault or inside it, and
-  the per-test progress file gets its directory before the first test.
-  `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
-
-- **A repeated append no longer hashes the file it only has to find.** The
-  2026-09-18 presence check read and digested the whole daily log outside any
-  lock, so under eighteen concurrent writers it refused with `transaction
-  target changed while hashing` and a line already on disk was reported as a
-  failed capture (one red job on `main` after PR 36). Presence is now one
-  `lstat`. `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
-
-- **A timing ratio under a tenth of a second measured the machine.** Five ratio
-  gates used a 0.05 s floor and a sixth derived one from the process clock tick;
-  a macOS shard failed `0.0946 <= 0.0714` on a step whose quiet time is 22 ms,
-  after already taking the best of five attempts. They now share
-  `tests/timing_floor.noise_floor_seconds()` — `max(0.25 s, 8 clock ticks)` — and
-  the deterministic half of those tests, the counted scanner calls that double
-  exactly, is what still proves the linearity claim.
-
-- **Two seconds for a Git probe was a Linux figure.**
-  `repository_scope.GIT_TIMEOUT_SECONDS` was 2.0 while `repository_index` gives the
-  same probe 10.0, and on a hosted Windows runner `git rev-parse` crossed it: a
-  navigation test failed with "repository scope deadline reached during Git probe"
-  with nothing wrong with the repository. One operation, one bound — it is ten now,
-  and a test pins the two constants together.
-
-- **A retry of a completion must replay its own request.** `complete_task` built
-  its record with a fresh clock reading, so a completion interrupted by
-  `database is locked` could never be finished: the operation id was the claim's,
-  the payload was not, and the transaction layer adopts a bound operation only
-  when the block matches. It takes `completed_at` now, defaulting to the moment it
-  runs, and a retry-aware caller replays the value it used first. Main run
-  34760092169 failed on exactly this. See
-  `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
-- **A refusal says what the provider said.** Eighteen of nineteen rows of a
-  LongMemEval run carried only "grounded QA provider returned invalid JSON" while
-  the provider had answered `API Error: ... safeguards flagged this message`,
-  which named both the cause and the fix. The refusal now carries the response
-  length and its first 200 characters, whitespace collapsed and redacted. See
-  `docs/research/2026-09-13-an-unparsable-answer-must-say-what-it-said.md`.
-
-- **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
-  minutes above the measured 22-30 minute range, and one shard that took 45 on a
-  slow runner was cancelled at the cap — which GitHub reports as `cancelled`, not
-  `failure`, and refuses to re-run, so a branch could not go green without a new
-  commit. The Windows class now has 60 minutes; Linux and macOS keep 20, where the
-  range is 6-12.
-
-- **An answer stops paying for whitespace and for a module name the path already
-  spells.** A tool answer is serialized compactly, and a row that carries
-  `scripts/retrieval.py` no longer repeats `scripts.retrieval` inside its
-  qualified name. One `callers` question on the installed vault: 836 tokens
-  before, 561 after. Nothing is dropped, and the test callers the other tool
-  filters out stay.
-- **A line the file has moved on from is read from the file.** The generation is
-  rebuilt by the nightly pass, so a definition edited today used to answer with
-  yesterday's line — measured, 3030 against the 3054 it had moved to. Every file
-  an answer names is now parsed when its digest no longer matches, at most 20 per
-  answer, inside the caller's deadline, and nothing is written: no generation, no
-  catalog row, no active pointer. A stale code snippet is read from the file the
-  same way, so its text is the text that is there. On the same tree the parity
-  stand goes from 15 of 16 to 16 of 16 on both our columns, and the other tool is
-  the one answering T04 with a stale line. See
-  `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
-
-- **A graded line number is read from the tree, not frozen in the gold.** T04
-  asks where `_page_diverse` is defined and graded on the literal `3030`; the
-  slot fix moved that definition to 3054, so every side would have graded wrong
-  whatever it answered, and CI said so on shard 2. The term is now
-  `{line:scripts/retrieval.py:_page_diverse}`, resolved when the answer is
-  graded, and a guard test fails if it resolves to nothing.
-
-- **One argument, one slot.** A compiled note could take three of ten visible
-  rows with three headings of the same page, because since 2026-09-08 a slot
-  belonged to a page *and* heading — right for a daily log, whose headings are
-  separate sessions, wrong for a note, whose headings are sections of one
-  argument. The unit of a repeat is now the episode under `knowledge/daily/**`
-  and `knowledge/raw/**` and the page everywhere else; nothing is dropped, the
-  repeats still follow. Measured on the live vault's notes: pages surfacing in a
-  ten-row window rose from 70 to 80 of 100. The selective-forgetting stand, which
-  found this, now decides presence over a window of 200 — every page it called
-  forgotten was retrievable at rank 11 to 13 — and reports the ten-row share
-  instead of gating on it. All nine of its gates pass. See
-  `docs/research/2026-09-13-one-argument-one-slot.md`.
-
-- **A definition's line number is not a fact worth storing.** The parity gold
-  cited `scripts/search_memory.py:5038 (def _legacy_vector_source_membership)`,
-  and the guard test turned the suite red twice in one day because edits above
-  that definition moved it — while the gold's claim stayed true. Eleven anchors
-  that name a definition now name the file and the definition and leave the line
-  to be resolved from the tree; the guard still fails loudly when a definition
-  leaves its file, and every *graded* line number keeps its exact check, because
-  those numbers are the measurement. See
-  `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.
-
-- **A digest recomputed over damaged rows cannot catch them.** Moving the chunk
-  walk off the read path took the corruption fallback with it: five kinds of row
-  damage — a heading ancestry that is not a JSON list, a broken `chunk_order`, a
-  `source_sha256` or `chunk_id` that is not a sha256, blank content — were served
-  from the generation instead of falling back to lexical search, because the test
-  that damages a row also refreshes the manifest descriptor. The walk is back on
-  the read path and its verdict is now remembered by the artifact's content
-  digest, so it is paid once per distinct bytes instead of once per process; a
-  deep check still walks and still re-derives. Two fake catalogs in the code-graph
-  tests learned to answer the code-generation question the reader now asks first,
-  and the autonomous-bootstrap LSP test no longer uses one 0.8 s number for both
-  a real server start and the replacement budget it measures — a Windows runner
-  failed the start. See
-  `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
-
-- **The parity gold described the tree of 2026-08-28, and graded on it.** Eight
-  of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
-  that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when
-  `fuse_rrf` sat at 1568 in the very commit whose message says the gold was read
-  by hand from the working tree. A nested `must` entry is alternatives, not a
-  conjunction, so most of those stale numbers cost no grade; two tasks were
-  genuinely unsatisfiable — T04 requires the line `_page_diverse` no longer
-  occupies as a separate term, and T10 requires a caller this tree does not
-  have. The two-hop task named `retrieve` as the only
-  second-hop caller of `_fused_candidates`; the callers are
-  `_partial_candidates` and `_executed_plan`. T07 asked whether
-  `_search_backends` is dead code after the H1 deletion had removed it from the
-  tree; it is retired with its reason recorded in the file and replaced by the
-  same question about `_legacy_vector_source_membership`, whose name occurs
-  exactly once in the repository — its own `def`. Every number is re-read from
-  the tree on 2026-09-12, and `tests/test_parity_gold_resolves.py` fails when a
-  citation stops resolving or a graded line number is one no citation names. A
-  stale benchmark does not crash; it publishes.
-
-- **A replay over a committed transaction is a duplicate, not a quarantine.**
-  A project checkpoint row and its transaction do not change in the same
-  instant, so a second caller could find the row still `reserved` while the
-  transaction another caller ran was already `committed`; it then asked to
-  refresh the lease precondition of a transaction that was no longer
-  `prepared`, was told `precondition_failed`, and quarantined an attempt
-  whose work was durably in the journal. `precondition_failed` is now graded
-  against the transaction: committed means the caller gets the ordinary
-  duplicate receipt, anything else keeps the old fence error. Found by the
-  Windows job of CI run 34655557302, which is where the window is widest.
-
-### Added
 
 - **A verified digest is remembered across processes, and the warm-up it would
   have hidden is gone.** Hashing every artifact of a generation against its
@@ -613,8 +291,91 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   block naming both commits and what was done. `repository_index.py` gains a
   command line (`index`, `list`, `detect`, `refresh`, `refresh-all`).
 
-
 ### Changed
+
+- **The encoder runs through ONNX Runtime, without torch.** The search loaded
+  `intfloat/multilingual-e5-small` through `sentence-transformers` on `torch`:
+  6.5 s before the first query, 8.2 s for a cold command-line search. It now
+  reads the model's own `onnx/model.onnx` at the same pinned revision with
+  `onnxruntime` and `tokenizers` (`scripts/onnx_encoder.py`): a cold search takes
+  2.3 s, a batch of 402 vault texts encodes in 4.8 s instead of 5.9 s, and the
+  vectors equal the old ones to 1.4e-07, so no index is rebuilt. The `semantic`
+  and `hybrid` extras no longer pull `torch`; only the reranker does.
+  `install_models.py` fetches and verifies the ONNX weights and then removes the
+  encoder's retired PyTorch weights (470 MB) from the cache. See
+  `docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+
+- **One classification prompt.** The capture path sent three lines that named
+  `FLUSH_OK`, `FLUSH_MAJOR` and `FLUSH_MINOR` and never said what a tier meant,
+  while the measurement stand scored `build_classification_prompt`, which no
+  installed hook reached. The capture worker now sends that prompt with its
+  system prompt, so the stand measures what the product sends; the wire grammar
+  and its parser are unchanged. Measured on the same 21 confirmed real cases:
+  the short prompt named the tier right 0.857 of the time and kept 0.667 of the
+  marker terms; the rich prompt 0.905 and 0.476, because "be terse" dropped
+  terms; with one added sentence — keep names exactly as the transcript spells
+  them — 0.952 and 0.714 (2026-09-23).
+- **A fresh install builds its first generation.** `doctor` reports a missing
+  generation as degraded and repairable instead of "legacy retrieval remains
+  available", so the installer's `sync_memory.py --apply` builds it (measured:
+  48.9 s for the live vault's 189 pages with vectors, into a scratch state
+  root), `doctor --rebuild-generation` builds it on demand, and a
+  generation reason (`generation_corrupt`, …) is reported ahead of the
+  Markdown read's `no_active_generation` when both apply.
+
+- **One limit, one place.** Fifteen numeric bounds that were copied into a
+  second module now have one owner each (the 64 KiB I/O chunk, the archive
+  installers' bounds, the extractors' bounds, the capture-intent bound, the
+  hook lock timeout, the index bound, the hook-configuration bound, the
+  generation-manifest bound, the ninety hot days); doctor reads the hook
+  configuration and a generation's manifest under the writers' own bounds
+  instead of smaller ones of its own. Every remaining name reused for a
+  different bound says what it bounds, and `tests/test_one_limit_one_place.py`
+  refuses a new copy. `docs/LIMITS-2026-09-23.md` lists every limit with no
+  recorded reason. `docs/research/2026-09-23-one-limit-one-place.md`.
+- **The memory generation carries a project's claim pages, not its journal.**
+  On the live vault of 2026-09-23 `journal.md` was 94 % of the search index's
+  bytes — one checkpoint event per chunk — and most of the reranker's time;
+  the accepted 2026-09-10 decision already names `state.md`/`context.md` as the
+  claim pages and the journal as the event log. The journal stays on disk,
+  consolidated nightly and greppable, as session records do.
+- **A directory is a project only if the owner could be working in it.** The
+  slug rule refuses a directory inside the vault, a direct child of the
+  platform's temporary directory (what `mkdtemp` and the provider CLI make) and
+  the home directory, for every caller at once. The audit found 85 project
+  directories, minted for a benchmark run under `cache/`, a transaction under
+  `run/`, `/tmp`, the provider's temp directory, `$HOME` and the vault itself.
+  `docs/research/2026-09-23-the-corpus-is-the-claim-pages-and-a-project-is-a-project.md`.
+
+- **The navigation gate measures our share, not the machine.**
+  `warm_overhead_p95_ms` failed CI at 34.28 ms against 30 while
+  `direct_pyright_p95_ms` — Pyright itself, which no change of ours can reach —
+  rose 27.6% in the same three hours; our share of the work moved 2.4%. The
+  bound is now `max(30 ms, 0.90 x direct_pyright_p95_ms)`: the approved 30 ms
+  floor, or, on a slower machine, 90% of what the language server took on the
+  same queries in the same run. A uniformly slower runner can no longer fail the
+  gate; our layer growing its share still does, and an absent or non-positive
+  control makes the evidence incomplete. The August runs, where our share was
+  0.48-0.50 against today's 0.72-0.74, show what the single absolute number was
+  blind to. See `docs/CODE-NAVIGATION.md` and
+  `docs/research/2026-09-18-the-gate-measures-our-share-not-the-machine.md`.
+- **The test tree comes under the complexity law.** `lizard -C 5` reported 88
+  functions over CCN 5 in `tests/`; it now reports none. The scenario ladders
+  in the navigation tests become tables of runners and builders, the
+  121-line AST walk over the benchmark fixture becomes one function per module
+  and per block, the fake LSP server's two 300-line loops become
+  `_SemanticServer` and `_LifecycleServer` with one method per protocol
+  request, and the runtime-deletion guard resolves paths through a dispatch on
+  node type. No test lost an assertion: each file was run before and after.
+
+- **The reader is named by configuration, and this machine names Sonnet.** With
+  `MEMORY_CLAUDE_MODEL` unset the claude CLI call carries no `--model` flag, so the
+  pipeline read with whatever the operator's own session was set to — on this
+  machine Opus, which refused the grounded-QA prompt and failed 18 of 19
+  LongMemEval questions. The code still invents no model; the docstring says why,
+  and the machine is configured instead (agent sessions and both maintenance
+  units). Verified on the installed vault: answered in 59.1 s where it refused
+  before. See `docs/research/2026-09-13-the-pipeline-asks-sonnet-by-default.md`.
 
 - Every file touched in this round also passes the second complexity analysis, which counts what the first did not: more than two `if` at one level, an exit followed by `else`, and radon's count of asserts and comprehensions. 157 findings across 14 files went to 0, the largest being impact analysis (`analyze_impact` from CCN 34), the LSP path and log guards, and the retrieval stand; messages, check order and outputs unchanged.
 - The older code passes both complexity analyses too: every product module under `scripts/` and `benchmark/` is at zero findings (the last five, in `codex_memory` and `merge_claude_settings`, were fixed on the #24 branch). The largest were the code-graph extractor (`extract_code` CCN 63), the Pyright navigation facade (one method at CCN 90), the analysis contracts and the installer. The extractor's output over the whole repository is record-for-record identical, so `EXTRACTOR_VERSION` stays `code-extractor/v11` and no graph is rebuilt for it; the navigation branches the tests never reached are now pinned by `tests/test_code_navigation_fault_paths.py`, which passes on the code before and after the change.
@@ -684,7 +445,435 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   generation** (300 s on 1 026 files in #24): it names `mode=index` and exits
   2; `--live` opts into the scan.
 
+### Deprecated
+
+- **`compile_memory.py --all`.** It has never changed anything: every daily log
+  without a committed receipt is compiled anyway, and a day with one is never
+  compiled again. The flag is still accepted, is hidden from `--help`, and now
+  prints one line saying it does nothing and will be removed.
+
+### Removed
+
+- **`optimum` and the encoder's `sentence-transformers`.** `optimum` was declared
+  in the `reranker` extra and imported nowhere; the reranker's comment said "via
+  ONNX", which it has not done since it moved to `transformers`. The search
+  extras no longer name `sentence-transformers`; only the retrieval benchmark,
+  which measures the native library on purpose, keeps it.
+
+- **Code no product path reaches.** Seven functions nothing called; twelve that
+  only their own tests called (`MemoryQueue.export_task`,
+  `payload_for_execution`, `retrieval.trace_to_dict`,
+  `project_journal.build_handoff`, `retrieval_telemetry.record_event` and
+  `count_events_after`, and six smaller ones); the Windows directory-listing layer
+  of `generation_catalog.py` they left unreached; and the module-level queue owner
+  of `memory_queue.py`, which no product module called since the queue worker and
+  doctor own the queue through `MemoryQueue.queue_owner`. Tests that used a removed
+  function as a tool now use the product path. Test seams and the Reliability v3
+  repair and discard operations stay. `compile_memory.py --all` stays deprecated
+  until 6.0.0. See
+  `docs/research/2026-09-24-code-no-product-path-reaches-is-removed.md`.
+- **The manual label review.** `benchmark/review_flush_labels.py`, its tests and
+  its verdict sidecar are gone: the owner does no manual labelling, and the two
+  automatic readings above replace the step it existed for. Corpus schema v2
+  (`label_reviewed`, `human_tier`) is refused; the only v2 corpus was the private
+  live one, rebuilt under v3 (2026-09-23).
+- **Legacy that nothing reads.** The pre-telemetry `cache/access_log.jsonl`
+  reader (no writer since 2026-08-20, no file on the live vault), the
+  positional `git_range` of `analyze_impact` (every caller names its
+  endpoints), and the readers for incremental-manifest versions v1–v4 (every
+  generation on the live vault is v5; a fresh install builds v5). A parent
+  whose manifest cannot be read is now rebuilt in full instead of failing the
+  build. The legacy FTS index, the v2 queue and coordinator readers and the JSON
+  queue migration stay, with the evidence and the plan for each in
+  `docs/research/2026-09-23-legacy-that-nothing-reads.md`.
+- **The legacy FTS5 index and vector cache.** `cache/index.sqlite`,
+  `cache/.paths-manifest`, `cache/vectors.npy` and `cache/vectors_meta.json`
+  are read and written by nothing: their builders, readers, swap lock and
+  freshness manifest, `doctor`'s `index` check and repair, `sync_memory`'s
+  index builder, the nightly's Step 3b, `lookup_mode`'s index probe and about
+  a hundred functions with them. On the live vault the legacy index answered
+  537 of 15 284 retrievals ever, the last on 2026-09-05; a fresh install read
+  it by design until now. The evidence generation is the only index: without
+  one a search reads Markdown directly, bounded by its deadline, and every
+  such hit says `no_active_generation`; `search_memory.py --rebuild` rebuilds
+  the generation and `--status` names it. See
+  `docs/research/2026-09-23-the-generation-is-the-only-index.md`.
+- **The JSON queue import.** Releases v3.3.0–v3.4.0 (July 2026) kept one file
+  per task under `run/queue/`; the importer, its marker, quarantine, lease
+  repair and `memory_queue.py migrate` are gone, as is the `run/queue/` the
+  installers still created. Measured before removal: the installer's adoption
+  already refused such a vault and never ran the import. A `run/queue/` holding
+  records is now refused by the queue (`legacy_json_queue_unsupported`) and
+  named by `doctor`, which keeps `run/` from deletion while they exist. See
+  `docs/research/2026-09-23-the-json-queue-import-goes.md`.
+
+- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
+- The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
+- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
+  had no caller; 40 functions reachable only from it (legacy triple RRF, its
+  own reranker call, its own generation search) and the tests that existed
+  only for them are gone — 897 lines. The live path is unchanged:
+  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
+  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
+- **The repository ships no memory.** The 89 published pages under
+  `knowledge/notes/` (the owner's architecture decisions and the
+  demonstration pages), the two synthetic daily logs and the vault's log
+  entries leave the repository; a fresh install starts with an empty memory
+  instead of another person's guard rails and "89 curated pages" (issue #19).
+  The owner's pages stay where they are, private. `knowledge/index.md` and
+  `knowledge/log.md` ship as empty skeletons the runtime fills.
+- **The memory index no longer holds the product's own code.** The vault
+  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
+  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
+  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
+  repository, the checkout included when its owner asks.
+- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
+  --legacy-only` and the generated-query run measured recall over the pages
+  the repository used to ship; with no pages shipped there is nothing to
+  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
+  and `benchmark/legacy-60-v1.json` are gone.
+- **The vault stands are retired**: retrieval, application, contamination
+  and lift attribution, with their answer-key and entry-point helpers. Their
+  questions and gold pages were the owner's decision pages; with those pages
+  private there is nothing public to run them on. The synthetic
+  `retrieval-v2.json` corpus (which carries cross-language queries) and the
+  LongMemEval stand are the public measurements.
+- **Cursor and Antigravity are no longer supported platforms.** The owner uses
+  neither, and carrying two hosts nobody exercises meant two managed hook
+  formats, two doctor checks, two installer detections, and two event
+  projections whose only evidence was their own tests. Claude Code, OpenCode,
+  and Codex CLI remain supported. Gone: `integrations/cursor/`,
+  `integrations/antigravity/`, the `--cursor-hooks` / `--antigravity-hooks`
+  install flags, installer detection in `install.sh` and `install.ps1`, the
+  IDE branches in `integration_adapter.py`, the two `event_envelope.py` agent
+  patterns, the two `doctor.py` integration hosts, and the `cursor` /
+  `antigravity` values of `flush_memory.py --agent`.
+- What an existing user of those hosts loses: automatic capture and injected
+  session context. MCP reads and actions were never platform-specific and are
+  unaffected — any agent that speaks MCP can still use the vault.
+
 ### Fixed
+
+- **The health and context resources are readable.** The server's read handler
+  returned the protocol model `TextResourceContents` where the MCP SDK 1.29
+  expects its helper `ReadResourceContents`, so every `resources/read` failed with
+  `'TextResourceContents' object has no attribute 'content'`; the unit tests had
+  replaced the type with a stand-in. A test now reads both resources through a
+  real stdio session. See
+  `docs/research/2026-09-25-the-health-resource-is-readable.md`.
+
+- **A foreground subagent's report is kept with its session.** The session record
+  dropped every tool result, so the conclusion a foreground subagent returned was
+  missing from it; it is now kept as `**subagent report:**`, bounded to 8 000
+  characters. A background launch's receipt is skipped: its report arrives as a
+  notification the record already keeps. There is no separate subagent capture,
+  which would classify each subagent again and duplicate the report. See
+  `docs/research/2026-09-24-a-subagents-report-is-kept-with-its-session.md`.
+- **The documents say what the code does.** The three READMEs, USER-GUIDE,
+  ARCHITECTURE, STRUCTURE and the operating model no longer tell a reader to keep
+  the retired legacy index, no longer say search falls back to it, name the pinned
+  embedding and reranker models, describe the one automatic Git operation (the
+  nightly fast-forward of the default branch) and the retention purges, and show
+  `build_context.py <slug>` as it is parsed. Three superseded status documents are
+  marked as history. Doctor has a `backup` check: the nightly knowledge snapshot
+  must be at most two days old. A test pins the corrected claims. See
+  `docs/research/2026-09-24-the-documents-say-what-the-code-does.md`.
+- **The vault follows its default branch.** The nightly update fast-forwarded
+  whatever branch was checked out, up to what `main` held, so a vault left on a
+  working branch never received what reached `main` from any other branch and
+  still said `current`. It now updates only on the default branch and answers
+  `skipped: not_on_default_branch` (naming the branch) anywhere else; a checkout
+  ahead of its remote says `ahead_of_remote`. See
+  `docs/research/2026-09-24-the-vault-follows-its-default-branch.md`.
+- **A long session in the vault is captured, and each capture keeps its window.**
+  The prompt hook skipped every prompt inside the vault as "maintenance", so the
+  owner's own sessions there never reached the every-20th-prompt capture; the
+  adapter's reentry marker already filters the memory's own processes, and the
+  vault rule is gone. A second, different record of a session on one day is
+  written beside the first (`<session>@<digest>.md`) instead of replacing it, so
+  the earlier window survives and consolidation reads the new one. A hook
+  delegate that exits non-zero is recorded as a lost capture, and the prompt hook
+  no longer runs on no-op stand-ins when its state module will not import. A rule
+  no longer reads "When When". The 25 dead capture tasks of August and September
+  are archived by the weekly purge rather than redriven under today's date. See
+  `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
+- **Every store that only grew has a bound.** Settled transaction rows and the
+  attempts of committed checkpoints are dropped after 90 days (checkpoint rows
+  and quarantined transactions stay), and doctor reports exact row totals by
+  state. The weekly runs the designed queue purge: finished work older than
+  `queue_result_retention_days` is exported to the private
+  `knowledge/raw/queue-archive/<date>/` and removed from `run/`. The hook error
+  log is trimmed with the scheduler logs; old lock probes, empty intent shards
+  and staged state links are swept (the state keeper no longer leaves one when
+  `rename` finds the same inode); benchmark run directories untouched for 30 days
+  are retired while dataset caches stay; and checkouts under the temporary or
+  host job directory are neither refreshed nor followed, and their code
+  generations are retired. See `docs/research/2026-09-24-every-store-has-a-bound.md`.
+- **An answer says how old its index is, and the index follows the compile.** A
+  page compiled during the day was not searchable until the next nightly, and
+  `recall` said `fresh`. A successful command-line compile now refreshes the
+  memory generation (a no-op when nothing changed); `recall` reports its lexical
+  and dense components `stale` when a page changed after the generation was
+  built, and the envelope's `index_timestamp`, declared and never filled, now
+  names the build time. Graph is no longer reported "missing" from an answer
+  whose mode never asks for it. Doctor calls a generation stale when changed
+  sources waited a day unrefreshed, not for every daily-log append nor for age
+  alone. `lookup_mode` reports the mode search runs in (HYBRID, BASE, DIRECT)
+  instead of a page-count recommendation nothing followed, and `wiki_overview`
+  carries the same. `prune_generations` counts only memory publications as
+  pending. Command-line hits show their text, not only their heading, and the
+  model-loading progress bar is gone. See
+  `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
+- **The memory server reloads its own code.** A Claude Code session keeps its
+  stdio MCP server for its whole life, and the nightly changes the code under it:
+  on 2026-09-23 a server kept its old `bounded_io`, imported a new
+  `evidence_graph` lazily, and answered `get_architecture` with
+  `operation_failed` for the rest of the session. `mcp_server.py`, run as a
+  program, is now a standard-library supervisor (`mcp_supervisor.py`) that serves
+  the tools from a child process. When a request arrives, none is in flight and
+  the code under `scripts/` has changed, it restarts the child and replays the
+  client's initialisation; a child that exits answers what was in flight with an
+  error and is started again. The registered command is unchanged, and
+  `--help` no longer starts a server. See
+  `docs/research/2026-09-24-the-memory-server-reloads-its-own-code.md`.
+- **A vanished project is rebuilt by the night.** A project whose directory was
+  deleted while its committed checkpoints remained blocked every later checkpoint
+  with `ProjectJournalRebuildRequired`; the nightly re-attempted it, printed
+  `failed` and exited 0, and the pass said `failures=0`. The nightly now runs the
+  same `rebuild_journal` + `recover` the manual `project_journal.py --rebuild`
+  runs, when the journal is behind the store (never over a journal that is ahead),
+  and exits 1 for a row it could not settle. Doctor ages a stuck sequence from its
+  first attempt, so the night's own retry no longer hides it, and calls an
+  unreadable checkpoint database `degraded`. See
+  `docs/research/2026-09-24-a-vanished-project-is-rebuilt-by-the-night.md`.
+- **The weekly pass has its own record, and doctor reads it.** The weekly failed
+  on 2026-09-13 and 2026-09-20 and nothing said so: a failure before its first
+  step went into the nightly's field, which the next nightly overwrote, a failure
+  inside it was recorded nowhere, and doctor had no weekly check. It now writes
+  `last_weekly_status`/`last_weekly_at`/`last_weekly_failure`; doctor's scheduler
+  check calls a failed weekly an `error` and one silent for more than eight days
+  `degraded`. The weekly no longer re-runs the whole nightly an hour after it
+  (a second compile, repository refresh, self-update and prune). Step labels in
+  both logs are numbered by the logger in the order the steps run
+  (`StepLog`); "Step 3c" had come to name three different steps. See
+  `docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md`.
+- **A stray candidate is retired where it refuses.** A provably stray
+  pre-adoption candidate (complete adoption, no adoption in flight, no row in any
+  data table, no live owner) is moved into `run/coordinator-quarantine/` or
+  `run/queue-quarantine/` by the writer that meets it, not only by
+  `doctor --repair`, which nothing ran on a schedule: on 2026-09-17..23 one stray
+  refused capture, the nightly and the weekly for six days. The queue candidate is
+  covered too, the quarantine directory is created `0700`, and doctor's adoption
+  check counts what has been quarantined. One rule, in
+  `installed_memory_repair.retire_stray_candidates`. See
+  `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
+- **A test no longer reads a pid file before it is written.** The push run on
+  `main` after PR 41 failed on Windows: a processor killed at its 1-second deadline
+  between creating its pid file and writing it left an empty file, and the test
+  parsed it. Pid files in the queue tests are now written through a temporary name
+  and `os.replace`, read with a bounded wait (`tests/pid_files.py`), and the kill
+  test's deadline is 10 s (CI run 36023732204, 2026-09-24). See
+  `docs/research/2026-09-24-a-pid-file-read-before-it-is-written.md`.
+- **Telemetry schema is created inside the write transaction.** Eight processes
+  recording into a fresh telemetry database on Windows: five failed at once with
+  `database is locked` although the connection had a busy timeout, because
+  `CREATE … IF NOT EXISTS` outside a transaction promotes a read lock to a write
+  lock, the one wait SQLite refuses. `record_events` and `trace_ingest.open_store`
+  now create their schema under `BEGIN IMMEDIATE` (CI run 35941975284, 2026-09-24).
+- **A pinned download that meets a transient network error is tried again.**
+  `pinned_download.retry_transient` runs a download up to three times, after 1 s
+  and 4 s, for a connection reset, a timeout, HTTP 408, 429 or 5xx, inside the
+  install deadline; a 4xx, a redirect or a digest mismatch is raised at once. The
+  language-server installer uses it, truncating the target between attempts; one
+  reset had ended a CI install (run 35926589114, 2026-09-23). See
+  `docs/research/2026-09-24-two-post-merge-failures-on-main.md`.
+- **The adoption gate names its cause and the queue waits out a busy
+  database.** `reliability_v3_record_invalid` now carries what the validation
+  saw (`code: Cause: message`), and the adopted queue validates adoption
+  through the coordinator's retried, cached check instead of a bare call:
+  on the live vault a `doctor --rebuild-generation` at 18:27 UTC failed its
+  queue repair with the bare code while a later run and a standalone check
+  passed. See
+  `docs/research/2026-09-23-the-adoption-gate-names-its-cause-and-waits-out-contention.md`.
+- **A barrier proves concurrency; a stopwatch measured the machine.** The
+  three parallel version probes of `detect_code_tools` were asserted to finish
+  under 0.35 s; on a Windows runner under four shards they took 0.60 s (CI run
+  35857662331) with nothing wrong. They now meet at one `threading.Barrier`,
+  which a sequential probe would break. See
+  `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
+- **A dead task names its reason.** Every exception a processor raised became
+  the one code `processor_failed`; on the live vault 225 failed attempts of 25
+  dead `flush` tasks said only that, while the failure trail held the actual
+  reason (`intent_fence_lost`) for seven of them. A failed attempt now carries
+  a queue error's own code, or `processor_failed:<reason>` naming the
+  exception's type or its code-shaped message, bounded to the column's 64
+  bytes and never the message text. See
+  `docs/research/2026-09-23-a-dead-task-names-its-reason.md`.
+- **A scheduled pass that fails before it starts is recorded as failed.** The
+  nightly and weekly passes take their fence first; a refusal there exited 1
+  and left `last_nightly_status = success` for six nights while session start
+  said nothing. Doctor also says when a transaction scan stopped at its row
+  bound (its counts are lower bounds), admits a `run/state.json` up to 4 MiB (the writer's
+  own bound exceeds the old 256 KiB), and rebuilds the legacy index with the
+  same page collector its freshness check uses, so the repair can succeed.
+  Session start counts daily logs at the top level (receipts are not logs), the
+  guard-rails block joins a wrapped one-sentence summary, a compile dry run moves
+  no clock, pending checkpoint events older than 30 days of vault activity are
+  dropped and noted, and the nightly retires LSP failure roots older than 14 days
+  beyond the newest 20 (`scripts/retire_lsp_evidence.py`). Session
+  consolidation gives its provider the compile's 300 s ceiling instead of the
+  client's 90 s default, and `install_pyright.py` reinstalls over a receipt that
+  predates the tree digest instead of refusing the repair it is recommended for,
+  and re-validates an installed tree by its files only (pyright ships
+  `dist/typeshed-fallback/` as a directory, which every re-run had read as a file).
+  `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
+- **A stray pre-adoption candidate no longer stops the memory in silence.** A
+  pytest session whose state root resolved to the live vault left an empty
+  `run/markdown-transactions-v3.candidate.sqlite3` there on 2026-09-17; the
+  adoption boundary refused every capture, checkpoint and compile for six days
+  while doctor named only the symptoms. Doctor now has an `adoption` check that
+  reports the refusal as an error with its cause and the stray path, and
+  `--repair` moves an empty, ownerless candidate to `run/coordinator-quarantine/`
+  (retained evidence, never deleted) once no adoption is in flight. The test
+  harness refuses an external state root that is the vault or inside it, and
+  the per-test progress file gets its directory before the first test.
+  `docs/research/2026-09-23-a-stray-candidate-stopped-the-memory-for-six-days.md`.
+
+- **A repeated append no longer hashes the file it only has to find.** The
+  2026-09-18 presence check read and digested the whole daily log outside any
+  lock, so under eighteen concurrent writers it refused with `transaction
+  target changed while hashing` and a line already on disk was reported as a
+  failed capture (one red job on `main` after PR 36). Presence is now one
+  `lstat`. `docs/research/2026-09-23-a-presence-check-does-not-hash.md`.
+
+- **A timing ratio under a tenth of a second measured the machine.** Five ratio
+  gates used a 0.05 s floor and a sixth derived one from the process clock tick;
+  a macOS shard failed `0.0946 <= 0.0714` on a step whose quiet time is 22 ms,
+  after already taking the best of five attempts. They now share
+  `tests/timing_floor.noise_floor_seconds()` — `max(0.25 s, 8 clock ticks)` — and
+  the deterministic half of those tests, the counted scanner calls that double
+  exactly, is what still proves the linearity claim.
+
+- **Two seconds for a Git probe was a Linux figure.**
+  `repository_scope.GIT_TIMEOUT_SECONDS` was 2.0 while `repository_index` gives the
+  same probe 10.0, and on a hosted Windows runner `git rev-parse` crossed it: a
+  navigation test failed with "repository scope deadline reached during Git probe"
+  with nothing wrong with the repository. One operation, one bound — it is ten now,
+  and a test pins the two constants together.
+
+- **A retry of a completion must replay its own request.** `complete_task` built
+  its record with a fresh clock reading, so a completion interrupted by
+  `database is locked` could never be finished: the operation id was the claim's,
+  the payload was not, and the transaction layer adopts a bound operation only
+  when the block matches. It takes `completed_at` now, defaulting to the moment it
+  runs, and a retry-aware caller replays the value it used first. Main run
+  34760092169 failed on exactly this. See
+  `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
+- **A refusal says what the provider said.** Eighteen of nineteen rows of a
+  LongMemEval run carried only "grounded QA provider returned invalid JSON" while
+  the provider had answered `API Error: ... safeguards flagged this message`,
+  which named both the cause and the fix. The refusal now carries the response
+  length and its first 200 characters, whitespace collapsed and redacted. See
+  `docs/research/2026-09-13-an-unparsable-answer-must-say-what-it-said.md`.
+
+- **The Windows job cap had no headroom.** `timeout-minutes: 40` sat a few
+  minutes above the measured 22-30 minute range, and one shard that took 45 on a
+  slow runner was cancelled at the cap — which GitHub reports as `cancelled`, not
+  `failure`, and refuses to re-run, so a branch could not go green without a new
+  commit. The Windows class now has 60 minutes; Linux and macOS keep 20, where the
+  range is 6-12.
+
+- **An answer stops paying for whitespace and for a module name the path already
+  spells.** A tool answer is serialized compactly, and a row that carries
+  `scripts/retrieval.py` no longer repeats `scripts.retrieval` inside its
+  qualified name. One `callers` question on the installed vault: 836 tokens
+  before, 561 after. Nothing is dropped, and the test callers the other tool
+  filters out stay.
+- **A line the file has moved on from is read from the file.** The generation is
+  rebuilt by the nightly pass, so a definition edited today used to answer with
+  yesterday's line — measured, 3030 against the 3054 it had moved to. Every file
+  an answer names is now parsed when its digest no longer matches, at most 20 per
+  answer, inside the caller's deadline, and nothing is written: no generation, no
+  catalog row, no active pointer. A stale code snippet is read from the file the
+  same way, so its text is the text that is there. On the same tree the parity
+  stand goes from 15 of 16 to 16 of 16 on both our columns, and the other tool is
+  the one answering T04 with a stale line. See
+  `docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md`.
+
+- **A graded line number is read from the tree, not frozen in the gold.** T04
+  asks where `_page_diverse` is defined and graded on the literal `3030`; the
+  slot fix moved that definition to 3054, so every side would have graded wrong
+  whatever it answered, and CI said so on shard 2. The term is now
+  `{line:scripts/retrieval.py:_page_diverse}`, resolved when the answer is
+  graded, and a guard test fails if it resolves to nothing.
+
+- **One argument, one slot.** A compiled note could take three of ten visible
+  rows with three headings of the same page, because since 2026-09-08 a slot
+  belonged to a page *and* heading — right for a daily log, whose headings are
+  separate sessions, wrong for a note, whose headings are sections of one
+  argument. The unit of a repeat is now the episode under `knowledge/daily/**`
+  and `knowledge/raw/**` and the page everywhere else; nothing is dropped, the
+  repeats still follow. Measured on the live vault's notes: pages surfacing in a
+  ten-row window rose from 70 to 80 of 100. The selective-forgetting stand, which
+  found this, now decides presence over a window of 200 — every page it called
+  forgotten was retrievable at rank 11 to 13 — and reports the ten-row share
+  instead of gating on it. All nine of its gates pass. See
+  `docs/research/2026-09-13-one-argument-one-slot.md`.
+
+- **A definition's line number is not a fact worth storing.** The parity gold
+  cited `scripts/search_memory.py:5038 (def _legacy_vector_source_membership)`,
+  and the guard test turned the suite red twice in one day because edits above
+  that definition moved it — while the gold's claim stayed true. Eleven anchors
+  that name a definition now name the file and the definition and leave the line
+  to be resolved from the tree; the guard still fails loudly when a definition
+  leaves its file, and every *graded* line number keeps its exact check, because
+  those numbers are the measurement. See
+  `docs/research/2026-09-13-what-the-stands-must-show-after-the-verdict-cache.md`.
+
+- **A digest recomputed over damaged rows cannot catch them.** Moving the chunk
+  walk off the read path took the corruption fallback with it: five kinds of row
+  damage — a heading ancestry that is not a JSON list, a broken `chunk_order`, a
+  `source_sha256` or `chunk_id` that is not a sha256, blank content — were served
+  from the generation instead of falling back to lexical search, because the test
+  that damages a row also refreshes the manifest descriptor. The walk is back on
+  the read path and its verdict is now remembered by the artifact's content
+  digest, so it is paid once per distinct bytes instead of once per process; a
+  deep check still walks and still re-derives. Two fake catalogs in the code-graph
+  tests learned to answer the code-generation question the reader now asks first,
+  and the autonomous-bootstrap LSP test no longer uses one 0.8 s number for both
+  a real server start and the replacement budget it measures — a Windows runner
+  failed the start. See
+  `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+
+- **The parity gold described the tree of 2026-08-28, and graded on it.** Eight
+  of the sixteen tasks in `benchmark/code-parity-v2.json` cited line numbers
+  that resolve to nothing — `scripts/retrieval.py:1378 (def fuse_rrf)` when
+  `fuse_rrf` sat at 1568 in the very commit whose message says the gold was read
+  by hand from the working tree. A nested `must` entry is alternatives, not a
+  conjunction, so most of those stale numbers cost no grade; two tasks were
+  genuinely unsatisfiable — T04 requires the line `_page_diverse` no longer
+  occupies as a separate term, and T10 requires a caller this tree does not
+  have. The two-hop task named `retrieve` as the only
+  second-hop caller of `_fused_candidates`; the callers are
+  `_partial_candidates` and `_executed_plan`. T07 asked whether
+  `_search_backends` is dead code after the H1 deletion had removed it from the
+  tree; it is retired with its reason recorded in the file and replaced by the
+  same question about `_legacy_vector_source_membership`, whose name occurs
+  exactly once in the repository — its own `def`. Every number is re-read from
+  the tree on 2026-09-12, and `tests/test_parity_gold_resolves.py` fails when a
+  citation stops resolving or a graded line number is one no citation names. A
+  stale benchmark does not crash; it publishes.
+
+- **A replay over a committed transaction is a duplicate, not a quarantine.**
+  A project checkpoint row and its transaction do not change in the same
+  instant, so a second caller could find the row still `reserved` while the
+  transaction another caller ran was already `committed`; it then asked to
+  refresh the lease precondition of a transaction that was no longer
+  `prepared`, was told `precondition_failed`, and quarantined an attempt
+  whose work was durably in the journal. `precondition_failed` is now graded
+  against the transaction: committed means the caller gets the ordinary
+  duplicate receipt, anything else keeps the old fence error. Found by the
+  Windows job of CI run 34655557302, which is where the window is widest.
 
 - **A capture worker that loses its intent fence no longer counts a lost capture.** Every `adapter_capture_worker` "lost" row since 2026-09-07 carried `QueueOperationError: intent_fence_lost`, and on 2026-09-11 every intent those rows named had a succeeded task, with no ready intent left without one. Losing the fence moves authority, not data: the intent is durable, a lapsed lease is recovered, an undispatched intent is adopted. That code is now recorded as deferred; every other queue error stays a loss.
 
@@ -863,55 +1052,6 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   content check now applies only to generations this extractor built; an
   older one is validated structurally and served until the nightly rebuilds
   it, and a refusal is remembered under the same hashed identity as a success.
-
-### Removed
-
-- `scripts/session_feedback.py`, a decision-staleness loop that was never wired: nothing recorded an injection, so its check always found nothing and its verdict was read by nobody.
-- The daily-log file lock (`daily_log_append._daily_lock`) and the four tests that exercised it: no writer has taken it since every daily-log write moved onto the transaction's `append_knowledge`, whose cross-process serialization the writer-integration and append-race tests already prove.
-- **The second, unreachable retrieval pipeline.** `search_memory._search_backends`
-  had no caller; 40 functions reachable only from it (legacy triple RRF, its
-  own reranker call, its own generation search) and the tests that existed
-  only for them are gone — 897 lines. The live path is unchanged:
-  `search()` → `retrieval.retrieve_via_search_memory` → `retrieval.fuse_rrf`.
-  Audit H1; research `docs/research/2026-09-10-one-retrieval-pipeline-not-two.md`.
-- **The repository ships no memory.** The 89 published pages under
-  `knowledge/notes/` (the owner's architecture decisions and the
-  demonstration pages), the two synthetic daily logs and the vault's log
-  entries leave the repository; a fresh install starts with an empty memory
-  instead of another person's guard rails and "89 curated pages" (issue #19).
-  The owner's pages stay where they are, private. `knowledge/index.md` and
-  `knowledge/log.md` ship as empty skeletons the runtime fills.
-- **The memory index no longer holds the product's own code.** The vault
-  generation collects `knowledge/` only; `scripts/`, `docs/`, `tests/` and
-  `benchmark/` of the checkout were 92 % of an installed vault's chunks and
-  outranked the user's pages in `recall` (issue #29.2). Code is indexed per
-  repository, the checkout included when its owner asks.
-- **The legacy BM25 benchmark gates are retired.** `run_benchmark.py
-  --legacy-only` and the generated-query run measured recall over the pages
-  the repository used to ship; with no pages shipped there is nothing to
-  measure. `run_benchmark.py` is the retrieval-v2 entry point; the CI step
-  and `benchmark/legacy-60-v1.json` are gone.
-- **The vault stands are retired**: retrieval, application, contamination
-  and lift attribution, with their answer-key and entry-point helpers. Their
-  questions and gold pages were the owner's decision pages; with those pages
-  private there is nothing public to run them on. The synthetic
-  `retrieval-v2.json` corpus (which carries cross-language queries) and the
-  LongMemEval stand are the public measurements.
-- **Cursor and Antigravity are no longer supported platforms.** The owner uses
-  neither, and carrying two hosts nobody exercises meant two managed hook
-  formats, two doctor checks, two installer detections, and two event
-  projections whose only evidence was their own tests. Claude Code, OpenCode,
-  and Codex CLI remain supported. Gone: `integrations/cursor/`,
-  `integrations/antigravity/`, the `--cursor-hooks` / `--antigravity-hooks`
-  install flags, installer detection in `install.sh` and `install.ps1`, the
-  IDE branches in `integration_adapter.py`, the two `event_envelope.py` agent
-  patterns, the two `doctor.py` integration hosts, and the `cursor` /
-  `antigravity` values of `flush_memory.py --agent`.
-- What an existing user of those hosts loses: automatic capture and injected
-  session context. MCP reads and actions were never platform-specific and are
-  unaffected — any agent that speaks MCP can still use the vault.
-
-### Fixed
 
 - Two users' first-day findings (issues #17–#29, PR #27), each with its test
   and, where the design changed, a dated note under `docs/research/`:

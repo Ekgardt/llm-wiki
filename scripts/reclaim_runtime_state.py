@@ -41,11 +41,21 @@ from memory_state import ROOT, STATE_ROOT  # noqa: E402
 ORPHAN_TEMP_SECONDS = 3600.0
 
 
+# Staged state temporaries, and SQLite lock probes left before the probe cleaned
+# up after itself (26 of them, 2026-08-28..09-07). See
+# `docs/research/2026-09-24-every-store-has-a-bound.md`.
+ORPHAN_PATTERNS = (".*.tmp", ".llm-wiki-lock-probe-*.sqlite3*")
+
+
 def _orphan_temporaries(directory: Path, now: float) -> list[Path]:
     """Staged files old enough that no live writer can still own them."""
     if not directory.exists():
         return []
-    return [path for path in directory.glob(".*.tmp") if _is_orphan(path, now)]
+    return [path for path in _staged_files(directory) if _is_orphan(path, now)]
+
+
+def _staged_files(directory: Path) -> list[Path]:
+    return [path for pattern in ORPHAN_PATTERNS for path in directory.glob(pattern)]
 
 
 def _is_orphan(path: Path, now: float) -> bool:
@@ -97,6 +107,37 @@ def prune_settled_transactions() -> dict[str, int]:
         return {"pruned": 0, "failed": 1, "reason": str(error)[:120]}
 
 
+def prune_transaction_history() -> dict[str, int]:
+    """Settled rows past the history window (`HISTORY_RETENTION_DAYS`).
+
+    The image prune above kept the rows, and the table only grew: 23 557 rows,
+    55 MB on 2026-09-24. Failure is reported, never raised.
+    """
+    from markdown_transaction import active_or_legacy_coordinator
+
+    try:
+        coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
+        return {**coordinator.prune_history(), "failed": 0}
+    except Exception as error:  # noqa: BLE001
+        return {"attempts": 0, "transactions": 0, "failed": 1, "reason": str(error)[:120]}
+
+
+def remove_empty_intent_shards(directory: Path | None = None) -> int:
+    """Shard directories a capture intent left empty when it moved on."""
+    root = directory if directory is not None else STATE_ROOT / "run" / "capture-intents" / "pending"
+    if not root.is_dir():
+        return 0
+    return sum(_removed_if_empty(shard) for shard in root.iterdir())
+
+
+def _removed_if_empty(shard: Path) -> int:
+    try:
+        shard.rmdir()
+    except OSError:
+        return 0
+    return 1
+
+
 def snapshot_memory() -> dict[str, object]:
     """A second copy of the memory, outside the vault, kept with its history.
 
@@ -136,7 +177,9 @@ def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
         "transactions": prune_settled_transactions(),
+        "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
+        "empty_shards": remove_empty_intent_shards(),
         "snapshot": snapshot_memory(),
         "co_activation": rebuild_co_activation(),
     }
@@ -151,11 +194,13 @@ def _report(result: dict[str, object]) -> str:
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
         f"pruned {transactions['pruned']} settled transaction(s); "
+        f"dropped {result['history']['transactions']} transaction row(s) and "
+        f"{result['history']['attempts']} attempt row(s) past the history window; "
         f"drained {drained} checkpoint(s); "
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
-        f"{temporaries['bytes']} byte(s)"
+        f"{temporaries['bytes']} byte(s), and {result['empty_shards']} empty intent shard(s)"
     )
 
 

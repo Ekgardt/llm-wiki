@@ -32,7 +32,7 @@ def test_the_release_note_form_carries_the_oid_and_the_command():
     import release_manifest
 
     oid = release_manifest.commit_of("HEAD")
-    note = release_manifest._markdown("v-test", oid, {"install.sh": "0" * 64})
+    note = release_manifest.markdown("v-test", oid, {"install.sh": "0" * 64})
 
     assert oid in note
     assert f"LLM_WIKI_COMMIT={oid}" in note

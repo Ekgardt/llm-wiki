@@ -147,19 +147,33 @@ def _fetch_failure(root: Path, remote: str, branch: str) -> str | None:
 
 
 def _update_target(root: Path) -> tuple[str, str] | dict:
-    """The branch and remote to update from, or the outcome that stops us."""
+    """The default branch and its remote, or the outcome that stops us.
+
+    Only the default branch is followed: it is what a merged pull request lands
+    on. A checkout on any other branch is named, never reported `current`; on
+    2026-09-24 the vault sat on `work` and missed what reached `main` from other
+    branches. See `docs/research/2026-09-24-the-vault-follows-its-default-branch.md`.
+    """
     branch = _current_branch(root)
     if branch is None:
         return _outcome("skipped", "detached_head")
     remote = _remote_for(root, branch)
     if remote is None:
         return _outcome("skipped", "no_tracking_remote")
+    return _on_default_branch(root, branch, remote)
+
+
+def _on_default_branch(root: Path, branch: str, remote: str) -> tuple[str, str] | dict:
+    if branch != _default_branch(root, remote):
+        return _outcome("skipped", "not_on_default_branch", branch=branch)
     return branch, remote
 
 
 def _fast_forward_block(root: Path, head: str, fetched: str) -> dict | None:
     if head == fetched:
         return _outcome("current", None, commit=head)
+    if _is_ancestor(root, fetched, head):
+        return _outcome("skipped", "ahead_of_remote", commit=head)
     if not _is_ancestor(root, head, fetched):
         return _outcome("skipped", "diverged_branch", commit=head)
     return None
@@ -173,19 +187,14 @@ def _conflicting_paths(root: Path, head: str, fetched: str) -> dict | None:
     return _outcome("skipped", "local_changes_conflict", paths=sorted(conflicts)[:20])
 
 
-def _outside_default_branch(root: Path, fetched: str, default_tip: str) -> dict | None:
-    """Only what the default branch holds has passed its checks (a merged pull request).
+def _fast_forward(root: Path, head: str, fetched: str) -> dict | None:
+    """The outcome that stops a fast-forward, or None when it may proceed.
 
-    See `docs/research/2026-09-14-an-update-only-to-what-main-holds.md`.
+    Only the default branch is fetched (`_update_target`), so what it holds has
+    passed its checks as a merged pull request; see
+    `docs/research/2026-09-14-an-update-only-to-what-main-holds.md`.
     """
-    if _is_ancestor(root, fetched, default_tip):
-        return None
-    return _outcome("skipped", "not_in_default_branch", commit=fetched)
-
-
-def _fast_forward(root: Path, head: str, fetched: str, default_tip: str) -> dict | None:
-    """The outcome that stops a fast-forward, or None when it may proceed."""
-    blocked = _fast_forward_block(root, head, fetched) or _outside_default_branch(root, fetched, default_tip)
+    blocked = _fast_forward_block(root, head, fetched)
     if blocked is not None:
         return blocked
     return _conflicting_paths(root, head, fetched)
@@ -226,23 +235,16 @@ def _fetched_tip(root: Path, remote: str, branch: str) -> str | dict:
     return _git(root, "rev-parse", "FETCH_HEAD")
 
 
-def _prepared_update(root: Path) -> tuple[str, str, str] | dict:
-    """The current head, the fetched head and the default branch's tip, or what stops us."""
+def _prepared_update(root: Path) -> tuple[str, str] | dict:
+    """The current head and the fetched default-branch head, or what stops us."""
     target = _update_target(root)
     if isinstance(target, dict):
         return target
-    return _fetched_heads(root, *target)
-
-
-def _fetched_heads(root: Path, branch: str, remote: str) -> tuple[str, str, str] | dict:
-    """The default branch is fetched first, so the tracked branch is what FETCH_HEAD names last."""
-    default_tip = _fetched_tip(root, remote, _default_branch(root, remote))
-    if isinstance(default_tip, dict):
-        return default_tip
+    branch, remote = target
     fetched = _fetched_tip(root, remote, branch)
     if isinstance(fetched, dict):
         return fetched
-    return _git(root, "rev-parse", "HEAD"), fetched, default_tip
+    return _git(root, "rev-parse", "HEAD"), fetched
 
 
 def _dependency_state(root: Path) -> str:
@@ -327,8 +329,8 @@ def _attempted_update(root: Path) -> dict:
     prepared = _prepared_update(root)
     if isinstance(prepared, dict):
         return prepared
-    head, fetched, default_tip = prepared
-    stopped = _fast_forward(root, head, fetched, default_tip)
+    head, fetched = prepared
+    stopped = _fast_forward(root, head, fetched)
     if stopped is not None:
         return stopped
     return _merged_update(root, head, fetched)
