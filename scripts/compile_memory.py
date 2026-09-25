@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -631,6 +632,7 @@ def pack_compile_batches(
     optional_sources = tuple(
         item for item in inputs.sources if item.logical_path not in daily_paths
     )
+    ranking = _ContextRanking(optional_sources)
     return tuple(
         _compile_batch(
             inputs,
@@ -638,10 +640,71 @@ def pack_compile_batches(
             budget,
             model,
             token_adapters,
-            optional_paths=_fitting_context(paths, optional_sources, budget, measure),
+            optional_paths=_fitting_context(
+                paths, ranking.ordered(_batch_text(inputs, paths)), budget, measure
+            ),
         )
         for paths in _group_dailies(inputs, budget, measure)
     )
+
+
+_RANKING_WORD = re.compile(r"[^\W\d_]{4,}")
+# BM25's usual constants; see _ContextRanking.
+BM25_K1 = 1.2
+BM25_B = 0.75
+
+
+def _words(content: bytes) -> frozenset[str]:
+    return frozenset(_RANKING_WORD.findall(content.decode("utf-8", errors="ignore").casefold()))
+
+
+def _batch_text(inputs: CompileInputs, paths: set[str]) -> bytes:
+    return b"\n".join(item.content for item in inputs.dailies if item.part_key in paths)
+
+
+def _inverse_document_frequency(documents, total: int) -> dict[str, float]:
+    """BM25's IDF: `ln((N - n + 0.5) / (n + 0.5) + 1)` for each word."""
+    frequency: dict[str, int] = {}
+    for words in documents:
+        for word in words:
+            frequency[word] = frequency.get(word, 0) + 1
+    return {word: math.log((total - count + 0.5) / (count + 0.5) + 1) for word, count in frequency.items()}
+
+
+def _length_factors(words_by_path: Mapping[str, frozenset[str]]) -> dict[str, float]:
+    """BM25's length normalisation with a term frequency of one."""
+    lengths = [len(words) for words in words_by_path.values()]
+    average = (sum(lengths) / len(lengths)) if lengths else 1.0
+    return {
+        path: (BM25_K1 + 1) / (1 + BM25_K1 * (1 - BM25_B + BM25_B * len(words) / max(average, 1.0)))
+        for path, words in words_by_path.items()
+    }
+
+
+class _ContextRanking:
+    """Optional context in order of relevance to a batch's days, not by path.
+
+    A 32k window shows a fraction of the notes; offered by path, the planner saw
+    the alphabetically early pages and created a new page beside the one its day
+    was about (audit B-12, B-13). The score is the BM25 IDF of the words a page
+    shares with the days; ties go by path, so the order is deterministic. See
+    `docs/research/2026-09-25-the-compile-sees-the-pages-its-day-is-about.md`.
+    """
+
+    def __init__(self, sources: Sequence[SourceSnapshot]) -> None:
+        self.sources = tuple(sources)
+        self.words = {item.logical_path: _words(item.content) for item in self.sources}
+        self.idf = _inverse_document_frequency(self.words.values(), len(self.sources))
+        self.length_factor = _length_factors(self.words)
+
+    def ordered(self, day_text: bytes) -> tuple[SourceSnapshot, ...]:
+        day = _words(day_text)
+        return tuple(sorted(self.sources, key=lambda item: (-self._score(item, day), item.logical_path)))
+
+    def _score(self, item: SourceSnapshot, day: frozenset[str]) -> float:
+        """BM25 with every shared word counted once: a long page does not win by length."""
+        shared = sum(self.idf[word] for word in self.words[item.logical_path] & day)
+        return shared * self.length_factor[item.logical_path]
 
 
 def _draft_prompt_text(inputs: CompileInputs) -> str:
