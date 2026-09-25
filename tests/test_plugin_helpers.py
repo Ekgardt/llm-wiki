@@ -506,6 +506,12 @@ def _run_claude_delegate(integration_adapter, raw, event, delegate):
         )
 
 
+def _delegate_output(command, delegate: str, outputs: list[str]) -> str:
+    if not any(str(part).endswith(delegate) for part in command):
+        return ""
+    return outputs.pop(0)
+
+
 @pytest.mark.parametrize("delegate", ["user_prompt_capture.py", "session_start_context.py"])
 def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
     import integration_adapter
@@ -514,11 +520,13 @@ def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
         '{"hookSpecificOutput":{}}',
         '{"hookSpecificOutput":{"additionalContext":"safe"}}',
     ]
+    # A Claude prompt also reaches feedback capture (audit B-7), whose output is
+    # never forwarded; only the named delegate's output is under test here.
     monkeypatch.setattr(
         integration_adapter.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=0, stdout=outputs.pop(0), stderr=""
+        lambda command, *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=_delegate_output(command, delegate, outputs), stderr=""
         ),
     )
     event, raw = {

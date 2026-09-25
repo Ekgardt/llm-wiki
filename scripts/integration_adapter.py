@@ -34,6 +34,14 @@ from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DELEGATE_TIMEOUT_SECONDS = 10
+# Delegates on the host's 5-second hooks stop before the host stops the hook, so
+# a hang is recorded here instead of vanishing with the process (audit B-11,
+# docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md).
+DELEGATE_TIMEOUTS = {
+    "user_prompt_capture.py": 2.5,
+    "feedback_capture.py": 1.0,
+    "post_tool_capture.py": 3.5,
+}
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 CAPTURE_DRAIN_MAX_TASKS = 20
 CAPTURE_DRAIN_SECONDS = 450
@@ -126,6 +134,15 @@ DELEGATES = frozenset(
 CAPTURE_DELEGATES = {
     "pre_compact": "precompact_capture.py",
     "session_end": "session_end_capture.py",
+}
+# The delegate `ingest_event` itself runs for an event. Claude's hooks name it with
+# `--delegate`, and that flag used to take the one-script path, which skipped the
+# feedback capture every other host's prompts reach (audit B-7). See
+# `docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md`.
+INGESTED_DELEGATES = {
+    **CAPTURE_DELEGATES,
+    "user_prompt": "user_prompt_capture.py",
+    "post_tool_use": "post_tool_capture.py",
 }
 
 
@@ -498,7 +515,7 @@ def _run_delegate(
         encoding="utf-8",
         errors="replace",
         check=False,
-        timeout=DELEGATE_TIMEOUT_SECONDS,
+        timeout=DELEGATE_TIMEOUTS.get(name, DELEGATE_TIMEOUT_SECONDS),
     )
     _forward_delegate_stdout(result, forward_stdout)
     _record_failed_delegate(name, result)
@@ -3459,7 +3476,7 @@ def _dispatch_cli_event(
 ) -> dict[str, object] | None:
     if envelope is None:
         return None
-    if args.delegate and args.delegate != CAPTURE_DELEGATES.get(envelope.event_type):
+    if args.delegate and args.delegate != INGESTED_DELEGATES.get(envelope.event_type):
         _run_own_delegate(args, envelope)
         return None
     result = ingest_event(envelope)
