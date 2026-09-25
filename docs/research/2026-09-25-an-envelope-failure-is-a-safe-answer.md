@@ -33,3 +33,10 @@ Date: 2026-09-25. Audit item B-20 (`docs/AUDIT-2026-09-25-full.md`).
 - `scripts/mcp_server.py`
 - `tests/test_an_envelope_failure_is_a_safe_answer.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day (clean run of b4f3015a)
+
+- Fact: the repository's privacy guard (`tests/test_nothing_private_reaches_the_public_repository.py`)
+  failed on this note's test, which used a home-directory-shaped path as its example of a private
+  string. The example is now `/srv/private-vault/...`; what it proves is unchanged.
+- File: `tests/test_an_envelope_failure_is_a_safe_answer.py`.

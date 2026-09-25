@@ -45,3 +45,10 @@ Date: 2026-09-25. Audit item A-17 (`docs/AUDIT-2026-09-25-full.md`).
 - `scripts/mcp_server.py`
 - `tests/test_a_grounded_recall_has_the_time_it_needs.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day (clean run of b4f3015a)
+
+- Fact: `tests/test_slow_machine.py::test_no_test_carries_a_literal_hang_bound` failed on this
+  note's test, which bounded a thread join with a literal `5`. It uses `LONG_TIMEOUT` like every
+  other test.
+- File: `tests/test_a_grounded_recall_has_the_time_it_needs.py`.

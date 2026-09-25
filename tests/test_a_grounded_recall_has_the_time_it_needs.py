@@ -12,6 +12,8 @@ import llm_client
 import mcp_server
 import query_memory
 
+from tests.slow_machine import LONG_TIMEOUT
+
 
 def test_the_provider_call_runs_under_the_time_left(monkeypatch) -> None:
     monkeypatch.delenv("MEMORY_LLM_TIMEOUT_S", raising=False)
@@ -38,10 +40,10 @@ def test_a_ceiling_set_in_one_thread_does_not_reach_another(monkeypatch) -> None
 
     worker = threading.Thread(target=hold_a_ceiling)
     worker.start()
-    inside.wait(5)
+    inside.wait(LONG_TIMEOUT)
     here = llm_client._timeout_s()
     release.set()
-    worker.join(5)
+    worker.join(LONG_TIMEOUT)
 
     assert here == llm_client.DEFAULT_TIMEOUT_S
 
