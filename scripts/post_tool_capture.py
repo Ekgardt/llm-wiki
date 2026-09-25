@@ -39,31 +39,21 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from memory_state import ROOT as _MS_ROOT  # noqa: E402
-    from memory_state import STATE_ROOT as _MS_STATE
-    from memory_state import update_state
-    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
-    STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
-except Exception:  # noqa: BLE001
-    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-    STATE_ROOT = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-    ).resolve()
+# No stand-ins: a module that cannot import fails the hook, which the host shows
+# as a non-blocking hook error and the adapter records as a lost capture
+# (docs/research/2026-09-25-a-tool-call-in-the-vault-is-captured.md).
+from memory_state import ROOT as _MS_ROOT  # noqa: E402
+from memory_state import STATE_ROOT as _MS_STATE  # noqa: E402
+from memory_state import update_state  # noqa: E402
 
-    def update_state(mutator):  # type: ignore[misc]
-        """No-op stub — safe skip when memory_state is unavailable."""
+ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
+STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
+from capture_diagnostics import record_capture_failure  # noqa: E402
 from capture_operation import claim_operation, complete_operation  # noqa: E402
-
-try:
-    from capture_diagnostics import record_capture_failure  # noqa: E402
-except Exception:  # noqa: BLE001
-    def record_capture_failure(kind, reason, **fields):  # type: ignore[misc]
-        """No-op stub — diagnostics must never break the capture hook."""
-
 from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+from session_start_project_state import _compute_slug  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
@@ -110,17 +100,11 @@ def _read_hook_input() -> dict:
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
-    projects_dir = ROOT / "knowledge" / "projects"
+    """The slug `state.md` uses; only a path the system cannot resolve falls back."""
     try:
-        sys.path.insert(0, str(ROOT / "scripts"))
-        from session_start_project_state import _compute_slug  # type: ignore
-
-        return _compute_slug(Path(cwd).resolve(), projects_dir)
-    except Exception:  # noqa: BLE001
-        try:
-            return Path(cwd).resolve().name.lower().replace(" ", "-")
-        except Exception:  # noqa: BLE001
-            return "unknown"
+        return _compute_slug(Path(cwd).resolve(), ROOT / "knowledge" / "projects")
+    except (OSError, ValueError):
+        return Path(cwd).name.lower().replace(" ", "-") or "unknown"
 
 
 def _file_target(tool_input: dict) -> str:
@@ -244,13 +228,6 @@ def _optional_string(value: object) -> str | None:
     return value
 
 
-def _inside_vault(cwd: str) -> bool:
-    try:
-        return Path(cwd).resolve().is_relative_to(ROOT)
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _text_or_empty(value: object) -> str:
     if not isinstance(value, str):
         return ""
@@ -292,10 +269,9 @@ def _tool_context(hook: dict) -> tuple[str, str, object, object, str] | None:
     tool_name, target = tool
     source_session = hook.get("session_id")
     source_cwd = hook.get("cwd")
-    cwd = _cwd(source_cwd)
-    if _inside_vault(cwd):
-        return None
-    return tool_name, target, source_session, source_cwd, cwd
+    # A call made inside the vault is captured like any other; the memory's own
+    # processes are filtered by the adapter's reentry marker (audit B-1).
+    return tool_name, target, source_session, source_cwd, _cwd(source_cwd)
 
 
 def _tool_envelope(
