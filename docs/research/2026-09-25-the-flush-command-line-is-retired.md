@@ -43,3 +43,6 @@ Date: 2026-09-25. Audit item C-4 (`docs/AUDIT-2026-09-25-full.md`).
 - tests that ran only the command line
 - `CLAUDE.md`, `AGENTS.md`
 - `CHANGELOG.md`
+- `benchmark/code-parity-v2.json`: task T02's gold named `_keep_transcript_record`
+  as a caller of `write_session_evidence`; it now names the two callers that
+  remain, at their current lines (found by the clean run of 2026-09-25).
