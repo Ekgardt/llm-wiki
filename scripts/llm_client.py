@@ -667,20 +667,25 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
 
 
 
+KNOWN_PROVIDERS = ("opencode", "codex", "claude", "openai", "ollama")
+
+
 def _candidate_order(forced: str) -> list[str]:
     """Order in which to try backends.
 
     When ``forced`` is set to a known backend, ONLY that backend is tried —
     a strict override. If it fails, the call returns None rather than
-    silently falling through to another provider. When ``forced`` is empty
-    or unknown, the full default order is used (auto-detection).
+    silently falling through to another provider. When ``forced`` is empty the
+    full default order is used (auto-detection); a name that is no provider
+    yields none.
     """
-    defaults = ["opencode", "codex", "claude", "openai", "ollama"]
     if forced == "fake":
         return ["fake"]
-    if forced and forced in defaults:
+    if forced in KNOWN_PROVIDERS:
         return [forced]
-    return defaults
+    # A name that is no provider is a typo, not a request for the automatic chain
+    # with its cloud providers (audit C-3).
+    return list(KNOWN_PROVIDERS) if not forced else []
 
 
 ProviderConfiguration = tuple[
@@ -1523,12 +1528,13 @@ def _call_codex(
 # ---------------------------------------------------------------------------
 
 
+class _FlagsUnknown(RuntimeError):
+    """`claude --help` did not answer; nothing is known about the flags."""
+
+
 @functools.lru_cache(maxsize=1)
-def _claude_cli_flags() -> frozenset[str]:
-    """Which flags this Claude CLI understands, asked once per process."""
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        return frozenset()
+def _probed_claude_flags(claude_bin: str) -> frozenset[str]:
+    """The flags this CLI names in `--help`; only an answer is cached, a failure is not."""
     try:
         with provider_cwd() as neutral:
             result = subprocess.run(
@@ -1542,9 +1548,27 @@ def _claude_cli_flags() -> frozenset[str]:
                 cwd=neutral,
                 env=provider_environment(),
             )
-    except (subprocess.TimeoutExpired, OSError):
-        return frozenset()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise _FlagsUnknown(type(exc).__name__) from exc
+    if result.returncode != 0:
+        raise _FlagsUnknown(f"exit {result.returncode}")
     return frozenset(re.findall(r"--[a-z][a-z-]+", result.stdout or ""))
+
+
+def _claude_cli_flags() -> frozenset[str] | None:
+    """Which flags this Claude CLI understands; None while `--help` cannot say.
+
+    A failed probe used to be cached as "no flags" for the life of the process,
+    and every later call ran without isolation (audit C-2,
+    docs/research/2026-09-25-a-provider-call-fails-closed.md).
+    """
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return frozenset()
+    try:
+        return _probed_claude_flags(claude_bin)
+    except _FlagsUnknown:
+        return None
 
 
 def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> list[str]:
@@ -1563,7 +1587,7 @@ def _claude_command(claude_bin: str, model: str | None, system_prompt: str) -> l
     `docs/research/2026-09-14-a-memory-call-leaves-no-session.md`). Each flag is
     used only when this CLI has it.
     """
-    flags = _claude_cli_flags()
+    flags = _claude_cli_flags() or frozenset()
     system_argument = _claude_system_argument(system_prompt, flags)
     optional = (
         (bool(system_argument), system_argument),
@@ -1599,7 +1623,7 @@ def _claude_stdin(system_prompt: str, prompt: str) -> str:
     `docs/research/2026-09-17-the-task-is-named-to-the-model.md`.
     """
     task = _framed_task(prompt)
-    if _claude_system_argument(system_prompt, _claude_cli_flags()):
+    if _claude_system_argument(system_prompt, _claude_cli_flags() or frozenset()):
         return task
     return f"<system>{_framed_system_text(system_prompt)}</system>\n\n{task}"
 
@@ -1634,7 +1658,8 @@ def _call_claude(
     through stdin to avoid the Windows CreateProcess ~32K command-line ceiling.
     """
     claude_bin = shutil.which("claude")
-    if not claude_bin:
+    if not claude_bin or _claude_cli_flags() is None:
+        # Fail closed: a call whose isolation flags are unknown is not made.
         return ""
     try:
         with provider_cwd() as neutral:

@@ -173,8 +173,36 @@ def _environment_check(root: Path, state_root: Path) -> dict:
         "vault_root": {"status": _ok_or_error(root_ok)},
         "state_root": {"status": _ok_or_error(state_parent_ok)},
         "layout": layout,
+        "provider": _provider_setting(),
     }
-    return _result("environment", status, _environment_message(status), details)
+    return _with_provider_finding(
+        _result("environment", status, _environment_message(status), details)
+    )
+
+
+def _provider_setting() -> dict[str, object]:
+    """`MEMORY_LLM_PROVIDER` as the calls read it, and whether it names a provider.
+
+    A name that is no provider yields no provider at all (audit C-3); saying so
+    here is the only way the operator learns of the typo.
+    """
+    from llm_client import KNOWN_PROVIDERS, forced_provider
+
+    value = forced_provider()
+    known = value in {"", "fake", *KNOWN_PROVIDERS}
+    return {"value": value or "auto", "known": known, "accepted": ["auto (unset)", *KNOWN_PROVIDERS]}
+
+
+def _with_provider_finding(result: dict) -> dict:
+    provider = result["details"]["provider"]
+    if provider["known"] or result["status"] != "ok":
+        return result
+    result["status"] = "degraded"
+    result["message"] = (
+        f"MEMORY_LLM_PROVIDER={provider['value']} names no provider, so no model is called; "
+        f"use one of: {', '.join(provider['accepted'])}."
+    )
+    return result
 
 
 def _ok_or_error(value: bool) -> str:

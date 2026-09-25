@@ -83,9 +83,9 @@ def test_the_claude_call_runs_outside_the_vault(
     monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(llm_client, "_claude_command", lambda *_a: ["claude"])
     monkeypatch.setattr(llm_client, "_claude_answer", lambda *_a: "")
-    llm_client._claude_cli_flags.cache_clear()
+    llm_client._probed_claude_flags.cache_clear()
     llm_client._call_claude(_descriptor(), "prompt", "system")
-    llm_client._claude_cli_flags.cache_clear()
+    llm_client._probed_claude_flags.cache_clear()
     outside = [_is_outside_the_vault(cwd) for cwd in recorder.cwds]
     assert outside and all(outside), recorder.cwds
 
