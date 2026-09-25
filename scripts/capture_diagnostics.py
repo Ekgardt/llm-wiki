@@ -101,6 +101,13 @@ def is_contention(error: BaseException) -> bool:
 # `docs/research/2026-09-14-a-worker-that-failed-lost-no-capture.md`.
 DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
 
+# Failures recorded in the same trail that are not captures: an MCP tool call
+# that raised, a telemetry write that failed. Counting them as lost captures
+# kept the capture check red for tool errors (audit B-25,
+# docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md); they are
+# reported on their own.
+OPERATIONAL_KINDS = frozenset({"mcp_tool", "telemetry_event"})
+
 
 class DurableWorkExhausted(RuntimeError):
     """The task behind a durable capture spent its last attempt and is now dead.
@@ -414,7 +421,16 @@ def _trail_written(record: dict[str, str], *, trim: bool) -> bool:
     return written
 
 
-def _counter_entries(state: dict) -> dict[str, dict]:
+def _counter_entries(state: dict, *, operational: bool = False) -> dict[str, dict]:
+    """Capture counters, or with `operational` the non-capture ones."""
+    return {
+        kind: entry
+        for kind, entry in _all_counter_entries(state).items()
+        if (kind in OPERATIONAL_KINDS) == operational
+    }
+
+
+def _all_counter_entries(state: dict) -> dict[str, dict]:
     counters = state.get(STATE_KEY)
     if not isinstance(counters, dict):
         return {}
@@ -427,7 +443,16 @@ def _lost_count(entry: dict) -> int:
 
 def capture_failure_totals(state: dict) -> dict[str, int]:
     """Lost captures per kind: every record minus the ones a writer race deferred."""
-    totals = {kind: _lost_count(entry) for kind, entry in _counter_entries(state).items()}
+    return _lost_totals(_counter_entries(state))
+
+
+def operational_failure_totals(state: dict) -> dict[str, int]:
+    """Failed tool calls and telemetry writes per kind; not captures."""
+    return _lost_totals(_counter_entries(state, operational=True))
+
+
+def _lost_totals(entries: dict[str, dict]) -> dict[str, int]:
+    totals = {kind: _lost_count(entry) for kind, entry in entries.items()}
     return {kind: count for kind, count in totals.items() if count}
 
 
@@ -460,12 +485,17 @@ def _recorded_moment(entry: object) -> str:
 
 
 def last_capture_failure_at(state: dict) -> str:
-    """The most recent moment any kind was recorded, or an empty string."""
-    counters = state.get(STATE_KEY)
-    if not isinstance(counters, dict):
-        return ""
-    moments = [_recorded_moment(entry) for entry in counters.values()]
-    return max(moments, default="")
+    """The most recent moment a capture kind was recorded, or an empty string."""
+    return _last_moment(_counter_entries(state))
+
+
+def last_operational_failure_at(state: dict) -> str:
+    """The most recent moment a tool or telemetry failure was recorded, or empty."""
+    return _last_moment(_counter_entries(state, operational=True))
+
+
+def _last_moment(entries: dict[str, dict]) -> str:
+    return max((_recorded_moment(entry) for entry in entries.values()), default="")
 
 
 def _moment_age_seconds(moment: str, now: datetime) -> float | None:
@@ -489,9 +519,18 @@ def capture_failure_is_live(state: dict, now: datetime | None = None) -> bool:
     State written before the moment was recorded has no timestamp to judge, and
     counts as history.
     """
-    if not sum(capture_failure_totals(state).values()):
+    return _recent_loss(capture_failure_totals(state), last_capture_failure_at(state), now)
+
+
+def operational_failure_is_live(state: dict, now: datetime | None = None) -> bool:
+    """Whether a tool or telemetry failure happened within the same seven days."""
+    return _recent_loss(operational_failure_totals(state), last_operational_failure_at(state), now)
+
+
+def _recent_loss(totals: dict[str, int], moment: str, now: datetime | None) -> bool:
+    if not sum(totals.values()):
         return False
-    age = _moment_age_seconds(last_capture_failure_at(state), now or datetime.now())
+    age = _moment_age_seconds(moment, now or datetime.now())
     if age is None:
         return False
     return age <= CAPTURE_RECENT_SECONDS
@@ -527,7 +566,7 @@ def clear_capture_failures() -> dict[str, int]:
     retired: dict[str, int] = {}
 
     def mutate(state: dict) -> None:
-        retired.update(capture_failure_totals(state))
+        retired.update(_lost_totals(_all_counter_entries(state)))
         state.pop(STATE_KEY, None)
 
     update_state(mutate, lock_timeout=STATE_LOCK_TIMEOUT)
@@ -538,6 +577,8 @@ def _print_summary(state: dict) -> int:
     totals = capture_failure_totals(state)
     for kind, count in sorted(capture_deferred_totals(state).items()):
         print(f"{kind}: {count} deferred by a writer race (retried, not lost)")
+    for kind, count in sorted(operational_failure_totals(state).items()):
+        print(f"{kind}: {count} failed (a tool or telemetry failure, not a capture)")
     if not totals:
         print("capture_diagnostics: no capture failures recorded")
         return 0

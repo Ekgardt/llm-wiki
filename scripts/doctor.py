@@ -4709,6 +4709,40 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
+def _tool_failure_check(state_root: Path, deadline: float) -> dict:
+    """Report failed tool calls and telemetry writes, which are not lost captures.
+
+    They share the capture trail and were counted as lost captures (audit B-25,
+    docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md).
+    """
+    from capture_diagnostics import (
+        last_operational_failure_at,
+        operational_failure_is_live,
+        operational_failure_totals,
+    )
+
+    state, state_error = _read_state(state_root, deadline)
+    totals = operational_failure_totals(state)
+    failed = sum(totals.values())
+    details = {
+        "failed": failed,
+        "kinds": totals,
+        "trail": "logs/capture-failures.jsonl",
+        "last_at": last_operational_failure_at(state),
+        "state_error": state_error,
+    }
+    if state_error:
+        return _result("tools", "ok", "Tool failures could not be read; the capture check says why.", details)
+    if not operational_failure_is_live(state):
+        return _result("tools", "ok", f"{failed} tool failure(s) recorded, none recently.", details)
+    return _result(
+        "tools",
+        "degraded",
+        f"{failed} tool call(s) or telemetry write(s) failed; see `logs/capture-failures.jsonl`.",
+        details,
+    )
+
+
 def _models_check() -> dict:
     """Name the pinned model weights the cache lacks, with the command that fetches them.
 
@@ -8081,6 +8115,7 @@ def _deferrable_checks(
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("tools", lambda budget: _tool_failure_check(state_path, budget)),
         ("backup", lambda _budget: _backup_check(home_path, generated_at)),
         ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
