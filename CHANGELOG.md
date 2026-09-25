@@ -554,6 +554,14 @@ the legacy index files are no longer read (see Removed).
 
 ### Fixed
 
+- **The health and context resources are readable.** The server's read handler
+  returned the protocol model `TextResourceContents` where the MCP SDK 1.29
+  expects its helper `ReadResourceContents`, so every `resources/read` failed with
+  `'TextResourceContents' object has no attribute 'content'`; the unit tests had
+  replaced the type with a stand-in. A test now reads both resources through a
+  real stdio session. See
+  `docs/research/2026-09-25-the-health-resource-is-readable.md`.
+
 - **A foreground subagent's report is kept with its session.** The session record
   dropped every tool result, so the conclusion a foreground subagent returned was
   missing from it; it is now kept as `**subagent report:**`, bounded to 8 000

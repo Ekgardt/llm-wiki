@@ -3411,7 +3411,7 @@ class TestResources:
         server = FakeServer()
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
-        monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
+        monkeypatch.setattr(mcp_server, "ReadResourceContents", Model)
 
         assert mcp_server._register_resources(server) is True
         resources = asyncio.run(server.callbacks["list"]())
@@ -3421,7 +3421,7 @@ class TestResources:
             "llm-wiki://health",
             "llm-wiki://context",
         }
-        assert json.loads(contents[0].text)["data"]["last_compile_status"]
+        assert json.loads(contents[0].content)["data"]["last_compile_status"]
 
     @pytest.mark.parametrize(
         "uri", ["llm-wiki://health", "llm-wiki://context"]
@@ -3481,7 +3481,7 @@ class TestResources:
         server = FakeServer()
         monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
         monkeypatch.setattr(mcp_server, "Resource", Model)
-        monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
+        monkeypatch.setattr(mcp_server, "ReadResourceContents", Model)
         monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 3.0)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
         monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
@@ -3490,7 +3490,7 @@ class TestResources:
         loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
 
         _assert_resource_timeout(
-            json.loads(contents[0].text), loop_progressed, seen
+            json.loads(contents[0].content), loop_progressed, seen
         )
 
         status = {"last_compile": "fresh", "last_compile_status": "ok"}
@@ -3500,7 +3500,7 @@ class TestResources:
             lambda *, deadline: status,
         )
         sentinel_contents = asyncio.run(server.callbacks["read"](uri))
-        sentinel = json.loads(sentinel_contents[0].text)
+        sentinel = json.loads(sentinel_contents[0].content)
         expected = status
         if uri == mcp_server.CONTEXT_RESOURCE_URI:
             expected = {"overview": {"ok": True}, "status": status}

@@ -113,7 +113,7 @@ MCP_RESOURCES_AVAILABLE = False
 MCP_STRUCTURED_OUTPUT_AVAILABLE = False
 MCP_CALL_TOOL_RESULT_AVAILABLE = False
 Resource = None
-TextResourceContents = None
+ReadResourceContents = None
 CallToolResult = None
 TextContent = None
 try:
@@ -140,14 +140,17 @@ if MCP_AVAILABLE:
 
 if MCP_AVAILABLE:
     try:
-        from mcp.types import Resource, TextResourceContents
+        # The read handler returns the SDK's own helper type; the SDK builds the
+        # protocol content from it (docs/research/2026-09-25-the-health-resource-is-readable.md).
+        from mcp.server.lowlevel.helper_types import ReadResourceContents
+        from mcp.types import Resource
 
         MCP_RESOURCES_AVAILABLE = all(
             (
                 hasattr(Server, "list_resources"),
                 hasattr(Server, "read_resource"),
                 Resource is not None,
-                TextResourceContents is not None,
+                ReadResourceContents is not None,
             )
         )
     except ImportError:
@@ -6000,13 +6003,7 @@ def _register_resources(server) -> bool:
             text = _busy_envelope_text()
         except TimeoutError:
             text = _timeout_envelope_text()
-        return [
-            TextResourceContents(
-                uri=uri,
-                mimeType="application/json",
-                text=text,
-            )
-        ]
+        return [ReadResourceContents(content=text, mime_type="application/json")]
 
     return True
 
