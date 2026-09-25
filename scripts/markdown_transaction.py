@@ -7602,12 +7602,25 @@ class MarkdownCoordinator:
             return frozenset(str(row[0]) for row in database.execute('SELECT id FROM "transaction"'))
 
     def _restore_staged_prune(self, staged: Path) -> None:
-        """The images go back where the row still says they are; a live one wins."""
-        artifact_root = self.transaction_root / _staged_prune_owner(staged.name)
-        if artifact_root.exists():
+        """The images go back only where the row still says they are.
+
+        A row marked pruned (or gone) already disowned them: the crash came after
+        the mark, so the prune is finished and the images go (audit C-10,
+        docs/research/2026-09-25-a-finished-prune-is-not-undone.md).
+        """
+        owner = _staged_prune_owner(staged.name)
+        artifact_root = self.transaction_root / owner
+        if artifact_root.exists() or not self._images_still_owned(owner):
             self._remove_artifacts(staged)
             return
         staged.replace(artifact_root)
+
+    def _images_still_owned(self, transaction_id: str) -> bool:
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT artifacts_pruned_at FROM "transaction" WHERE id = ?', (transaction_id,)
+            ).fetchone()
+        return row is not None and row["artifacts_pruned_at"] is None
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
         with self._connect() as database:
