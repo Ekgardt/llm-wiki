@@ -1254,6 +1254,24 @@ def adopted_ownership_registry(vault: Path, state_root: Path) -> OwnershipRegist
     return coordinator._ownership_registry()  # noqa: SLF001 - the coordinator's own rule
 
 
+def _pre_adoption_registry(
+    state_root: Path, *, clock: Callable[[], datetime] = utc_now
+) -> OwnershipRegistry:
+    """The candidate registry, which exists only before adoption.
+
+    An adopted vault's registry lives on its adopted coordinator and must be
+    passed in; opening the candidate there reads a database that is not the
+    vault's (audit C-14,
+    docs/research/2026-09-25-an-owner-helper-refuses-the-candidate-on-an-adopted-vault.md).
+    """
+    if markdown_transaction._reliability_v3_records_present(state_root):
+        raise OperationalOwnershipError(
+            "adopted_registry_required",
+            "an adopted vault's ownership registry must be passed in",
+        )
+    return OwnershipRegistry(state_root, clock=clock)
+
+
 def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdentity]:
     now = utc_now().replace(microsecond=0)
     actor_id = ownership_actor_identity("compile", "global")
@@ -1262,7 +1280,7 @@ def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdenti
         f"{os.getpid()}\n{_timestamp(now)}\n{token}\n".encode("ascii", errors="strict")
     )
     marker = _publish_marker(Path(state_root), "run/compile.pid", payload)
-    registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+    registry = _pre_adoption_registry(Path(state_root), clock=lambda: now)
     try:
         lease = registry.acquire(
             "compile",
@@ -1295,7 +1313,7 @@ def acquire_scheduled_owner(
     token = secrets.token_hex(16)
     payload = _marker_payload()
     if registry is None:
-        registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+        registry = _pre_adoption_registry(Path(state_root), clock=lambda: now)
     marker = _publish_marker_reclaiming(
         Path(state_root),
         "run/maintenance.lock",
@@ -1358,7 +1376,7 @@ def heartbeat_owner(
     (client-go's `OnStoppedLeading`; the doctor's own heartbeat does the same).
     """
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     stop = threading.Event()
     failure: list[BaseException] = []
     # The lease is already written; its expiry is counted from here.
@@ -1409,7 +1427,7 @@ def current_owner_lease(
     lease: OwnerLease, *, registry: OwnershipRegistry | None = None
 ) -> OwnerLease:
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     with contextlib.closing(registry._connect()) as database:
         row = database.execute(
             """SELECT * FROM maintenance_owners
@@ -1443,7 +1461,7 @@ def release_marker_owner(
     registry: OwnershipRegistry | None = None,
 ) -> None:
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     current = current_owner_lease(lease, registry=registry)
     registry.release(current)
     _remove_exact_marker(Path(lease.state_root), marker)

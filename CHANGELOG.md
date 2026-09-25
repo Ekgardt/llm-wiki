@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The ownership helpers refuse with `adopted_registry_required` instead of opening the migration-candidate database when called on an adopted vault without its registry.
 - A prune that died after marking its row no longer has its images put back by the next recovery; they are removed, as the row says.
 - A checkpoint reservation whose checkpoint another attempt committed is dropped by the next history prune instead of standing for 90 days (41 on this vault). The checkpoint log itself keeps growing by design: it is what a project journal is rebuilt from.
 - A transaction and its images agree: a failed prepare removes the directory it made, the prune removes a directory no row names once it is an hour old (9 on this vault), and a settled row whose images are already gone is marked pruned so the history prune can take it (13 on this vault).
