@@ -1605,6 +1605,10 @@ def ignored_top_level_directories(
             deadline=deadline,
             cancelled=cancelled,
         )
+    except _RevisionStopped:
+        # A stop is a TimeoutError, which is an OSError; it is the caller's, not
+        # Git's (docs/research/2026-09-25-a-cancel-is-not-a-git-failure.md).
+        raise
     except (ValueError, OSError):
         return frozenset()
     return frozenset(_top_level_directory(record) for record in output.split(b"\0") if _is_top_level_directory(record))

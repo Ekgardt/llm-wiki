@@ -3970,3 +3970,18 @@ def test_revision_rejects_known_oversized_file_before_reading_it(
 
     with pytest.raises(ValueError, match="byte ceiling"):
         compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_a_cancel_during_the_ignored_folder_query_stops_the_revision(tmp_path: Path) -> None:
+    """A stop is a TimeoutError, an OSError; it was taken for a Git failure.
+
+    docs/research/2026-09-25-a-cancel-is-not-a-git-failure.md
+    """
+    import workspace_revision
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        workspace_revision.ignored_top_level_directories(root, deadline=None, cancelled=lambda: True)

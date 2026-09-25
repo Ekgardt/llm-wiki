@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A cancel or an expired deadline while the workspace revision asks Git for ignored folders now stops the revision instead of being taken for a Git failure; the background refresh gets the checkout path in the platform's own spelling (Windows CI, run 36197318516).
 - The private vault log rotates instead of stopping compile: past 2 MiB, the compile archives it whole to `knowledge/log-archive/log.local.<date>.md` in the same transaction and starts a fresh log that names the archive. Before, compile refused every run once the log passed its 4 MiB cap.
 - Feedback correction candidates are retired: `feedback_capture.py`, its hook delegate, the guardrails source that read promoted candidates, and the `knowledge/feedback/` zone in the layout are removed. They reached the rules only through a manual `promote`, and compile already learns corrections from the daily log that holds every prompt. Old candidate files stay gitignored and inert.
 - Opening the pre-adoption queue no longer takes the write lock unless a ready task is out of attempts, so a queue opened while another writer holds it no longer fails with `database is locked` (seen on Windows CI).

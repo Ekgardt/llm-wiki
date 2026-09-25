@@ -7,6 +7,7 @@ every time. See docs/research/2026-09-25-one-hard-python-file-does-not-freeze-th
 
 from __future__ import annotations
 
+import ast
 import hashlib
 from pathlib import Path
 
@@ -16,6 +17,15 @@ from code_extractor import extract_code
 from corpus_snapshot import CapturedSource, SourceMetadata, SourceRecord
 
 DEEP = ("x = " + "+".join(["1"] * 100_000) + "\n").encode()
+
+
+def _deep_parse_fails() -> bool:
+    """Python 3.10 parses this expression; 3.11 and later raise `RecursionError`."""
+    try:
+        ast.parse(DEEP)
+    except RecursionError:
+        return True
+    return False
 
 
 def _source(path: str, content: bytes) -> CapturedSource:
@@ -42,7 +52,7 @@ def test_the_deep_file_is_a_parse_error_and_its_neighbour_is_extracted() -> None
 
     names = {node["metadata"].get("name") for node in result.nodes}
     kinds = {observation.get("reason") for observation in result.observations}
-    assert ("fine" in names, "parse_error" in kinds) == (True, True)
+    assert ("fine" in names, "parse_error" in kinds) == (True, _deep_parse_fails())
 
 
 def test_the_import_reader_and_the_parse_probe_answer_for_it(tmp_path: Path) -> None:
@@ -50,4 +60,5 @@ def test_the_import_reader_and_the_parse_probe_answer_for_it(tmp_path: Path) -> 
     path.write_bytes(DEEP)
 
     assert import_resolver.resolve_python_imports_and_calls(path) == ([], [])
-    assert path_coverage._python_parse(DEEP)["errors"][0]["kind"] == "RecursionError"
+    kinds = [error["kind"] for error in path_coverage._python_parse(DEEP)["errors"]]
+    assert kinds == (["RecursionError"] if _deep_parse_fails() else [])

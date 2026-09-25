@@ -2229,7 +2229,7 @@ def _request_repository_refresh(resolved: Path, checkout) -> str:
     out_log, err_log = _refresh_log_paths(checkout.checkout_id)
     script = Path(__file__).resolve().parent / "repository_index.py"
     pid = spawn_detached(
-        [sys.executable, str(script), "refresh", str(checkout.checkout_root)],
+        [sys.executable, str(script), "refresh", str(Path(checkout.checkout_root))],
         stdout_path=out_log,
         stderr_path=err_log,
     )
