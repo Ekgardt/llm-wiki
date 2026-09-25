@@ -298,6 +298,10 @@ GOPLS_ENVIRONMENT_TEMPLATE = (
     ("GOMODCACHE", "{root}/gopath/pkg/mod"),
     ("GOCACHE", "{root}/gocache"),
     ("GOTOOLCHAIN", "local"),
+    # No module download while answering a query: a missing module is an
+    # unresolved import, not a network fetch into the managed root (audit B-43,
+    # docs/research/2026-09-25-a-query-makes-no-network-call.md).
+    ("GOPROXY", "off"),
 )
 
 
@@ -611,6 +615,9 @@ RUST_ENVIRONMENT_TEMPLATE = (
     ("CARGO_HOME", "{root}/cargo-home"),
     ("LD_LIBRARY_PATH", "{root}/toolchain/lib"),
     ("DYLD_FALLBACK_LIBRARY_PATH", "{root}/toolchain/lib"),
+    # `cargo metadata`, which rust-analyzer runs, fetches crates unless it is
+    # offline; the configuration's promise of no downloads needs this (audit B-43).
+    ("CARGO_NET_OFFLINE", "true"),
 )
 
 # Read-only defaults: no `cargo check` on save, no build scripts run for a
