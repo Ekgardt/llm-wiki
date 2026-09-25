@@ -8112,13 +8112,36 @@ def _completed_or_deferred(
 ) -> dict:
     """The LSP check owns its own budget; the rest defer once time is up."""
     if check_id != "lsp" and time.monotonic() >= deadline:
-        return _result(
-            check_id,
-            "degraded",
-            "Check not completed because the doctor time budget was exhausted.",
-            {"budget_exhausted": True},
-        )
+        return _unfinished_result(check_id)
     return operation(share)
+
+
+def _unfinished_result(check_id: str) -> dict:
+    return _result(
+        check_id,
+        "degraded",
+        "Check not completed because the doctor time budget was exhausted.",
+        {"budget_exhausted": True},
+    )
+
+
+def _unfinished_when_late(check: dict, deadline: float) -> dict:
+    """A read that failed once the budget ran out is an unfinished check, not a broken store.
+
+    Every check catches its deadline together with real read errors, and a
+    SQLite read the deadline interrupts raises `sqlite3.OperationalError`; so
+    under the default budget `queue` and `claims` said `error` and advised
+    `--repair` on a healthy vault (audit A-9,
+    docs/research/2026-09-25-a-late-check-is-unfinished-not-broken.md).
+    """
+    details = check.get("details") or {}
+    if check.get("status") != "error" or not details.get("read_error"):
+        return check
+    if not _deadline_reached(deadline):
+        return check
+    unfinished = _unfinished_result(check["id"])
+    unfinished["details"]["deletion_codes"] = _derived_deletion_codes(check)
+    return unfinished
 
 
 def _collect_checks(
@@ -8142,7 +8165,7 @@ def _collect_checks(
         root_path, state_path, home_path, generated_at
     ):
         checks.append(_completed_or_deferred(check_id, operation, deadline, deadline))
-    return checks
+    return [_unfinished_when_late(check, deadline) for check in checks]
 
 
 def _mark_repair_deferred(check: dict) -> None:
