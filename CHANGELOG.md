@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A compile failure recorded for bytes a daily log no longer has is retired on the next compile pass: 44 of the 45 rows on this vault named content that was gone and held its day out of the archive and `run/` out of deletion for ever.
 - The compile offers the planner the pages its day is about: the optional context of a batch is ranked by BM25 relevance to the batch's days instead of by path, so a day about a known subject updates the existing page instead of creating a near-duplicate beside it and leaving the old figures untouched. It costs about 40 ms on this vault and asks no model.
 - The OpenCode plugin and the adapter read the events OpenCode sends: the session id of `session.created` (`info.id`), so the session-start context reaches the system prompt, and a tool's arguments (`args`), so tool lines name their target. The plugin no longer drops sessions inside the vault, and an idle with nothing new is not captured twice. Still open: one classification per OpenCode turn, which needs a measurement on a live OpenCode.
 - A transcript copy the adapter makes for one event is removed when the event ends even if its capture intent could not be published; nothing read a kept copy any more, so it was private text left in the cache.

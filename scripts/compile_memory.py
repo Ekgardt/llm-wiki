@@ -4385,6 +4385,7 @@ def _run(
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
     _repair_compile_mirror(coordinator)
+    _retire_stale_source_failures(coordinator.state_root)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -4646,6 +4647,31 @@ def _record_compile_source_failures(
             error_code=error_code[:200],
             producer="compile",
         )
+
+
+def _retire_stale_source_failures(state_root: Path) -> None:
+    """Retire every failure row whose digest the file no longer has (audit B-15).
+
+    A daily log only grows, so a failure of older bytes can never be cleared by a
+    commit, and it held the day out of the archive and `run/` out of deletion
+    for ever. See `docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md`.
+    """
+    queue = active_or_legacy_memory_queue(ROOT, state_root)
+    current: dict[str, frozenset[str]] = {}
+    for logical_path, digest in queue.source_failure_keys():
+        if logical_path not in current:
+            current[logical_path] = _current_source_digests(logical_path)
+        if digest not in current[logical_path]:
+            queue.clear_source_failure(logical_path, digest)
+
+
+def _current_source_digests(logical_path: str) -> frozenset[str]:
+    """The digests a compile of this file would record: the whole and each part."""
+    content = _readable_daily(ROOT / logical_path)
+    if content is None:
+        return frozenset()
+    parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
+    return frozenset({sha256_bytes(content), *parts})
 
 
 def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path) -> None:

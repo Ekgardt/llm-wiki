@@ -6472,6 +6472,16 @@ class MemoryQueue:
                 (logical_path, source_digest),
             )
 
+    def source_failure_keys(self) -> list[tuple[str, str]]:
+        """Every recorded `(logical_path, source_digest)`, so a caller can retire stale ones.
+
+        A row keyed by a digest the file no longer has is about content that is
+        gone (audit B-15, docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md).
+        """
+        with self._connect() as connection:
+            rows = connection.execute(_SOURCE_FAILURE_KEYS).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
     def source_failure(
         self, logical_path: str, source_digest: str
     ) -> dict[str, str] | None:
@@ -7259,6 +7269,12 @@ class _QueueV3CandidateReader:
                 "DELETE FROM source_failures WHERE logical_path=? AND source_digest=?",
                 (logical_path, source_digest),
             )
+
+    def source_failure_keys(self) -> list[tuple[str, str]]:
+        """Every recorded `(logical_path, source_digest)`; see `MemoryQueue.source_failure_keys`."""
+        with closing(self._connect()) as database:
+            rows = database.execute(_SOURCE_FAILURE_KEYS).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     def source_failure(
         self, logical_path: str, source_digest: str
@@ -13110,6 +13126,9 @@ def _legacy_memory_queue(
         retry_base_seconds=policy.retry_base_seconds,
         retry_cap_seconds=policy.retry_cap_seconds,
     )
+
+
+_SOURCE_FAILURE_KEYS = "SELECT logical_path, source_digest FROM source_failures ORDER BY logical_path, source_digest"
 
 
 def active_or_legacy_memory_queue(
