@@ -63,6 +63,12 @@ hundredths of a second using it. Can the query path load the same model without
    change nothing reads that 470 MB file.
 4. `_embedder_failure_kind` recognises a missing model partly by the substring
    `NotFound` in an exception's class name.
+5. Two doctor tests of a healthy vault (`test_report_schema_and_all_check_classes_are_json_safe`,
+   `test_cli_returns_zero_for_healthy_report`) read this machine's real Hugging
+   Face cache: `huggingface_hub.try_to_load_from_cache` takes
+   `constants.HF_HUB_CACHE` at call time. With the semantic extra installed they
+   passed while the cache held the old weights and failed once the encoder
+   needed `onnx/model.onnx`, which this machine has not fetched yet.
 
 ## Decision (conclusion)
 
@@ -80,6 +86,8 @@ hundredths of a second using it. Can the query path load the same model without
 - `install_models.py` pins and verifies `onnx/model.onnx` for the encoder, keeps
   `model.safetensors` for the reranker, and removes the encoder's retired
   `model.safetensors` from the cache once the ONNX weights are verified.
+- The healthy-vault doctor tests build the pinned files in a Hub cache of
+  their own, as an install leaves them, like the rest of the state they build.
 - Legacy cleanup: `optimum` leaves the `reranker` extra and its comment is
   corrected; the `NotFound` substring rule goes; CI's hybrid job checks the new
   imports.
@@ -94,7 +102,8 @@ hundredths of a second using it. Can the query path load the same model without
   `scripts/query_memory.py`, `scripts/embedding_model.py`,
   `scripts/install_models.py`, `pyproject.toml`, `uv.lock`,
   `.github/workflows/tests.yml`
-- tests of the encoder, the installer and the embedder failure reasons
+- tests of the encoder, the installer, the embedder failure reasons and
+  `tests/test_doctor.py`
 - `README.md`, `README.ru.md`, `README.zh-CN.md`, `docs/ARCHITECTURE.md`,
   `docs/USER-GUIDE.md`, `CHANGELOG.md`, `tests/test_readme_i18n.py`
 

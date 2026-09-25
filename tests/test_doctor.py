@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -287,6 +288,34 @@ def _check(report: dict, check_id: str) -> dict:
     return next(item for item in report["checks"] if item["id"] == check_id)
 
 
+def _cache_pinned_models(tmp_path: Path, monkeypatch) -> None:
+    """The pinned model files present in a Hub cache of the test's own, as an install leaves them.
+
+    The report used to read this machine's real cache, so a healthy-vault test
+    passed or failed with whatever the machine had downloaded. See
+    `docs/research/2026-09-25-the-encoder-runs-without-torch.md`.
+    """
+    import install_models
+
+    hub = install_models.hub_library()
+    if hub is None:
+        return
+    cache = tmp_path / "hub-cache"
+    # The package loads `constants` lazily; import it by name to set the cache.
+    constants = importlib.import_module(f"{hub.__name__}.constants")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    for model in install_models.pinned_models():
+        _write_pinned_files(cache, model)
+
+
+def _write_pinned_files(cache: Path, model) -> None:
+    snapshot = cache / f"models--{model.repo_id.replace('/', '--')}" / "snapshots" / model.revision
+    named = [pattern for pattern in model.allow_patterns if "*" not in pattern]
+    for name in {model.weights_file, *named}:
+        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+        (snapshot / name).write_bytes(b"pinned")
+
+
 def _take_snapshot(root: Path, home: Path) -> None:
     """A healthy vault has its nightly second copy: a snapshot repository with a commit."""
     from snapshot_knowledge import snapshot_root
@@ -349,6 +378,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     )
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _cache_pinned_models(tmp_path, monkeypatch)
     _take_snapshot(root, home)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -1379,6 +1409,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
     _create_index(state_root / "cache" / "index.sqlite")
     _create_claim_index(root, state_root)
     _create_generation(root, state_root)
+    _cache_pinned_models(tmp_path, monkeypatch)
     _take_snapshot(root, home)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
@@ -1411,6 +1442,10 @@ def test_import_with_missing_state_root_creates_nothing(tmp_path):
     assert not state_root.exists()
 
 
+def _check_statuses(report: dict) -> dict[str, str]:
+    return {check["id"]: check["status"] for check in report["checks"]}
+
+
 def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     import doctor
 
@@ -1437,9 +1472,10 @@ def test_cli_repair_json_is_idempotent(tmp_path, monkeypatch, capsys):
     # A fresh vault has no generation until the installer's sync or the nightly
     # builds one (2026-09-23): `--repair` leaves that one honest degradation and
     # names it, and the second run finds nothing left to repair.
-    degraded = {check["id"] for check in first_report["checks"] if check["status"] != "ok"}
-    assert (bool(first_report["repaired"]), degraded <= {"generation", "models", "scheduler", "backup"}) == (True, True)
-    assert not any(check["status"] == "error" for check in first_report["checks"])
+    statuses = _check_statuses(first_report)
+    degraded = {check_id for check_id, status in statuses.items() if status != "ok"}
+    allowed = {"generation", "models", "scheduler", "backup"}
+    assert (bool(first_report["repaired"]), degraded <= allowed, "error" in statuses.values()) == (True, True, False)
     assert (
         second_return_code,
         second_report["overall_status"],
