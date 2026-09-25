@@ -1,14 +1,16 @@
 """Print the retrieval mode search uses on this vault, and what it searches.
 
   HYBRID  — the active evidence generation has complete vectors: BM25 + dense
-            retrieval + reranking, the default of `search_memory.py` and `recall`.
+            retrieval + reranking, the default of `search_memory.py` and `recall`;
+            a question about relations also asks the evidence graph (GRAPH).
   BASE    — a generation without complete vectors: BM25 alone.
   DIRECT  — no active generation: search reads Markdown directly, bounded by its
             deadline, and every hit says `no_active_generation`.
 
 This used to recommend a mode by page count (under 50, 50–300, over 300), a rule
-from before the generation existed that nothing followed: search always ran in
-HYBRID. It now reports what search does. See
+from before the generation existed that nothing followed: search ran in HYBRID
+(and since 2026-09-25 in GRAPH for relation questions,
+`retrieval.planned_request`). It now reports what search does. See
 `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
 
 Usage:

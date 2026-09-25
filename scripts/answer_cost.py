@@ -10,9 +10,10 @@ Four properties are load-bearing.
 1. **One estimator.** `answer_budget.estimate_tokens` is imported, never
    re-implemented. Two token counters that disagreed would be worse than none,
    and reusing it makes a runtime number directly comparable to the harness
-   numbers. Its known bias is measured in the research note: it serialises
-   compactly while the wire form is `indent=2`, so it understates by ~4 % on a
-   large answer and ~9-13 % on a tiny one.
+   numbers. The research note measured it understating by ~4-13 % while the
+   wire form was `indent=2`; since 2026-09-13 the wire form is compact
+   (`mcp_server._rendered_envelope`), so the estimator and the wire now differ
+   only by the separators' spaces.
 
 2. **A missing measurement reads as missing.** `0` is a legal value for both
    tokens and milliseconds, so it can never double as "unknown". An estimate
@@ -24,7 +25,7 @@ Four properties are load-bearing.
 3. **Stages are read, not re-derived.** The envelope's `components` map already
    carries `fresh`/`stale`/`missing`/`unknown` per retrieval leg, folded there
    by `mcp_server._recall_components` from the trace fields `signals_used`,
-   `fallback_reason` and `reranker_fallback_reason`. A second derivation could
+   `reranker_applied` and `reranker_fallback_reason` and from the index's age. A second derivation could
    disagree with the first.
 
 4. **The telemetry obeys the law it measures.** The block costs a measured
@@ -88,8 +89,8 @@ _STATE_BY_FRESHNESS = {"fresh": _RAN, "stale": _RAN, "missing": _NOT_RUN}
 _STATES = (_RAN, _NOT_RUN, _UNKNOWN)
 
 # One packed field rather than three keys: measured 2026-08-28, three keys cost
-# 23 tokens against this form's 14, and at `indent=2` every extra key is a
-# whole line. The block reports rule 4; it does not get to be exempt from it.
+# 23 tokens against this form's 14 (measured at `indent=2`, where every extra
+# key was a whole line; the wire is compact since 2026-09-13). The block reports rule 4; it does not get to be exempt from it.
 _STAGE_KEY = "stages"
 
 # Read in order; the first one set names why a leg did not run.

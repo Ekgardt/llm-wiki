@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Three stale docstrings corrected: `answer_cost` (the wire is compact JSON, not `indent=2`), the lazy query encoder (a 2.7 s cold load, a tracked straggler) and `lookup_mode` (relation questions run GRAPH).
 - `get_decisions` returns up to `limit` decision pages, one row each, in the agent row shape `recall` uses: it asked the search for exactly `limit` rows and filtered afterwards, so other pages and repeated chunks took the places.
 - The health resource and `vault_status` count only past days as compile backlog: today's log is still being written and the nightly compiles it, so it made every answer partial from the first capture of the day.
 - A telemetry write that fails leaves a record in the capture diagnostics (kind `telemetry_event`: deferred when the database was busy, lost otherwise); the best-effort writer returned False and no caller read it.

@@ -956,16 +956,18 @@ def _generation_embedder(embedder, *, is_query: bool):
 def _lazy_generation_query_encoder():
     """Encode a question, loading the model on first use rather than up front.
 
-    The load is about ten seconds cold on this vault. Done eagerly in `search()`
-    it was spent before retrieval started, outside the optional-stage boundary
-    and outside the caller's deadline, so the first recall in a fresh MCP server
-    burned its whole ten-second budget on a signal it had not asked for yet and
-    returned nothing at all — not even the lexical answer that was ready in 1.3 s.
+    The cold load measured about ten seconds when this was written and 2.7 s on
+    2026-09-24 (`docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`).
+    Done eagerly in `search()` it was spent before retrieval started, outside the
+    optional-stage boundary and outside the caller's deadline, so the first recall
+    in a fresh MCP server could burn its whole budget on a signal it had not asked
+    for yet and return nothing at all — not even the lexical answer that was ready
+    in 1.3 s.
 
     Resolved here, the same load happens inside the dense leg, which is already
     an abandonable optional stage: the caller gets the lexical answer on time,
-    the daemon straggler finishes the load, and the next call finds it in the
-    module-level cache. Two stragglers racing the cache would load twice and
+    the straggler (a thread `inference_threads` waits for at exit) finishes the
+    load, and the next call finds it in the module-level cache. Two stragglers racing the cache would load twice and
     keep the last; the cost is one wasted load, never a wrong vector.
 
     An unavailable model returns no vector rather than raising, because the
