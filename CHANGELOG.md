@@ -8,6 +8,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A secret written as JSON is still a secret.** The redactor — the one scrub
+  before a provider, the daily log and the session record — passed `{"api_key":
+  "…"}`, `{"password": "…"}`, a JSON `Authorization: Bearer` header, a database URL
+  password, `AWS_SECRET_ACCESS_KEY=…` and GitLab tokens. A key is now any name that
+  contains a credential word, as gitleaks' `generic-api-key` reads it, with a quote
+  allowed before the separator; a JSON value keeps its quotes and brackets; a quoted
+  value is code only when it interpolates; URL userinfo and `glpat-` are caught. See
+  `docs/research/2026-09-25-a-secret-in-json-is-still-a-secret.md`.
 - **`read_page` returns every note again.** 52 of 209 live notes answered "Evidence
   resolution failed": the `## Claims` block writes its references inside JSON strings,
   and the extractor ended a reference only at a backtick. A reference opened by a

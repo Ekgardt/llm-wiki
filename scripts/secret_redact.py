@@ -21,16 +21,20 @@ import re
 # follows is the block, not a value. A YAML scalar indented onto the next line
 # is the price, and it is named here rather than silently paid.
 _SAME_LINE = r"[^\S\r\n]*"
-_NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(rf"(?i)({name}{_SAME_LINE}{separator}{_SAME_LINE})(\S+)")
-    for name, separator in (
-        (r"authorization", r":[^\S\r\n]*bearer[^\S\r\n]"),
-        (r"api[_-]?key", r"[=:]"),
-        (r"secret", r"[=:]"),
-        (r"password", r"[=:]"),
-        (r"token", r"[=:]"),
-        (r"entropy", r"[=:]"),
-    )
+# Any name that contains a credential word, as gitleaks' `generic-api-key` reads
+# one: `AWS_SECRET_ACCESS_KEY`, `client_secret`, `db.password` — and a JSON key,
+# whose closing quote sits between the name and the separator. See
+# docs/research/2026-09-25-a-secret-in-json-is-still-a-secret.md.
+_CREDENTIAL_NAME = (
+    r"(?<![\w.-])[\w.-]{0,50}?"
+    r"(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"credentials?|entropy)[\w.-]{0,20}"
+)
+_NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"(?i)(authorization[\"']?{_SAME_LINE}:{_SAME_LINE}[\"']?bearer[^\S\r\n])(\S+)"
+    ),
+    re.compile(rf"(?i)({_CREDENTIAL_NAME}[\"']?{_SAME_LINE}[=:]{_SAME_LINE})(\S+)"),
 )
 
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -72,6 +76,10 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "[REDACTED_JWT]",
     ),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PEM_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]"),
+    # The password in `scheme://user:password@host` (RFC 3986 3.2.1 deprecates it
+    # for exactly this reason); the user and the host stay readable.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+(@)"), r"\1[REDACTED]\2"),
 ]
 
 _HIGH_ENTROPY_RE = re.compile(
@@ -88,8 +96,11 @@ _QUOTE_CHARACTERS = "\"'`"
 # a trailing `=`, so `=` stays legal.
 _CODE_CHARACTERS = frozenset("()[]{}<>$\\?*|&")
 # A comma or semicolon ends the value and starts the next field, in
-# `connect(token="…",timeout=5)` as in `SET lease_token=NULL,lease_expires_at=NULL`.
-_VALUE_END_RE = re.compile(r"[,;]")
+# `connect(token="…",timeout=5)` as in `SET lease_token=NULL,lease_expires_at=NULL`;
+# a closing brace or bracket ends a JSON value.
+_VALUE_END_RE = re.compile(r"[,;}\]]")
+# Inside quotes a value is a literal; only interpolation makes it code.
+_INTERPOLATION_MARKS = ("${", "$(", "{{")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Below this a value is indistinguishable from a keyword, a type name, or a
 # small integer, and the false refusal costs more than the missed short secret.
@@ -120,9 +131,17 @@ def _unquote(value: str) -> tuple[bool, str]:
     return stripped != value, stripped
 
 
-def _value_is_code(value: str) -> bool:
-    """`next(iterator)`, `tuple[bytes,`, `${{ secrets.X }}`, `?`, `128`."""
-    return bool(_CODE_CHARACTERS & set(value)) or value.isdigit()
+def _value_is_code(value: str, quoted: bool) -> bool:
+    """`next(iterator)`, `tuple[bytes,`, `${{ secrets.X }}`, `?`, `128`.
+
+    A quoted value is a literal, so `"Hunter$2024?"` is a password and not code;
+    only interpolation inside the quotes names something stored elsewhere.
+    """
+    if value.isdigit():
+        return True
+    if quoted:
+        return any(mark in value for mark in _INTERPOLATION_MARKS)
+    return bool(_CODE_CHARACTERS & set(value))
 
 
 def _is_symbol_reference(value: str) -> bool:
@@ -162,15 +181,26 @@ def _value_is_credential(raw: str) -> bool:
     secret stored elsewhere all leave the secret itself absent.
     """
     quoted, value = _unquote(_VALUE_END_RE.split(raw, maxsplit=1)[0])
-    if len(value) < _MIN_CREDENTIAL_VALUE_CHARS or _value_is_code(value):
+    if len(value) < _MIN_CREDENTIAL_VALUE_CHARS or _value_is_code(value, quoted):
         return False
     return True if quoted else _bare_value_is_credential(value)
 
 
+def _quote_marks(head: str) -> tuple[str, str]:
+    """The opening and closing quote around a value, kept so JSON stays JSON."""
+    opening = head[:1] if head[:1] in _QUOTE_CHARACTERS else ""
+    body = head[len(opening):]
+    closing = body[-1:] if body[-1:] in _QUOTE_CHARACTERS else ""
+    return opening, closing
+
+
 def _replace_named_value(match: re.Match[str]) -> str:
-    if _value_is_credential(match.group(2)):
-        return f"{match.group(1)}[REDACTED]"
-    return match.group(0)
+    raw = match.group(2)
+    head = _VALUE_END_RE.split(raw, maxsplit=1)[0]
+    if not _value_is_credential(raw):
+        return match.group(0)
+    opening, closing = _quote_marks(head)
+    return f"{match.group(1)}{opening}[REDACTED]{closing}{raw[len(head):]}"
 
 
 def _redact_named_values(text: str) -> str:
