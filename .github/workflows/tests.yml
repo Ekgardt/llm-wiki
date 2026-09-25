@@ -269,6 +269,37 @@ jobs:
       - run: uv run --locked --no-sync python -c "import onnxruntime, tokenizers, huggingface_hub"
       - run: uv run --locked --no-sync python -c "import torch, transformers"
       - run: uv run --locked --no-sync python scripts/search_memory.py "installation"
+      # The real encoder, end to end: fetch the pinned ONNX weights (470 MB, cached;
+      # the 2.3 GB reranker stays out of CI), build a generation with vectors, and
+      # require the search to answer with the dense signal. Before this nothing in CI
+      # reached the model session (audit B-28,
+      # docs/research/2026-09-25-ci-runs-the-real-encoder.md).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
+          key: hf-encoder-${{ hashFiles('scripts/embedding_model.py') }}
+      - name: Fetch the pinned encoder
+        run: >-
+          uv run --locked --no-sync python -c "import sys; sys.path.insert(0, 'scripts');
+          import install_models as m; outcome = m.ensure(m.pinned_models()[0], m.hub_library(), download=True);
+          print(outcome); assert outcome['state'] in {m.STATE_PRESENT, m.STATE_FETCHED}, outcome"
+      - name: Build a generation with the real encoder
+        run: |
+          printf '%s\n' '---' 'type: concept' '---' '# Installing the memory' \
+            'One-sentence summary: the installer sets up the hooks and the nightly pass.' \
+            > knowledge/notes/ci-encoder-probe.md
+          uv run --locked --no-sync python scripts/doctor.py --rebuild-generation --time-budget 600 --json > "$RUNNER_TEMP/doctor.json" || true
+          uv run --locked --no-sync python -c "import json, os; report = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'doctor.json')));
+          generation = [check for check in report['checks'] if check['id'] == 'generation'][0];
+          assert generation['status'] == 'ok', generation;
+          assert any(item.get('action') == 'rebuild_generation' for item in report['repaired']), report['repaired']"
+      - name: Search answers with the dense signal
+        run: >-
+          uv run --locked --no-sync python -c "import sys; sys.path.insert(0, 'scripts');
+          from search_memory import search; trace = {};
+          rows = search('how is the memory installed', limit=3, rerank=False, trace_sink=trace);
+          print(trace['signals_used'], [row.get('path') for row in rows]);
+          assert 'dense' in trace['signals_used'], trace; assert rows"
 
   clean-code-graph:
     name: timing::clean::code-graph-py${{ matrix.python }}
