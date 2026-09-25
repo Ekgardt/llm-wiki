@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A transaction and its images agree: a failed prepare removes the directory it made, the prune removes a directory no row names once it is an hour old (9 on this vault), and a settled row whose images are already gone is marked pruned so the history prune can take it (13 on this vault).
 - The nightly reclaim settles a quarantined transaction whose every operation was rolled back to `discarded`, so the existing prunes take its images: all 117 quarantines on this vault (69 MB) had left nothing in the vault and held `run/` out of deletion for good. One with an operation still applied keeps its quarantine. Empty capture-intent shards under `ready/` are removed like those under `pending/`.
 - A compile failure recorded for bytes a daily log no longer has is retired on the next compile pass: 44 of the 45 rows on this vault named content that was gone and held its day out of the archive and `run/` out of deletion for ever.
 - The compile offers the planner the pages its day is about: the optional context of a batch is ranked by BM25 relevance to the batch's days instead of by path, so a day about a known subject updates the existing page instead of creating a near-duplicate beside it and leaving the old figures untouched. It costs about 40 ms on this vault and asks no model.

@@ -665,6 +665,16 @@ _PRUNE_SETTLED_TRANSACTIONS = (
 
 MAX_ATTEMPT_ORDINAL = 100
 
+# How old a transaction directory no row names must be before the prune removes it.
+UNNAMED_ARTIFACT_AGE_SECONDS = 3600
+
+
+def _abandoned_artifact_root(root: Path, named: frozenset[str], cutoff: float) -> bool:
+    if root.name.startswith(".") or root.name in named or not root.is_dir():
+        return False
+    return root.stat().st_mtime < cutoff
+
+
 _SETTLE_ROLLED_BACK_QUARANTINES = (
     'UPDATE "transaction" SET state = \'discarded\', updated_at = ? '
     "WHERE state = 'quarantined' AND NOT EXISTS ("
@@ -5654,6 +5664,10 @@ class MarkdownCoordinator:
                     "operation_id is already bound to a different request"
                 ) from None
             return existing
+        except BaseException:
+            # No row will name this directory: it goes with the failed insert (C-8).
+            self._remove_artifacts(artifact_root)
+            raise
         return None
 
     def _staged_change(
@@ -7511,6 +7525,7 @@ class MarkdownCoordinator:
         pruned = 0
         with self.writer_gate():
             self._recover_interrupted_prunes()
+            self._remove_unnamed_artifact_roots()
             for row in self._prunable_rows():
                 self._require_operation_active(deadline, cancelled)
                 if _parse_timestamp(row["updated_at"]) < cutoff:
@@ -7560,6 +7575,25 @@ class MarkdownCoordinator:
         for staged in sorted(self.transaction_root.glob(".*.pruning-*")):
             self._restore_staged_prune(staged)
 
+    def _remove_unnamed_artifact_roots(self) -> None:
+        """A directory no row names, an hour old, is the debris of a failed prepare.
+
+        A prepare inserts its row seconds after making the directory, outside the
+        writer gate, so only an old one is certainly abandoned. See
+        `docs/research/2026-09-25-a-transaction-and-its-images-agree.md`.
+        """
+        if not self.transaction_root.is_dir():
+            return
+        named = self._transaction_ids()
+        cutoff = time.time() - UNNAMED_ARTIFACT_AGE_SECONDS
+        for root in self.transaction_root.iterdir():
+            if _abandoned_artifact_root(root, named, cutoff):
+                self._remove_artifacts(root)
+
+    def _transaction_ids(self) -> frozenset[str]:
+        with self._connect() as database:
+            return frozenset(str(row[0]) for row in database.execute('SELECT id FROM "transaction"'))
+
     def _restore_staged_prune(self, staged: Path) -> None:
         """The images go back where the row still says they are; a live one wins."""
         artifact_root = self.transaction_root / _staged_prune_owner(staged.name)
@@ -7587,6 +7621,8 @@ class MarkdownCoordinator:
         """The images are staged aside first, so a failure can put them back."""
         artifact_root = self.transaction_root / row["id"]
         if not artifact_root.exists():
+            # Nothing left to keep; marked, so the history prune can take the row (C-9).
+            self._mark_artifacts_pruned(row["id"], deadline, cancelled)
             return 0
         staged_root = self.transaction_root / (
             f".{row['id']}{_STAGED_PRUNE_MARK}{uuid.uuid4().hex}"
