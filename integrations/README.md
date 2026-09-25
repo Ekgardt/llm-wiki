@@ -16,14 +16,12 @@ still take back a fragment written by an older install, so an existing user is n
 left with a hook pointing at a vault nothing maintains. See
 `knowledge/notes/retire-cursor-and-antigravity-decision.md`.
 
-The OpenCode plugin is installed from outside this repository (it lives with
-OpenCode on the owner's other machine); this directory holds no copy of it. The
-helpers it calls are here: `scripts/daily_log_append.py` and
-`scripts/tool_breadcrumb_append.py` append to the daily log, and
-`scripts/heartbeat_record.py` records a no-content heartbeat in `run/state.json`.
-The heartbeat helper is not the plugin's alone: `scripts/integration_adapter.py`
-runs it on every session start and on a session end that left no transcript. All
-three are exercised by `tests/test_plugin_helpers.py`.
+The OpenCode plugin ships as `scripts/llm-wiki-memory-opencode.js`; the installer
+copies it into OpenCode's plugin directory and replaces it on every install. Like
+the Claude and Codex hooks it forwards each lifecycle event to
+`scripts/integration_adapter.py`, which does the capture itself. The two helper
+commands older plugins called (`daily_log_append.py` and `tool_breadcrumb_append.py`)
+were retired on 2026-09-25; the plugin has not called them since 2026-07-13.
 
 ## What works differently from CLI agents
 
