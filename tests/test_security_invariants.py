@@ -47,8 +47,17 @@ def _rename_calls(tree: ast.AST) -> list[ast.Call]:
 
 
 def _mentions_daily_archive(text: str) -> bool:
-    lowered = text.casefold()
-    return "daily" in lowered and "archive" in lowered
+    """A daily-archive path is named on one line (`daily_root / "archive"`).
+
+    Matching the two words anywhere in one assignment took the transaction
+    allowlist, which lists `knowledge/daily` and `knowledge/log-archive` as
+    separate roots, for a daily-archive publisher (2026-09-25).
+    """
+    return any(_names_daily_archive(line.casefold()) for line in text.splitlines())
+
+
+def _names_daily_archive(line: str) -> bool:
+    return "daily" in line and "archive" in line
 
 
 def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
