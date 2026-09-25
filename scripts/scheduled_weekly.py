@@ -167,13 +167,20 @@ def _run_contradictions(run_step, log: StepLog) -> int:
     return int(bool(run_step(command, log, "contradictions", timeout=CONTRADICTIONS_STEP_SECONDS)))
 
 
-def _reflect(log: StepLog) -> None:
-    """A-MEM reflection — consolidate pages with multiple updates (v4.0)."""
+def _reflect(log: StepLog) -> int:
+    """A-MEM reflection — consolidate pages; a failure is counted, not only logged.
+
+    It and the tier step logged their exceptions and the pass still reported
+    success (audit C-32,
+    docs/research/2026-09-25-a-weekly-pass-counts-what-failed.md).
+    """
     log.step("A-MEM reflection (page consolidation)...")
     try:
         _reflect_candidates(log)
-    except Exception as error:  # noqa: BLE001 - best effort by design
-        log(f"  reflection: failed ({error}) — skipping")
+    except Exception as error:  # noqa: BLE001 - one step, counted below
+        log(f"  reflection: failed ({error})")
+        return 1
+    return 0
 
 
 def _reflect_candidates(log) -> None:
@@ -202,16 +209,18 @@ def worst_case_seconds() -> float:
     return float(waits + steps + CONTRADICTIONS_STEP_SECONDS + reflection)
 
 
-def _build_tiers(log: StepLog) -> None:
-    """Generate L1 tier overviews (v4.0, best-effort)."""
+def _build_tiers(log: StepLog) -> int:
+    """Generate L1 tier overviews; a failure is counted, not only logged."""
     log.step("generating L1 tier overviews...")
     try:
         from build_tiers import build_all_tiers
 
         stats = build_all_tiers(use_llm=False, verbose=False)
-        log(f"  tiers: {stats['generated']} generated, {stats['skipped']} skipped")
-    except Exception as error:  # noqa: BLE001 - best effort by design
-        log(f"  tiers: failed ({error}) — skipping")
+    except Exception as error:  # noqa: BLE001 - one step, counted below
+        log(f"  tiers: failed ({error})")
+        return 1
+    log(f"  tiers: {stats['generated']} generated, {stats['skipped']} skipped")
+    return 0
 
 
 def record_weekly_result(failures: int, error: str | None = None) -> None:
@@ -234,6 +243,25 @@ def record_weekly_result(failures: int, error: str | None = None) -> None:
     update_state(_mutate)
 
 
+def record_weekly_skip(reason: str) -> None:
+    """A weekly that did not run says so, so a stale weekly names why."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _mutate(state: dict) -> None:
+        state["last_weekly_skip"] = {"skipped_at": now, "reason": reason}
+
+    update_state(_mutate)
+
+
+def _skipped(reason: str) -> int:
+    print(f"scheduled_weekly: maintenance already running ({reason}), skipping.", file=sys.stderr)
+    try:
+        record_weekly_skip(reason)
+    except Exception as exc:  # noqa: BLE001 - the skip itself is the outcome
+        print(f"scheduled_weekly: could not record the skip: {exc}", file=sys.stderr)
+    return 0
+
+
 def _record_quietly(failures: int, error: str | None = None) -> None:
     try:
         record_weekly_result(failures, error)
@@ -245,8 +273,8 @@ def _run_weekly_steps(run_step, log: StepLog) -> int:
     _wait_for_compile_idle(log)
     failures = _run_script_steps(run_step, log)
     failures += _run_contradictions(run_step, log)
-    _reflect(log)
-    _build_tiers(log)
+    failures += _reflect(log)
+    failures += _build_tiers(log)
     return failures
 
 
@@ -287,14 +315,12 @@ def main() -> int:
     try:
         fence = scheduled_nightly.take_scheduled_fence("weekly")
     except OperationalOwnershipError as exc:
-        print(f"scheduled_weekly: maintenance already running ({exc.code}), skipping.", file=sys.stderr)
-        return 0
+        return _skipped(str(exc.code))
     except Exception as exc:
         _record_quietly(1, describe_error_chain(exc))
         raise
     if fence is None:
-        print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
-        return 0
+        return _skipped("fence held")
     try:
         return run_weekly(ownership=fence.lease, registry=fence.registry)
     finally:
