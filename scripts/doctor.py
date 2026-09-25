@@ -5373,8 +5373,21 @@ def _skip_moment(skip: dict) -> str:
 
 
 def _skip_is_newer_than_run(state: dict, skip: dict) -> bool:
-    ran_at = str(state.get("last_nightly_at") or state.get("last_nightly_date") or "")
-    return _skip_moment(skip) >= ran_at
+    """Compared as instants: an older state wrote the skip in local time, the run in UTC."""
+    skipped = _state_instant(_skip_moment(skip))
+    if skipped is None:
+        return False
+    ran = _state_instant(str(state.get("last_nightly_at") or state.get("last_nightly_date") or ""))
+    return ran is None or skipped >= ran
+
+
+def _state_instant(text: str) -> datetime | None:
+    """An ISO instant or date from the state; one without an offset is local time."""
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone()
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:

@@ -115,9 +115,19 @@ def _log_generation_details(log, result: dict) -> None:
     log(f"  generation: details {details}")
 
 
+def _utc_now() -> str:
+    """Every instant in the state is UTC with its offset; a date stays the local calendar day.
+
+    `skipped_at` and `failed_at` were local and `last_nightly_at` UTC, and doctor
+    compared them as strings (audit C-30,
+    docs/research/2026-09-25-the-scheduler-state-keeps-one-clock.md).
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
     """Release today's catchup lease and persist the terminal result."""
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = _utc_now()
 
     def _mutate(state: dict) -> None:
         claim = state.get("nightly_catchup_claim", {})
@@ -136,9 +146,7 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
             state["last_nightly_date"] = today
             # The date alone cannot say whether a 03:00 run is late; the health
             # check needs an instant to measure an interval against.
-            state["last_nightly_at"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
+            state["last_nightly_at"] = timestamp
             state.pop("last_nightly_failure", None)
 
     update_state(_mutate)
@@ -146,7 +154,7 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
 
 def _record_nightly_skip(today: str, reason: str) -> None:
     """Release today's claim without replacing the last execution result."""
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = _utc_now()
 
     def _mutate(state: dict) -> None:
         claim = state.get("nightly_catchup_claim", {})
