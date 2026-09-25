@@ -53,7 +53,8 @@ def test_a_settled_row_without_images_is_marked_pruned(tmp_path: Path) -> None:
     assert marked == [(1,)]
 
 
-def test_a_failed_insert_leaves_no_directory(tmp_path: Path) -> None:
+def test_a_failed_insert_keeps_its_directory_for_the_prune(tmp_path: Path) -> None:
+    """Whether the row committed is unknown at the failure, so only the prune removes it."""
     coordinator = _coordinator(tmp_path)
     root = coordinator.transaction_root / ("c" * 32)
     root.mkdir(parents=True)
@@ -63,4 +64,4 @@ def test_a_failed_insert_leaves_no_directory(tmp_path: Path) -> None:
             "c" * 32, "post-tool:x", "d" * 64, {}, "2026-01-01T00:00:00Z", None, root, 0.0, None
         )
 
-    assert not root.exists()
+    assert root.exists()

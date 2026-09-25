@@ -37,3 +37,20 @@ Date: 2026-09-25. Audit items C-8 and C-9 (`docs/AUDIT-2026-09-25-full.md`).
 - `scripts/markdown_transaction.py`
 - `tests/test_a_transaction_and_its_images_agree.py`
 - `CHANGELOG.md`
+
+## Revised the same day (after CI run 36170944200)
+
+- Fact: CI run 36170944200 on commit 620aa6c3 failed one of 2195 tests on
+  `timing::windows_full::py3.13-s4`: `test_multiprocess_status_reads_remain_coherent_during_claim_and_complete`
+  timed out after 300 s waiting for four writer processes. Main (295ece8f) passed that job.
+- Not proven: that the eager removal caused it. The test has a Windows contention history
+  (`docs/research/2026-09-12-an-activation-that-nothing-completes.md`).
+- Reason to revise anyway: the eager branch removed the directory on any failure of the insert,
+  but a failure can arrive when the row's fate is unknown. In rollback-journal mode a commit
+  finishes by deleting the journal; SQLite, https://www.sqlite.org/rescode.html (fetched
+  2026-09-25): "The SQLITE_IOERR_DELETE error code is an extended error code for SQLITE_IOERR
+  indicating an I/O error within the xDelete method on the sqlite3_vfs object." A committed row
+  whose images were removed is the worse outcome, and a replay of the same operation finds it.
+- Decision: a failed insert keeps its directory; the prune's hour-old sweep of unnamed
+  directories remains the one remover (C-8 is still closed by it).
+- Files: `scripts/markdown_transaction.py`, `tests/test_a_transaction_and_its_images_agree.py`.

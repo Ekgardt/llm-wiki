@@ -5670,10 +5670,9 @@ class MarkdownCoordinator:
                     "operation_id is already bound to a different request"
                 ) from None
             return existing
-        except BaseException:
-            # No row will name this directory: it goes with the failed insert (C-8).
-            self._remove_artifacts(artifact_root)
-            raise
+        # Any other failure keeps the directory: whether the row committed is not
+        # known here, and a committed row must keep its images. An unnamed one is
+        # removed by the prune an hour later (C-8, revised 2026-09-25).
         return None
 
     def _staged_change(
