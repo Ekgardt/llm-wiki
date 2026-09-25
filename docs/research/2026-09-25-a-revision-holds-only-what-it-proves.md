@@ -32,3 +32,8 @@ Date: 2026-09-25. Audit item B-42 (`docs/AUDIT-2026-09-25-full.md`).
 - `scripts/workspace_revision.py`
 - `tests/test_a_revision_holds_only_what_it_proves.py`
 - `CHANGELOG.md`
+
+## Follow-up the same day
+
+- `tests/test_language_server_wiring.py` pinned the old root-only rule for `tsconfig.json`. TypeScript, "What is a tsconfig.json", https://www.typescriptlang.org/docs/handbook/tsconfig-json.html (fetched 2026-09-25): "The presence of a `tsconfig.json` file in a directory indicates that the directory is the root of a TypeScript project." The test now holds the nested case as relevant and a nested `pyproject.toml` as not.
+- File: `tests/test_language_server_wiring.py`.
