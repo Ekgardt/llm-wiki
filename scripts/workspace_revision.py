@@ -476,11 +476,22 @@ def _normalized_path(raw: str) -> str:
 
 
 def _is_configuration(path: str) -> bool:
-    return "/" not in path and (
-        path in PYTHON_CONFIG_NAMES
-        or path in PROFILE_CONFIG_NAMES
-        or (path.startswith("requirements") and path.endswith(".txt"))
-    )
+    """A server's configuration file.
+
+    A profile's names count at any depth: a nested `go.mod` or `Cargo.toml` is
+    a module or crate root the server reads (audit B-42,
+    docs/research/2026-09-25-a-revision-holds-only-what-it-proves.md). Python's
+    stay at the root, where the Python server reads them.
+    """
+    if PurePosixPath(path).name in PROFILE_CONFIG_NAMES:
+        return True
+    return "/" not in path and _is_python_configuration(path)
+
+
+def _is_python_configuration(path: str) -> bool:
+    if path in PYTHON_CONFIG_NAMES:
+        return True
+    return path.startswith("requirements") and path.endswith(".txt")
 
 
 def _is_relevant_path(path: str) -> bool:
@@ -3845,9 +3856,14 @@ def _require_inside_checkout(path: Path, resolved_root: Path) -> None:
 
 
 def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
-    """Record one path git reported as changed, as the disk says it is."""
+    """Record one relevant path git reported as changed, as the disk says it is.
+
+    A path the walk does not hold (a `README.md`) entered the revision only while
+    it was dirty, so the next clean revision reported it deleted and a watched-file
+    `deleted` event reached the server for a file that exists (audit B-42).
+    """
     normalized = _normalized_path(raw)
-    if _inside_pruned_directory(normalized):
+    if _inside_pruned_directory(normalized) or not _is_relevant_path(normalized):
         return
     path = build.root / PurePosixPath(normalized)
     try:
