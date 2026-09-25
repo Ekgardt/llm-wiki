@@ -1624,7 +1624,8 @@ def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[s
     return (
         "ok",
         "Transaction state is healthy within the scanned rows; the scan stopped at "
-        f"its row bound. Rows by state: {totals or 'unknown'}.",
+        "its row bound, so its counts are a lower bound. Rows by state, counted "
+        f"whole: {totals or 'unknown'}.",
     )
 
 
