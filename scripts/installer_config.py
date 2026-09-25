@@ -183,13 +183,25 @@ def expected_opencode_entry(vault_root: Path) -> dict[str, Any]:
 CRON_DEFAULT_PATH = "/usr/bin:/bin"
 
 
+def stable_uv_path(uv_path: Path | str) -> Path:
+    """uv as the operator's PATH names it: absolute, with its symbolic links kept.
+
+    Resolving the links pinned a package manager's versioned target, which an
+    upgrade removes: Homebrew's `/opt/homebrew/bin/uv` points into a
+    `Cellar/uv/<version>/` directory that `brew upgrade` deletes, and every
+    scheduled run then failed to start (audit B-30,
+    docs/research/2026-09-25-a-scheduled-run-keeps-the-uv-link.md).
+    """
+    return Path(os.path.abspath(uv_path))
+
+
 def scheduled_path(uv_path: Path, default_path: str) -> str:
     """A scheduled run's PATH: the directory of the uv it calls, then the scheduler's default.
 
     Provider CLIs live beside uv in a per-user directory no scheduler puts on PATH. See
     `docs/research/2026-09-14-every-scheduler-gets-the-providers-path.md`.
     """
-    return f"{Path(uv_path).resolve().parent}:{default_path}"
+    return f"{stable_uv_path(uv_path).parent}:{default_path}"
 
 
 def cron_quote(value: str) -> str:

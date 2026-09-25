@@ -5111,12 +5111,17 @@ def _scheduler_check(
     details["last_weekly_status"] = state.get("last_weekly_status")
     details["last_weekly_at"] = state.get("last_weekly_at")
     details["last_update"] = state.get("last_update")
-    verdicts = (
+    verdicts = _scheduler_verdicts(state, now, home or Path.home())
+    return _with_findings(_nightly_result(state, now, details), verdicts)
+
+
+def _scheduler_verdicts(state: dict, now: datetime, home: Path) -> tuple[tuple[str, str] | None, ...]:
+    return (
         _weekly_verdict(state, now),
         _update_verdict(state.get("last_update")),
-        _unit_limit_verdict(home or Path.home()),
+        _unit_limit_verdict(home),
+        _scheduled_program_verdict(home),
     )
-    return _with_findings(_nightly_result(state, now, details), verdicts)
 
 
 # What a recorded code update outcome means for the operator, by field and value.
@@ -5164,6 +5169,76 @@ def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
         + ", ".join(stale)
         + " time limit); rerun the installer.",
     )
+
+
+def _scheduled_program_verdict(home: Path) -> tuple[str, str] | None:
+    """(status, message) when an installed schedule calls a uv that is no longer there.
+
+    A package manager's upgrade removes the versioned target a resolved path named
+    (audit B-30, docs/research/2026-09-25-a-scheduled-run-keeps-the-uv-link.md).
+    """
+    missing = sorted({program for program in _scheduled_programs(home) if not Path(program).exists()})
+    if not missing:
+        return None
+    return (
+        "degraded",
+        "The scheduled runs call uv at " + ", ".join(missing) + ", which no longer exists; rerun the installer.",
+    )
+
+
+def _scheduled_programs(home: Path) -> list[str]:
+    """The program each installed systemd unit or LaunchAgent starts; none installed, none read."""
+    return [*_systemd_programs(home), *_launchd_programs(home)]
+
+
+def _systemd_programs(home: Path) -> list[str]:
+    directory = _systemd_user_directory(home)
+    programs = [_unit_program(directory / f"llm-wiki-{kind}.service") for kind in ("nightly", "weekly")]
+    return [program for program in programs if program]
+
+
+def _unit_program(path: Path) -> str:
+    text = _read_small_text(path)
+    if text is None:
+        return ""
+    return _first_word(_unit_setting(text, "ExecStart") or "")
+
+
+def _first_word(command: str) -> str:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ""
+    return words[0] if words else ""
+
+
+def _launchd_programs(home: Path) -> list[str]:
+    import plistlib
+
+    programs = []
+    for kind in ("nightly", "weekly"):
+        path = home / "Library" / "LaunchAgents" / f"io.github.ekgardt.llm-wiki.{kind}.plist"
+        text = _read_small_bytes(path)
+        if text is not None:
+            programs.append(_plist_program(plistlib, text))
+    return [program for program in programs if program]
+
+
+def _plist_program(plistlib, data: bytes) -> str:
+    try:
+        arguments = plistlib.loads(data).get("ProgramArguments") or [""]
+    except (plistlib.InvalidFileException, ValueError, AttributeError):
+        return ""
+    return str(arguments[0])
+
+
+def _read_small_bytes(path: Path) -> bytes | None:
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 def _expected_unit_limit(kind: str) -> str:

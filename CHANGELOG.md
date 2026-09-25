@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Scheduled runs call uv by the path the shell found, links kept: resolving it pinned Homebrew's versioned Cellar target, which `brew upgrade` deletes, and every scheduled run then failed to start. Doctor now says when an installed unit or LaunchAgent calls a uv that is gone.
 - The Windows installer no longer passes `--environment ""` when `UV_PROJECT_ENVIRONMENT` is unset (Windows PowerShell 5.1 drops the empty string and the setup step stopped), and its native-command runner refuses any empty argument.
 - CI runs the real encoder: the `clean-hybrid` job fetches the pinned ONNX encoder (cached), builds a generation with vectors and requires a search to answer with the dense signal. Before, no CI job reached the model session.
 - The user guide names `doctor --rebuild-generation` where it tells how to rebuild the evidence generation; it said `--repair`, which only repairs the generation catalog. A test keeps the docs from saying it again.

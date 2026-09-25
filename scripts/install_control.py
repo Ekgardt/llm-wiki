@@ -508,9 +508,15 @@ def select_scheduler_backend(platform: str, requested: str, systemd_available: b
     return _native_scheduler_backend(platform, systemd_available)
 
 
+def _stable_uv_path(uv_path: Path) -> Path:
+    from installer_config import stable_uv_path
+
+    return stable_uv_path(uv_path)
+
+
 def _scheduled_arguments(root: Path, uv_path: Path, kind: str) -> list[str]:
     return [
-        str(Path(uv_path).resolve()),
+        str(_stable_uv_path(uv_path)),
         "run",
         "--locked",
         "--no-sync",
@@ -1233,7 +1239,7 @@ def systemd_scheduler_resource(
         metadata={
             "definition_set": "linux",
             "unit_directory": str(unit_directory),
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions=persisted,
         adopt_as_absent=True,
@@ -1399,7 +1405,7 @@ def launchd_scheduler_resource(
         metadata={
             "definition_set": "macos",
             "launchd_domain": domain,
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions=persisted,
         adopt_as_absent=True,
@@ -1412,14 +1418,14 @@ def render_cron_block(root: Path, state_root: Path, uv_path: Path) -> bytes:
     nightly = build_cron_command(
         root=Path(root).resolve(),
         state_root=Path(state_root).resolve(),
-        uv_path=Path(uv_path).resolve(),
+        uv_path=_stable_uv_path(uv_path),
         kind="nightly",
         log_path=Path(state_root).resolve() / "logs" / "cron-nightly.log",
     )
     weekly = build_cron_command(
         root=Path(root).resolve(),
         state_root=Path(state_root).resolve(),
-        uv_path=Path(uv_path).resolve(),
+        uv_path=_stable_uv_path(uv_path),
         kind="weekly",
         log_path=Path(state_root).resolve() / "logs" / "cron-weekly.log",
     )
@@ -1547,7 +1553,7 @@ def cron_scheduler_resource(
             "cron_existed": table is not None,
             "cron_insert_separator": _cron_separator(table),
             "definition_set": "cron",
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         }
     return ManagedResource(
         resource_id="cron-user-maintenance",
@@ -1659,7 +1665,7 @@ def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> byt
         "spec": WINDOWS_TASK_SPEC_VERSION,
         "state_root": str(Path(state_root).resolve()),
         "tasks": _expected_windows_tasks(),
-        "uv_path": str(Path(uv_path).resolve()),
+        "uv_path": str(_stable_uv_path(uv_path)),
     }
     return canonical_json_bytes(value)
 
@@ -1741,7 +1747,7 @@ def _windows_task_command(
         "-StateRoot",
         str(Path(state_root).resolve()),
         "-UvPath",
-        str(Path(uv_path).resolve()),
+        str(_stable_uv_path(uv_path)),
         "-SpecVersion",
         str(spec_version),
     )
@@ -1909,7 +1915,7 @@ def windows_task_scheduler_resource(
         recover_legacy_projection=lambda snapshot: _recover_windows_spec(snapshot, legacy_loader),
         metadata={
             "definition_set": "windows",
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions={"scheduler/windows/tasks.json": desired},
         adopt_as_absent=True,
