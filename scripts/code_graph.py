@@ -1404,10 +1404,15 @@ def _shown_community_members(communities: list[list[str]]) -> list[str]:
 
 
 def _stored_symbol_node_ids(graph, symbol: str | None):
+    """Every function or method of this name, asked up to the reader's ceiling.
+
+    A bound of 512 refused `symbol=__init__` on a repository with more
+    definitions of it (audit C-36,
+    docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md).
+    """
     if symbol is None:
         return None
-    found = graph.find_nodes(kinds=("function", "method"), name=symbol, max_rows=512)
-    return {item["node_id"] for item in found}
+    return set(_named_node_ids(graph, ("function", "method"), symbol))
 
 
 def _stored_community_answer(graph, symbol: str | None = None) -> tuple[list, dict]:
