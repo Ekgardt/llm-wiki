@@ -1227,12 +1227,29 @@ def _daily_needs_compile(daily_path: Path, file_hash, compiled: dict) -> bool:
 
 
 def _compile_backlog(root: Path, file_hash, compiled: dict, deadline) -> int:
+    """Past days whose log changed since it was compiled.
+
+    Today's log is still being written and is compiled by the nightly pass, so
+    it is not a backlog; counting it made the health resource partial all day
+    (audit C-24, docs/research/2026-09-25-today-is-not-a-compile-backlog.md).
+    """
     backlog = 0
-    for daily_path in _daily_files(root):
+    for daily_path in _closed_daily_files(root):
         _check_deadline(deadline)
         if _daily_needs_compile(daily_path, file_hash, compiled):
             backlog += 1
     return backlog
+
+
+def _closed_daily_files(root: Path) -> list[Path]:
+    open_days = _open_days()
+    return [path for path in _daily_files(root) if path.stem not in open_days]
+
+
+def _open_days() -> set[str]:
+    """Today, locally and in UTC: a capture may name its day in either."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return {now.date().isoformat(), now.astimezone().date().isoformat()}
 
 
 def _get_decisions(
