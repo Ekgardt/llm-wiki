@@ -124,3 +124,23 @@ def test_the_same_request_is_not_a_replacement(machine: Path) -> None:
     result = _install(machine, scheduler="native", profile=".bashrc", plugin=True)
 
     assert result["replaced"] is False
+
+
+def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monkeypatch) -> None:
+    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md."""
+    _install(machine, scheduler="native", profile=".bashrc", plugin=True)
+    real_install = install_control.install_resources
+    calls: list[int] = []
+
+    def fail_first(**options):
+        calls.append(len(options["resources"]))
+        if len(calls) == 1:
+            raise install_control.InstallControlError("injected_install_failure")
+        return real_install(**options)
+
+    monkeypatch.setattr(install_control, "install_resources", fail_first)
+
+    with pytest.raises(install_control.InstallControlError, match="injected_install_failure"):
+        _install(machine, scheduler="native", profile=".bashrc", plugin=False)
+
+    assert (_plugin(machine).exists(), (machine / "sched" / "systemd_user.txt").exists(), len(calls)) == (True, True, 2)

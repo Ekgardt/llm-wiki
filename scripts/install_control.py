@@ -4903,7 +4903,7 @@ def _requested_resources(args: argparse.Namespace, backend: str) -> list[Managed
         backend=backend,
         root=args.root.resolve(),
         state_root=args.state_root.resolve(),
-        uv_path=args.uv_path.resolve(),
+        uv_path=_stable_uv_path(args.uv_path),
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
@@ -4954,31 +4954,70 @@ def _outgrown_manifest(
     return manifest
 
 
-def _replace_outgrown_install(args: argparse.Namespace, backend: str) -> bool:
+def _replace_outgrown_install(
+    args: argparse.Namespace, backend: str
+) -> dict[str, object] | None:
+    """Take back an outgrown install; return its manifest, so a failure can restore it."""
     state_root = args.state_root.resolve()
     manifest = _outgrown_manifest(state_root, _requested_resources(args, backend))
     if manifest is None:
-        return False
+        return None
     uninstall_resources(state_root=state_root, resources=_resources_from_record(args, manifest))
-    return True
+    return manifest
 
 
-def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+def _install_requested(args: argparse.Namespace, backend: str) -> dict[str, object]:
     root = args.root.resolve()
-    backend = _selected_backend(args.scheduler)
-    replaced = _replace_outgrown_install(args, backend)
     # Built after the old set is taken back: a resource records what it found on disk.
-    resources = _requested_resources(args, backend)
-    manifest = install_resources(
+    return install_resources(
         state_root=args.state_root.resolve(),
         vault_root=root,
         release=build_release_identity(root),
         scheduler_backend=backend,
-        resources=resources,
+        resources=_requested_resources(args, backend),
         control_version=2,
     )
+
+
+def _restore_replaced(args: argparse.Namespace, replaced: Mapping[str, object]) -> None:
+    """Put the previous install back after its replacement failed.
+
+    The old set was uninstalled first, and a failed new install left the machine
+    with no scheduler and no hooks (audit B-31,
+    docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md).
+    """
+    root = args.root.resolve()
+    install_resources(
+        state_root=args.state_root.resolve(),
+        vault_root=root,
+        release=build_release_identity(root),
+        scheduler_backend=_record_backend(replaced),
+        resources=_resources_from_record(args, replaced),
+        control_version=2,
+    )
+
+
+def _install_or_restore(
+    args: argparse.Namespace, backend: str, replaced: Mapping[str, object] | None
+) -> dict[str, object]:
+    """Install the request; a failure after a replacement puts the old set back first.
+
+    A restore that fails itself raises with the install's failure as its context.
+    """
+    try:
+        return _install_requested(args, backend)
+    except Exception:
+        if replaced is not None:
+            _restore_replaced(args, replaced)
+        raise
+
+
+def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+    backend = _selected_backend(args.scheduler)
+    replaced = _replace_outgrown_install(args, backend)
+    manifest = _install_or_restore(args, backend, replaced)
     return {
-        "replaced": replaced,
+        "replaced": replaced is not None,
         "scheduler_backend": backend,
         "status": "committed",
         "transaction_id": manifest["transaction_id"],
@@ -5046,7 +5085,7 @@ def _resources_from_record(
         backend=_record_backend(record),
         root=root,
         state_root=state_root,
-        uv_path=args.uv_path.resolve(),
+        uv_path=_stable_uv_path(args.uv_path),
         home=args.home.resolve(),
         profile=_recorded_profile(record, args.profile),
         powershell_path=args.powershell_path,

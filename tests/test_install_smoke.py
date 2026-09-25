@@ -67,7 +67,7 @@ def test_run_smoke_uses_one_deadline_and_retains_degraded_evidence(
 @pytest.mark.parametrize(
     ("returncode", "stdout", "message"),
     [
-        (2, json.dumps(_doctor_report("error")), "Doctor failed"),
+        (2, json.dumps(_doctor_report("error")), "Doctor reported error in"),
         (0, "not-json", "valid JSON"),
         (0, json.dumps({"overall_status": "ok"}), "schema"),
     ],
@@ -144,11 +144,9 @@ def test_production_import_probe_has_no_pytest_dependency() -> None:
     imports = install_smoke._production_imports()
     source = Path(install_smoke.__file__).read_text(encoding="utf-8")
 
-    assert imports["mcp"] is True
-    assert imports["mcp_server"] is True
-    assert "import pytest" not in source
-    if sys.version_info < (3, 11):
-        assert imports["tomli"] is True
+    needs_tomli = sys.version_info < (3, 11)
+    assert (imports["mcp"], imports["mcp_server"], "import pytest" in source) == (True, True, False)
+    assert imports.get("tomli", False) is True or not needs_tomli
 
 
 def test_cli_emits_one_json_object_or_bounded_failure(
@@ -165,22 +163,17 @@ def test_cli_emits_one_json_object_or_bounded_failure(
     expected = {"status": "ok", "tool_count": 12}
     monkeypatch.setattr(install_smoke, "run_smoke", lambda *args, **kwargs: expected)
 
-    assert install_smoke.main(
-        ["--root", str(root), "--state-root", str(state_root)]
-    ) == 0
+    arguments = ["--root", str(root), "--state-root", str(state_root)]
+    passed = install_smoke.main(arguments)
     output = capsys.readouterr()
-    assert json.loads(output.out) == expected
-    assert output.err == ""
+    assert (passed, json.loads(output.out), output.err) == (0, expected, "")
 
     monkeypatch.setattr(
         install_smoke,
         "run_smoke",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("secret detail")),
     )
-    assert install_smoke.main(
-        ["--root", str(root), "--state-root", str(state_root)]
-    ) == 1
+    failed = install_smoke.main(arguments)
     output = capsys.readouterr()
-    assert output.out == ""
+    assert (failed, output.out, "secret detail" in output.err) == (1, "", False)
     assert len(output.err.encode("utf-8")) <= install_smoke.MAX_ERROR_BYTES
-    assert "secret detail" not in output.err
