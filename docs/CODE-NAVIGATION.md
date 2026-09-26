@@ -31,7 +31,10 @@ uv run python scripts/install_language_server.py --profile rust-analyzer --state
 | gopls | v0.23.0, built from pinned Go 1.27.1 | `cache/code-tools/gopls/v0.23.0/` |
 | rust-analyzer | 1.98.1, with its pinned Rust toolchain | `cache/code-tools/rust-analyzer/1.98.1/` |
 
-The installer verifies the pinned SHA-256 and npm integrity before publishing.
+The installer verifies the pinned SHA-256 and npm integrity before publishing, and
+for gopls and rust-analyzer runs the toolchain the server uses (`go version`,
+`cargo --version`, `rustc --version`) in the staged tree first; a re-run refuses an
+install whose toolchain files are gone.
 No query, MCP call, doctor check, or profile discovery path downloads or updates a
 server. The qualified runtime uses Node 22; CI pins Node 22.23.1.
 

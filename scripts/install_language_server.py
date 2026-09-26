@@ -34,6 +34,7 @@ import os
 import platform
 import secrets
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -666,6 +667,56 @@ def _require_recorded_runtime(
     )
 
 
+# One version probe is a fork and a print; a minute covers a cold disk.
+TOOLCHAIN_PROBE_SECONDS = 60.0
+
+
+def _require_toolchain_file(path: Path) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise InstallError(f"the installed toolchain is missing {path.name}")
+    if os.name != "nt" and not os.access(path, os.X_OK):
+        raise InstallError(f"the installed toolchain cannot run {path.name}")
+
+
+def _require_toolchain_present(profile: LanguageServerProfile, root: Path) -> None:
+    """Every executable the server runs while answering is still there."""
+    for relative, _argument in profile.toolchain_probes:
+        _require_toolchain_file(root / relative)
+
+
+def _probe_environment(profile: LanguageServerProfile, root: Path) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        {name: value.format(root=str(root)) for name, value in profile.environment_template}
+    )
+    return environment
+
+
+def _run_toolchain_probe(command: list[str], environment: dict[str, str], timeout: float) -> None:
+    try:
+        completed = subprocess.run(
+            command, env=environment, capture_output=True, timeout=timeout, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise InstallError(f"{Path(command[0]).name} did not run") from error
+    if completed.returncode != 0:
+        raise InstallError(f"{Path(command[0]).name} exited {completed.returncode}")
+
+
+def _prove_toolchain(profile: LanguageServerProfile, root: Path, deadline: float) -> None:
+    """Run each toolchain probe in the staged tree before it is published.
+
+    The archives were verified byte for byte, but only a run proves the
+    unpacked toolchain loads its libraries and starts (audit 2026-09-26 C-9).
+    """
+    _require_toolchain_present(profile, root)
+    environment = _probe_environment(profile, root)
+    for relative, argument in profile.toolchain_probes:
+        _check_deadline(deadline)
+        timeout = min(TOOLCHAIN_PROBE_SECONDS, max(deadline - time.monotonic(), 0.001))
+        _run_toolchain_probe([str(root / relative), argument], environment, timeout)
+
+
 def _validated_existing_install(profile: LanguageServerProfile, root: Path) -> Path:
     """An install already at the managed root, re-derived rather than trusted.
 
@@ -680,6 +731,7 @@ def _validated_existing_install(profile: LanguageServerProfile, root: Path) -> P
         root / profile.server_relative, receipt["server_sha256"], "server"
     )
     _require_recorded_runtime(profile, root, receipt)
+    _require_toolchain_present(profile, root)
     return root
 
 
@@ -827,6 +879,7 @@ def _published(
     deadline: float,
 ) -> Path:
     manifest = _staged(profile, staging, scratch, artifacts, deadline)
+    _prove_toolchain(profile, staging, deadline)
     (staging / INSTALL_MANIFEST_NAME).write_bytes(canonical_json_bytes(manifest))
     _fsync_tree(staging)
     staging.rename(root)

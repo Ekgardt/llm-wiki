@@ -104,6 +104,20 @@ def _require_relative(path: object, label: str) -> Path:
     return path
 
 
+def _require_toolchain_probe(probe: object) -> None:
+    if not isinstance(probe, tuple) or len(probe) != 2:
+        raise ProfileError("toolchain_probes must hold (Path, argument) pairs")
+    _require_relative(probe[0], "toolchain probe")
+    _require_text(probe[1], "toolchain probe argument")
+
+
+def _require_toolchain_probes(probes: object) -> None:
+    if not isinstance(probes, tuple):
+        raise ProfileError("toolchain_probes must be a tuple")
+    for probe in probes:
+        _require_toolchain_probe(probe)
+
+
 def _require_tuple_of_text(value: object, label: str) -> tuple[str, ...]:
     if not isinstance(value, tuple):
         raise ProfileError(f"{label} must be a tuple")
@@ -507,12 +521,18 @@ class LanguageServerProfile:
     components: tuple[ServerComponent, ...] = ()
     strip_components: int = 0
     install_prefix: Path | None = None
+    # Executables beside the server that it runs while answering, each with the
+    # one argument that makes it print its version. The installer runs every
+    # probe before it publishes, and re-checks the files on a re-run (audit
+    # 2026-09-26 C-9, docs/research/2026-09-26-a-toolchain-is-proven-before-it-is-published.md).
+    toolchain_probes: tuple[tuple[Path, str], ...] = ()
 
     def __post_init__(self) -> None:
         self._check_names()
         self._check_artifact()
         self._check_runtime()
         self._check_launch()
+        _require_toolchain_probes(self.toolchain_probes)
 
     def _check_launch(self) -> None:
         """A package launch has to name the same entry the artifact pin names."""

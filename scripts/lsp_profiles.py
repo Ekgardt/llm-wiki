@@ -380,6 +380,10 @@ GOPLS_PROFILE = LanguageServerProfile(
     max_decompressed_bytes=GOPLS_MAX_DECOMPRESSED_BYTES,
     max_members=GOPLS_MAX_MEMBERS,
     environment_template=GOPLS_ENVIRONMENT_TEMPLATE,
+    # gopls runs `go list` while it answers.
+    toolchain_probes=(
+        (_gopls_relative(GO_TOOLCHAIN_RELATIVE, GO_TOOLCHAIN_RELATIVE_WINDOWS), "version"),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -603,6 +607,13 @@ RUST_MAX_MEMBER_BYTES = 512 * 1024 * 1024
 RUST_ANALYZER_RELATIVE = Path("toolchain/bin/rust-analyzer")
 RUST_ANALYZER_RELATIVE_WINDOWS = Path("toolchain/bin/rust-analyzer.exe")
 
+# What rust-analyzer runs while it answers: `cargo metadata` reads the project and
+# `rustc --print sysroot` finds the standard library.
+RUST_TOOLCHAIN_PROBES = tuple(
+    (Path(f"toolchain/bin/{tool}.exe" if _windows() else f"toolchain/bin/{tool}"), "--version")
+    for tool in ("cargo", "rustc")
+)
+
 # The toolchain this profile installed is the only one on its PATH, so the
 # sysroot rust-analyzer discovers is ours; cargo writes its own state inside
 # the managed root rather than into the operator's home.
@@ -689,6 +700,7 @@ RUST_ANALYZER_PROFILE = LanguageServerProfile(
     max_members=RUST_MAX_MEMBERS,
     max_member_bytes=RUST_MAX_MEMBER_BYTES,
     environment_template=RUST_ENVIRONMENT_TEMPLATE,
+    toolchain_probes=RUST_TOOLCHAIN_PROBES,
 )
 
 REGISTRY = ProfileRegistry(
