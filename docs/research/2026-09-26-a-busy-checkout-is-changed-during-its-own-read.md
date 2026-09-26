@@ -26,5 +26,12 @@ before its bytes are read. The real before/after `fstat` check then refuses the
 checkout, every run, on every platform. The quiet checkout is still refreshed in
 the same pass.
 
+## Follow-up (CI on 3d756cd6, Windows py3.10 and py3.12)
+The busy checkout came back `('fresh', 'unchanged')`: nothing in it had changed
+since it was indexed, so the refresh never read it and the injected write never
+ran. The test now adds a file to the busy checkout before the refresh, as it
+already does for the quiet one, so the refresh must capture it on every
+platform.
+
 ## Files
 - tests/test_one_busy_or_broken_checkout_does_not_end_the_pass.py

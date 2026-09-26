@@ -71,6 +71,8 @@ def test_a_checkout_being_written_is_refused_by_name_and_the_others_are_refreshe
     for repository in (busy, quiet):
         repository_index.index_repository(repository, state_root=state)
     (quiet / "pkg" / "beta.py").write_text("def beta():\n    return 1\n", encoding="utf-8")
+    # A change the refresh must capture; an unchanged checkout is never read.
+    (busy / "pkg" / "new_work.py").write_text("def new_work():\n    return 1\n", encoding="utf-8")
 
     _write_while_read(monkeypatch, busy)
     answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=120)
