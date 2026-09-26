@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A hook error is judged by when it happened: its writers stamp local time with the offset, and doctor reads an older stamp without one as local time instead of UTC, which made a fresh error look hours old west of UTC (audit 2026-09-26 B-25).
 - A repository of 10 001-20 000 code files no longer crashes the nightly `refresh-all`: the extractor holds the 20 000 files the index admits, and any extraction ceiling is the named refusal `repository_exceeds_extraction_bounds` (audit 2026-09-26 B-11).
 - `find_dead_code` no longer calls a TypeScript, JavaScript, Go or Rust symbol dead on a check it never made: the value-reference index reads Python only, so such rows say `references_not_indexed`, the weakest reason, ordered last (audit 2026-09-26 A-7).
 - One symbolic link, one file past 8 MiB, one name that is not UTF-8 or a nested git-ignored folder such as `web/node_modules` no longer makes a whole repository unindexable: under a code root such entries are skipped and named in the receipt (`skipped_entries`), and git-ignored directories are pruned at any depth by both the corpus and the freshness walk (audit 2026-09-26 A-8).

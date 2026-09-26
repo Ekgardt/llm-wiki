@@ -126,7 +126,7 @@ def _safe_write_error(err: str) -> None:
             return
         log_path = state_root / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().isoformat(timespec="seconds")
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as f:
             f.write(f"[{ts}] session_start_project_state: {err}\n")
     except Exception:  # noqa: BLE001

@@ -1926,7 +1926,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         message = _bounded_checkpoint_error(error)
         log_path = STATE_ROOT / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().isoformat(timespec="seconds")
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
             stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
     except Exception:  # noqa: BLE001

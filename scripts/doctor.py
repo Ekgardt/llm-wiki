@@ -4950,8 +4950,11 @@ def _hook_error_is_live(last_at: str, now: datetime) -> bool:
         seen = datetime.fromisoformat(last_at)
     except ValueError:
         return False
+    # Writers stamped local wall-clock time without an offset until 2026-09-26;
+    # read as UTC it was hours off (audit 2026-09-26 B-25). A line without an
+    # offset is local time, which is what those writers meant.
     if seen.tzinfo is None:
-        seen = seen.replace(tzinfo=now.tzinfo)
+        seen = seen.astimezone()
     return (now - seen).total_seconds() <= HOOK_ERROR_LIVE_SECONDS
 
 

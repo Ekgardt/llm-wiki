@@ -31,6 +31,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +130,8 @@ def _keep_corrupt_copy(raw: bytes) -> None:
         err_log = REPORTS_DIR / "hook-errors.log"
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         with err_log.open("a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
+            stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            f.write(f"[{stamp}] state.json corrupt; backed up to {bak.name}\n")
     except OSError:
         pass
 
