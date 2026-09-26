@@ -37,9 +37,11 @@ import asyncio
 import concurrent.futures
 import contextvars
 import datetime as dt
+import functools
 import hashlib
 import inspect
 import itertools
+import json
 import os
 import re
 import sys
@@ -5317,6 +5319,10 @@ def _newest_page_ns() -> int:
     return max((_mtime_ns(path) for path in sources), default=0)
 
 
+# A generation's source manifest names every source; read whole, bounded.
+MAX_SOURCE_MANIFEST_BYTES = 32 * 1024 * 1024
+
+
 def _directories(root: Path) -> list[Path]:
     return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
 
@@ -5340,7 +5346,65 @@ def _index_is_behind(generation: object) -> bool:
     built = _generation_built_ns(generation)
     if built is None:
         return False
-    return _newest_page_ns() > built
+    if _newest_page_ns() <= built:
+        return False
+    return _sources_differ(generation, built)
+
+
+def _sources_differ(generation: str, built: int) -> bool:
+    """Something the generation indexes really changed, not only its file time.
+
+    A touched page, an edited README or a renamed directory moved a time and left
+    every answer "stale" until the next build, which reused the old generation and
+    never moved its manifest (audit 2026-09-26 B-15,
+    docs/research/2026-09-26-an-answer-is-stale-only-when-a-source-changed.md).
+    """
+    from memory_state import ROOT
+
+    recorded = _recorded_memory_digests(generation)
+    if recorded is None:
+        return True
+    current = _memory_source_files(ROOT)
+    gone = set(recorded) - {path.relative_to(ROOT).as_posix() for path in current}
+    return bool(gone) or any(_changed_since(ROOT, path, recorded, built) for path in current)
+
+
+def _memory_source_files(root: Path) -> list[Path]:
+    knowledge = root / "knowledge"
+    return [*(knowledge / "notes").rglob("*.md"), *_project_sources(knowledge / "projects")]
+
+
+def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int) -> bool:
+    if _mtime_ns(path) <= built:
+        return False
+    relative = path.relative_to(root).as_posix()
+    if relative in recorded:
+        return _file_sha256(path) != recorded[relative]
+    from corpus_snapshot import memory_source_would_be_collected
+
+    return memory_source_would_be_collected(root, path)
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(read_stable_bytes(path, MAX_MCP_PAGE_BYTES, label="indexed source")).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=4)
+def _recorded_memory_digests(generation: str) -> dict[str, str] | None:
+    """The memory sources a generation recorded, by path; None when it cannot be read."""
+    manifest = _generation_manifest(generation)
+    try:
+        value = json.loads(read_stable_bytes(manifest.with_name("source-manifest.json"), MAX_SOURCE_MANIFEST_BYTES, label="source manifest"))
+        return {str(item["relative_path"]): str(item["sha256"]) for item in value["sources"] if _is_memory_path(str(item["relative_path"]))}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _is_memory_path(relative: str) -> bool:
+    return relative.startswith(("knowledge/notes/", "knowledge/projects/"))
 
 
 def _requested_signals(trace: dict) -> tuple[str, ...]:

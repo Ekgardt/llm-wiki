@@ -1506,6 +1506,49 @@ def _frontmatter(
     return read.mapping, read.body_start
 
 
+def memory_source_would_be_collected(vault: Path, path: Path) -> bool:
+    """Whether the default memory collection would take this note or project file.
+
+    The same rules the walk and the capture apply — name, pruned directories,
+    storable path, UTF-8, and a page that is not retired — for one file, so a
+    freshness check can tell a new page from a file the corpus would never read
+    (audit 2026-09-26 B-15,
+    docs/research/2026-09-26-an-answer-is-stale-only-when-a-source-changed.md).
+    """
+    relative = path.relative_to(vault).as_posix()
+    kind = _memory_kind(relative)
+    if kind is None or not _collectable_place(relative, kind):
+        return False
+    return _collectable_content(path, relative, kind)
+
+
+def _memory_kind(relative: str) -> str | None:
+    if relative.startswith("knowledge/notes/"):
+        return "note"
+    if relative.startswith("knowledge/projects/"):
+        return "project"
+    return None
+
+
+def _collectable_place(relative: str, kind: str) -> bool:
+    parts = PurePosixPath(relative).parts
+    pruned = any(_pruned_directory_name(part, include_archives=False) for part in parts[2:-1])
+    return not pruned and _storable_source_path(relative) and _Discovery._eligible(Path(relative), kind)
+
+
+def _collectable_content(path: Path, relative: str, kind: str) -> bool:
+    try:
+        content = read_stable_bytes(path, MAX_CORPUS_FILE_BYTES, label="memory source")
+    except (OSError, ValueError):
+        return False
+    if not _decodes_as_utf8(content):
+        return False
+    project = PurePosixPath(relative).parts[2] if kind == "project" else None
+    frontmatter, _start = _frontmatter(content)
+    metadata = _metadata(frontmatter, _Candidate(path, relative, kind, project, ()))
+    return not is_retired(metadata.status)
+
+
 def _utc_text(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
