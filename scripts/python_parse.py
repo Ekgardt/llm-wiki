@@ -31,6 +31,7 @@ PARSE_FAILURES: tuple[type[BaseException], ...] = (
 MAX_OPERATOR_CHAIN = 3000
 _UNGUARDED = sys.version_info >= (3, 11)
 _NON_NESTING = frozenset({",", ":", ".", "=", "(", ")", "[", "]", "{", "}", ";", "->", "@"})
+_RUN_SEPARATORS = frozenset({",", ";", "(", "[", "{"})
 _NESTING_KEYWORDS = frozenset({"and", "or", "not", "if", "else", "in", "is", "lambda"})
 _OPERATOR_OR_KEYWORD = re.compile(rb"[-+*/%&|^<>~!]|\b(?:and|or|not|if|else|in|is|lambda)\b")
 
@@ -61,13 +62,25 @@ def _longest_operator_chain(data: bytes) -> int:
 
 
 def _count_per_line(tokens) -> int:
+    """The longest run of nesting operators between two separators.
+
+    A comma, a semicolon, an opening bracket or a new logical line ends a run: a
+    flat table `[-0, -1, …]` is many runs of one, not one run of thousands
+    (audit 2026-09-26 C-3).
+    """
     longest = current = 0
     for token in tokens:
-        if token.type == tokenize.NEWLINE:
+        if _ends_run(token):
             longest, current = max(longest, current), 0
             continue
         current += _nests(token)
     return max(longest, current)
+
+
+def _ends_run(token: tokenize.TokenInfo) -> bool:
+    if token.type == tokenize.NEWLINE:
+        return True
+    return token.type == tokenize.OP and token.string in _RUN_SEPARATORS
 
 
 def _nests(token: tokenize.TokenInfo) -> int:

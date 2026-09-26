@@ -42,6 +42,13 @@ The count is a proxy for the parser's depth; nesting that is not an operator
 chain (`[[[[…` is capped at 200 levels by the 3.10 tokenizer) is not counted.
 The crash boundary was measured on Linux with a 1 MiB thread, not on Windows.
 
+## Follow-up (audit 2026-09-26 C-3)
+Counting every nesting operator of a logical line refused a flat data table such
+as `TABLE = [-0, -1, …, -3999]` (4 000 unary minuses, each one level deep). The
+count is now the longest run of operators between two separators — a comma, a
+semicolon or an opening bracket reset it — which is the chain the parser nests.
+The deep expression of the crash is one run of 100 000 and is still refused.
+
 ## Files
 - scripts/python_parse.py
 - scripts/code_extractor.py

@@ -46,3 +46,13 @@ def test_a_long_data_literal_is_still_parsed() -> None:
     tree = parse_python("x = [" + ", ".join(["1"] * 100_000) + "]\n")
 
     assert len(tree.body) == 1
+
+
+def test_a_flat_table_of_signed_numbers_is_parsed() -> None:
+    """Audit 2026-09-26 C-3: many one-level items are not one deep chain."""
+    sys.path.insert(0, str(SCRIPTS))
+    from python_parse import _longest_operator_chain
+
+    table = ("TABLE = [" + ", ".join(f"-{index}" for index in range(4000)) + "]\n").encode()
+
+    assert _longest_operator_chain(table) == 1
