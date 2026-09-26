@@ -142,8 +142,15 @@ def _tool_target(block: Mapping[str, object]) -> str:
 
 
 def _tool_line(block: Mapping[str, object]) -> str:
+    """One line per tool call; redacted before it is cut.
+
+    Cut first, a secret split at the bound no longer matched its pattern and
+    its first characters reached the record (audit 2026-09-26 C-6).
+    """
+    from secret_redact import redact_secrets
+
     name = str(block.get("name") or "tool")
-    target = " ".join(_tool_target(block).split())[:MAX_TOOL_LINE_CHARS]
+    target = redact_secrets(" ".join(_tool_target(block).split()))[:MAX_TOOL_LINE_CHARS]
     if not target:
         return f"- tool `{name}`"
     return f"- tool `{name}`: {target}"

@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A session record's tool line is redacted before it is cut to 200 characters, so a secret split at the bound no longer leaves its first characters in the record (audit 2026-09-26 C-6).
 - A date a page or model writes with a fraction of seconds that is not 3 or 6 digits, or with `Z`, is read on Python 3.10 as on 3.11 by one shared reader, `iso_time` (audit 2026-09-26 C-4).
 - Legacy sweep: two functions and one constant nothing called are removed, and the transcript-containment security test, which asked a function removed long ago and so tested nothing, now calls the live validator (audit 2026-09-26 C-15).
 - Impact analysis names each edit of a file as its own range instead of one span from the first to the last, finds the repository top when asked from a subfolder, and looks changed files up by value instead of reading every file node under a 10 000-row ceiling (audit 2026-09-26 B-8; the CRLF part stays open).
