@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A code file whose bytes are not UTF-8 is named in the index receipt's `skipped_examples` instead of vanishing from the graph in silence (audit 2026-09-26 B-13).
 - A hook error is judged by when it happened: its writers stamp local time with the offset, and doctor reads an older stamp without one as local time instead of UTC, which made a fresh error look hours old west of UTC (audit 2026-09-26 B-25).
 - A repository of 10 001-20 000 code files no longer crashes the nightly `refresh-all`: the extractor holds the 20 000 files the index admits, and any extraction ceiling is the named refusal `repository_exceeds_extraction_bounds` (audit 2026-09-26 B-11).
 - `find_dead_code` no longer calls a TypeScript, JavaScript, Go or Rust symbol dead on a check it never made: the value-reference index reads Python only, so such rows say `references_not_indexed`, the weakest reason, ordered last (audit 2026-09-26 A-7).

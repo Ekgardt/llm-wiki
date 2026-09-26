@@ -2475,6 +2475,9 @@ class _Capture:
         self.chunks: list[RetrievalChunk] = []
         self.hashes: dict[str, str] = {}
         self.total = 0
+        # Code files left out because their bytes are not UTF-8: named with the
+        # walk's own skips, never silent (audit 2026-09-26 B-13).
+        self.unreadable: list[str] = []
 
     def add(self, candidate: _Candidate) -> None:
         content = _candidate_content(candidate, self.policy, "corpus source")
@@ -2486,8 +2489,13 @@ class _Capture:
         metadata = _metadata(frontmatter, candidate)
         digest = _sha256(content)
         self.hashes[candidate.relative] = digest
+        self._note_unreadable(candidate, readable)
         if readable and _included(metadata, self.policy):
             self._store(candidate, content, metadata, is_markdown, searchable_start, digest)
+
+    def _note_unreadable(self, candidate: _Candidate, readable: bool) -> None:
+        if candidate.kind == "code" and not readable:
+            self.unreadable.append(candidate.relative)
 
     def _head(self, content: bytes, is_markdown: bool) -> tuple[dict[str, Any], int]:
         if not is_markdown:
@@ -2575,7 +2583,7 @@ def _capture(
         tuple(capture.chunks),
         corpus_hash,
         policy,
-        skipped=tuple(discovery.skipped),
+        skipped=(*discovery.skipped, *capture.unreadable),
     )
 
 

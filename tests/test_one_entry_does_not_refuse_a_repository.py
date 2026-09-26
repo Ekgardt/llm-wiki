@@ -52,3 +52,16 @@ def test_the_same_repository_is_detected_unchanged(vault, tmp_path):  # noqa: F8
     detected = repository_index.detect_repository_changes(repository, state_root=state)
 
     assert (detected["status"], detected["stale"]) == ("ok", False)
+
+
+def test_a_code_file_that_is_not_utf8_is_named_not_dropped_in_silence(vault, tmp_path):  # noqa: F811
+    """Audit 2026-09-26 B-13."""
+    import repository_index
+
+    _root, state = vault
+    repository = _repository(tmp_path / "latin", {"src/alpha.py": ALPHA})
+    (repository / "src" / "legacy.py").write_bytes("name = 'café'\n".encode("latin-1"))
+
+    receipt = repository_index.index_repository(repository, roots=["src"], state_root=state)
+
+    assert (receipt["sources"], receipt["skipped_examples"]) == (1, ["src/legacy.py"])

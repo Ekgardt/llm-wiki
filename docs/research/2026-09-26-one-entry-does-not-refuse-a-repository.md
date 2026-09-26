@@ -45,3 +45,12 @@ Date: 2026-09-26. Audit 2026-09-26 A-8 (and nav findings 5 and 16 of the same au
 - `tests/test_a_revision_walks_no_ignored_top_level_folder.py`
 - `tests/test_workspace_revision.py`
 - `CHANGELOG.md`
+
+## Follow-up (2026-09-26): a code file whose bytes are not UTF-8 (audit B-13)
+
+Fact: `_Capture.add` leaves out a file that does not decode as UTF-8 (`_decodes_as_utf8`)
+and said nothing, so a Latin-1 Python module vanished from the graph. Decision: under a
+code root such a file is added to the same `skipped` list, so the receipt counts and
+names it. Honest limit: the generation itself does not record the skip, so
+`graph_complete` in a later answer still speaks only of unresolved observations; the
+receipt of the build is where the omission is stated.
