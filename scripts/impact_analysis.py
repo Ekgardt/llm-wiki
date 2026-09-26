@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import math
 import os
@@ -827,12 +828,33 @@ def _changed_ranges(
     new_lines = (new or b"").splitlines(keepends=True)
     old_offsets = _line_offsets(old_lines, stop)
     new_offsets = _line_offsets(new_lines, stop)
-    prefix = _common_prefix(old_lines, new_lines, stop)
-    if prefix == len(old_lines) == len(new_lines):
+    old_keys, new_keys = _compared_lines(old_lines, new_lines)
+    prefix = _common_prefix(old_keys, new_keys, stop)
+    if prefix == len(old_keys) == len(new_keys):
         return []
-    suffix = _common_suffix(old_lines, new_lines, prefix, stop)
-    hunks = _hunks(old_lines, new_lines, prefix, suffix)
+    suffix = _common_suffix(old_keys, new_keys, prefix, stop)
+    hunks = _hunks(old_keys, new_keys, prefix, suffix)
     return [_hunk_ranges(hunk, new_lines, old_offsets, new_offsets) for hunk in hunks]
+
+
+def _without_crlf(line: bytes) -> bytes:
+    return line[:-2] + b"\n" if line.endswith(b"\r\n") else line
+
+
+def _compared_lines(old_lines: list[bytes], new_lines: list[bytes]) -> tuple[list[bytes], list[bytes]]:
+    """Lines as the diff should compare them: a CRLF ending is the LF Git stores.
+
+    With `core.autocrlf` the index holds LF and the worktree CRLF, so every line
+    differed and every symbol in the file read as changed (audit 2026-09-26 B-8,
+    docs/research/2026-09-26-a-line-ending-is-not-an-edit.md). When the files
+    differ in nothing but line endings, that difference is the edit and the
+    bytes are compared as they are.
+    """
+    old_keys = [_without_crlf(line) for line in old_lines]
+    new_keys = [_without_crlf(line) for line in new_lines]
+    if old_keys == new_keys:
+        return old_lines, new_lines
+    return old_keys, new_keys
 
 
 # Two edits in one file were one range from the first to the last, so every
@@ -1041,8 +1063,7 @@ def _map_side(graph, symbols: dict, change: dict, changed_range: dict, side: str
     path = _code_path(change, side)
     if path is None:
         return
-    old_range = changed_range["old"]
-    classification = _offset_classification(graph, path, change, deadline)
+    old_range, classification = _indexed_old_range(graph, path, change, changed_range["old"], deadline)
     for node in graph.find_nodes(path=path, max_rows=bounds.max_graph_rows, deadline=deadline):
         if node["kind"] not in _SYMBOL_KINDS:
             continue
@@ -1052,18 +1073,48 @@ def _map_side(graph, symbols: dict, change: dict, changed_range: dict, side: str
             _require_symbol_ceiling(symbols, bounds)
 
 
-def _offset_classification(graph, path: str, change: dict, deadline: float) -> str:
-    """`exact` only when the generation indexed the very bytes the diff's old side holds.
+def _indexed_old_range(graph, path: str, change: dict, old_range: dict, deadline: float) -> tuple[dict, str]:
+    """The hunk's old range in the bytes the generation indexed, and how sure that is.
 
-    The hunk's offsets are into the old side; a generation built from other
-    content of the file matched them against different lines and still said
-    `exact` (audit B-36,
-    docs/research/2026-09-25-impact-is-exact-only-on-the-bytes-it-indexed.md).
+    Offsets are into the old side, so a generation built from other content is
+    `approximate` (audit B-36,
+    docs/research/2026-09-25-impact-is-exact-only-on-the-bytes-it-indexed.md). A
+    checkout with `core.autocrlf` indexes CRLF while the diff's old side is the
+    LF blob; the lines are the same lines, so the range is moved onto the indexed
+    bytes line for line and stays `exact` (audit 2026-09-26 B-8).
     """
     source = graph.source_by_path(path, deadline=deadline)
-    if source is not None and source.get("content") == change.get("old_blob"):
-        return "exact"
-    return "approximate"
+    content = source.get("content") if source is not None else None
+    old_blob = change.get("old_blob")
+    if content == old_blob:
+        return old_range, "exact"
+    if _same_lines(content, old_blob):
+        return _moved_range(old_range, old_blob, content), "exact"
+    return old_range, "approximate"
+
+
+def _same_lines(indexed: object, old_blob: object) -> bool:
+    if not isinstance(indexed, bytes) or not isinstance(old_blob, bytes):
+        return False
+    return indexed.replace(b"\r\n", b"\n") == old_blob.replace(b"\r\n", b"\n")
+
+
+def _moved_range(old_range: dict, old_blob: bytes, indexed: bytes) -> dict:
+    """The same lines, measured in the indexed bytes (ranges start and end at a line)."""
+    old_offsets = _plain_offsets(old_blob)
+    indexed_offsets = _plain_offsets(indexed)
+    return {
+        **old_range,
+        "byte_start": indexed_offsets[bisect.bisect_left(old_offsets, old_range["byte_start"])],
+        "byte_end": indexed_offsets[bisect.bisect_left(old_offsets, old_range["byte_end"])],
+    }
+
+
+def _plain_offsets(content: bytes) -> list[int]:
+    offsets = [0]
+    for line in content.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    return offsets
 
 
 def _require_symbol_ceiling(symbols: dict, bounds: ImpactLimits) -> None:
