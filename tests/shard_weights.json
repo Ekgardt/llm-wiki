@@ -305,6 +305,7 @@
   "test_capture_worker_reclaims_leases.py": 4.65,
   "test_ci_and_scheduler_gaps.py": 1.37,
   "test_ci_policy.py": 0.7,
+  "test_ci_runs_a_reinstall_and_a_pass.py": 0.08,
   "test_ci_timing_report.py": 1.92,
   "test_claim_schemas.py": 0.02,
   "test_claims.py": 4.72,

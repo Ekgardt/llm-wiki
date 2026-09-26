@@ -422,12 +422,34 @@ jobs:
         env:
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
+      # A reinstall over its own install is how an operator applies an update the
+      # nightly could not bring into force; no job ever ran one (audit 2026-09-26
+      # C-13, docs/research/2026-09-26-ci-runs-a-reinstall-and-a-pass.md).
+      - name: Run install.sh again over its own install
+        if: runner.os != 'Windows'
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+        run: /bin/bash ./install.sh --scheduler cron
+      - name: Run install.ps1 again over its own install
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
       - name: The installed vault reports session capture enabled
         shell: bash
         env:
           HOME: ${{ runner.temp }}/installer-home
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+      # The command the scheduler registers, run once on the installed vault: the
+      # passes themselves never ran after an install anywhere in CI.
+      - name: A nightly pass runs on the installed vault
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: uv run --locked --no-sync python scripts/scheduled_nightly.py
 
   # Tests whose dependency no job installed, so they skipped everywhere and a skip
   # is not a pass. `torch` stays out on purpose: the locked wheel pulls the CUDA
