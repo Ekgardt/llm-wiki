@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An install no longer puts the dependencies into a custom `UV_PROJECT_ENVIRONMENT` that timers, hooks and the MCP server never use: the vault always runs from its own `.venv`, and the installer names the ignored setting (audit 2026-09-26 B-26).
 - A knowledge append whose attempt meets a database busy past its timeout repeats the attempt instead of failing the write, and the retry's lineage read waits out the busy database too; this was the Windows `database is locked` failure of concurrent appends (audit 2026-09-26 B-27).
 - An interrupted transaction-image prune is settled by `doctor --repair` as well as by the next prune, and is no longer reported as a damaged or unreadable transaction trail (audit 2026-09-26 B-22).
 - The nightly reclaim step names what it could not do and fails when a prune, the history prune, the snapshot or a backlog project failed; doctor treats a queue task that died this week as needing attention instead of calling the queue healthy (audit 2026-09-26 B-23).

@@ -314,6 +314,11 @@ SYNC_ARGS=()
 while IFS= read -r sync_argument; do
   SYNC_ARGS+=("$sync_argument")
 done < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+IGNORED_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
+if [ -n "$IGNORED_ENVIRONMENT" ]; then
+  # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
+  warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
+fi
 export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
 uv "${SYNC_ARGS[@]}"
 ok "Production dependencies installed (MCP included)"

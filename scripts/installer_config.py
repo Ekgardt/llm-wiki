@@ -278,6 +278,24 @@ def resolve_uv_project_environment(root: Path, override: str | None) -> Path:
     return candidate.resolve()
 
 
+def _ignored_environment(root: Path, override: str | None) -> str | None:
+    """A `UV_PROJECT_ENVIRONMENT` the install does not use, so the installer can say so.
+
+    The vault runs from `<vault>/.venv`: timers, hooks and the MCP server call
+    `uv run` there and carry no `UV_PROJECT_ENVIRONMENT`, and persisting one
+    would hand every other uv project on the machine the vault's environment. An
+    install into a custom environment left all of them on an empty `.venv`
+    (audit 2026-09-26 B-26,
+    docs/research/2026-09-26-the-vault-runs-from-its-own-venv.md).
+    """
+    if not override:
+        return None
+    chosen = resolve_uv_project_environment(root, override)
+    if chosen == resolve_uv_project_environment(root, None):
+        return None
+    return str(chosen)
+
+
 def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]]:
     root = Path(root).resolve()
     environment = resolve_uv_project_environment(root, override)
@@ -840,10 +858,14 @@ def _cron_command(args: argparse.Namespace) -> int:
 
 
 def _sync_args_command(args: argparse.Namespace) -> int:
-    environment, arguments = uv_sync_arguments(args.root, args.environment)
+    environment, arguments = uv_sync_arguments(args.root, None)
     print(
         json.dumps(
-            {"environment": str(environment), "arguments": arguments},
+            {
+                "environment": str(environment),
+                "arguments": arguments,
+                "ignored_environment": _ignored_environment(args.root, args.environment),
+            },
             ensure_ascii=False,
             sort_keys=True,
         )

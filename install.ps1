@@ -342,6 +342,10 @@ if (-not [string]::IsNullOrEmpty($env:UV_PROJECT_ENVIRONMENT)) {
 }
 $syncPlanJson = Invoke-NativeCommand python $syncArguments -CaptureOutput
 $syncPlan = $syncPlanJson | ConvertFrom-Json
+if (-not [string]::IsNullOrEmpty($syncPlan.ignored_environment)) {
+    # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
+    Warn "UV_PROJECT_ENVIRONMENT=$($syncPlan.ignored_environment) is not used: the vault runs from $($syncPlan.environment)"
+}
 $env:UV_PROJECT_ENVIRONMENT = $syncPlan.environment
 Invoke-NativeCommand uv @($syncPlan.arguments)
 Ok "Production dependencies installed (MCP included)"
