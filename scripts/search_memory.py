@@ -4003,11 +4003,17 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
 
 
 def _direct_match_score(
-    page: Path, title: str, read: _PageRead, query_terms: set[str]
+    page: Path, read: _PageRead, query_terms: set[str], shared: set[str]
 ) -> float:
-    """Literal matching has no BM25, so the term count carries the base score."""
-    score = float(len(query_terms))
-    if query_terms.issubset(set(re.findall(r"\w+", title.casefold()))):
+    """Literal matching has no BM25, so the count of shared terms carries the base score.
+
+    The title and filename lift a page only when they hold the whole question. They
+    were tested against the shared terms instead, so a page sharing one word of
+    the question, in its title, scored 12 against 3 for a page holding all three
+    in its body (audit 2026-09-26 C-10).
+    """
+    score = float(len(shared))
+    if query_terms.issubset(set(re.findall(r"\w+", read.title.casefold()))):
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
@@ -4038,7 +4044,7 @@ def _direct_page_hit(
         read, project=project, since=since, as_of=as_of
     ):
         return None
-    score = round(_direct_match_score(page, read.title, read, shared), 2)
+    score = round(_direct_match_score(page, read, query_terms, shared), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "no_active_generation",
