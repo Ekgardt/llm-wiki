@@ -7,6 +7,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A long session keeps its first and last turns: each edge of an over-bound transcript skips service records and keeps whole turns (audit 2026-09-26 C-5).
+- A nightly housekeeping step names its failure instead of ending the night; a failed update is named, a failed retention counts once (audit 2026-09-26 C-13).
+- An extra counts as chosen only by a distribution nothing outside it pulls in, so the reranker's `transformers` no longer implies `semantic` (audit 2026-09-26 C-13).
+- A launchd job is absent only on `launchctl print` exit 113; any other failure still gets its `bootout` (audit 2026-09-26 C-13).
+- Every git call has a timeout, and the knowledge snapshot ignores the operator's global and system git config; a guard scans every script (audit 2026-09-26 C-13).
+- `install.ps1` registers Claude MCP through the `claude` CLI and reports every entry state as `install.sh` does (audit 2026-09-26 C-13).
+- The Windows task script writes its hour limits in one table (audit 2026-09-26 C-13).
+- Every test file has a measured shard weight, refreshed from CI JUnit reports; a guard holds new files to it (audit 2026-09-26 C-13).
+- On a vault whose first memory generation is not built yet, the prune step reports nothing to prune instead of failing the nightly pass.
+- The CI installer job installs twice and then runs a nightly pass (audit 2026-09-26 C-13).
+- A "Related" list or an empty heading ranks behind prose in recall; an annotated Related list counts as navigation too (audit 2026-09-26 C-10).
+- Recall and get_decisions name a hit by its page, not by the heading of the matching chunk, and send one id per row (audit 2026-09-26 C-10).
+- get_decisions reports its fallback and freshness as recall does and returns results, retrieval_trace and _meta (audit 2026-09-26 C-10).
+- Without a generation, a page's title lifts it only when it holds the whole question (audit 2026-09-26 C-10).
+- A retrieval leg that was asked for and did not run is reported missing (audit 2026-09-26 C-10).
+- vault_status no longer reports full confidence for a vault with no compile history (audit 2026-09-26 C-10).
+- The tool list an agent reads has a 10 KiB budget, checked by a test (audit 2026-09-26 C-10).
+- A TypeScript query no longer lets tsserver fetch `@types` from npm, and rust-analyzer reads the project with `cargo.noDeps` (audit 2026-09-26 C-8).
+- A language server that failed for good is started again only after its pause (5 s, 30 s, 120 s) and answers degraded meanwhile (audit 2026-09-26 C-2).
+- A navigation position past the end of a line means the line end; the schema says `character` is a 0-based UTF-8 byte offset (audit 2026-09-26 C-9).
+- A file no managed language server claims answers `unsupported` without starting a server (audit 2026-09-26 C-9).
+- An answer about another repository names that repository's commit, not the vault's (audit 2026-09-26 C-9).
+- Installing gopls or rust-analyzer runs its toolchain before publishing (audit 2026-09-26 C-9).
+- A local name that matches an import no longer makes a false caller of that import; extractor v16 rebuilds stored generations (audit 2026-09-26 C-9).
+- Cancelling an impact analysis stops its running git process within 0.1 s (audit 2026-09-26 C-9).
+- On a `core.autocrlf` checkout an edit names only the symbol it touched, as exact (audit 2026-09-26 B-8).
 - Every instant the coordinator and the project journal store has six fraction digits, so a lease written on a whole second no longer reads as live half a second past its expiry when SQL compares it as text (audit 2026-09-26 C-12).
 - A daily log compiled in several parts can be archived: its bag carries `archive-manifest/v2` with one embedded compile receipt per part, and a page quoting one part resolves from the archive by that part's digest; whole-day bags stay `archive-manifest/v1` (audit 2026-09-26 B-1).
 - A compiled page belongs to the project its evidence names: captured session blocks now carry `- Project slug:`, and a new page whose quoted entries all name one project gets `project:` in its frontmatter, so project-scoped rules stop reaching other projects' sessions (audit 2026-09-26 B-14).

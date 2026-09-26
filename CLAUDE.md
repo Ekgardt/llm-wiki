@@ -200,8 +200,9 @@ platform-qualified lifecycle ownership, repository containment, safe log redacti
 explicit profile installation, document synchronization, session-manager capacity,
 the normalized navigation facade, deterministic rendering, precise
 `get_architecture` modes, doctor diagnostics, and qualification gates. A query is
-routed to one profile by file suffix; a suffix no profile claims falls back to
-Pyright, which opens the file, answers nothing, and degrades to structural evidence.
+routed to one profile by file suffix; a file whose suffix no profile claims answers
+`unsupported` before any server is started (2026-09-26; it used to reach Pyright and
+end as an error).
 A session whose close failed is closed again by the next caller for its key, under
 that caller's deadline, and is evicted before a healthy idle one. A start that ran
 out of time or met the operating system is retried at most three times, after 5 s,
