@@ -152,35 +152,70 @@ def _stderr_head(stderr, limit: int = 1024) -> str:
     return stderr.read(limit).decode("utf-8", errors="replace").strip()
 
 
-def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -> bytes:
+# How often a running Git child looks at the caller's cancellation. A cancel
+# is the operator leaving; a tenth of a second is below what they notice.
+GIT_STOP_POLL_SECONDS = 0.1
+
+
+def _stop_reason(deadline: float, cancelled: Callable[[], bool] | None) -> str | None:
+    if cancelled is not None and cancelled():
+        return "impact analysis cancelled"
+    if time.monotonic() >= deadline:
+        return "Git impact command deadline reached"
+    return None
+
+
+def _watch_git(
+    process: subprocess.Popen,
+    finished: threading.Event,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+    stopped: list[str],
+) -> None:
+    """Kill the child at the deadline or as soon as the caller cancels."""
+    while not finished.wait(GIT_STOP_POLL_SECONDS):
+        reason = _stop_reason(deadline, cancelled)
+        if reason is not None:
+            stopped.append(reason)
+            process.kill()
+            return
+
+
+def _git(
+    root: Path,
+    arguments: list[str],
+    *,
+    deadline: float,
+    max_bytes: int,
+    cancelled: Callable[[], bool] | None = None,
+) -> bytes:
     """Run Git without a shell and stop reading at the declared ceiling.
 
     Stderr is kept apart from the `-z` record stream: on a checkout with
     `core.autocrlf=true` Git prints an advisory line about line endings and
     still exits 0, and that line is not a diff record (research
-    2026-09-11-git-warnings-are-not-diff-records.md).
+    2026-09-11-git-warnings-are-not-diff-records.md). A cancel stops the child
+    within `GIT_STOP_POLL_SECONDS`, not only at the deadline (audit 2026-09-26
+    C-9, docs/research/2026-09-26-an-impact-hears-its-cancel.md).
     """
     # Checked before the child exists: raised after it, between the spawn and the
     # try below, it left Git running and unreaped (audit C-40,
     # docs/research/2026-09-25-an-impact-git-child-is-never-orphaned.md).
-    _remaining(deadline)
+    _check_impact_stop(deadline, cancelled)
     with tempfile.TemporaryFile() as stderr:
         process = _start_git(root, arguments, stderr)
-        timed_out = threading.Event()
-
-        def stop_at_deadline() -> None:
-            timed_out.set()
-            process.kill()
-
-        timer = threading.Timer(max(0.0, deadline - time.monotonic()), stop_at_deadline)
-        timer.daemon = True
+        finished = threading.Event()
+        stopped: list[str] = []
+        watcher = threading.Thread(
+            target=_watch_git, args=(process, finished, deadline, cancelled, stopped), daemon=True
+        )
         try:
-            timer.start()
+            watcher.start()
             stdout = _read_to_ceiling(process, max_bytes)
         finally:
-            timer.cancel()
+            finished.set()
             _ensure_finished(process)
-        _require_git_success(process, stdout, timed_out, max_bytes, _stderr_head(stderr))
+        _require_git_success(process, stdout, stopped, max_bytes, _stderr_head(stderr))
     return stdout
 
 
@@ -191,10 +226,10 @@ def _ensure_finished(process: subprocess.Popen) -> None:
 
 
 def _require_git_success(
-    process: subprocess.Popen, stdout: bytes, timed_out: threading.Event, max_bytes: int, stderr: str
+    process: subprocess.Popen, stdout: bytes, stopped: list[str], max_bytes: int, stderr: str
 ) -> None:
-    if timed_out.is_set():
-        raise TimeoutError("Git impact command deadline reached")
+    if stopped:
+        raise TimeoutError(stopped[0])
     if len(stdout) > max_bytes:
         raise ValueError("Git impact output exceeds the read ceiling")
     _require_git_exit_zero(process, stdout, stderr)
@@ -225,7 +260,7 @@ def _option_safe_revision(value: str) -> bool:
 
 
 def _resolve_revision(
-    root: Path, value: str | None, label: str, *, deadline: float
+    root: Path, value: str | None, label: str, *, deadline: float, cancelled: Callable[[], bool] | None = None
 ) -> str:
     revision = _validate_revision(value, label)
     try:
@@ -234,6 +269,7 @@ def _resolve_revision(
             ["rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
             deadline=deadline,
             max_bytes=128,
+            cancelled=cancelled,
         ).decode("ascii", errors="strict").strip()
     except (UnicodeError, ValueError) as exc:
         raise InvalidRevisionError(f"{label} revision is not a valid commit") from exc
@@ -257,9 +293,10 @@ class _DiffRequest:
     branch: str | None
     root: Path
     deadline: float
+    cancelled: Callable[[], bool] | None = None
 
     def resolve(self, value: str | None, label: str) -> str:
-        return _resolve_revision(self.root, value, label, deadline=self.deadline)
+        return _resolve_revision(self.root, value, label, deadline=self.deadline, cancelled=self.cancelled)
 
     def require_no_endpoints(self) -> None:
         if any(value is not None for value in (self.base, self.target, self.branch)):
@@ -311,6 +348,7 @@ def _merge_base(request: _DiffRequest, base_value: str, branch_value: str) -> st
         ["merge-base", "--", base_value, branch_value],
         deadline=request.deadline,
         max_bytes=4096,
+        cancelled=request.cancelled,
     ).decode("ascii", errors="strict").strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40,64}", merge_base):
         raise ValueError("Git merge-base did not return an object ID")
@@ -334,11 +372,12 @@ def _diff_arguments(
     branch: str | None,
     root: Path,
     deadline: float,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[tuple[str, list[str], bool]]:
     builder = _DIFF_BUILDERS.get(comparison)
     if builder is None:
         raise ValueError(f"comparison must be one of: {', '.join(sorted(COMPARISONS))}")
-    return builder(_DiffRequest(comparison, base, target, branch, root, deadline))
+    return builder(_DiffRequest(comparison, base, target, branch, root, deadline, cancelled))
 
 
 def _decode_path(value: bytes) -> str:
@@ -420,10 +459,11 @@ def _object_blob(
     *,
     deadline: float,
     limit: int,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bytes | None:
     if not oid or set(oid) <= ZERO_OID:
         return None
-    return _git(root, ["cat-file", "blob", oid], deadline=deadline, max_bytes=limit)
+    return _git(root, ["cat-file", "blob", oid], deadline=deadline, max_bytes=limit, cancelled=cancelled)
 
 
 def repository_top(directory: Path, deadline: float) -> Path:
@@ -501,6 +541,7 @@ def collect_git_changes(
     branch: str | None = None,
     limits: ImpactLimits | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Collect NUL-safe diff records and their bounded old/new blobs."""
     bounds = _limits_or_default(limits)
@@ -508,9 +549,9 @@ def collect_git_changes(
         raise ValueError(f"comparison must be one of: {', '.join(sorted(COMPARISONS))}")
     deadline = _deadline_or_default(deadline, bounds, time.monotonic)
     root = repository_top(Path(root).resolve(strict=True), deadline)
-    collector = _ChangeCollector(root, bounds, deadline)
+    collector = _ChangeCollector(root, bounds, deadline, cancelled)
     for phase, arguments, worktree_new in _diff_arguments(
-        comparison, base=base, target=target, branch=branch, root=root, deadline=collector.deadline
+        comparison, base=base, target=target, branch=branch, root=root, deadline=deadline, cancelled=cancelled
     ):
         collector.add_phase(phase, arguments, worktree_new)
     return collector.records
@@ -519,10 +560,13 @@ def collect_git_changes(
 class _ChangeCollector:
     """Diff records of one request, each with its bounded old and new blob."""
 
-    def __init__(self, root: Path, bounds: ImpactLimits, deadline: float) -> None:
+    def __init__(
+        self, root: Path, bounds: ImpactLimits, deadline: float, cancelled: Callable[[], bool] | None = None
+    ) -> None:
         self.root = root
         self.bounds = bounds
         self.deadline = deadline
+        self.cancelled = cancelled
         self.records: list[dict] = []
         self.total_bytes = 0
 
@@ -532,6 +576,7 @@ class _ChangeCollector:
             arguments,
             deadline=self.deadline,
             max_bytes=max(64 * 1024, self.bounds.max_files * 16 * 1024),
+            cancelled=self.cancelled,
         )
         parsed = _parse_raw_records(raw, phase)
         if len(self.records) + len(parsed) > self.bounds.max_files:
@@ -540,6 +585,7 @@ class _ChangeCollector:
             self._add_record(record, worktree_new)
 
     def _add_record(self, record: dict, worktree_new: bool) -> None:
+        _check_impact_stop(self.deadline, self.cancelled)
         old_blob = self._old_blob(record)
         new_blob = self._new_blob(record, worktree_new)
         self.total_bytes += len(old_blob or b"") + len(new_blob or b"")
@@ -550,7 +596,9 @@ class _ChangeCollector:
         self.records.append(record)
 
     def _object_blob(self, oid: str) -> bytes | None:
-        return _object_blob(self.root, oid, deadline=self.deadline, limit=self.bounds.max_blob_bytes)
+        return _object_blob(
+            self.root, oid, deadline=self.deadline, limit=self.bounds.max_blob_bytes, cancelled=self.cancelled
+        )
 
     def _old_blob(self, record: dict) -> bytes | None:
         if not _holds_source(record, "old"):
@@ -767,17 +815,22 @@ def _weighted_prefix(pages: list[dict], total: int, threshold: float) -> list[di
 
 
 def _changed_ranges(
-    old: bytes | None, new: bytes | None, *, deadline: float | None = None
+    old: bytes | None,
+    new: bytes | None,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
-    _check_impact_stop(deadline)
+    stop = (deadline, cancelled)
+    _check_impact_stop(*stop)
     old_lines = (old or b"").splitlines(keepends=True)
     new_lines = (new or b"").splitlines(keepends=True)
-    old_offsets = _line_offsets(old_lines, deadline)
-    new_offsets = _line_offsets(new_lines, deadline)
-    prefix = _common_prefix(old_lines, new_lines, deadline)
+    old_offsets = _line_offsets(old_lines, stop)
+    new_offsets = _line_offsets(new_lines, stop)
+    prefix = _common_prefix(old_lines, new_lines, stop)
     if prefix == len(old_lines) == len(new_lines):
         return []
-    suffix = _common_suffix(old_lines, new_lines, prefix, deadline)
+    suffix = _common_suffix(old_lines, new_lines, prefix, stop)
     hunks = _hunks(old_lines, new_lines, prefix, suffix)
     return [_hunk_ranges(hunk, new_lines, old_offsets, new_offsets) for hunk in hunks]
 
@@ -831,31 +884,35 @@ def _anchored_insertion(old_side: dict, prefix: int, inserted: list[bytes]) -> d
     return {**old_side, "line_start": prefix, "line_end": prefix}
 
 
-def _line_offsets(lines: list[bytes], deadline: float | None) -> list[int]:
+# (deadline, cancelled): what every loop of one impact run checks between steps.
+_Stop = tuple[float | None, Callable[[], bool] | None]
+
+
+def _line_offsets(lines: list[bytes], stop: _Stop) -> list[int]:
     offsets = [0]
     for line in lines:
-        _check_impact_stop(deadline)
+        _check_impact_stop(*stop)
         offsets.append(offsets[-1] + len(line))
     return offsets
 
 
-def _common_prefix(old_lines: list[bytes], new_lines: list[bytes], deadline: float | None) -> int:
+def _common_prefix(old_lines: list[bytes], new_lines: list[bytes], stop: _Stop) -> int:
     prefix = 0
     shared = min(len(old_lines), len(new_lines))
     while prefix < shared and old_lines[prefix] == new_lines[prefix]:
-        _check_impact_stop(deadline)
+        _check_impact_stop(*stop)
         prefix += 1
     return prefix
 
 
 def _common_suffix(
-    old_lines: list[bytes], new_lines: list[bytes], prefix: int, deadline: float | None
+    old_lines: list[bytes], new_lines: list[bytes], prefix: int, stop: _Stop
 ) -> int:
     """Lines shared at the end, never reaching back into the shared prefix."""
     suffix = 0
     limit = min(len(old_lines), len(new_lines)) - prefix
     while suffix < limit and old_lines[-suffix - 1] == new_lines[-suffix - 1]:
-        _check_impact_stop(deadline)
+        _check_impact_stop(*stop)
         suffix += 1
     return suffix
 
@@ -1024,21 +1081,25 @@ def _range_sides(changes: list[dict]) -> list[tuple[dict, dict, str]]:
     ]
 
 
-def _map_symbols(graph, changes: list[dict], bounds: ImpactLimits, deadline: float) -> list[dict]:
+def _map_symbols(
+    graph, changes: list[dict], bounds: ImpactLimits, deadline: float, cancelled: Callable[[], bool] | None = None
+) -> list[dict]:
     symbols: dict[str, dict] = {}
     for change, changed_range, side in _range_sides(changes):
-        if time.monotonic() >= deadline:
-            raise TimeoutError("impact analysis deadline reached")
+        _check_impact_stop(deadline, cancelled)
         _map_side(graph, symbols, change, changed_range, side, bounds, deadline)
     return sorted(symbols.values(), key=lambda item: (item["path"], item["name"], item["node_id"]))
 
 
-def _project_file_ids(graph, changes: list[dict], bounds: ImpactLimits, deadline: float) -> set[str]:
+def _project_file_ids(
+    graph, changes: list[dict], bounds: ImpactLimits, deadline: float, cancelled: Callable[[], bool] | None = None
+) -> set[str]:
     """Resolve project-journal file values before following checkpoint edges."""
     paths = _changed_path_values(changes)
     spellings = sorted(paths | {path.replace("/", "\\") for path in paths})
     found: set[str] = set()
     for start in range(0, len(spellings), 400):
+        _check_impact_stop(deadline, cancelled)
         nodes = graph.find_nodes(
             kinds=("file",), values=spellings[start : start + 400], max_rows=bounds.max_graph_rows, deadline=deadline
         )
@@ -1112,10 +1173,13 @@ def _edges_into(graph, frontier: list[str], bounds: ImpactLimits, deadline: floa
     return edges
 
 
-def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline: float) -> dict:
-    used = _reaching_edges(graph, set(symbol_ids), bounds, deadline)
+def _affected_nodes(
+    graph, symbol_ids: set[str], bounds: ImpactLimits, deadline: float, cancelled: Callable[[], bool] | None = None
+) -> dict:
+    used = _reaching_edges(graph, set(symbol_ids), bounds, (deadline, cancelled))
     groups = _empty_affected()
     for node_id, edge in used.items():
+        _check_impact_stop(deadline, cancelled)
         _add_affected(groups, graph, node_id, edge, bounds, deadline)
     for values in groups.values():
         values.sort(key=lambda item: (item["path"], item["name"], item["node_id"]))
@@ -1123,7 +1187,7 @@ def _affected_nodes(graph, symbol_ids: set[str], bounds: ImpactLimits, deadline:
 
 
 def _reaching_edges(
-    graph, reached: set[str], bounds: ImpactLimits, deadline: float
+    graph, reached: set[str], bounds: ImpactLimits, stop: _Stop
 ) -> dict[str, dict]:
     """The confirmed edge that first reached each source node, one hop a round."""
     used: dict[str, dict] = {}
@@ -1131,8 +1195,8 @@ def _reaching_edges(
     for _depth in range(bounds.max_depth):
         if not frontier:
             break
-        _check_impact_stop(deadline)
-        frontier = _extend_reach(_edges_into(graph, frontier, bounds, deadline), reached, used)
+        _check_impact_stop(*stop)
+        frontier = _extend_reach(_edges_into(graph, frontier, bounds, stop[0]), reached, used)
     return used
 
 
@@ -1220,8 +1284,8 @@ def analyze_impact(
     """
     bounds = _limits_or_default(limits)
     deadline = _deadline_or_default(deadline, bounds, monotonic)
-    root = repository_top(Path(root).resolve(strict=True), deadline)
     _check_impact_stop(deadline, cancelled)
+    root = repository_top(Path(root).resolve(strict=True), deadline)
     run = _ImpactRun(bounds, deadline, cancelled)
     run.collect(root, comparison=comparison, base=base, target=target, branch=branch)
     run.describe()
@@ -1270,7 +1334,7 @@ class _ImpactRun:
     def collect(self, root: Path, **endpoints) -> None:
         try:
             self.changes = collect_git_changes(
-                root, limits=self.bounds, deadline=self.deadline, **endpoints
+                root, limits=self.bounds, deadline=self.deadline, cancelled=self.cancelled, **endpoints
             )
         except (InvalidRevisionError, TimeoutError):
             raise
@@ -1281,7 +1345,7 @@ class _ImpactRun:
         for change in self.changes:
             _check_impact_stop(self.deadline, self.cancelled)
             change["ranges"] = _changed_ranges(
-                change["old_blob"], change["new_blob"], deadline=self.deadline
+                change["old_blob"], change["new_blob"], deadline=self.deadline, cancelled=self.cancelled
             )
             self.textual_names.update(_textual_symbols(change["old_blob"]))
             self.textual_names.update(_textual_symbols(change["new_blob"]))
@@ -1318,8 +1382,10 @@ class _ImpactRun:
                 graph.close()
 
     def _map_through(self, graph) -> None:
-        self.changed_symbols = _map_symbols(graph, self.changes, self.bounds, self.deadline)
-        self.affected = _affected_nodes(graph, self._reached_ids(graph), self.bounds, self.deadline)
+        self.changed_symbols = _map_symbols(graph, self.changes, self.bounds, self.deadline, self.cancelled)
+        self.affected = _affected_nodes(
+            graph, self._reached_ids(graph), self.bounds, self.deadline, self.cancelled
+        )
         if _has_unsourced_edge(self.affected):
             self.warn("One or more resolved impact edges have no source evidence path.")
         self.textual_names.update(str(item["name"]) for item in self.changed_symbols)
@@ -1343,7 +1409,7 @@ class _ImpactRun:
 
     def _reached_ids(self, graph) -> set[str]:
         symbol_ids = {item["node_id"] for item in self.changed_symbols}
-        return symbol_ids | _project_file_ids(graph, self.changes, self.bounds, self.deadline)
+        return symbol_ids | _project_file_ids(graph, self.changes, self.bounds, self.deadline, self.cancelled)
 
     def classification(self) -> str:
         if self.graph_missing and self.changes:
