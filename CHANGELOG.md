@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A daily log compiled in several parts can be archived: its bag carries `archive-manifest/v2` with one embedded compile receipt per part, and a page quoting one part resolves from the archive by that part's digest; whole-day bags stay `archive-manifest/v1` (audit 2026-09-26 B-1).
 - A compiled page belongs to the project its evidence names: captured session blocks now carry `- Project slug:`, and a new page whose quoted entries all name one project gets `project:` in its frontmatter, so project-scoped rules stop reaching other projects' sessions (audit 2026-09-26 B-14).
 - The guide and the structure notes say what the code does: `index_timestamp` is filled, the update syncs the extras you installed, a hung pass on macOS or cron keeps the fence until it exits, the detached refresh runs once per checkout and commit, and the plain unencrypted `knowledge/` snapshot in `~/llm-wiki-snapshots` is named (audit 2026-09-26 C-14).
 - Doctor knows the coordinator's `aborting` and `aborted` states (an aborting transaction counts as unsettled instead of "a state this runtime does not define"), and the daily `compile-drops-*.jsonl` logs get the same retention as the other maintenance reports (audit 2026-09-26 C-12, two of its parts).

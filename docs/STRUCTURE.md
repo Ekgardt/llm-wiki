@@ -588,7 +588,13 @@ or nonzero active state remains fail-closed.
 - `knowledge/daily/archive/YYYY-MM/bag-<timestamp>-<id>/` — private immutable,
   uncompressed BagIt-style daily-log bags and
   a derived archive index. Archive means move, never delete; evidence resolves by
-  logical ID, source hash, and byte span.
+  logical ID, source hash, and byte span. A day compiled whole carries
+  `archive-manifest/v1` and one embedded `compile-receipt.md`; a day compiled in
+  parts carries `archive-manifest/v2`, whose `compile_parts` list each part's byte
+  span, receipt reference and compile authority, with one embedded
+  `compile-receipt-<n>.md` per part, all in the tag manifest. A page quoting one
+  part resolves from the bag by that part's digest. See
+  `docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md`.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of
