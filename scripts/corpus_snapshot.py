@@ -1028,20 +1028,23 @@ class _Discovery:
         if self.entries > self.max_entries:
             raise ValueError("corpus traversal entry limit exceeded")
 
-    def _directory_excluded(self, path: Path, kind: str) -> bool:
-        """`kind == "code"` means somebody's source tree, so vault nouns do not apply.
+    def _directory_excluded(self, name: str, kind: str) -> bool:
+        """`kind == "code"` means somebody's source tree, so vault nouns do not apply."""
+        return _pruned_directory_name(
+            name,
+            include_archives=self.include_archives,
+            vault_vocabulary=kind != "code",
+        )
 
-        A directory git ignores is pruned at any depth, not only at the top: a
-        nested `web/node_modules` made the whole repository unindexable (audit
+    def _directory_skipped(self, path: Path, kind: str) -> bool:
+        """Pruned by name, or a directory the caller named: git ignores it at any depth.
+
+        A nested `web/node_modules` made the whole repository unindexable (audit
         2026-09-26 A-8).
         """
         if path.relative_to(self.vault).as_posix() in self.pruned_directories:
             return True
-        return _pruned_directory_name(
-            path.name,
-            include_archives=self.include_archives,
-            vault_vocabulary=kind != "code",
-        )
+        return self._directory_excluded(path.name, kind)
 
     def _skip(self, path: Path, kind: str) -> None:
         """Leave one code entry out, by name; anywhere else a strange entry still refuses."""
@@ -1134,7 +1137,7 @@ class _Discovery:
         return None
 
     def _windows_child(self, path: Path, name: str, depth: int, kind: str):
-        if self._directory_excluded(path, kind):
+        if self._directory_skipped(path, kind):
             return None
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")
@@ -1247,7 +1250,7 @@ class _Discovery:
         name: str,
         info: os.stat_result,
     ) -> None:
-        if self._directory_excluded(path, kind):
+        if self._directory_skipped(path, kind):
             return
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")

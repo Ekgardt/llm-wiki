@@ -29,7 +29,7 @@ def _unit(home: Path, kind: str, limit: str | None) -> None:
         ({"status": "updated", "dependencies": "synced", "resources": "current"}, None),
         ({"status": "skipped", "reason": "not_on_default_branch"}, "not on its default branch"),
         ({"status": "error", "reason": "fetch_failed"}, "could not fetch"),
-        ({"status": "updated", "dependencies": "stale", "resources": "current"}, "run `uv sync`"),
+        ({"status": "updated", "dependencies": "stale", "resources": "current"}, "`uv sync --locked --inexact`"),
         ({"status": "updated", "dependencies": "synced", "resources": "rerun_installer"}, "rerun the installer"),
     ],
 )
@@ -58,7 +58,10 @@ def test_no_installed_units_is_not_a_finding(tmp_path: Path, monkeypatch) -> Non
 def test_the_nightly_keeps_what_the_update_did() -> None:
     record = scheduled_nightly.update_record({"status": "skipped", "reason": "not_on_default_branch", "extra": 1})
 
-    assert (set(record), record["reason"]) == ({"status", "reason", "dependencies", "resources", "at"}, "not_on_default_branch")
+    assert (set(record), record["reason"]) == (
+        {"status", "reason", "dependencies", "resources", "resources_since", "at"},
+        "not_on_default_branch",
+    )
 
 
 def test_one_table_sets_every_scheduler_limit() -> None:

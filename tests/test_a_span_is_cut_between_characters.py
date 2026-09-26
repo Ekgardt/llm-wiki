@@ -95,11 +95,11 @@ def test_a_capture_that_loses_the_race_takes_another_pass(monkeypatch, tmp_path)
     attempts = {"n": 0}
     original = corpus_snapshot._capture
 
-    def flaky(root, policy, deadline, cancelled):
+    def flaky(root, policy, deadline, cancelled, pruned=frozenset()):
         attempts["n"] += 1
         if attempts["n"] < 3:
             raise corpus_snapshot.CorpusChanged("corpus source changed during collection")
-        return original(root, policy, deadline, cancelled)
+        return original(root, policy, deadline, cancelled, pruned)
 
     monkeypatch.setattr(corpus_snapshot, "_capture", flaky)
 
@@ -117,7 +117,7 @@ def test_a_vault_that_never_holds_still_is_still_refused(monkeypatch, tmp_path) 
     (vault / "knowledge" / "notes").mkdir(parents=True)
     (vault / "knowledge" / "notes" / "alpha.md").write_text("Alpha.", encoding="utf-8")
 
-    def always_moving(root, policy, deadline, cancelled):
+    def always_moving(root, policy, deadline, cancelled, pruned=frozenset()):
         raise corpus_snapshot.CorpusChanged("corpus source changed during collection")
 
     monkeypatch.setattr(corpus_snapshot, "_capture", always_moving)

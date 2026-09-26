@@ -54,3 +54,13 @@ code root such a file is added to the same `skipped` list, so the receipt counts
 names it. Honest limit: the generation itself does not record the skip, so
 `graph_complete` in a later answer still speaks only of unresolved observations; the
 receipt of the build is where the omission is stated.
+
+## Follow-up (2026-09-26): what the clean run caught
+
+Fact: the full clean run on 7067c686 failed five tests this change broke — two that
+fake `_capture` with its old four-argument signature, and two that hold the
+single definition of the prune rule by calling `_Discovery._directory_excluded(name,
+kind)`. Decision: `_directory_excluded(name, kind)` keeps its signature and meaning;
+the path check is `_directory_skipped(path, kind)`, used by both walks; the fakes take
+the new `pruned` argument. Two B-24 tests held the old advice text and record fields
+and now hold the new ones (docs/research/2026-09-26-an-unfinished-update-stays-named.md).
