@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Reranking recovers after one slow run: a cost that said "does not fit" is tried again as a background trial after five minutes instead of switching the stage off for the life of the server; and without the reranker installed an answer says `reranker_unavailable` instead of a timeout that never happened (audit 2026-09-26 B-16).
 - Doctor judges each check the moment it returns: a store found broken early stays an `error` with its repair advice, instead of reading "not completed" whenever a later check pushed the run past the time budget (audit 2026-09-26 B-19).
 - A question about a folder inside the vault no longer starts a daytime refresh of the vault's code index: the stale-answer check judges the checkout the folder belongs to (audit 2026-09-26 B-10).
 - A day whose log holds two entries written in the same second compiles again: an evidence reference picks the entry that holds its byte span, as the compiler's quote did, instead of refusing every repeated id (the live compile had stopped on 2026-09-25 and every later day waited); a prompt breadcrumb is one line, so a pasted log excerpt can no longer forge an entry (audit 2026-09-26 A-1, B-4).

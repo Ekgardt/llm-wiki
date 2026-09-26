@@ -251,9 +251,12 @@ def test_reranker_receives_real_title_and_content_not_stem_only():
     assert all(t != "a" for t, _ in seen)
 
 
-def test_should_rerank_refuses_only_for_a_named_reason():
+def test_should_rerank_refuses_only_for_a_named_reason(monkeypatch):
     """Every question in a rerank profile is reranked; a refusal names why."""
     import reranker
+
+    # The reranker is installed here; its absence is its own refusal (audit 2026-09-26 B-16).
+    monkeypatch.setattr(reranker, "reranker_installed", lambda: True)
 
     docs = [
         {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},

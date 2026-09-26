@@ -127,6 +127,12 @@ class OptionalStageTimeout(TimeoutError):
 # either direction, and a wrongly skipped stage degrades to the lexical answer,
 # which is the designed fallback rather than a failure.
 _OPTIONAL_STAGE_OBSERVED: dict[str, float] = {}
+# When each cost was observed (monotonic). A cost that said "does not fit" is
+# tried again after this long, as a background trial, so one slow run under load
+# does not switch the stage off for the life of the process (audit 2026-09-26
+# B-16, docs/research/2026-09-26-a-rerank-is-tried-again.md).
+_OPTIONAL_STAGE_OBSERVED_AT: dict[str, float] = {}
+OPTIONAL_STAGE_REPROBE_SECONDS = 300.0
 _OPTIONAL_STAGE_OBSERVED_LOCK = threading.Lock()
 
 
@@ -146,6 +152,16 @@ def _observe_optional_stage(kind: str | None, seconds: float) -> None:
         return
     with _OPTIONAL_STAGE_OBSERVED_LOCK:
         _OPTIONAL_STAGE_OBSERVED[kind] = min(seconds, OPTIONAL_STAGE_MAX_SECONDS)
+        _OPTIONAL_STAGE_OBSERVED_AT[kind] = time.monotonic()
+
+
+def _observed_cost_is_stale(kind: str) -> bool:
+    """Whether the last observed cost is old enough to be tried again."""
+    with _OPTIONAL_STAGE_OBSERVED_LOCK:
+        observed_at = _OPTIONAL_STAGE_OBSERVED_AT.get(kind)
+    if observed_at is None:
+        return False
+    return time.monotonic() - observed_at >= OPTIONAL_STAGE_REPROBE_SECONDS
 
 
 def _observed_optional_stage_cost(kind: str | None) -> float | None:
@@ -2209,9 +2225,16 @@ def _rerank_worker_deadline(stage_deadline: float) -> float:
     """
     if _optional_stage_fits("rerank", stage_deadline):
         return stage_deadline
-    if _observed_optional_stage_cost("rerank") is None:
+    if _rerank_cost_worth_learning():
         return time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS
     raise OptionalStageTimeout("the rerank is known not to fit this window")
+
+
+def _rerank_cost_worth_learning() -> bool:
+    """No cost yet, or one old enough that the model may be warm again."""
+    if _observed_optional_stage_cost("rerank") is None:
+        return True
+    return _observed_cost_is_stale("rerank")
 
 
 def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
