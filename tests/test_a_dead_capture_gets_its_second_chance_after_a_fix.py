@@ -154,6 +154,6 @@ def test_the_nightly_redrives_before_the_queue_worker_runs() -> None:
 
 
 def test_no_readable_head_means_no_redrive_step(monkeypatch) -> None:
-    monkeypatch.setattr(scheduled_nightly, "head_commit_time", lambda: None)
+    monkeypatch.setattr(scheduled_nightly, "head_arrival_time", lambda: None)
 
     assert "dead_capture_redrive" not in [step.label for step in scheduled_nightly._intake_steps()]

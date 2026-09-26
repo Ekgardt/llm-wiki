@@ -246,11 +246,11 @@ QUEUE_STEP_SECONDS = 600
 HEAD_TIME_TIMEOUT_SECONDS = 10
 
 
-def head_commit_time(root: Path = ROOT) -> str | None:
-    """The committer time of the checkout's HEAD, or None when it cannot be read."""
+def _git_line(root: Path, *arguments: str) -> str | None:
+    """One line of a bounded git answer, or None when git cannot give it."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "log", "-1", "--format=%cI", "HEAD"],
+            ["git", "-C", str(root), *arguments],
             capture_output=True,
             text=True,
             timeout=HEAD_TIME_TIMEOUT_SECONDS,
@@ -263,6 +263,20 @@ def head_commit_time(root: Path = ROOT) -> str | None:
     return result.stdout.strip() or None
 
 
+def head_arrival_time(root: Path = ROOT) -> str | None:
+    """When HEAD last moved in this checkout (its reflog), else its commit time.
+
+    The commit time is earlier than the fast-forward that brought the fix here,
+    so captures that died on the old code in between never got their redrive
+    (audit 2026-09-26 B-28,
+    docs/research/2026-09-26-a-fix-arrives-when-the-checkout-moves.md).
+    """
+    selector = _git_line(root, "reflog", "-1", "--date=iso-strict", "--format=%gd", "HEAD")
+    if selector is not None and selector.startswith("HEAD@{") and selector.endswith("}"):
+        return selector[len("HEAD@{") : -1]
+    return _git_line(root, "log", "-1", "--format=%cI", "HEAD")
+
+
 def _dead_capture_redrive_steps() -> list[_Step]:
     """Give dead captures their one redrive once the code changed after they died.
 
@@ -270,7 +284,7 @@ def _dead_capture_redrive_steps() -> list[_Step]:
     night. No readable HEAD means no known code change, so no step. See
     `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
     """
-    changed_after = head_commit_time()
+    changed_after = head_arrival_time()
     if changed_after is None:
         return []
     return [
