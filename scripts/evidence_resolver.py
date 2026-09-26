@@ -1190,18 +1190,25 @@ def _require_utf8(content: bytes, message: str) -> None:
 
 
 def _sole_block_span(content: bytes, ref: EvidenceRef) -> tuple[int, int]:
-    """The one entry this reference names, and proof the span sits inside it."""
-    matching = [item for item in daily_entries(content) if item[0] == ref.block_id]
+    """The one entry with this id that holds the reference's span.
+
+    Two entries written in one second share an id; entries never overlap, so the
+    span picks exactly one of them, as the compiler's quote did. Refusing every
+    repeated id stopped the compile of a whole day and every day after it
+    (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
+    """
+    matching = [
+        (start, end)
+        for block_id, start, end in daily_entries(content)
+        if block_id == ref.block_id and _span_inside(ref, start, end)
+    ]
     if len(matching) != 1:
         raise EvidenceResolutionError("evidence block is ambiguous or missing")
-    _block_id, block_start, block_end = matching[0]
-    _require_span_inside_block(ref, block_start, block_end)
-    return block_start, block_end
+    return matching[0]
 
 
-def _require_span_inside_block(ref: EvidenceRef, start: int, end: int) -> None:
-    if ref.byte_start < start or ref.byte_end > end:
-        raise EvidenceResolutionError("evidence span is outside its block")
+def _span_inside(ref: EvidenceRef, start: int, end: int) -> bool:
+    return start <= ref.byte_start and ref.byte_end <= end
 
 
 def _bag_matches(bag: ValidatedBag, ref: EvidenceRef) -> bool:

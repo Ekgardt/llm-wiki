@@ -229,7 +229,9 @@ def _append_prompt_tag(
         )
 
         ts = datetime.now().strftime("%H:%M:%S")
-        safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
+        # One line: a newline in the prompt started a real daily-log entry
+        # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
+        safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
         block = (
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"
