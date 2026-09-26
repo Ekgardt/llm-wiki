@@ -14,6 +14,7 @@ See knowledge/notes/automatic-code-update-decision.md.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -42,12 +43,13 @@ FETCH_DETAIL_CHARS = 300
 
 # What one update may cost the pass that calls it, by its own timeouts: two
 # fetches (the default branch and the tracked one), the baseline sync, and the
-# thirteen ordinary git calls of a full update — `rev-parse --abbrev-ref`,
+# sixteen ordinary git calls of a full update — `rev-parse --abbrev-ref`,
 # `config --get`, `symbolic-ref`, `rev-parse FETCH_HEAD` twice, `rev-parse HEAD`
-# twice, `merge-base --is-ancestor` twice, three `diff`s and the `merge`. The
+# twice, `merge-base --is-ancestor` twice, four `diff`s, `hash-object`,
+# `cat-file` and the `merge`. The
 # nightly counts this in its own bound instead of leaving the step out of the
 # sum. Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-GIT_CALLS_PER_UPDATE = 13
+GIT_CALLS_PER_UPDATE = 16
 WORST_CASE_SECONDS = (
     2 * FETCH_TIMEOUT_SECONDS
     + SYNC_TIMEOUT_SECONDS
@@ -60,11 +62,12 @@ class SelfUpdateError(RuntimeError):
 
 
 def _run(
-    command: Sequence[str], *, cwd: Path, timeout: float
+    command: Sequence[str], *, cwd: Path, timeout: float, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
         cwd=str(cwd),
+        input=stdin,
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -72,10 +75,19 @@ def _run(
     )
 
 
-def _git(root: Path, *arguments: str, timeout: float = GIT_TIMEOUT_SECONDS) -> str:
-    completed = _run(("git", *arguments), cwd=root, timeout=timeout)
+def _git_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """What git said on stderr, redacted and bounded; its exit code when it said nothing."""
+    from secret_redact import redact_secrets
+
+    said = " ".join(redact_secrets(completed.stderr or "").split())
+    return said[-FETCH_DETAIL_CHARS:] or f"exit {completed.returncode}"
+
+
+def _git(root: Path, *arguments: str, stdin: str | None = None) -> str:
+    """One git call; a failure carries git's own words (audit 2026-09-26 A-9)."""
+    completed = _run(("git", *arguments), cwd=root, timeout=GIT_TIMEOUT_SECONDS, stdin=stdin)
     if completed.returncode != 0:
-        raise SelfUpdateError(f"git {arguments[0]} failed")
+        raise SelfUpdateError(f"git {arguments[0]} failed: {_git_detail(completed)}")
     return completed.stdout.strip()
 
 
@@ -139,8 +151,6 @@ def _synced_dependencies(root: Path, extras: Sequence[str]) -> bool:
 
 def _fetch_failure(root: Path, remote: str, branch: str) -> str | None:
     """None when the fetch worked; otherwise what git said, redacted and bounded."""
-    from secret_redact import redact_secrets
-
     completed = _run(
         ("git", "fetch", "--quiet", remote, branch),
         cwd=root,
@@ -148,8 +158,7 @@ def _fetch_failure(root: Path, remote: str, branch: str) -> str | None:
     )
     if completed.returncode == 0:
         return None
-    said = " ".join(redact_secrets(completed.stderr or "").split())
-    return said[-FETCH_DETAIL_CHARS:] or f"exit {completed.returncode}"
+    return _git_detail(completed)
 
 
 def _update_target(root: Path) -> tuple[str, str] | dict:
@@ -352,9 +361,79 @@ def _resource_state(changed: set[str]) -> str:
     return "current"
 
 
-def _merged_update(root: Path, head: str, fetched: str) -> dict:
+def _present_additions(root: Path, head: str, fetched: str) -> list[str]:
+    """Paths the update adds that already exist, untracked, in the working tree."""
+    added = _diff_paths(root, "--diff-filter=A", f"{head}..{fetched}")
+    return sorted(path for path in added if os.path.lexists(root / path))
+
+
+def _local_blobs(root: Path, paths: list[str]) -> list[str | None]:
+    """Each path's blob id as `git add` would store it; a link or directory is None."""
+    regular = [path for path in paths if _is_regular_file(root / path)]
+    ids = _git(root, "hash-object", "--stdin-paths", stdin="\n".join(regular) + "\n").splitlines()
+    known = dict(zip(regular, ids))
+    return [known.get(path) for path in paths]
+
+
+def _is_regular_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def _fetched_blobs(root: Path, fetched: str, paths: list[str]) -> list[str]:
+    """Each path's object id in the fetched commit, from one `cat-file --batch-check`."""
+    requests = "".join(f"{fetched}:{path}\n" for path in paths)
+    lines = _git(root, "cat-file", "--batch-check=%(objectname)", stdin=requests).splitlines()
+    return [line.strip() for line in lines]
+
+
+def _untracked_copies(root: Path, head: str, fetched: str) -> list[str] | dict:
+    """Untracked files identical to what the update adds, or the outcome that stops it.
+
+    Git refuses a fast-forward that would overwrite an untracked file. A research
+    note written in the vault and merged through a pull request is such a file,
+    byte for byte what the update brings; a file that differs is the owner's and
+    stops the update. See
+    `docs/research/2026-09-26-an-untracked-copy-of-the-update-does-not-stop-it.md`.
+    """
+    present = _present_additions(root, head, fetched)
+    if not present:
+        return []
+    pairs = zip(present, _local_blobs(root, present), _fetched_blobs(root, fetched, present))
+    differing = [path for path, local, incoming in pairs if local != incoming]
+    if differing:
+        return _outcome("skipped", "untracked_files_conflict", paths=differing[:20])
+    return present
+
+
+def _set_aside(root: Path, paths: list[str]) -> dict[str, tuple[bytes, int]]:
+    """Read each identical copy and remove it, keeping what puts it back."""
+    saved = {path: ((root / path).read_bytes(), (root / path).stat().st_mode) for path in paths}
+    for path in paths:
+        (root / path).unlink()
+    return saved
+
+
+def _put_back(root: Path, saved: dict[str, tuple[bytes, int]]) -> None:
+    """A failed merge leaves the tree as it was: each copy set aside returns."""
+    for path, (content, mode) in saved.items():
+        target = root / path
+        if not os.path.lexists(target):
+            target.write_bytes(content)
+            os.chmod(target, mode)
+
+
+def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
+    saved = _set_aside(root, copies)
+    try:
+        _git(root, "merge", "--ff-only", fetched)
+    except SelfUpdateError:
+        _put_back(root, saved)
+        raise
+
+
+def _merged_update(root: Path, head: str, fetched: str, copies: list[str]) -> dict:
     changed = _changed_paths(root, head, fetched)
-    _git(root, "merge", "--ff-only", fetched)
+    _fast_forward_over(root, fetched, copies)
     extras = chosen_extras(root)
     return _outcome(
         "updated",
@@ -375,4 +454,11 @@ def _attempted_update(root: Path) -> dict:
     stopped = _fast_forward(root, head, fetched)
     if stopped is not None:
         return stopped
-    return _merged_update(root, head, fetched)
+    return _update_over_copies(root, head, fetched)
+
+
+def _update_over_copies(root: Path, head: str, fetched: str) -> dict:
+    copies = _untracked_copies(root, head, fetched)
+    if isinstance(copies, dict):
+        return copies
+    return _merged_update(root, head, fetched, copies)
