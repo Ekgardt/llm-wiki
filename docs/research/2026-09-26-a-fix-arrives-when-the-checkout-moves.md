@@ -27,3 +27,11 @@ answer (disabled, pruned), it falls back to the commit time as before.
 - scripts/scheduled_nightly.py
 - tests/test_a_fix_arrives_when_the_checkout_moves.py
 - tests/test_a_dead_capture_gets_its_second_chance_after_a_fix.py
+
+## Follow-up (2026-09-26): git may spell UTC as `Z`
+
+Fact: CI run 36217815665 (linux, Python 3.10) failed with
+`ValueError: Invalid isoformat string: '2026-09-26T04:27:04Z'`: that runner's git
+printed the reflog time with `Z`, which Python 3.10's `datetime.fromisoformat` does
+not read (3.11 does); the local git printed `+00:00`. The same string is passed on as
+`--changed-after`. Decision: `head_arrival_time` returns `+00:00` for a trailing `Z`.

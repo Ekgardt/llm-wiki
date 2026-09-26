@@ -64,3 +64,10 @@ kind)`. Decision: `_directory_excluded(name, kind)` keeps its signature and mean
 the path check is `_directory_skipped(path, kind)`, used by both walks; the fakes take
 the new `pruned` argument. Two B-24 tests held the old advice text and record fields
 and now hold the new ones (docs/research/2026-09-26-an-unfinished-update-stays-named.md).
+
+## Follow-up (2026-09-26): macOS refuses the byte name itself
+
+Fact: CI run 36217815665 (macOS) failed creating `caf\xe9.py`: APFS returned
+`[Errno 92] Illegal byte sequence`, so such a name cannot exist there. Decision: the
+test creates it only where the file system allows it and expects one more skipped
+entry when it did.

@@ -273,8 +273,13 @@ def head_arrival_time(root: Path = ROOT) -> str | None:
     """
     selector = _git_line(root, "reflog", "-1", "--date=iso-strict", "--format=%gd", "HEAD")
     if selector is not None and selector.startswith("HEAD@{") and selector.endswith("}"):
-        return selector[len("HEAD@{") : -1]
+        return _offset_spelling(selector[len("HEAD@{") : -1])
     return _git_line(root, "log", "-1", "--format=%cI", "HEAD")
+
+
+def _offset_spelling(moment: str) -> str:
+    """Git spells UTC `Z`; Python 3.10's `fromisoformat` reads only `+00:00`."""
+    return moment[:-1] + "+00:00" if moment.endswith("Z") else moment
 
 
 def _dead_capture_redrive_steps() -> list[_Step]:
