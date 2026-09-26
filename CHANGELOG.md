@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A call through a package re-export (`from lib import compute as calc` where `lib/__init__.py` re-exports it) now reaches the definition instead of `missing_dependency`, so the live function is not reported dead; code generations are rebuilt under `code-extractor/v15` (audit 2026-09-26 B-6).
 - An install no longer puts the dependencies into a custom `UV_PROJECT_ENVIRONMENT` that timers, hooks and the MCP server never use: the vault always runs from its own `.venv`, and the installer names the ignored setting (audit 2026-09-26 B-26).
 - A knowledge append whose attempt meets a database busy past its timeout repeats the attempt instead of failing the write, and the retry's lineage read waits out the busy database too; this was the Windows `database is locked` failure of concurrent appends (audit 2026-09-26 B-27).
 - An interrupted transaction-image prune is settled by `doctor --repair` as well as by the next prune, and is no longer reported as a damaged or unreadable transaction trail (audit 2026-09-26 B-22).

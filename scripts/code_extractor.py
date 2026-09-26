@@ -39,7 +39,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v14"
+EXTRACTOR_VERSION = "code-extractor/v15"  # v15: calls follow package re-exports (audit 2026-09-26 B-6)
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
@@ -732,6 +732,8 @@ def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, .
 # deep parses fine and then aborted the whole extraction from inside
 # `_call_edges`. Depth is measured iteratively before anything recurses.
 MAX_EXPRESSION_DEPTH = 64
+# A re-export chain is followed this many modules deep, then left unresolved.
+MAX_REEXPORT_HOPS = 8
 _TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
 
 
@@ -922,6 +924,9 @@ class _Collector:
         self.tables: dict[str, list[str]] = {}
         self.routes: dict[tuple[str, str], list[str]] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
+        # (module, exported name) -> (source module, symbol) for a module-level
+        # `from x import y [as z]`: a package's re-export (audit 2026-09-26 B-6).
+        self.reexports: dict[tuple[str, str], tuple[str, str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
         self.function_body_scope: dict[str, str] = {}
         self.function_parent_scope: dict[str, str] = {}
@@ -1211,9 +1216,23 @@ class _Collector:
         self.sqlite_modules[source.record.logical_id] = _sqlite_aliases(tree)
         self.python_entry_names[source.record.logical_id] = self._python_entry_names(tree)
         ctx = _PythonFile(source, _line_offsets(source.content), module_name, module_id)
+        self._record_reexports(ctx, tree)
         self._walk_python(
             ctx, tree.body, _PythonOwner(module_name or "<module>", module_id, False, module_name)
         )
+
+    def _record_reexports(self, ctx: _PythonFile, tree: ast.Module) -> None:
+        """Module-level `from x import y`: what this module hands on under its own name."""
+        for statement in tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.module is not None:
+                self._record_reexport(ctx, statement)
+
+    def _record_reexport(self, ctx: _PythonFile, statement: ast.ImportFrom) -> None:
+        imported = self._absolute_import(
+            ctx.module_name, statement.module or "", statement.level, is_package=ctx.is_package
+        )
+        for exported, target in _from_import_aliases(statement, imported).items():
+            self.reexports.setdefault((ctx.module_name, exported), target)
 
     def _walk_python(self, ctx: _PythonFile, body: list[ast.stmt], owner: _PythonOwner) -> None:
         """Every definition of one scope, including those under an `if` or a `try`.
@@ -2085,11 +2104,36 @@ class _Collector:
         return self._module_candidates(module)
 
     def _symbol_targets(self, module: str, symbol: str) -> list[str]:
+        """The definition, or the one a chain of re-exports hands it on from.
+
+        `from lib import compute as calc` named `lib.compute`, which `lib/__init__.py`
+        only re-exports, so the call was `missing_dependency` and the live function
+        looked dead (audit 2026-09-26 B-6,
+        docs/research/2026-09-26-a-re-export-is-followed-to-its-definition.md).
+        """
+        return self._defined_targets(module, symbol) or self._reexported_targets(module, symbol)
+
+    def _defined_targets(self, module: str, symbol: str) -> list[str]:
         return [
             node_id
             for candidate in self._matching_modules(module)
             for node_id in self.definitions.get((candidate, symbol), ())
         ]
+
+    def _reexported_targets(self, module: str, symbol: str) -> list[str]:
+        seen: set[tuple[str, str]] = set()
+        hop = self._reexport_of(module, symbol)
+        while hop is not None and hop not in seen and len(seen) < MAX_REEXPORT_HOPS:
+            seen.add(hop)
+            targets = self._defined_targets(*hop)
+            if targets:
+                return targets
+            hop = self._reexport_of(*hop)
+        return []
+
+    def _reexport_of(self, module: str, symbol: str) -> tuple[str, str] | None:
+        hops = (self.reexports.get((candidate, symbol)) for candidate in self._matching_modules(module))
+        return next((hop for hop in hops if hop is not None), None)
 
     def _scoped_targets(self, name: str, module_name: str, owner: ast.AST) -> list[str]:
         """The innermost enclosing scope that defines `name`, falling back to module level."""
