@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = "repository-index/v1"
+from repository_refusal import SCHEMA_VERSION, RepositoryIndexRefused  # noqa: E402
 
 # A listing names repositories, not files. 128 is far above the number of
 # repositories one operator keeps on one machine and far below MAX_GENERATIONS.
@@ -53,24 +53,6 @@ MAX_INDEXED_SOURCES = 20_000
 MAX_CODE_ROOTS = 128
 GIT_TIMEOUT_SECONDS = 10.0
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
-
-
-class RepositoryIndexRefused(ValueError):
-    """A named, fail-closed refusal. `reason` is stable; the message explains."""
-
-    def __init__(self, reason: str, message: str, **details: object) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.details = details
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "status": "refused",
-            "reason": self.reason,
-            "message": str(self),
-            **self.details,
-        }
 
 
 def _refuse(reason: str, message: str, **details: object) -> RepositoryIndexRefused:
