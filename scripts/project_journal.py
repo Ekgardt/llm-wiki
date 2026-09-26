@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
+from iso_time import utc_text
 from markdown_transaction import (
     ABSENT,
     MarkdownChange,
@@ -708,7 +709,7 @@ def _utc_now() -> datetime:
 def _timestamp(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("project lease times must be timezone-aware")
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_text(value)
 
 
 def _parse_timestamp(value: str) -> datetime:

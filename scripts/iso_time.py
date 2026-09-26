@@ -26,3 +26,13 @@ def parse_instant(text: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def utc_text(value: datetime) -> str:
+    """A stored instant whose text order is its time order: UTC, six fraction digits, `Z`.
+
+    SQL compares these as text. `isoformat()` drops the fraction on a whole
+    second, and `Z` sorts after `.`, so `…:00Z` read as later than `…:00.5Z`.
+    Research: docs/research/2026-09-26-every-stored-instant-has-one-width.md
+    """
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")

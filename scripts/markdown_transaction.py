@@ -40,6 +40,7 @@ from claim_tree_manifest import (
     validate_claim_tree_manifest,
     validate_guardrail_source_manifest,
 )
+from iso_time import utc_text
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     DEFAULTS,
@@ -2840,7 +2841,7 @@ def _require_live_intent_fence(
             intent_fence.mode,
             intent_fence.token,
             intent_fence.epoch,
-            now.isoformat().replace("+00:00", "Z"),
+            utc_text(now),
         ),
     ).fetchone()
     if row is None:
@@ -2905,7 +2906,7 @@ def _insert_binding_projection(
             binding.task_id,
             binding.active_digest,
             binding.seal_digest,
-            now.isoformat().replace("+00:00", "Z"),
+            utc_text(now),
             intent_fence.token,
             intent_fence.epoch,
         ),
@@ -4524,16 +4525,15 @@ def append_captured_knowledge(
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_text(datetime.now(timezone.utc))
 
 
 def _future_timestamp(seconds: float) -> str:
-    value = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-    return value.isoformat().replace("+00:00", "Z")
+    return utc_text(datetime.now(timezone.utc) + timedelta(seconds=seconds))
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_text(value)
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -4990,8 +4990,8 @@ class MarkdownCoordinator:
                     owner.epoch,
                     owner.process.pid,
                     owner.process.start_identity,
-                    now.isoformat().replace("+00:00", "Z"),
-                    expires_at.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
+                    utc_text(expires_at),
                 ),
             ).rowcount
             if inserted != 1:
@@ -5102,8 +5102,8 @@ class MarkdownCoordinator:
                      AND canonical_owner_token=? AND canonical_fencing_epoch=?
                      AND process_id=? AND process_start_identity=? AND expires_at>?""",
                 (
-                    now.isoformat().replace("+00:00", "Z"),
-                    expires_at.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
+                    utc_text(expires_at),
                     fence.intent_id,
                     fence.mode,
                     fence.token,
@@ -5112,7 +5112,7 @@ class MarkdownCoordinator:
                     owner.epoch,
                     owner.process.pid,
                     owner.process.start_identity,
-                    now.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
                 ),
             ).rowcount
             if renewed != 1:
@@ -6707,7 +6707,7 @@ class MarkdownCoordinator:
                 database,
                 intent_fence,
                 active_link_digest,
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                utc_text(datetime.now(timezone.utc)),
                 "aborting",
                 "abort_final_verification_failed",
                 "abort final verification failed",
@@ -6754,7 +6754,7 @@ class MarkdownCoordinator:
         before_manifest = self._abort_before_manifest(transaction_id)
         manifest_sha256 = sha256_bytes(canonical_json_bytes(before_manifest))
         chosen_at = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            utc_text(datetime.now(timezone.utc))
         )
         direction = _AbortDirection(
             _abort_identity(
@@ -8991,7 +8991,7 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_text(datetime.now(timezone.utc))
         row = database.execute(
             """SELECT 1 FROM intent_fences AS fence
                JOIN capture_binding_projections AS binding

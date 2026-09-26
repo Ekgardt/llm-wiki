@@ -1007,7 +1007,7 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
         checkpoints[0]["delta"]["current_task"],
         checkpoints[0]["delta"]["current_task_operations"],
     ) == (
-        ordinary_event_at.isoformat().replace("+00:00", "Z"),
+        "2026-07-13T12:00:01.000000Z",
         [],
         1,
         integration_adapter._batch_occurrence_id([ordinary.event_id]),
