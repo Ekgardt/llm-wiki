@@ -5,113 +5,48 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
-**A local-first memory system for AI agents. Markdown files, git-tracked, and owned by you.**
+**One local memory for all your AI coding agents — plain Markdown on your disk, in Git, owned by you.**
 
-LLM Wiki gives every AI coding agent you use — Claude Code, OpenCode, Codex — one MCP-first interface to a shared, persistent knowledge base. MCP handles reads and actions; thin native lifecycle adapters capture session events that MCP cannot observe. Durable knowledge survives across sessions so you never re-explain the same thing twice.
+Claude Code, Codex and OpenCode each forget everything when a session ends. LLM Wiki
+records what happened in every session, distils it overnight into short knowledge
+pages, and gives the next session — in any of those agents — the decisions, lessons
+and project state it needs. You stop explaining the same thing twice.
 
-Everything lives on your disk as plain markdown: readable in Obsidian, diffable in git, owned entirely by you.
-
-Storage, capture, MCP, and retrieval are local. Model-backed classification and
-compilation use the configured provider: OpenCode, Codex, Claude, and OpenAI may use
-cloud services; Ollama may be local. Auto-detection is not a local-only guarantee.
+Storage, capture, search and the MCP server run locally. Turning sessions into pages
+needs a language model: the one you configure, or the first one found among OpenCode,
+Codex, Claude, OpenAI and Ollama. Only Ollama is local; the others are cloud services,
+so auto-detection is not a local-only guarantee. Current version: **5.0.0**.
 
 **Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
-
----
-
-## Table of Contents
-
-- [How it works](#how-it-works)
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Wire up your agents](#wire-up-your-agents)
-- [Architecture](#architecture)
-- [Evidence generations and migration](#evidence-generations-and-migration)
-- [Benchmark](#benchmark)
-- [Comparison](#comparison)
-- [Contributing](#contributing)
-- [Credits](#credits)
-- [License](#license)
 
 ---
 
 ## How it works
 
 ```
-Your agent reads and acts through the local MCP server
-             ↓
-Thin hooks/plugins send lifecycle events through integration_adapter.py
-             ↓
-Background compile distills daily logs into durable knowledge pages
-(with VERIFY-BEFORE-WRITE — citations are checked, not trusted)
-             ↓
-Next session: guardrails + advisory + metacognitive context auto-injected
-             ↓
-Agent picks up where you stopped — no re-explaining, no repeated mistakes
+You work with an agent as usual
+      ↓  thin hooks send each session event to integration_adapter.py
+Session record  →  knowledge/raw/sessions/<date>/  (redacted, kept for every session)
+Daily log       →  knowledge/daily/<date>.md
+      ↓  compile (at session start when idle, and every night)
+Knowledge pages →  knowledge/notes/<slug>.md   (every quote checked against its source)
+      ↓
+Next session, in any agent: learned rules, open threads, last decision,
+project state — and 12 task-shaped MCP tools to ask the memory anything
 ```
 
-The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)): raw session signals are captured in real time, then a background LLM pass compiles them into structured knowledge pages rather than relying on raw retrieval at query time.
+The idea is "compile, not retrieve" ([Karpathy, April 2026](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)):
+instead of searching raw transcripts at question time, a background pass turns them
+into structured pages once, and the agent reads those.
 
----
+A day at work, as the system sees it:
 
-## Features
-
-### Capture pipeline
-- **Thin lifecycle adapters**: Claude Code and Codex hooks plus the OpenCode plugin normalize events through `integration_adapter.py`
-- **3-tier session classification**: FLUSH_MAJOR (decisions/lessons → triggers compile), FLUSH_MINOR (gotchas → save only), FLUSH_OK (chatter → skip)
-- **Non-LLM breadcrumbs** — prompt + tool-usage tagging at ms-latency, no API calls
-- **Secret redaction** — API keys, tokens, long base64 stripped before any write
-
-### Agent-native interface
-- **MCP-first access** — 12 task-shaped local tools for recall, context, decisions, maintenance, code intelligence, and `doctor`
-- **Uniform response envelope** — every tool reports schema version, freshness, evidence quality, warnings, and data; MCP resources expose health and context
-- **Automatic health** — SessionStart stays quiet when healthy and injects only degraded/error findings; `doctor(repair=true)` limits repairs to safe, idempotent local actions
-
-### Compile pipeline
-- **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
-- **Fail-closed model boundary** — prompts are redacted before transport; sensitive provider output and invalid required DLP policy block publication
-- **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
-- **Semantic dedup with quarantine** — update is preferred over create; uncertain or evaluator-disputed contradictions are quarantined and automatic semantic supersession remains disabled
-- **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
-- **Concurrency-safe** — PID lock with stale detection; only one compile runs at a time
-- **Persistent task queue** — offline-tolerant; deferred LLM work drains on next session
-
-### Search and retrieval
-- **Generation-consistent retrieval**: one validated immutable generation can bind FTS, vectors, graph, tiers, and evidence to the same source snapshot
-- **Truthful retrieval traces**: results report requested/effective mode, signals actually used, generation, reranker state, and fallback reason
-- **Triple-fusion when available**: BM25 (FTS5) + Vector (multilingual E5 on ONNX Runtime) + evidence-backed Graph-neighbor RRF
-- **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
-- **Title + filename boost** — exact filename match short-circuits to rank 1
-- **Typed-provenance ranking** — one weight table (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) multiplies the score that decides the order on every path: BM25, fused RRF, and reranked
-- **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
-- **Local retrieval modes** — direct page reads at small scale, the evidence generation's FTS5 BM25 as the base (a direct Markdown read until the first generation is built), optional vectors + graph, and a multilingual cross-encoder reranker on by default for hybrid retrieval
-- **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
-
-### Proactive intelligence
-- **Guardrails** — auto-injects learned corrections at SessionStart (prevents repeating mistakes)
-- **Advisory** — surfaces open threads, last decision, lint alerts, cross-project insights
-- **Metacognitive context** — vault inventory, compile backlog, flush tier distribution
-- **Feedback capture** — detects corrections/preferences in transcripts, saves as promotion candidates
-
-### Multi-project and multi-agent
-- **One vault, many projects** — 5-step collision-safe slug system, per-project `state.md`
-- **Project bootstrap** — auto-generates context from git history, README, tech stack
-- **Blackboard protocol** — parallel agents claim tasks, signal completion, detect conflicts
-- **Loop detector** — flags repeated edit cycles (fix → review → redo)
-- **Agent timeline** — attribution: which agent decided what and when
-
-### Maintenance
-- **17 lint checks (16 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, stale compiles, missing backlinks, sparse pages, missing frontmatter, unreadable frontmatter, missing or invalid type, missing sources, invalid supersede chains, orphan gaps, temporal validity, unresolvable evidence, invalid claim schema, contradictions
-- **Type-aware archive** — debugging 60d, patterns 180d, decisions never
-- **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, LaunchAgent on macOS, user systemd on Linux; cron is an explicit degraded fallback)
-- **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
-
-### Infrastructure
-- **5 LLM backends** (auto-detected): OpenCode (with `OPENCODE_SERVER_PASSWORD`) → Codex → Claude CLI → OpenAI → Ollama
-- **Cross-platform**: Windows, macOS, Linux, WSL2
-- **Local and zero-daemon** — the installed baseline includes the MCP package; vector search remains optional
-- **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 through 3.14
-- **Pre-commit hooks (opt-in)**: ruff (static analysis) + structural lint + gitleaks (secret scanning). Opt-in; the installer does not activate these hooks. Enable them with `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
+- You fix a bug with Claude Code and say "never use the legacy API here again".
+  The session is recorded; that night the correction becomes a rule page.
+- The next morning you open Codex in the same repository. Its first message already
+  carries the rule, the project's open threads and yesterday's decision.
+- You ask "why did we drop LanceDB?". The agent calls `recall` and answers with the
+  decision page and the exact lines of the session it came from.
 
 ---
 
@@ -119,21 +54,19 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 ### Prerequisites
 
-- Python 3.10+
-- git
+- Python 3.10+ and git
 - [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
-- An AI agent you already use (Claude Code, OpenCode, or Codex)
+- An agent you already use: Claude Code, Codex or OpenCode
+- Node 22 only if you want precise TypeScript or Python navigation (see below)
 
-### Source install
+### Install
 
-The recommended path is still to clone and inspect the source before installing:
+Clone and read the source first, then run the installer from that checkout:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 ```
-
-After inspection, run the installer from that checkout:
 
 **macOS / Linux / WSL2:**
 ```bash
@@ -146,57 +79,33 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-The installer also supports remote bootstrap only when `LLM_WIKI_COMMIT` is an exact
-40-hex commit OID. Pipe the installer from a trusted location while setting that value;
-the bootstrap fetches that exact commit, verifies `HEAD`, repository identity, and required
-files, then executes only the checked-out installer. Branch and tag names are rejected.
-The verified commit becomes the local `main` branch tracking `origin/main`, so the nightly
-fast-forward update reaches this vault like a cloned one; `git -C ~/LLM-wiki checkout --detach`
-freezes it at the current commit.
+The installer builds the vault's own `.venv` from the exact lock, installs the pinned
+search models, runs a bounded production smoke test, wires every agent it finds,
+registers the nightly and weekly passes, and builds the first search index. It prints
+what it did for each agent and whether anything still needs your hand.
 
-The local installer syncs the locked production baseline, runs a bounded production smoke,
-creates runtime directories, and wires supported agents. The full regression suite remains
-a separate development and release gate. Existing checkouts keep all Git remote settings;
-pass `--protect-push` or `-ProtectPush` to replace every remote's push URLs with `no-push`.
-
-### Verifying a release
-
-A published release states the exact commit the remote bootstrap accepts —
-branch and tag names are rejected — together with the SHA-256 of every file the
-bootstrap runs. Print them for any tag from a local checkout:
+A remote bootstrap is supported only for an exact commit: set `LLM_WIKI_COMMIT` to a
+full 40-character commit OID and pipe the installer from a trusted location. Branch
+and tag names are refused. Every release lists its commit and the SHA-256 of each file
+the bootstrap runs:
 
 ```bash
 uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
-Install that exact commit:
+### Check it
 
 ```bash
-git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
-bash ./install.sh
+uv run python scripts/doctor.py
+uv run python scripts/search_memory.py "auth"
 ```
 
-### Shared HTTP transport (optional)
-
-The MCP server speaks stdio by default: every agent starts its own process. If
-you run several agents at once, one shared local server is cheaper — measured
-on this vault, a marginal agent costs 1220.3 MiB through stdio and 0.1 MiB
-through the shared server, and a new session answers in 0.010-0.013 s instead
-of 1.3-2.9 s. A single call costs 8-22 ms more, so for one agent stdio still
-wins.
-
-```bash
-uv run python scripts/mcp_http.py --port 8931
-```
-
-It binds literal loopback only, refuses any `Origin`, and requires the bearer
-token it writes to `<state root>/run/mcp-http/token` with mode 0600. stdio is
-unchanged and remains the default.
+`doctor` is read-only and says what is healthy, degraded or broken, and what to run.
 
 ### Dependency profiles
 
-MCP is part of the production baseline; `mcp-server` remains a compatibility alias. Fresh
-production installs use the exact lock without development groups:
+MCP is part of the production baseline; `mcp-server` remains a compatibility alias.
+The installer does this for you; by hand:
 
 ```bash
 uv sync --locked --no-default-groups
@@ -204,150 +113,171 @@ uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
 
-The repair command is read-only by default and reports fresh, upgrade-required,
-partial, adopted, or conflicting Reliability V3 evidence without creating `run/`.
-With the offline apply flags (`--apply --adopt-ownership-v3
---confirm-all-agents-stopped`) it performs the v3 cutover on a fresh or quiescent
-vault; the installer runs it on a fresh vault, because session capture is refused
-until adoption has happened (issue #17). A vault that already holds the earlier
-queue is adopted only when you tell the installer yourself that no agent is
-running (`--confirm-all-agents-stopped`, PowerShell `-ConfirmAllAgentsStopped`);
-otherwise the installer names the command and leaves the queue alone. It never
-deletes `run/`, knowledge, retired databases, legacy caches, or compatibility
-markers.
+The repair command is read-only by default. On a fresh or quiet vault the installer
+runs it with `--apply --adopt-ownership-v3 --confirm-all-agents-stopped` to move the
+runtime to its current database format; on a vault that already holds work it asks you
+to confirm that no agent is running first. It never deletes knowledge or `run/`.
 
-Optional extras are additive and preserve packages already selected by the operator:
+Optional extras add to what is installed and keep what you already chose:
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid
-uv sync --locked --no-default-groups --inexact --extra code-graph
+uv sync --locked --no-default-groups --inexact --extra hybrid      # vectors + reranker
+uv sync --locked --no-default-groups --inexact --extra code-graph  # code index
 ```
 
-Contributors install the locked development group and run the full regression suite without
-an implicit sync:
+Contributors install the development group and run the full regression suite:
 
 ```bash
 uv sync --locked
 uv run --locked --no-sync pytest -q
 ```
 
-Node 22 is optional and is needed only for qualified precise Python navigation with Pyright.
+Pre-commit hooks (ruff, structural lint, gitleaks) are available.
+Opt-in; the installer does not activate these hooks:
+`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
-### Verify it works
+---
+
+## Agents
+
+| Agent | Status | How it is wired |
+|-------|--------|-----------------|
+| **Claude Code** | Automatic when the settings merge verifies | MCP server + hooks in `settings.json`: seven lifecycle events go to `integration_adapter.py`, two hooks add code-graph hints to searches and subagents |
+| **Codex CLI** | Automatic when its configuration verifies; approve the hooks once in `/hooks` | MCP server + seven lifecycle hooks |
+| **OpenCode** | Automatic when its configuration verifies | MCP server + a thin JS lifecycle plugin |
+| **Obsidian** | Viewer only | An optional Obsidian viewer: open the vault folder; nothing to install |
+
+Cursor and Antigravity were retired on 2026-08-26; the installer no longer detects or
+configures them, and `uninstall` still takes back hooks an earlier install wrote.
+
+All agents share one vault: a decision recorded in Claude Code is in Codex's next
+session.
+
+### The MCP interface
+
+The local MCP server exposes **12 task-shaped tools**: `recall`, `read_page`,
+`wiki_overview`, `vault_status`, `get_decisions`, `get_context`,
+`check_contradiction`, `log_decision`, `compile`, `find_dead_code`,
+`get_architecture` and `doctor`. Every answer comes in one envelope that states its
+schema version, freshness, evidence quality and warnings, and two resources expose
+health and context. A session start stays silent when everything is healthy and
+injects only degraded or broken findings. `doctor(repair=true)` limits itself to safe,
+idempotent local repairs.
+
+The server speaks stdio by default. When several agents run at once, one shared local
+server is cheaper:
 
 ```bash
-uv run python scripts/search_memory.py "auth"
-uv run python scripts/lookup_mode.py
+uv run python scripts/mcp_http.py --port 8931
 ```
+
+It binds literal loopback only, refuses any `Origin`, and requires the bearer token it
+writes to `<state root>/run/mcp-http/token` with mode 0600.
 
 ---
 
-## Wire up your agents
+## What you get
 
-LLM Wiki detects installed agents during install and reports whether integration is automatic or still requires a manual step:
+**Capture that never loses a session.** Every session writes a redacted record of
+itself — the conversation, one line per tool call, a subagent's report — before any
+judgement about its value. A classifier then decides whether it also deserves a
+compiled page. Secrets (keys, tokens, passwords in URLs and commands) are removed
+before anything is written.
 
-| Agent | Status | Integration | How |
-|-------|--------|-------------|-----|
-| **OpenCode** | Automatic when configuration verifies | MCP + thin JS lifecycle plugin | MCP provides reads/actions; the plugin forwards lifecycle events to `integration_adapter.py` |
-| **Codex CLI** | Automatic when configuration verifies; review hook trust in `/hooks` | MCP + official lifecycle hooks | MCP provides reads/actions; hooks forward lifecycle events |
-| **Claude Code** | Automatic when settings merge verifies | MCP + thin settings.json hooks | MCP provides reads/actions; five hooks forward lifecycle events |
-| **Obsidian** | Viewer only | Optional Markdown viewer | Open the vault directly; no Obsidian UI or ingestion feature is required |
+**Pages you can trust.** Compile turns daily logs into typed pages (decision, pattern,
+debugging, concept…) with YAML frontmatter. Python checks every quote against the
+source line and its digest before a page is written; a second model pass reviews each
+change and drops weak ones. A contradiction with an existing page is recorded, not
+overwritten: the old page is marked `superseded`, and uncertain cases wait in
+quarantine. Every write is a recoverable transaction with a two-day undo.
 
-Cursor and Antigravity were retired on 2026-08-26; the installer no longer detects or configures them,
-and `uninstall` still takes back hooks an earlier install wrote.
-All agents share the same vault — a decision recorded by Claude Code is visible to OpenCode in its next session.
+**Context at session start.** Learned rules from your corrections, open threads, the
+last decision, lint alerts and insights from other projects, scoped to the project you
+are in: a page compiled from one project's sessions carries `project:` and does not
+reach another project's sessions.
 
-### Optional: semantic search
+**Search that says how it answered.** Lexical search (BM25) is the base; the `hybrid`
+extra adds multilingual vectors (`intfloat/multilingual-e5-small` on ONNX Runtime)
+and a cross-encoder reranker (`BAAI/bge-reranker-v2-m3`), and relation questions add
+the evidence graph. Ranking weighs where a claim came from (you, the web, a model, a
+guess) and what kind of page holds it. Every answer reports the mode it asked for, the
+signals it actually used, and why it fell back. Until the first index is built, search
+reads the Markdown directly and says so.
 
-For hybrid BM25 + Vector search (finds semantically related pages even when keywords don't match):
+**Many projects, one vault.** Each repository gets a project folder with its state,
+context and an append-only journal; a new project is bootstrapped from its Git history
+and README on first sight.
 
-```bash
-uv sync --locked --no-default-groups --inexact --extra semantic
-```
+**Maintenance that runs itself.** A nightly pass updates the code (fast-forward only,
+never pushes, declines when it would touch a file you changed), works the queue,
+compiles, refreshes the search index, keeps a local Git snapshot of `knowledge/`, and
+reports health. A weekly pass lints (17 checks), archives old daily logs, and migrates
+frontmatter. Windows uses Task Scheduler, macOS a LaunchAgent, Linux a user systemd
+timer; cron is an explicit degraded fallback.
 
----
-
-## Architecture
-
-```
-CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
-KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox}
-RUNTIME       cache/  logs/  run/   (gitignored, inside vault)
-```
-
-- **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
-- **KNOWLEDGE** — your memory; the repository ships it empty. Every page and daily log is gitignored, only the READMEs are tracked.
-- **RUNTIME** — gitignored. Search indexes and logs are disposable; transactions, queue state, and undo images under `run/` are operational state.
-- **Authority boundary** — Markdown, Git history, and append-only project journals are authoritative. FTS, vectors, Evidence Graph databases, tiers, telemetry, and model caches are derived and rebuildable.
-
-Full design rationale (7 axioms, system architecture diagram, memory taxonomy, search architecture) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-For the canonical structure reference (what lives where, env contracts, forbidden layouts), see [docs/STRUCTURE.md](docs/STRUCTURE.md).
-
----
-
-## Evidence generations and migration
-
-`cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
-
-Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild (`uv run python scripts/doctor.py --rebuild-generation`) before expecting generation-backed retrieval. The generation is the only index: the legacy `cache/index.sqlite`, `cache/vectors.npy`, and `cache/vectors_meta.json` were retired on 2026-09-23 and are read by nothing. Until a generation exists, memory search reads Markdown directly within its deadline and every hit says `no_active_generation`; a code answer names its own reason, `no_generation` when the repository has none, or `generation_unreadable:<ExceptionClass>` when it has one that could not be opened. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
-
-The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. The defaults are `intfloat/multilingual-e5-small` for vectors and `BAAI/bge-reranker-v2-m3` for reranking, both pinned; replacing either needs the matrix's evidence, which is pending. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
-
-Real Graphify comparison and model-superiority evidence are pending. The deterministic comparative smoke validates orchestration only and supports no quality or token-ratio claim.
-
-See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for activation, recovery, rollback, citation, and exact MCP behavior details.
+**Code intelligence.** `get_architecture` and `find_dead_code` answer from a code index
+of your repositories; precise definitions, references, callers and diagnostics come
+from pinned language servers (see [Code navigation](#code-navigation)).
 
 ---
 
-## Reliable memory operations
+## Where things live
 
-Markdown remains authoritative. Runtime SQLite coordinates recoverable writes and queued work but is not a knowledge source. Operational databases use rollback-journal mode, `synchronous=FULL`, and no WAL on the current SQLite runtime. Keep the state root on a local filesystem; network paths are rejected and cloud-synchronized folder detection is best-effort.
+```
+CODE        scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
+KNOWLEDGE   knowledge/{daily,notes,projects,raw,inbox}
+RUNTIME     cache/  logs/  run/        (inside the vault, never committed)
+```
+
+- **Code** is this repository.
+- **Knowledge** is your memory. The repository ships it empty: every page, daily log and
+  session record is denied by `.gitignore`, and only the READMEs are tracked. Publishing
+  a page is a deliberate act.
+- **Runtime** is gitignored. `cache/` and `logs/` can be deleted and rebuilt; `run/`
+  holds transactions, the queue and undo history and follows the deletion rules in
+  [docs/STRUCTURE.md](docs/STRUCTURE.md).
+- **Authority.** Markdown, Git history and project journals are the truth. Search
+  indexes, vectors, the evidence graph and telemetry are derived and rebuildable.
+
+Design rationale: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Day-to-day operation,
+recovery and backup: [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+
+---
+
+## Keeping memory safe
+
+The operational databases use rollback journaling with `synchronous=FULL`; keep the
+state root on a local disk (network paths are refused). Queue delivery is at least
+once, so every handler is idempotent.
 
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
-uv run python scripts/doctor.py --time-budget 60
+uv run python scripts/doctor.py --rebuild-generation
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
-uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
-uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
-uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
-uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution; the weekly pass runs that archiver, so the command above is the manual form of scheduled work. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
+Daily logs older than 90 days move into verified, uncompressed BagIt packages (the
+weekly pass does this); evidence that quotes them still resolves. For a copy that
+survives a lost disk, the vault has an encrypted Restic backup with staged restore;
+the nightly Git snapshot of `knowledge/` is local and not encrypted. See the backup
+section of [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 
-## Benchmark
+## Code navigation
 
-The retrieval gate is the frozen, public, synthetic `benchmark/retrieval-v2.json`
-corpus: multilingual pages with graded evidence, distractors, temporal history
-and abstention cases, run by `benchmark/run_retrieval_v2.py`. Long-horizon
-memory is measured on the LongMemEval stand (`benchmark/run_longmemeval.py`).
-The historical BM25 gates over the pages this repository used to ship
-(112 generated queries, 60 frozen ones) were retired on 2026-09-10 together
-with those pages; their last numbers are in `benchmark/baseline-2026-07-16.md`.
-Competitor figures elsewhere use different datasets and are not comparable.
-
-Run retrieval-v2: `uv run python benchmark/run_benchmark.py`
-
-### MCP agent interface
-
-The local stdio MCP server exposes **12 task-shaped tools**, including `doctor`, with one response envelope and health/context resources. `find_dead_code(directory)` returns conservative candidates, while `get_architecture(directory)` reports entry points, routes, canonical-symbol hotspots, and communities. Filesystem analysis requires an explicit existing non-root directory and never falls back to the process CWD.
-
-Precise modes `definition`, `references`, `implementations`, `type`,
-`diagnostics`, and positioned `callers`/`callees` use four pinned managed language
-servers — **Pyright 1.1.411** (Python), **typescript-language-server 6.0.0** with
-tsserver 5.9.3 (TypeScript/JavaScript), **gopls v0.23.0** (Go, built from the pinned
-Go 1.27.1 toolchain) and **rust-analyzer 1.98.1** (Rust, with its pinned Rust
-toolchain). Install each explicitly; queries never download or update them:
+Precise modes — `definition`, `references`, `implementations`, `type`,
+`diagnostics`, and positioned `callers`/`callees` — use four pinned language servers:
+**Pyright 1.1.411** (Python), **typescript-language-server 6.0.0** with tsserver 5.9.3
+(TypeScript/JavaScript), **gopls v0.23.0** (Go) and **rust-analyzer 1.98.1** (Rust).
+Each is installed explicitly; a query never downloads anything:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
@@ -356,51 +286,63 @@ uv run python scripts/install_language_server.py --profile gopls --state-root "$
 uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-This path supports **trusted local repositories** only and is **not an OS sandbox**.
-See [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md) for positions, deadlines,
-freshness, containment, and qualification limits.
+A file no server claims answers `unsupported`; a server that is missing or failing
+degrades the answer to the code index instead of failing it.
+This path is for trusted local repositories and is not an OS sandbox. Details:
+[docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md).
 
 ---
 
-## Comparison
+## Search index
 
-| Capability | LLM Wiki | agentmemory | ReMe | akitaonrails |
-|------------|----------|-------------|------|--------------|
-| Markdown-first | Yes | No | Yes | Yes |
-| Multi-agent (3+ tools) | Yes (3) | Yes (32+ via MCP) | Claude only | Yes (12+) |
-| IDE support | optional Obsidian viewer | No | No | No |
-| Compile-not-retrieve | Yes | No | No | No |
-| VERIFY-BEFORE-WRITE | Yes | No | No | No |
-| Guardrails (learned corrections) | Yes | No | No | No |
-| Blackboard coordination | Yes | No | No | No |
-| Loop detection | Yes | No | No | No |
-| Agent timeline | Yes | No | No | No |
-| Feedback learning | Yes | No | No | No |
-| Local / zero-daemon | Yes | No (Docker) | No (pip) | No (Rust) |
-| Temporal validity (`valid_to`) | Yes | No | No | No |
-| Typed provenance ranking | Yes | No | No | No |
+`cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under
+`cache/evidence-graph/generations/<generation-id>/`: the full-text index, vectors,
+evidence graph and tiers built from one snapshot of your pages. A new generation is
+activated only after its manifest, hashes, databases and evidence spans validate; a
+failed build leaves the previous one active. The installer builds the first
+generation, the nightly refreshes it, and
+`uv run python scripts/doctor.py --rebuild-generation` rebuilds it on demand.
+Deleting `cache/evidence-graph/` loses nothing but time.
+
+---
+
+## Benchmark
+
+Retrieval is gated on the frozen public synthetic corpus
+`benchmark/retrieval-v2.json` — multilingual pages with graded evidence,
+distractors, temporal history and questions that must be refused:
+
+```bash
+uv run python benchmark/run_benchmark.py
+```
+
+Long-horizon memory is measured on LongMemEval (`benchmark/run_longmemeval.py`), and
+contradiction handling on its own frozen corpus:
+
+```bash
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+No comparison with other memory systems is claimed here: their published numbers use
+different datasets.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. The bar is "does this survive contact with an actual multi-agent workflow?"
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Release checklist (README i18n sync, CHANGELOG, version bump)
-- Coding standards (ruff, pytest, pre-commit)
-- How to add a new agent integration
+Contributions are welcome. The bar is "does this survive a real multi-agent
+workflow?". See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, coding standards and the
+release checklist (the three READMEs, CHANGELOG and version change together).
 
 ---
 
 ## Credits
 
 - [Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — the "compile, not retrieve" pattern
-- [Harrison Chase's "Wiki Memory"](https://blog.langchain.dev/wiki-memory/) — agent-maintained files
-- [Google's OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — vendor-neutral markdown knowledge format
-- [Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — capture/compact/subagent patterns
-- [VEP Semantic DNA](https://vep.live) — confidence/supersede/temporal lifecycle
+- [Harrison Chase, "Wiki Memory"](https://blog.langchain.dev/wiki-memory/) — agent-maintained files
+- [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — vendor-neutral Markdown knowledge format
+- [Anthropic, effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — capture, compact and subagent patterns
+- [VEP Semantic DNA](https://vep.live) — confidence, supersede and temporal lifecycle
 
 ---
 

@@ -5,136 +5,69 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
-**Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git и полный контроль пользователя.**
+**Одна локальная память для всех ваших AI-агентов — обычный Markdown на вашем диске, в Git, принадлежит вам.**
 
-LLM Wiki даёт каждому AI-агенту, которым вы пользуетесь — Claude Code, OpenCode, Codex — единый MCP-first интерфейс к общей постоянной базе знаний. MCP отвечает за чтение и действия, а тонкие нативные lifecycle-адаптеры фиксируют события сессии, которые MCP не видит. Знания сохраняются между сессиями, поэтому вам не приходится заново объяснять одно и то же.
+Claude Code, Codex и OpenCode забывают всё, когда сессия заканчивается. LLM Wiki
+записывает, что происходило в каждой сессии, за ночь сводит это в короткие страницы
+знаний и отдаёт следующей сессии — в любом из этих агентов — решения, уроки и
+состояние проекта. Больше не нужно объяснять одно и то же дважды.
 
-Всё хранится на вашем диске в виде обычного markdown: читается в Obsidian, сравнивается в git, полностью принадлежит вам.
-
-Хранение, захват, MCP и retrieval работают локально. Классификация и компиляция с
-моделью используют настроенный провайдер: OpenCode, Codex, Claude и OpenAI могут
-обращаться к облачным сервисам; Ollama может работать локально. Автоопределение не
-гарантирует local-only режим.
+Хранение, захват, поиск и MCP-сервер работают локально. Чтобы превратить сессии в
+страницы, нужна языковая модель: та, что вы указали, или первая найденная среди
+OpenCode, Codex, Claude, OpenAI и Ollama. Локальна только Ollama, остальные — облачные
+сервисы, поэтому автовыбор не гарантирует, что всё останется на машине. Текущая
+версия: **5.0.0**.
 
 **Языки:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
-
----
-
-## Содержание
-
-- [Как это работает](#как-это-работает)
-- [Возможности](#возможности)
-- [Быстрый старт](#быстрый-старт)
-- [Подключение агентов](#подключение-агентов)
-- [Архитектура](#архитектура)
-- [Поколения evidence и миграция](#поколения-evidence-и-миграция)
-- [Бенчмарк](#бенчмарк)
-- [Сравнение](#сравнение)
-- [Участие в разработке](#участие-в-разработке)
-- [Благодарности](#благодарности)
-- [Лицензия](#лицензия)
 
 ---
 
 ## Как это работает
 
 ```
-Агент читает память и выполняет действия через локальный MCP-сервер
-             ↓
-Тонкие хуки/плагины передают lifecycle-события через integration_adapter.py
-             ↓
-Фоновая компиляция превращает daily-логи в устойчивые страницы знаний
-(с VERIFY-BEFORE-WRITE — цитаты проверяются, не доверяются LLM на слово)
-             ↓
-Следующая сессия: guardrails + advisory + метакогнитивный контекст инжектируются
-             ↓
-Агент продолжает с того места, где вы остановились — без повторных объяснений
+Вы работаете с агентом как обычно
+      ↓  тонкие хуки передают каждое событие сессии в integration_adapter.py
+Запись сессии   →  knowledge/raw/sessions/<дата>/  (очищенная, хранится для каждой сессии)
+Дневной журнал  →  knowledge/daily/<дата>.md
+      ↓  компиляция (при старте сессии, если система свободна, и каждую ночь)
+Страницы знаний →  knowledge/notes/<slug>.md   (каждая цитата сверена с источником)
+      ↓
+Следующая сессия в любом агенте: выученные правила, открытые темы, последнее
+решение, состояние проекта — и 12 task-shaped MCP-инструментов для вопросов к памяти
 ```
 
-Система следует паттерну «компилируй, а не извлекай» ([Karpathy, апрель 2026](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)): сырые сигналы сессий фиксируются в реальном времени, затем фоновый LLM-проход компилирует их в структурированные страницы знаний, вместо того чтобы полагаться на raw-retrieval в момент запроса.
+Идея — «компилировать, а не искать» ([Karpathy, апрель 2026](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)):
+вместо поиска по сырым стенограммам в момент вопроса фоновый проход один раз
+превращает их в структурированные страницы, и агент читает уже их.
 
----
+Рабочий день глазами системы:
 
-## Возможности
-
-### Пайплайн захвата
-- **Тонкие lifecycle-адаптеры**: хуки Claude Code и Codex вместе с плагином OpenCode нормализуют события через `integration_adapter.py`
-- **3-уровневая классификация сессий**: FLUSH_MAJOR (решения/уроки → запускает компиляцию), FLUSH_MINOR (гэтчи → только сохранить), FLUSH_OK (болтовня → пропустить)
-- **Non-LLM breadcrumbs** — тегирование промптов и tool-вызовов с ms-латентностью, без API-вызовов
-- **Redaction секретов** — API-ключи, токены, длинные base64 вычищаются до любой записи
-
-### Agent-native интерфейс
-- **MCP-first доступ** — 12 локальных task-shaped инструментов для recall, контекста, решений, обслуживания, code intelligence и `doctor`
-- **Единый response envelope** — каждый инструмент сообщает версию схемы, freshness, качество evidence, warnings и data; MCP resources публикуют health и context
-- **Автоматическое здоровье** — SessionStart молчит при норме и инжектирует только degraded/error результаты; `doctor(repair=true)` выполняет лишь безопасные идемпотентные локальные исправления
-
-### Пайплайн компиляции
-- **JSON-протокол компиляции** — не требует tool-use агента, работает с любым LLM-бэкендом
-- **Fail-closed граница модели** — промпты редактируются до transport; чувствительный output провайдера и невалидная обязательная DLP policy блокируют публикацию
-- **VERIFY-BEFORE-WRITE** — детерминированная проверка цитат на стороне Python; LLM не может сфабриковать улики
-- **Семантический дедуп с quarantine** — update предпочтительнее create; неуверенные или спорные противоречия помещаются в quarantine, а automatic semantic supersession остаётся отключённым
-- **Инкрементальность** — SHA-256 хеширование; рекомпилируются только изменённые daily-логи
-- **Concurrency-safe** — PID-лок с обнаружением stale; одновременно выполняется только одна компиляция
-- **Персистентная очередь задач** — устойчивость к офлайну; отложенные LLM-задачи выполняются на следующей сессии
-
-### Поиск и извлечение
-- **Generation-consistent retrieval**: одно проверенное неизменяемое поколение связывает FTS, vectors, graph, tiers и evidence с одним source snapshot
-- **Правдивые retrieval traces**: результаты сообщают requested/effective mode, реально использованные signals, generation, состояние reranker и причину fallback
-- **Triple-fusion при доступности**: BM25 (FTS5) + Vector (многоязычная E5 на ONNX Runtime) + evidence-backed Graph-neighbor RRF
-- **Взвешенный RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — предотвращает регрессию на known-item запросах
-- **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
-- **Typed-provenance ранжирование** — одна таблица весов (`user` 1.35, `web` 1.1, `ai-derived` 1.0, `inferred` 0.8) умножает балл, который определяет порядок, на каждом пути: BM25, слитый RRF и после реранкера
-- **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
-- **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, FTS5 BM25 по evidence generation (до первой сборки — прямое чтение Markdown), опциональные vectors + graph и многоязычный cross-encoder reranker, включённый по умолчанию, для hybrid retrieval
-- **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа
-
-### Проактивный интеллект
-- **Guardrails** — авто-инжекция выученных корректировок на SessionStart (предотвращает повторение ошибок)
-- **Advisory** — поднимает открытые треды, последнее решение, lint-алерты, кросс-проектные инсайты
-- **Метакогнитивный контекст** — инвентаризация vault, backlog компиляции, распределение flush-tier
-- **Захват обратной связи** — обнаруживает корректировки/предпочтения в транскриптах, сохраняет как кандидаты на промоутер
-
-### Мультипроект и мультиагент
-- **Один vault, много проектов** — 5-шаговая collision-safe slug-система, per-project `state.md`
-- **Bootstrap проектов** — авто-генерация контекста из git-истории, README, tech-стека
-- **Blackboard-протокол** — параллельные агенты клеймят задачи, сигналят завершение, детектят конфликты
-- **Loop-детектор** — фиксирует циклические редактирования (fix → review → redo)
-- **Agent timeline** — атрибуция: какой агент какое решение принял и когда
-
-### Обслуживание
-- **16 lint-проверок (15 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, несобранные дневники, отсутствующие обратные ссылки, sparse pages, missing frontmatter, отсутствующий или неверный type, missing sources, невалидные supersede-цепочки, orphan gap'ы, temporal validity, неразрешимые доказательства, невалидная схема claim, противоречия
-- **Type-aware архивация** — debugging 60 дн, patterns 180 дн, decisions никогда
-- **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, LaunchAgent на macOS, пользовательский systemd на Linux; cron доступен только как явный degraded fallback)
-- **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц
-
-### Инфраструктура
-- **5 LLM-бэкендов** (авто-детекция): OpenCode (с `OPENCODE_SERVER_PASSWORD`) → Codex → Claude CLI → OpenAI → Ollama
-- **Кросс-платформенность**: Windows, macOS, Linux, WSL2
-- **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search остаётся опциональным
-- **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10–3.14
-- **Pre-commit хуки (opt-in)**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов). Опционально; установщик не активирует эти хуки. Включение: `uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
+- Вы чините ошибку в Claude Code и говорите: «больше никогда не используй здесь старый
+  API». Сессия записана; ночью поправка становится страницей-правилом.
+- Утром вы открываете Codex в том же репозитории. Его первое сообщение уже содержит
+  это правило, открытые темы проекта и вчерашнее решение.
+- Вы спрашиваете: «почему мы отказались от LanceDB?». Агент вызывает `recall` и
+  отвечает страницей решения и точными строками сессии, из которой оно взялось.
 
 ---
 
 ## Быстрый старт
 
-### Требования
+### Что нужно
 
-- Python 3.10+
-- git
+- Python 3.10+ и git
 - [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
-- AI-агент, которым вы уже пользуетесь (Claude Code, OpenCode или Codex)
+- Агент, которым вы уже пользуетесь: Claude Code, Codex или OpenCode
+- Node 22 — только для точной навигации по TypeScript и Python (см. ниже)
 
-### Установка из исходников
+### Установка
 
-Рекомендуемый путь по-прежнему состоит в клонировании и проверке исходников перед установкой:
+Склонируйте и прочитайте исходники, затем запустите установщик из этой копии:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 ```
-
-После проверки запустите установщик из этого checkout:
 
 **macOS / Linux / WSL2:**
 ```bash
@@ -147,60 +80,35 @@ $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-Удалённый bootstrap поддерживается только когда `LLM_WIKI_COMMIT` является точным
-40-значным commit OID в hex-формате. Передавайте установщик только из доверенного источника
-и задавайте это значение: bootstrap получает точный commit, проверяет `HEAD`, identity
-репозитория и обязательные файлы, затем запускает только установщик из checkout. Имена
-веток и тегов отклоняются.
-Проверенный commit становится локальной веткой `main`, которая следит за `origin/main`,
-поэтому ночное fast-forward-обновление доходит до такого хранилища так же, как до
-клонированного; `git -C ~/LLM-wiki checkout --detach` замораживает его на текущем commit.
+Установщик собирает собственный `.venv` хранилища по точному lock-файлу, ставит
+закреплённые модели поиска, проводит ограниченный по времени production smoke-тест,
+подключает каждого найденного агента, регистрирует ночной и недельный проходы и
+строит первый поисковый индекс. Для каждого агента он сообщает, что сделал и нужно ли
+ещё что-то от вас.
 
-Локальный установщик синхронизирует locked production baseline, запускает ограниченный
-production smoke, создаёт runtime-директории и подключает поддерживаемых агентов. Полный
-регрессионный набор остаётся отдельным development- и release-gate. Существующие checkout
-сохраняют все Git remotes; `--protect-push` или `-ProtectPush` заменяет push URL каждого
-remote на `no-push`.
-
-### Проверка выпуска
-
-Выпуск называет точный коммит, который принимает удалённый bootstrap — имена
-веток и тегов отклоняются, — и SHA-256 каждого файла, который bootstrap
-запускает. Напечатать их для любого тега из локального клона:
+Удалённая установка поддерживается только для точного коммита: задайте
+`LLM_WIKI_COMMIT` полным 40-символьным OID коммита и передайте установщик из
+доверенного источника. Имена веток и тегов отклоняются. Каждый релиз указывает свой
+коммит и SHA-256 каждого файла, который запускает установка:
 
 ```bash
 uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
-Установить именно этот коммит:
+### Проверка
 
 ```bash
-git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
-bash ./install.sh
+uv run python scripts/doctor.py
+uv run python scripts/search_memory.py "auth"
 ```
 
-### Общий транспорт HTTP (необязательно)
-
-Сервер MCP по умолчанию говорит по stdio: каждый агент запускает свой процесс.
-Если агентов несколько сразу, один общий локальный сервер дешевле — измерено на
-этом хранилище: предельный агент стоит 1220.3 МиБ через stdio и 0.1 МиБ через
-общий сервер, а новая сессия отвечает за 0.010–0.013 с вместо 1.3–2.9 с. Один
-вызов при этом дороже на 8–22 мс, поэтому одному агенту stdio по-прежнему
-выгоднее.
-
-```bash
-uv run python scripts/mcp_http.py --port 8931
-```
-
-Привязка только к буквальному петлевому адресу, любой `Origin` отвергается,
-нужен носитель-токен, который сервер пишет в
-`<корень состояния>/run/mcp-http/token` с правами 0600. stdio не изменён и
-остаётся умолчанием.
+`doctor` только читает и сообщает, что здорово, что работает в режиме degraded, что
+сломано и что запустить.
 
 ### Профили зависимостей
 
-MCP входит в production baseline; `mcp-server` остаётся compatibility alias. Свежая
-production-установка использует точный lock без development-групп:
+MCP входит в production-базу; `mcp-server` остаётся как compatibility alias.
+Установщик делает это сам; вручную:
 
 ```bash
 uv sync --locked --no-default-groups
@@ -208,151 +116,175 @@ uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
 
-Команда repair по умолчанию работает только на чтение и сообщает о fresh,
-upgrade-required, partial, adopted или conflicting состоянии Reliability V3, не создавая
-`run/`. С offline apply-флагами (`--apply --adopt-ownership-v3
---confirm-all-agents-stopped`) команда выполняет переход на v3 для свежего или
-неактивного хранилища; на свежем хранилище установщик делает это сам, потому что до
-перехода захват сессий отклоняется (issue #17). Хранилище, в котором уже есть прежняя
-очередь, переходит на v3 только когда вы сами сказали установщику, что ни один агент не
-запущен (`--confirm-all-agents-stopped`, в PowerShell `-ConfirmAllAgentsStopped`); иначе
-установщик называет команду и очередь не трогает. Команда никогда не удаляет
-`run/`, knowledge, retired databases, legacy caches или compatibility markers.
+Команда восстановления по умолчанию только читает. На новом или спокойном хранилище
+установщик запускает её с `--apply --adopt-ownership-v3 --confirm-all-agents-stopped`,
+чтобы перевести служебные данные на текущий формат баз; если в хранилище уже есть
+работа, он сначала просит подтвердить, что ни один агент не запущен. Знания и `run/`
+она никогда не удаляет.
 
-Опциональные extras добавляются без удаления уже выбранных оператором пакетов:
+Дополнения добавляются к установленному и сохраняют то, что вы уже выбрали:
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid
-uv sync --locked --no-default-groups --inexact --extra code-graph
+uv sync --locked --no-default-groups --inexact --extra hybrid      # векторы + reranker
+uv sync --locked --no-default-groups --inexact --extra code-graph  # индекс кода
 ```
 
-Разработчики устанавливают locked development group и запускают полный регрессионный набор
-без неявной синхронизации:
+Разработчики ставят группу разработки и запускают полный регрессионный набор:
 
 ```bash
 uv sync --locked
 uv run --locked --no-sync pytest -q
 ```
 
-Node 22 опционален и нужен только для квалифицированной precise Python navigation через Pyright.
+Есть pre-commit хуки (ruff, структурный lint, gitleaks).
+Опционально; установщик не активирует эти хуки:
+`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
-### Проверка работы
+---
+
+## Агенты
+
+| Агент | Статус | Как подключён |
+|-------|--------|---------------|
+| **Claude Code** | Автоматически, когда слияние настроек проверено | MCP-сервер + хуки в `settings.json`: семь событий жизненного цикла идут в `integration_adapter.py`, два хука добавляют подсказки графа кода к поиску и субагентам |
+| **Codex CLI** | Автоматически, когда конфигурация проверена; один раз одобрите хуки в `/hooks` | MCP-сервер + семь хуков жизненного цикла |
+| **OpenCode** | Автоматически, когда конфигурация проверена | MCP-сервер + тонкий JS-плагин жизненного цикла |
+| **Obsidian** | Только viewer | Obsidian как опциональный viewer: откройте папку хранилища, ставить ничего не нужно |
+
+Cursor и Antigravity сняты с поддержки 2026-08-26: установщик их больше не находит и
+не настраивает, а `uninstall` по-прежнему забирает хуки, которые записала прежняя
+установка.
+
+Все агенты делят одно хранилище: решение, записанное в Claude Code, есть в следующей
+сессии Codex.
+
+### MCP-интерфейс
+
+Локальный MCP-сервер даёт **12 task-shaped инструментов**: `recall`, `read_page`,
+`wiki_overview`, `vault_status`, `get_decisions`, `get_context`,
+`check_contradiction`, `log_decision`, `compile`, `find_dead_code`,
+`get_architecture` и `doctor`. Каждый ответ приходит в едином response envelope с
+версией схемы, свежестью, качеством доказательств и предупреждениями, а два MCP
+resources отдают здоровье и контекст. Старт сессии молчит, когда всё в порядке, и
+вставляет только находки degraded или error. `doctor(repair=true)` ограничивается
+безопасными идемпотентными локальными исправлениями.
+
+По умолчанию сервер работает через stdio. Когда одновременно работают несколько
+агентов, дешевле один общий локальный сервер:
 
 ```bash
-uv run python scripts/search_memory.py "auth"
-uv run python scripts/lookup_mode.py
+uv run python scripts/mcp_http.py --port 8931
 ```
+
+Он слушает только буквальный loopback, отклоняет любой `Origin` и требует bearer-токен,
+который пишет в `<state root>/run/mcp-http/token` с правами 0600.
 
 ---
 
-## Подключение агентов
+## Что вы получаете
 
-LLM Wiki обнаруживает установленных агентов и сообщает, выполняется ли интеграция автоматически или требует ручного шага:
+**Захват, который не теряет сессий.** Каждая сессия записывает очищенную копию себя —
+разговор, по строке на каждый вызов инструмента, отчёт субагента — до любой оценки её
+ценности. Затем классификатор решает, заслуживает ли она ещё и скомпилированной
+страницы. Секреты (ключи, токены, пароли в адресах и командах) удаляются до записи.
 
-| Агент | Статус | Интеграция | Как |
-|-------|--------|------------|-----|
-| **OpenCode** | Автоматически после успешной проверки конфигурации | MCP + тонкий JS lifecycle-плагин | MCP выполняет чтение/действия; плагин передаёт события в `integration_adapter.py` |
-| **Codex CLI** | Автоматически после успешной проверки; доверие к хукам подтверждается в `/hooks` | MCP + официальные lifecycle-хуки | MCP выполняет чтение/действия; хуки передают lifecycle-события |
-| **Claude Code** | Автоматически после успешного merge и проверки settings | MCP + тонкие settings.json хуки | MCP выполняет чтение/действия; пять хуков передают lifecycle-события |
-| **Obsidian** | Только viewer | Опциональный Markdown viewer | Откройте vault напрямую; UI или ingestion-функции Obsidian не требуются |
+**Страницам можно доверять.** Компиляция превращает дневные журналы в типизированные
+страницы (решение, паттерн, отладка, понятие…) с YAML-заголовком. Python сверяет каждую
+цитату со строкой источника и её хэшем до записи страницы; второй проход модели
+просматривает каждое изменение и отбрасывает слабые. Противоречие с существующей
+страницей записывается, а не затирает её: старая страница помечается `superseded`, а
+сомнительные случаи ждут в карантине. Каждая запись — восстанавливаемая транзакция с
+отменой в течение двух дней.
 
-Cursor и Antigravity сняты с поддержки 2026-08-26: установщик их больше не определяет и не настраивает,
-а `uninstall` по-прежнему забирает хуки, записанные прежней установкой.
-Все агенты используют общий vault — решение, записанное Claude Code, видно OpenCode в следующей сессии.
+**Контекст при старте сессии.** Выученные из ваших поправок правила, открытые темы,
+последнее решение, предупреждения lint и находки из других проектов — с учётом
+проекта, в котором вы работаете: страница, скомпилированная из сессий одного проекта,
+несёт `project:` и не попадает в сессии другого.
 
-### Опционально: семантический поиск
+**Поиск, который говорит, как он ответил.** Основа — лексический поиск (BM25);
+дополнение `hybrid` добавляет многоязычные векторы (`intfloat/multilingual-e5-small`
+на ONNX Runtime) и cross-encoder reranker (`BAAI/bge-reranker-v2-m3`), а вопросы о
+связях подключают граф доказательств. Ранжирование учитывает, откуда утверждение (от
+вас, из веба, от модели, догадка) и на странице какого типа оно стоит. Каждый ответ
+сообщает запрошенный режим, реально использованные сигналы и причину отката. Пока
+первый индекс не построен, поиск читает Markdown напрямую и говорит об этом.
 
-Для гибридного BM25 + Vector поиска (находит семантически связанные страницы даже без совпадения ключевых слов):
+**Много проектов, одно хранилище.** У каждого репозитория своя папка проекта с
+состоянием, контекстом и журналом только на дописывание; новый проект при первой
+встрече получает начальный контекст из истории Git и README.
 
-```bash
-uv sync --locked --no-default-groups --inexact --extra semantic
-```
+**Обслуживание, которое идёт само.** Ночной проход обновляет код (только fast-forward,
+никогда не делает push, отказывается, если обновление заденет изменённый вами файл),
+разбирает очередь, компилирует, обновляет поисковый индекс, делает локальный
+Git-снимок `knowledge/` и сообщает о здоровье. Недельный проход запускает lint
+(17 проверок), архивирует старые дневные журналы и мигрирует заголовки страниц. На
+Windows — Task Scheduler, на macOS — LaunchAgent, на Linux — пользовательский таймер
+systemd; cron — явный degraded fallback.
 
----
-
-## Архитектура
-
-```
-CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
-KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox}
-RUNTIME       cache/  logs/  run/   (gitignored, внутри vault)
-```
-
-- **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
-- **KNOWLEDGE** — ваша память; репозиторий поставляет её пустой. Все страницы и daily-логи gitignored, отслеживаются только README.
-- **RUNTIME** — gitignored. Search-индексы и логи одноразовые; транзакции, состояние очереди и undo-образы в `run/` являются операционным состоянием.
-- **Граница авторитетности** — Markdown, Git history и append-only project journals авторитетны. FTS, vectors, базы Evidence Graph, tiers, telemetry и model caches производны и пересоздаваемы.
-
-Полное обоснование дизайна (7 аксиом, диаграмма архитектуры, таксономия памяти, архитектура поиска) — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-Канонический reference структуры (что где живёт, env-контракты, запрещённые layout'ы) — в [docs/STRUCTURE.md](docs/STRUCTURE.md).
-
----
-
-## Поколения evidence и миграция
-
-`cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в `cache/evidence-graph/generations/<generation-id>/`. Candidate регистрируется только после проверки manifest, состава source, хешей artifacts, целостности базы и evidence spans. Активация меняет указатель через compare-and-swap. Сбой или прерывание до активации оставляет предыдущее поколение активным; повреждённое активное поколение пропускается в пользу последнего проверенного предыдущего. Полные orphan generations могут быть зарегистрированы при recovery, но автоматически не активируются.
-
-Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте поколение (`uv run python scripts/doctor.py --rebuild-generation`) прежде, чем ожидать generation-backed retrieval. Поколение — единственный индекс: legacy `cache/index.sqlite`, `cache/vectors.npy` и `cache/vectors_meta.json` выведены из работы 2026-09-23 и ничем не читаются. Пока поколения нет, поиск по памяти читает Markdown напрямую в пределах своего срока, и каждый ответ помечен `no_active_generation`; ответ по коду называет свою причину: `no_generation`, если у репозитория поколения нет, или `generation_unreadable:<ExceptionClass>`, если поколение есть, но открыть его не удалось. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
-
-Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. По умолчанию используются `intfloat/multilingual-e5-small` для векторов и `BAAI/bge-reranker-v2-m3` для reranking, обе закреплены; замена любой из них требует evidence матрицы, которое пока отсутствует. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
-
-Реальное сравнение Graphify и evidence превосходства моделей отсутствуют: **evidence pending**. Детерминированный comparative smoke проверяет только orchestration и не подтверждает claims о качестве или token ratio.
-
-Активация, recovery, rollback, citations и точное поведение MCP описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+**Понимание кода.** `get_architecture` и `find_dead_code` отвечают по индексу кода
+ваших репозиториев; точные определения, ссылки, вызывающие и диагностика приходят от
+закреплённых языковых серверов (см. [Навигация по коду](#навигация-по-коду)).
 
 ---
 
-## Надёжные операции с памятью
+## Где что лежит
 
-Markdown остаётся авторитетным источником. Runtime SQLite координирует восстанавливаемые записи и очередь, но не является источником знаний. Операционные базы используют rollback-journal, `synchronous=FULL` и no WAL на текущей версии SQLite. State root должен находиться на локальной файловой системе; сетевые пути отклоняются, а обнаружение cloud-синхронизируемых папок выполняется best-effort.
+```
+CODE        scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
+KNOWLEDGE   knowledge/{daily,notes,projects,raw,inbox}
+RUNTIME     cache/  logs/  run/        (внутри хранилища, никогда не коммитятся)
+```
+
+- **Код** — этот репозиторий.
+- **Знания** — ваша память. Репозиторий поставляет её пустой: каждая страница, дневной
+  журнал и запись сессии запрещены в `.gitignore`, отслеживаются только README.
+  Публикация страницы — отдельное осознанное действие.
+- **Служебные данные** не попадают в Git. `cache/` и `logs/` можно удалить и
+  пересобрать; `run/` хранит транзакции, очередь и историю отмен и подчиняется правилам
+  удаления из [docs/STRUCTURE.md](docs/STRUCTURE.md).
+- **Источник истины** — Markdown, история Git и журналы проектов. Поисковые индексы,
+  векторы, граф доказательств и телеметрия производны и пересобираются.
+
+Обоснование устройства: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Повседневная
+работа, восстановление и резервные копии: [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+
+---
+
+## Как память защищена
+
+Служебные базы используют rollback journal с `synchronous=FULL`; держите state root на
+локальном диске (сетевые пути отклоняются). Очередь доставляет задачи хотя бы один раз,
+поэтому каждый обработчик идемпотентен.
 
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
-uv run python scripts/doctor.py --time-budget 60
+uv run python scripts/doctor.py --rebuild-generation
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
-uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
-uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
-uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
-uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence; недельный прогон запускает этот архиватор сам, а команда выше — его ручная форма. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
+Дневные журналы старше 90 дней переезжают в проверенные несжатые пакеты BagIt (это
+делает недельный проход); доказательства, которые их цитируют, по-прежнему находятся.
+Для копии, которая переживёт потерю диска, есть зашифрованная резервная копия Restic
+с поэтапным восстановлением; ночной Git-снимок `knowledge/` локален и не зашифрован.
+См. раздел о резервных копиях в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 
-## Бенчмарк
+## Навигация по коду
 
-Ворота поиска — замороженный публичный синтетический корпус
-`benchmark/retrieval-v2.json`: многоязычные страницы с градуированными
-свидетельствами, отвлекающими документами, историей во времени и случаями
-отказа; запускается `benchmark/run_retrieval_v2.py`. Долгая память измеряется
-на стенде LongMemEval (`benchmark/run_longmemeval.py`). Исторические BM25-ворота
-по страницам, которые репозиторий раньше поставлял (112 сгенерированных
-запросов и 60 замороженных), сняты 2026-09-10 вместе с этими страницами;
-их последние числа — в `benchmark/baseline-2026-07-16.md`. Числа конкурентов
-получены на других датасетах и несравнимы.
-
-Запустите retrieval-v2: `uv run python benchmark/run_benchmark.py`
-
-### MCP agent interface
-
-Локальный stdio MCP-сервер предоставляет **12 task-shaped инструментов**, включая `doctor`, единый response envelope и health/context resources. `find_dead_code(directory)` возвращает консервативные кандидаты, а `get_architecture(directory)` — entry points, routes, hotspots по canonical symbol ID и communities. Анализ файловой системы требует явно заданную существующую директорию, не принимает корень диска и не использует CWD как fallback.
-
-Точные режимы `definition`, `references`, `implementations`, `type`,
-`diagnostics` и позиционные `callers`/`callees` используют четыре закреплённых
-управляемых языковых сервера: **Pyright 1.1.411** (Python),
-**typescript-language-server 6.0.0** с tsserver 5.9.3 (TypeScript/JavaScript),
-**gopls v0.23.0** (Go, собирается из закреплённого тулчейна Go 1.27.1) и
-**rust-analyzer 1.98.1** (Rust, вместе со своим закреплённым тулчейном Rust).
-Установите каждый явно; запросы ничего не скачивают и не обновляют:
+Точные режимы — `definition`, `references`, `implementations`, `type`,
+`diagnostics` и позиционные `callers`/`callees` — используют четыре закреплённых
+языковых сервера: **Pyright 1.1.411** (Python), **typescript-language-server 6.0.0**
+с tsserver 5.9.3 (TypeScript/JavaScript), **gopls v0.23.0** (Go) и
+**rust-analyzer 1.98.1** (Rust). Каждый ставится явно; запрос никогда ничего не
+скачивает:
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
@@ -361,51 +293,64 @@ uv run python scripts/install_language_server.py --profile gopls --state-root "$
 uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-Этот путь поддерживается только в **доверенных локальных репозиториях** и
-**не является OS sandbox**. Позиции, deadlines, freshness, containment и
-qualification limits описаны в [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md).
+Файл, который не берёт ни один сервер, получает ответ `unsupported`; если сервера нет
+или он сбоит, ответ переходит на индекс кода, а не проваливается.
+Путь рассчитан на работу в доверенных локальных репозиториях и не является OS sandbox.
+Подробности: [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md).
 
 ---
 
-## Сравнение
+## Поисковый индекс
 
-| Возможность | LLM Wiki | agentmemory | ReMe | akitaonrails |
-|-------------|----------|-------------|------|--------------|
-| Markdown-first | Да | Нет | Да | Да |
-| Мультиагент (3+ инструмента) | Да (3) | Да (32+ через MCP) | Только Claude | Да (12+) |
-| Поддержка IDE | Obsidian как опциональный viewer | Нет | Нет | Нет |
-| Compile-not-retrieve | Да | Нет | Нет | Нет |
-| VERIFY-BEFORE-WRITE | Да | Нет | Нет | Нет |
-| Guardrails (выученные корректировки) | Да | Нет | Нет | Нет |
-| Blackboard-координация | Да | Нет | Нет | Нет |
-| Loop-детектор | Да | Нет | Нет | Нет |
-| Agent timeline | Да | Нет | Нет | Нет |
-| Feedback learning | Да | Нет | Нет | Нет |
-| Локально / без daemon | Да | Нет (Docker) | Нет (pip) | Нет (Rust) |
-| Temporal validity (`valid_to`) | Да | Нет | Нет | Нет |
-| Typed-provenance ранжирование | Да | Нет | Нет | Нет |
+`cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в
+`cache/evidence-graph/generations/<generation-id>/`: полнотекстовый индекс, векторы,
+граф доказательств и уровни, собранные из одного снимка ваших страниц. Новое поколение
+активируется, только когда его манифест, хэши, базы и участки доказательств прошли
+проверку; неудачная сборка оставляет активным предыдущее. Установщик строит первое
+поколение, ночной проход обновляет его, а
+`uv run python scripts/doctor.py --rebuild-generation` пересобирает по требованию.
+Удаление `cache/evidence-graph/` стоит только времени.
 
 ---
 
-## Участие в разработке
+## Бенчмарк
 
-Контрибьюции приветствуются. Критерий приёма — «выдерживает ли это контакт с реальным multi-agent workflow?»
+Поиск проверяется на замороженном публичном синтетическом корпусе
+`benchmark/retrieval-v2.json` — многоязычные страницы с градуированными
+доказательствами, отвлекающими страницами, историей во времени и вопросами, на которые
+нужно отказаться отвечать:
 
-См. [CONTRIBUTING.md](CONTRIBUTING.md):
-- Настройка окружения разработки
-- Release-чеклист (синхронизация README i18n, CHANGELOG, bump версии)
-- Стандарты кодирования (ruff, pytest, pre-commit)
-- Как добавить новую интеграцию агента
+```bash
+uv run python benchmark/run_benchmark.py
+```
+
+Долгая память измеряется на LongMemEval (`benchmark/run_longmemeval.py`), обработка
+противоречий — на своём замороженном корпусе:
+
+```bash
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+Сравнения с другими системами памяти здесь не заявлено: их опубликованные числа
+получены на других наборах данных.
+
+---
+
+## Участие
+
+Вклад приветствуется. Планка — «выдержит ли это настоящую работу нескольких агентов?».
+Настройка, стандарты кода и чеклист релиза (три README, CHANGELOG и версия меняются
+вместе) — в [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## Благодарности
 
-- [Karpathy LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — паттерн «компилируй, а не извлекай»
-- [Harrison Chase "Wiki Memory"](https://blog.langchain.dev/wiki-memory/) — agent-maintained files
-- [Google OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — vendor-neutral markdown knowledge format
-- [Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — паттерны capture/compact/subagent
-- [VEP Semantic DNA](https://vep.live) — lifecycle confidence/supersede/temporal
+- [Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — паттерн «компилировать, а не искать»
+- [Harrison Chase, "Wiki Memory"](https://blog.langchain.dev/wiki-memory/) — файлы, которые ведёт агент
+- [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — нейтральный к поставщику формат знаний в Markdown
+- [Anthropic, effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — паттерны захвата, сжатия и субагентов
+- [VEP Semantic DNA](https://vep.live) — жизненный цикл уверенности, замены и времени
 
 ---
 

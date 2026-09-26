@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
+
 ### Fixed
 - The CI installer job checks the installed vault in the `.venv` the install built, as the scheduler does, and a test refuses an installing job that points uv elsewhere; the Windows task check reads its hour limits through a function, so it works for any caller.
 - No test gives work it expects to finish a literal few-second deadline: 572 of them name the shared scaled timeout, and a guard refuses a new one outside a test about time running out; a full run had failed on one under load.
