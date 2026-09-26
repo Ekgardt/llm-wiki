@@ -29,6 +29,8 @@ import retire_benchmark_runs
 import scheduled_weekly
 from markdown_transaction import MarkdownCoordinator
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -83,7 +85,7 @@ def _append(coordinator: MarkdownCoordinator, day: str, family: str = "post-tool
         f"{family}:{day}",
         f"knowledge/daily/{day}.md",
         f"# {day}\n".encode(),
-        deadline=time.monotonic() + 60,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     )
 

@@ -15,6 +15,7 @@ import pytest
 from markdown_transaction import KEPT_OPERATION_FAMILIES, MarkdownCoordinator
 from project_journal import ProjectStore, parse_journal_events
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_project_journal import checkpoint_event
 
 LATER = timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
@@ -32,7 +33,7 @@ def _append(coordinator: MarkdownCoordinator, family: str) -> None:
         f"{family}:2026-01-01",
         "knowledge/daily/2026-01-01.md",
         b"# 2026-01-01\n",
-        deadline=time.monotonic() + 60,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     )
 

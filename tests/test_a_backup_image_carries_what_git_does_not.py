@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from reliable_memory import sha256_bytes
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
@@ -63,7 +64,7 @@ def image_paths(tmp_path: Path) -> set[str]:
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         return _image_paths(backup, image)
 
@@ -93,7 +94,7 @@ def test_a_directory_of_only_carried_files_is_not_in_the_image(
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         paths = _image_paths(backup, image)
 
@@ -114,7 +115,7 @@ def test_a_vault_that_is_no_repository_keeps_the_whole_image(tmp_path: Path) -> 
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         paths = _image_paths(backup, image)
 
@@ -137,7 +138,7 @@ def test_a_regenerable_directory_is_never_in_the_image(tmp_path: Path) -> None:
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         paths = _image_paths(backup, image)
 
@@ -163,7 +164,7 @@ def test_the_image_publishes_into_a_fresh_clone(tmp_path: Path) -> None:
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         backup.validate_backup_image(image)
         manifest_sha256 = sha256_bytes((image / "manifest.json").read_bytes())
@@ -172,7 +173,7 @@ def test_the_image_publishes_into_a_fresh_clone(tmp_path: Path) -> None:
             vault_root=clone,
             state_root=fresh_state,
             expected_manifest_sha256=manifest_sha256,
-            deadline=time.monotonic() + 120,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert (clone / "knowledge/notes/private.md").read_bytes() == b"private\n"

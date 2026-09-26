@@ -18,6 +18,8 @@ if str(SCRIPTS) not in sys.path:
 import install_language_server as installer  # noqa: E402
 import pinned_download  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def _http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://example.invalid/a", code, "x", {}, None)
@@ -53,7 +55,7 @@ def test_a_reset_is_tried_again_and_a_permanent_error_is_not():
         return "archive"
 
     result = pinned_download.retry_transient(
-        resets_twice, deadline=time.monotonic() + 60, sleep=waits.append
+        resets_twice, deadline=time.monotonic() + SHORT_TIMEOUT, sleep=waits.append
     )
 
     assert (result, len(calls), waits) == ("archive", 3, [1.0, 4.0])
@@ -68,7 +70,7 @@ def test_a_permanent_error_is_raised_at_once():
 
     with pytest.raises(urllib.error.HTTPError):
         pinned_download.retry_transient(
-            not_found, deadline=time.monotonic() + 60, sleep=lambda _: None
+            not_found, deadline=time.monotonic() + SHORT_TIMEOUT, sleep=lambda _: None
         )
     assert len(calls) == 1
 
@@ -96,7 +98,7 @@ def test_the_third_reset_is_raised():
 
     with pytest.raises(ConnectionResetError):
         pinned_download.retry_transient(
-            resets, deadline=time.monotonic() + 60, sleep=lambda _: None
+            resets, deadline=time.monotonic() + SHORT_TIMEOUT, sleep=lambda _: None
         )
     assert len(calls) == 3
 

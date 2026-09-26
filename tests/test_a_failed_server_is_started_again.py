@@ -14,21 +14,22 @@ from pathlib import Path
 from lsp_process import ProcessState
 
 from tests.code_kernel_helpers import repository, state_root  # noqa: F401 - fixtures
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_pyright_session import _anchor, _session, semantic_pyright  # noqa: F401 - fixture
 
 
 def test_a_failed_process_is_replaced_and_answers(repository: Path, state_root: Path, semantic_pyright) -> None:  # noqa: F811
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         failed = session._process
         failed.state = ProcessState.FAILED
 
-        session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + 10)
+        session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + SHORT_TIMEOUT)
         waiting = session._process
         # The backoff has passed (audit 2026-09-26 C-2 paces the replacement).
         session._startup_retry_after = time.monotonic()
-        answer = session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + 10)
+        answer = session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert (waiting, session._process is not failed, bool(answer.locations), answer.partial) == (
             None,
@@ -37,17 +38,17 @@ def test_a_failed_process_is_replaced_and_answers(repository: Path, state_root: 
             False,
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_a_replacement_waits_for_the_first_backoff(repository: Path, state_root: Path, semantic_pyright) -> None:  # noqa: F811
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         session._process.state = ProcessState.FAILED
         before = time.monotonic()
 
-        session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + 10)
+        session.definition(_anchor(repository, "pkg/service.py", 10, 20), deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert (session._process, session._startup_retries, session._startup_retry_after >= before + 5.0) == (
             None,
@@ -55,7 +56,7 @@ def test_a_replacement_waits_for_the_first_backoff(repository: Path, state_root:
             True,
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_a_server_that_ran_long_enough_gets_its_budget_back(

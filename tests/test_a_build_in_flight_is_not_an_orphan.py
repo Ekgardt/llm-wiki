@@ -17,6 +17,8 @@ for directory in (ROOT / "scripts", ROOT / "tests"):
 
 from test_generation_maintenance import _empty_generation, _vault  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def test_a_fresh_unregistered_directory_survives_the_repair(tmp_path):
     import doctor
@@ -29,7 +31,7 @@ def test_a_fresh_unregistered_directory_survives_the_repair(tmp_path):
     (building / "evidence.sqlite3").write_bytes(b"half written")
 
     doctor._repair_generation_catalog(
-        root, state, deadline=time.monotonic() + 5, cancelled=lambda: False, repaired=[]
+        root, state, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=lambda: False, repaired=[]
     )
 
     assert (building / "evidence.sqlite3").exists()

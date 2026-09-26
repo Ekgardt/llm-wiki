@@ -20,6 +20,8 @@ from impact_analysis import (  # noqa: E402
     format_for_advisory,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
@@ -936,7 +938,7 @@ def test_a_git_warning_on_stderr_is_not_a_diff_record(tmp_path):
     root = _autocrlf_checkout(tmp_path / "repository")
     warning = subprocess.run(["git", "diff", "--raw", "-z"], cwd=root, capture_output=True, check=True)
 
-    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + 30, max_bytes=1 << 20)
+    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + SHORT_TIMEOUT, max_bytes=1 << 20)
     records = impact_analysis._parse_raw_records(raw, "dirty")
 
     assert b"LF will be replaced by CRLF" in warning.stderr

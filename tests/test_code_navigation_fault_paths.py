@@ -42,6 +42,7 @@ from tests.code_kernel_helpers import (
     create_python_repository,
     create_semantic_pyright_fixture,
 )
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 @pytest.fixture
@@ -79,7 +80,7 @@ def navigation(repository: Path, state_root: Path, semantic_pyright: SemanticPyr
     try:
         yield facade, session, scope
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _graph_location(path: str, start: int, end: int) -> NavigationLocation:
@@ -112,7 +113,7 @@ def _pin_attempt(
 ) -> WorkspaceRevision:
     """One fixed workspace revision, a synchronized provider and an open document."""
     session._position_encoding = PositionEncoding.UTF8
-    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + 5)
+    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     revision = replace(revision, revision_sha256="a" * 64)
     source = resolve_repository_source(scope, "pkg/service.py")
     content = source.absolute_path.read_bytes()
@@ -334,7 +335,7 @@ def test_type_query_combines_type_and_hover_failures(
 
     result = facade.query(
         NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert (result.status.value, result.warnings) == TYPE_CASES[(type_call, hover_call)]
@@ -367,7 +368,7 @@ def test_outgoing_calls_ask_the_outgoing_hierarchy(
         NavigationRequest(
             scope, Capability.CALLS, "pkg/service.py", 10, 20, direction="outgoing"
         ),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert result.resolution.value == expected
@@ -400,7 +401,7 @@ def test_source_document_cache_replaces_and_evicts_by_entry_bound(
 
 
 def _revision_entries(scope: RepositoryScope) -> dict[str, object]:
-    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + 5)
+    revision = code_navigation._compute_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     return {entry.path: entry for entry in revision.entries}
 
 

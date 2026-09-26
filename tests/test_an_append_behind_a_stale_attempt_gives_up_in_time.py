@@ -45,7 +45,7 @@ def _stale_attempt(tmp_path: Path) -> MarkdownCoordinator:
     (root / "knowledge/daily").mkdir(parents=True)
     dying = MarkdownCoordinator(root, tmp_path / "state")
     dying._killpoint = _die_after_preparing  # type: ignore[method-assign]
-    _append(dying, [], deadline=time.monotonic() + 30)
+    _append(dying, [], deadline=time.monotonic() + SHORT_TIMEOUT)
     return MarkdownCoordinator(root, tmp_path / "state")
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import installed_memory_repair
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 PRUNED_ROWS = 10_050
@@ -39,7 +40,7 @@ def test_a_ledger_past_the_row_bound_is_read_by_what_it_holds(tmp_path: Path) ->
     _ledger(state_root, now)
 
     blockers = installed_memory_repair.validate_coordinator_v3_runtime(
-        state_root=state_root, now=now, deadline=time.monotonic() + 60, excluded_owner=None
+        state_root=state_root, now=now, deadline=time.monotonic() + SHORT_TIMEOUT, excluded_owner=None
     )
 
     assert blockers == ["transaction_artifact_retained", "transaction_undo_retained"]

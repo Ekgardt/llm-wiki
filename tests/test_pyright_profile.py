@@ -3397,7 +3397,7 @@ def test_node_probe_is_shell_free_credentials_reduced_bounded_and_records_full_v
         scope,
         state_root=state_root,
         candidates=PyrightCandidates((server,), (), ()),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert result.node_executable == node

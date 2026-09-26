@@ -2113,7 +2113,7 @@ class TestHandleToolCall:
             with pytest.raises(RuntimeError, match="cannot start"):
                 asyncio.run(
                     mcp_server._run_bounded(
-                        lambda: None, deadline=time.monotonic() + 1
+                        lambda: None, deadline=time.monotonic() + SHORT_TIMEOUT
                     )
                 )
 
@@ -4155,7 +4155,7 @@ def test_structural_callers_not_routed_as_precise(monkeypatch) -> None:
     monkeypatch.setattr("code_graph.find_callers", lambda *a, **k: {"callers": []})
     resolved = str(Path(__file__).resolve().parent.parent)
     data = mcp_server._get_architecture_mode(
-        resolved, mode="callers", symbol="f", deadline=time.monotonic() + 5
+        resolved, mode="callers", symbol="f", deadline=time.monotonic() + SHORT_TIMEOUT
     )
     assert data.get("mode", "callers") == "callers" or "callers" in data
 
@@ -4472,7 +4472,7 @@ def test_precise_source_containment_finishes_before_manager_creation(
         path=path,
         line=1,
         character=0,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert manager_calls == 0
@@ -5248,7 +5248,7 @@ def _navigation_location_result(
         require_span_hash=require_span_hash,
         metadata=None,
         graph_version="generation-1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
 
@@ -5453,8 +5453,8 @@ def test_navigation_source_cache_remembers_byte_cap_rejections(
     monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
     cache = mcp_server._NavigationSourceCache()
 
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
     _assert_cache_rejection_is_remembered(cache, reads)
 
 
@@ -5521,14 +5521,14 @@ def test_navigation_calls_use_lightweight_evidence_spans(
         "callee",
         scope,
         direction="incoming",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     include_span_hash = False
     missing_hash_locations = mcp_server._graph_call_locations(
         "callee",
         scope,
         direction="incoming",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert len(locations) == 1
@@ -5777,7 +5777,7 @@ def test_renderer_value_error_maps_to_normalized_navigation_error(
         path="api.py",
         line=1,
         character=4,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert data["status"] == "error"

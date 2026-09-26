@@ -11,7 +11,10 @@ import capture_diagnostics
 import markdown_transaction
 import memory_queue
 
-from tests.test_a_publication_that_stopped_half_way_is_finished import _pending_ids, _publish_pending_intent
+from tests.test_a_publication_that_stopped_half_way_is_finished import (
+    _pending_ids,
+    _publish_pending_intent,
+)
 from tests.test_capture_intent_adoption import _coordinator, _queue
 
 

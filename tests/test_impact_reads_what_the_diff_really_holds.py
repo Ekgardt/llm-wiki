@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -106,7 +108,7 @@ def _dirty_impact(repository: Path, text: str, **options) -> dict:
     target.write_bytes(text.encode("utf-8"))
     try:
         return impact_analysis.analyze_impact(
-            root=repository, comparison="dirty", deadline=time.monotonic() + 30, **options
+            root=repository, comparison="dirty", deadline=time.monotonic() + SHORT_TIMEOUT, **options
         )
     finally:
         target.write_bytes(CORE.encode("utf-8"))
@@ -154,7 +156,7 @@ def test_a_submodule_bump_does_not_discard_the_rest_of_the_diff(indexed):
     try:
         impact = impact_analysis.analyze_impact(
             root=indexed, comparison="two-commits", base=base, target=target,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
     finally:
         _git(indexed, "reset", "-q", "--hard", base)

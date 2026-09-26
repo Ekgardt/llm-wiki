@@ -10,7 +10,12 @@ from pathlib import Path
 import reclaim_runtime_state
 import scheduled_nightly
 
-from tests.test_nothing_half_written_is_left_behind import _PAGE, _committed, _coordinator, _kill_a_prune
+from tests.test_nothing_half_written_is_left_behind import (
+    _PAGE,
+    _committed,
+    _coordinator,
+    _kill_a_prune,
+)
 
 
 def test_undo_puts_back_the_images_a_killed_prune_staged_aside(tmp_path: Path) -> None:

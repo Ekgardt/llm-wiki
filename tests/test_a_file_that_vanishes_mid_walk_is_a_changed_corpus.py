@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 TESTS = Path(__file__).resolve().parent
 for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
@@ -30,7 +32,7 @@ def _discovery(vault: Path):
         max_depth=8,
         max_file_bytes=1 << 20,
         max_total_bytes=1 << 22,
-        deadline=time.monotonic() + 60,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         include_archives=False,
     )
 

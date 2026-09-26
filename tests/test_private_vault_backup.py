@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
@@ -119,7 +120,7 @@ def test_staged_backup_image_uses_online_databases_and_manifest(tmp_path: Path) 
         state_root=state_root,
         staging_parent=staging_parent,
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 30,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         facts = _staged_image_facts(backup, image, state_root)
 
@@ -167,7 +168,7 @@ def test_staged_backup_image_blocks_source_race_and_releases_owner(
             root=root,
             state_root=state_root,
             staging_parent=staging_parent,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ):
             pass
 
@@ -197,7 +198,7 @@ def test_staged_backup_image_requires_quiescent_canonical_owners(tmp_path: Path)
                 root=root,
                 state_root=state_root,
                 staging_parent=staging_parent,
-                deadline=time.monotonic() + 30,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
             ):
                 pass
         assert raised.value.code == "backup_requires_quiescence"
@@ -243,7 +244,7 @@ def test_staged_backup_image_rejects_unknown_runtime_projection(tmp_path: Path) 
             root=root,
             state_root=state_root,
             staging_parent=staging_parent,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ):
             pass
 
@@ -283,7 +284,7 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         restic_binary=restic,
         repository_file=repository_file,
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 30,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     backup_command = calls[1][0]
 
@@ -340,7 +341,7 @@ def test_backup_private_vault_rejects_restic_incomplete_exit_and_cleans_staging(
             staging_parent=staging,
             restic_binary=restic,
             repository_file=repository_file,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "restic_backup_incomplete"
@@ -376,7 +377,7 @@ def test_backup_private_vault_rejects_wrong_restic_version_before_staging(
             staging_parent=staging,
             restic_binary=restic,
             repository_file=repository_file,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "restic_version_mismatch"
@@ -411,7 +412,7 @@ def test_backup_private_vault_rejects_local_repository_inside_source(
             staging_parent=staging,
             restic_binary=restic,
             repository_file=repository_file,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "repository_overlaps_source"
@@ -425,7 +426,7 @@ def test_bounded_runner_kills_output_overflow() -> None:
         backup._run_bounded(
             [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
             cwd=Path.cwd(),
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             max_output_bytes=1024,
         )
 
@@ -449,7 +450,7 @@ def _restic_restore_fixture(
         state_root=state_root,
         staging_parent=backup_staging,
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 30,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         shutil.copytree(image, snapshot, dirs_exist_ok=True, symlinks=True)
     manifest_sha256 = backup.sha256_bytes((snapshot / "manifest.json").read_bytes())
@@ -487,7 +488,7 @@ def test_restore_private_vault_restores_exact_snapshot_to_clean_target(
         repository_file=repository_file,
         snapshot_id=snapshot_id,
         expected_manifest_sha256=manifest_sha256,
-        deadline=time.monotonic() + 30,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert receipt == {
@@ -540,7 +541,7 @@ def test_restore_private_vault_rejects_tampered_content_and_cleans_target(
             repository_file=repository_file,
             snapshot_id="c" * 64,
             expected_manifest_sha256=manifest_sha256,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "manifest_content_mismatch"
@@ -581,7 +582,7 @@ def test_restore_private_vault_rejects_wrong_manifest_digest_and_cleans_target(
             repository_file=repository_file,
             snapshot_id="d" * 64,
             expected_manifest_sha256="0" * 64,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "restore_manifest_mismatch"
@@ -612,7 +613,7 @@ def test_restore_private_vault_requires_empty_target_before_restic(
             repository_file=repository_file,
             snapshot_id="e" * 64,
             expected_manifest_sha256=manifest_sha256,
-            deadline=time.monotonic() + 30,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert raised.value.code == "restore_target_not_empty"
@@ -733,7 +734,7 @@ def _staged_image(tmp_path: Path):
         state_root=state_root,
         staging_parent=staging_parent,
         now=datetime(2026, 8, 25, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 60,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         shutil.copytree(image, kept)
     digest = backup.sha256_bytes((kept / "manifest.json").read_bytes())

@@ -30,6 +30,7 @@ from workspace_revision import (
 )
 
 from tests.code_kernel_helpers import copy_python_fixture
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def _indexed_git_config_variables() -> list[str]:
@@ -1291,7 +1292,7 @@ def test_private_index_parser_rejects_malformed_binary_indexes(repository: Path)
         assert workspace_revision._parse_git_index(
             content,
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -1373,7 +1374,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
         assert workspace_revision._parse_git_index(
             _append_index_extension(raw, signature),
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -1382,7 +1383,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
     assert workspace_revision._parse_git_index(
         _rechecksum_index(bytes(nonregular)),
         hash_name="sha1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     ) is None
     zero_oid = bytearray(raw)
@@ -1390,7 +1391,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
     assert workspace_revision._parse_git_index(
         _rechecksum_index(bytes(zero_oid)),
         hash_name="sha1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     ) is None
 
@@ -1655,7 +1656,7 @@ def test_private_index_parser_rejects_v4_split_and_colliding_paths(
         assert workspace_revision._parse_git_index(
             (root / ".git/index").read_bytes(),
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -3003,7 +3004,7 @@ def test_hash_file_reads_owned_descriptor_without_fdopen(
         resolved_root=repository.resolve(strict=True),
         directory_snapshots={},
         remaining_bytes=MAX_REVISION_BYTES,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     )
 

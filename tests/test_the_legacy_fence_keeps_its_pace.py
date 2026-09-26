@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_doctor import _build_root
 
 
@@ -18,7 +19,7 @@ def test_the_legacy_maintenance_row_is_renewed_before_it_runs_out(tmp_path):
         root, state_root, datetime.now(timezone.utc)
     )
 
-    guard = doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 60)
+    guard = doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT)
     doctor._release_maintenance_owner(coordinator, lease)
 
     assert (guard.interval, doctor._lease_seconds(lease)) == (

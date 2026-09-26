@@ -489,7 +489,7 @@ def test_sent_request_evidence_only_advances_after_full_dispatch() -> None:
             protocol.request,
             "slow",
             {},
-            deadline=time.monotonic() + 2,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancellation=source.token,
         )
         deadline = time.monotonic() + 1
@@ -557,7 +557,7 @@ def test_immediate_responses_preserve_monotonic_dispatch_evidence(
         assert protocol.request(
             "immediate",
             {},
-            deadline=time.monotonic() + 2,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) is None
         with completed_condition:
             assert completed_condition.wait_for(
@@ -829,9 +829,9 @@ def test_location_result_ceiling_accepts_10000_and_rejects_10001(
         )
 
     protocol = fake_server.start(handler)
-    assert len(protocol.request(method, {}, deadline=time.monotonic() + 2)) == MAX_LOCATIONS
+    assert len(protocol.request(method, {}, deadline=time.monotonic() + SHORT_TIMEOUT)) == MAX_LOCATIONS
     with pytest.raises(ResponseRefused, match="location"):
-        protocol.request(method, {}, deadline=time.monotonic() + 2)
+        protocol.request(method, {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     # One answer over the bound refuses its request, not the connection (audit C-38).
     assert protocol.fatal is False
 
@@ -901,10 +901,10 @@ def test_hover_ceiling_accepts_256_kib_and_rejects_one_more(fake_server: FakeLsp
             )
 
     protocol = fake_server.start(handler)
-    result = protocol.request("textDocument/hover", {}, deadline=time.monotonic() + 2)
+    result = protocol.request("textDocument/hover", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert len(json.dumps(result, separators=(",", ":")).encode()) == MAX_HOVER_BYTES
     with pytest.raises(ResponseRefused, match="hover"):
-        protocol.request("textDocument/hover", {}, deadline=time.monotonic() + 2)
+        protocol.request("textDocument/hover", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert protocol.fatal is False
 
 
@@ -1986,7 +1986,7 @@ def test_writer_failure_is_fatal_and_cleans_pending_once() -> None:
     writer.released.set()
 
     with pytest.raises(ProtocolViolation):
-        protocol.request("write-failure", {}, deadline=time.monotonic() + 1)
+        protocol.request("write-failure", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert protocol.pending_count == 0
     deadline = time.monotonic() + 1
@@ -2051,7 +2051,7 @@ def test_close_during_blocked_initial_write_cleans_request_and_owners() -> None:
             protocol.request,
             "close-race",
             {},
-            deadline=time.monotonic() + 2,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert writer.started.wait(SHORT_TIMEOUT)
         protocol.close()
@@ -2196,10 +2196,10 @@ def test_call_hierarchy_result_ceiling_accepts_10000_and_rejects_10001(
             )
 
     protocol = fake_server.start(handler)
-    result = protocol.request(method, {}, deadline=time.monotonic() + 2)
+    result = protocol.request(method, {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert len(result) == MAX_LOCATIONS
     with pytest.raises(ProtocolViolation, match="location"):
-        protocol.request(method, {}, deadline=time.monotonic() + 2)
+        protocol.request(method, {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _nested_symbols(count: int) -> list[dict[str, object]]:
@@ -2228,11 +2228,11 @@ def test_nested_document_symbol_ceiling_counts_all_children(
 
     protocol = fake_server.start(handler)
     accepted = protocol.request(
-        "textDocument/documentSymbol", {}, deadline=time.monotonic() + 2
+        "textDocument/documentSymbol", {}, deadline=time.monotonic() + SHORT_TIMEOUT
     )
     assert sum(1 + len(root["children"]) for root in accepted) == MAX_LOCATIONS
     with pytest.raises(ProtocolViolation, match="location"):
-        protocol.request("textDocument/documentSymbol", {}, deadline=time.monotonic() + 2)
+        protocol.request("textDocument/documentSymbol", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unrelated_result_is_not_subject_to_location_ceiling(
@@ -2585,7 +2585,7 @@ def test_request_ids_are_not_reused_after_drain_release() -> None:
             protocol.request,
             "first",
             {},
-            deadline=time.monotonic() + 2,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancellation=source.token,
         )
         while not writer.frames:
@@ -2651,7 +2651,7 @@ def test_close_releases_drain_only_requests() -> None:
             protocol.request,
             "close-drain",
             {},
-            deadline=time.monotonic() + 1,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancellation=source.token,
         )
         while not writer.frames:
@@ -2707,7 +2707,7 @@ def test_finish_after_process_exit_completes_pending_immediately_and_clears_it()
             protocol.request,
             "pending-at-exit",
             {},
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert writer.started.wait(1) is False
         _await_frames(writer, 1)
@@ -2767,7 +2767,7 @@ def test_process_cleanup_stop_wakes_pending_before_blocked_owners_release() -> N
             protocol.request,
             "blocked-during-cleanup",
             {},
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert writer.started.wait(SHORT_TIMEOUT)
         protocol._stop_io_for_process_cleanup()

@@ -79,6 +79,8 @@ from run_code_navigation import (  # noqa: E402
     verify_repository_identity,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 PACKAGE_SHA256 = "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
 
 
@@ -2105,7 +2107,7 @@ def test_real_runtime_measures_four_active_ownership_scenarios() -> None:
             self.lazy_open_count += 1
 
     runtime = ActiveOwnershipRuntime()
-    outcomes = runtime.ownership_checks(deadline=time.monotonic() + 10.0)
+    outcomes = runtime.ownership_checks(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert tuple(outcomes) == (
         "normal_shutdown",
@@ -2205,7 +2207,7 @@ def test_ownership_cleanup_failure_stops_all_subsequent_scenarios() -> None:
             self.open_count += 1
 
     runtime = CleanupRuntime()
-    outcomes = runtime.ownership_checks(deadline=time.monotonic() + 10.0)
+    outcomes = runtime.ownership_checks(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert runtime.prepare_count == 1
     assert runtime.open_count == 0
@@ -2242,7 +2244,7 @@ def test_crash_without_a_process_returns_none() -> None:
             return None
 
     assert (
-        NoProcessRuntime().crash_and_recover(object(), deadline=time.monotonic() + 10.0)
+        NoProcessRuntime().crash_and_recover(object(), deadline=time.monotonic() + SHORT_TIMEOUT)
         is None
     )
 
@@ -2365,7 +2367,7 @@ def test_post_crash_second_oserror_fails_closed_after_one_retry() -> None:
 
     runtime = CrashRuntime()
     with pytest.raises(OSError, match="recovery failure 2"):
-        runtime.crash_and_recover(object(), deadline=time.monotonic() + 10.0)
+        runtime.crash_and_recover(object(), deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert runtime.query_calls == 3
     assert events == ["query-1", "kill", "query-2", "query-3", "reset"]
@@ -2603,7 +2605,7 @@ def test_post_crash_kill_error_cannot_bypass_reset() -> None:
 
     runtime = CrashRuntime()
     with pytest.raises(OSError, match="intentional kill failed"):
-        runtime.crash_and_recover(object(), deadline=time.monotonic() + 10.0)
+        runtime.crash_and_recover(object(), deadline=time.monotonic() + SHORT_TIMEOUT)
     assert runtime.reset_calls == 1
 
 
@@ -2650,7 +2652,7 @@ def test_post_crash_recovery_and_reset_failure_retries_then_becomes_terminal() -
     assert runtime.open_count == 0
     assert runtime.cleanup_failed is True
     calls = runtime.query_calls
-    assert runtime.crash_and_recover(object(), deadline=time.monotonic() + 10.0) is None
+    assert runtime.crash_and_recover(object(), deadline=time.monotonic() + SHORT_TIMEOUT) is None
     assert runtime.query_calls == calls
 
 
@@ -2978,7 +2980,7 @@ def test_raw_tool_tokens_cover_the_complete_normalized_result(tmp_path: Path) ->
     query = repository.gold_queries[0]
     request = _navigation_request(query, scope)
     runtime = BehavioralNavigationRuntime(repository, scope)
-    result = runtime.query(request, deadline=time.monotonic() + 10.0)
+    result = runtime.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
     provenance = (Provenance("lsp", "pyright", PYRIGHT_VERSION, "provider_reported"),)
     location = replace(
         result.locations[0],
@@ -3759,7 +3761,7 @@ def test_parse_args_preserves_absolute_operator_path_for_no_follow_traversal(
     assert args.operator_corpus == expected
     traversed_root, files = benchmark_runner._operator_python_files(
         args.operator_corpus,
-        deadline=time.monotonic() + 10.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     assert traversed_root == root.resolve()
     assert [path.name for path in files] == ["inside.py"]
@@ -3786,7 +3788,7 @@ def test_parse_and_traversal_reject_operator_root_symlink_without_leaking_target
     with pytest.raises(RuntimeError, match="regular directory"):
         benchmark_runner._operator_python_files(
             link,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert target.name not in captured.err
@@ -3819,7 +3821,7 @@ def test_parse_and_traversal_reject_operator_root_windows_junction(
     with pytest.raises(RuntimeError, match="regular directory"):
         benchmark_runner._operator_python_files(
             junction,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
     assert target.name not in captured.err
@@ -3856,7 +3858,7 @@ def test_operator_probe_never_reads_or_reports_outside_symlink(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert [path.name for path in visited] == ["inside.py"]
@@ -3891,7 +3893,7 @@ def test_operator_probe_fails_closed_without_leaking_oversized_source(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     encoded = json.dumps(metrics, sort_keys=True)
 
@@ -3937,7 +3939,7 @@ def test_operator_source_uses_bounded_chunk_reads_not_path_read_bytes(
         source,
         root,
         operator_root=root,
-        deadline=time.monotonic() + 10.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert definition == ("bounded.py", 1, len("def "))
@@ -4017,7 +4019,7 @@ def test_operator_source_revalidates_stable_fstat_after_read(
             source,
             root,
             operator_root=root,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
     assert calls == 2
 
@@ -4043,7 +4045,7 @@ def test_operator_source_rejects_outside_file_before_reading_private_text(
             outside,
             root,
             operator_root=root,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
     assert outside.name not in str(captured.value)
     assert "PRIVATE_OUTSIDE_SENTINEL" not in str(captured.value)
@@ -4075,7 +4077,7 @@ def test_operator_source_rejects_leaf_symlink_without_reading_target(
             link,
             root,
             operator_root=root,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
     assert outside.name not in str(captured.value)
     assert "PRIVATE_LEAF_SENTINEL" not in str(captured.value)
@@ -4111,7 +4113,7 @@ def test_operator_source_rejects_reparse_leaf_metadata_before_open(
             source,
             root,
             operator_root=root,
-            deadline=time.monotonic() + 10.0,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
 
@@ -4140,7 +4142,7 @@ def test_operator_source_uses_windows_no_follow_safe_handle(
         source,
         root,
         operator_root=root,
-        deadline=time.monotonic() + 10.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert definition == ("safe.py", 1, len("def "))
@@ -4187,7 +4189,7 @@ def test_operator_probe_never_descends_into_windows_junction(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert [path.name for path in visited] == ["inside.py"]
@@ -4213,7 +4215,7 @@ def test_operator_traversal_entry_cap_fails_closed_before_provider_start(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert metrics["available"] is False
@@ -4239,7 +4241,7 @@ def test_operator_traversal_depth_cap_fails_closed_before_provider_start(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert metrics["available"] is False
@@ -4288,7 +4290,7 @@ def test_operator_traversal_selects_a_deterministic_bounded_file_set(
     metrics = _probe_operator_corpus(
         root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert visited == ["a.py", "b.py"]
@@ -4345,7 +4347,7 @@ def test_operator_probe_close_failure_marks_metrics_unavailable(
     metrics = _probe_operator_corpus(
         operator_root,
         tmp_path / "state",
-        deadline=time.monotonic() + 30.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     assert len(close_deadlines) == 2
     assert close_deadlines[1] >= close_deadlines[0]

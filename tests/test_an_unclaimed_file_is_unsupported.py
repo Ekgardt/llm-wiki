@@ -11,6 +11,7 @@ from code_navigation import Capability, NavigationRequest, NavigationStatus
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import repository, state_root  # noqa: F401 - fixtures
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_code_navigation import _navigation, semantic_pyright  # noqa: F401 - fixture
 
 
@@ -25,10 +26,10 @@ def test_every_capability_on_an_unclaimed_file_is_unsupported(
         resolve_repository_scope(repository), capability, "notes.txt", 1, 0, direction=direction
     )
     try:
-        result = navigation.query(request, deadline=time.monotonic() + 20)
+        result = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
         started = session._process is not None
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert (result.status, result.warnings, started) == (
         NavigationStatus.UNSUPPORTED,

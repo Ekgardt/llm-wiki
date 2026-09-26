@@ -1001,7 +1001,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
                     _command("--lifecycle", "--bootstrap-handshake"),
                     cwd=tmp_path,
                     owner_root=tmp_path / OWNER_NONCE,
-                    deadline=time.monotonic() + 3,
+                    deadline=time.monotonic() + SHORT_TIMEOUT,
                     server_request_handlers={
                         "workspace/configuration": lambda _params: True
                     },
@@ -1235,7 +1235,7 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
 
         result = process.request(
-            "initialized/query", {"retry": True}, deadline=time.monotonic() + 5
+            "initialized/query", {"retry": True}, deadline=time.monotonic() + SHORT_TIMEOUT
         )
 
         assert result["initialized"] is True
@@ -1549,7 +1549,7 @@ def test_generation_guard_wraps_each_autonomous_generation_without_transition_lo
     first_nonce = process.generation_nonce
     try:
         assert process.request(
-            "initialized/query", {}, deadline=time.monotonic() + 5
+            "initialized/query", {}, deadline=time.monotonic() + SHORT_TIMEOUT
         )["initialized"] is True
         second_nonce = process.generation_nonce
 
@@ -2312,7 +2312,7 @@ def test_restart_bootstrap_failure_is_terminal_and_never_replays_request(
         ProtocolViolation,
         match="^LSP replacement startup failed$",
     ) as raised:
-        process.request("initialized/query", {}, deadline=time.monotonic() + 5)
+        process.request("initialized/query", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert str(raised.value.__cause__) == "LSP replacement startup cause (RuntimeError)"
@@ -3714,7 +3714,7 @@ def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) 
     process.shutdown(time.monotonic() + 5)
 
     with pytest.raises(RuntimeError, match="LSP process is closed"):
-        process.request("echo", {}, deadline=time.monotonic() + 5)
+        process.request("echo", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert process.process.pid == pid
     assert process.generation_nonce == generation
     assert process.restart_count == 0
@@ -3941,7 +3941,7 @@ def test_fatal_request_restarts_once_with_fresh_generation(tmp_path: Path) -> No
     process = _start(tmp_path, "--lifecycle", "--crash-once-marker", str(marker))
     first_generation = process.generation_nonce
 
-    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 5) == {
+    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "ok": True
     }
     assert process.restart_count == 1
@@ -3993,7 +3993,7 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
 
     try:
         with pytest.raises(ProtocolViolation):
-            process.request("echo", {}, deadline=time.monotonic() + 5)
+            process.request("echo", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert _coordinator_wait(
             process,
@@ -4336,7 +4336,7 @@ def test_fatal_endings_leave_no_real_descendants_after_leader_exit(
 
     if ending == "crash":
         with pytest.raises(ProtocolViolation):
-            process.request("ending", {}, deadline=time.monotonic() + 5)
+            process.request("ending", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
         _await_settled_failure(process)
     else:
         with pytest.raises(TimeoutError):
@@ -4563,7 +4563,7 @@ def test_environment_requires_inherited_systemroot_on_windows() -> None:
 def test_child_receives_only_the_allowlisted_environment(tmp_path: Path) -> None:
     process = _start(tmp_path, "--report-environment")
     _expect_active_generation_exit(process)
-    environment = process.request("environment", {}, deadline=time.monotonic() + 5)
+    environment = process.request("environment", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert isinstance(environment, dict)
     # CoreFoundation adds `__CF_USER_TEXT_ENCODING` to a macOS process itself,
     # after exec and outside the environment the parent passed.
@@ -4841,7 +4841,7 @@ def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) ->
         "process_exited"
     )
     with pytest.raises(RuntimeError, match="exited"):
-        process.request("later", {}, deadline=time.monotonic() + 1)
+        process.request("later", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     process.close(time.monotonic() + 5)
 
 
@@ -6854,7 +6854,7 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
         try:
             handles.append(open_identity(wait_for_pid_line(len(before))))
             assert process.request(
-                "echo", {"cycle": index}, deadline=time.monotonic() + 10
+                "echo", {"cycle": index}, deadline=time.monotonic() + SHORT_TIMEOUT
             ) == {"cycle": index}
             handles.append(open_identity(wait_for_pid_line(len(before) + 1)))
             assert process.restart_count == 1
@@ -7307,7 +7307,7 @@ def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
     callback.join(_BARRIER_SECONDS)
 
     assert _coordinator_wait(process, lambda: process.restart_count == 1)
-    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 3) == {
+    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "ok": True
     }
     assert process.restart_count == 1
@@ -8953,7 +8953,7 @@ def test_caller_json_violation_never_restarts_and_valid_follow_up_works(
         )
 
     assert process.restart_count == 0
-    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "valid": True
     }
     process.close(time.monotonic() + 5)
@@ -9004,7 +9004,7 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
     assert isinstance(request_errors[0], ProtocolViolation)
     assert attempts == 1
     assert process.restart_count == 1
-    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "valid": True
     }
     process.close(time.monotonic() + 5)
