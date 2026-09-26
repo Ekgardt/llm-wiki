@@ -1135,7 +1135,7 @@ def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> Mar
     """
     path = Path(state_root) / restricted_relative_path(relative_path, ("run",))
     path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    staged = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     _write_whole(staged, payload)
     try:
         os.link(staged, path)

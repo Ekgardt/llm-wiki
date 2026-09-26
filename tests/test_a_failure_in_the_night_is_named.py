@@ -15,6 +15,7 @@ HEALTHY = {
     "transactions": {"pruned": 0, "failed": 0},
     "history": {"attempts": 0, "transactions": 0, "failed": 0},
     "temporaries": {"removed": 0, "bytes": 0},
+    "staged_writes": {"removed": 0, "bytes": 0},
     "empty_shards": 0,
     "snapshot": {"status": "ok", "commit": "abc"},
     "co_activation": {"co_activation_pages": 3},

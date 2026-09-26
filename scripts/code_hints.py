@@ -188,7 +188,7 @@ def write_hints(
     """Publish the table whole: a reader sees the old file or the new one."""
     path = hints_path(state_root, meta["checkout_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.stem}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    temporary = path.with_name(f".{path.stem}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     try:
         _fill_table(temporary, meta, rows, routes)
         os.replace(temporary, path)

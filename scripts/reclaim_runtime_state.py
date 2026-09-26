@@ -26,6 +26,7 @@ See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -79,6 +80,41 @@ def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, int]:
     root = directory if directory is not None else STATE_ROOT / "run"
     reclaimed = [_remove(path) for path in _orphan_temporaries(root, time.time())]
     return {"removed": sum(1 for size in reclaimed if size), "bytes": sum(reclaimed)}
+
+
+# A write into `knowledge/` stages `.<name>.<nonce>.tmp` beside its target and
+# renames it over; a writer killed in between leaves the staged copy there. On
+# this vault (2026-09-26): three, the oldest from 08-26, two of them whole
+# project journals. Only this exact shape is swept — a dot, a name, a hex nonce
+# of at least 16 digits, `.tmp` — so a person's own file there is never taken;
+# `tests/test_a_killed_write_leaves_nothing_behind.py` holds every staging name
+# in `scripts/` to it. Research:
+# docs/research/2026-09-26-a-killed-write-leaves-nothing-behind.md
+STAGED_WRITE_NAME = re.compile(r"^\..+[.-][0-9a-f]{16,}\.tmp$")
+MAX_KNOWLEDGE_ENTRIES = 200_000
+
+
+def _staged_knowledge_writes(root: Path, now: float) -> list[Path]:
+    found: list[Path] = []
+    for count, path in enumerate(root.rglob(".*.tmp")):
+        if count >= MAX_KNOWLEDGE_ENTRIES:
+            break
+        if STAGED_WRITE_NAME.match(path.name) and _is_orphan(path, now):
+            found.append(path)
+    return found
+
+
+def _reclaimed(paths: list[Path]) -> dict[str, int]:
+    sizes = [_remove(path) for path in paths]
+    return {"removed": sum(1 for size in sizes if size), "bytes": sum(sizes)}
+
+
+def sweep_staged_knowledge_writes(root: Path | None = None) -> dict[str, int]:
+    """Staged copies a killed write left beside a Markdown target."""
+    base = root or ROOT / "knowledge"
+    if not base.is_dir():
+        return _reclaimed([])
+    return _reclaimed(_staged_knowledge_writes(base, time.time()))
 
 
 # The nightly kills this step after `RECLAIM_STEP_SECONDS`; the image prune stops
@@ -198,6 +234,7 @@ def reclaim(budget_seconds: float) -> dict[str, object]:
         "transactions": prune_settled_transactions(deadline),
         "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
+        "staged_writes": sweep_staged_knowledge_writes(),
         "empty_shards": remove_empty_intent_shards(),
         "snapshot": snapshot_memory(),
         "co_activation": rebuild_co_activation(),
@@ -219,7 +256,8 @@ def _report(result: dict[str, object]) -> str:
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
-        f"{temporaries['bytes']} byte(s), and {result['empty_shards']} empty intent shard(s)"
+        f"{temporaries['bytes']} byte(s), {result['staged_writes']['removed']} staged "
+        f"knowledge write(s), and {result['empty_shards']} empty intent shard(s)"
         f"{_failure_note(result)}"
     )
 
