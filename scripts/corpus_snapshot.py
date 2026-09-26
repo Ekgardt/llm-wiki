@@ -108,12 +108,16 @@ def _require_unique_manifest_entries(entries: list[dict[str, str]]) -> None:
 
 
 def _require_safe_entry(path: Path, info: os.stat_result, *, symlink: bool) -> None:
+    if _is_link_entry(info, symlink=symlink):
+        raise PermissionError(f"unsafe corpus path: {path}")
+
+
+def _is_link_entry(info: os.stat_result, *, symlink: bool) -> bool:
     reparse = bool(
         (getattr(info, "st_file_attributes", 0) or 0)
         & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     )
-    if symlink or reparse:
-        raise PermissionError(f"unsafe corpus path: {path}")
+    return symlink or reparse
 
 
 class CorpusChanged(RuntimeError):
@@ -207,6 +211,10 @@ class CorpusSnapshot:
     policy: SnapshotPolicy
     collector_version: str = COLLECTOR_VERSION
     extractor_version: str = EXTRACTOR_VERSION
+    # Entries under a code root the walk left out instead of refusing the whole
+    # repository: a link, a file past the size bound, a name that is not UTF-8
+    # (audit 2026-09-26 A-8). Named so a caller can say the graph is partial.
+    skipped: tuple[str, ...] = ()
 
     @property
     def source_hashes(self) -> tuple[tuple[str, str], ...]:
@@ -927,8 +935,11 @@ class _Discovery:
         max_total_bytes: int,
         deadline: float,
         include_archives: bool,
+        pruned_directories: frozenset[str] = frozenset(),
     ) -> None:
         self.vault = vault
+        self.pruned_directories = pruned_directories
+        self.skipped: list[str] = []
         self.max_files = max_files
         self.max_entries = max_entries
         self.max_directories = max_directories
@@ -970,6 +981,7 @@ class _Discovery:
     ) -> None:
         relative = unicodedata.normalize("NFC", path.relative_to(self.vault).as_posix())
         if not _storable_source_path(relative):
+            self._skip(path, kind)
             return
         self._require_unseen(relative)
         self._count_bytes(content)
@@ -1016,13 +1028,43 @@ class _Discovery:
         if self.entries > self.max_entries:
             raise ValueError("corpus traversal entry limit exceeded")
 
-    def _directory_excluded(self, name: str, kind: str) -> bool:
-        """`kind == "code"` means somebody's source tree, so vault nouns do not apply."""
+    def _directory_excluded(self, path: Path, kind: str) -> bool:
+        """`kind == "code"` means somebody's source tree, so vault nouns do not apply.
+
+        A directory git ignores is pruned at any depth, not only at the top: a
+        nested `web/node_modules` made the whole repository unindexable (audit
+        2026-09-26 A-8).
+        """
+        if path.relative_to(self.vault).as_posix() in self.pruned_directories:
+            return True
         return _pruned_directory_name(
-            name,
+            path.name,
             include_archives=self.include_archives,
             vault_vocabulary=kind != "code",
         )
+
+    def _skip(self, path: Path, kind: str) -> None:
+        """Leave one code entry out, by name; anywhere else a strange entry still refuses."""
+        if kind != "code":
+            return
+        self.skipped.append(os.fsencode(path.relative_to(self.vault)).decode("utf-8", "backslashreplace"))
+
+    def _left_out(self, path: Path, info: os.stat_result, kind: str, *, symlink: bool) -> bool:
+        """True for a link under a code root, which is skipped; elsewhere it refuses."""
+        if kind == "code" and _is_link_entry(info, symlink=symlink):
+            self._skip(path, kind)
+            return True
+        _require_safe_entry(path, info, symlink=symlink)
+        return False
+
+    def _wanted_file(self, path: Path, info: os.stat_result, kind: str) -> bool:
+        """An eligible file; under a code root one past the size bound is skipped."""
+        if not self._eligible(path, kind):
+            return False
+        if kind == "code" and info.st_size > self.max_file_bytes:
+            self._skip(path, kind)
+            return False
+        return True
 
     @staticmethod
     def _project_of(path: Path, root: Path, kind: str) -> str | None:
@@ -1078,15 +1120,21 @@ class _Discovery:
         _check_deadline(self.deadline)
         path = Path(entry.path)
         info = self._entry_info(entry)
-        _require_safe_entry(path, info, symlink=entry.is_symlink())
+        if self._left_out(path, info, kind, symlink=entry.is_symlink()):
+            return None
+        return self._windows_kept_entry(root, path, entry.name, depth, kind, info)
+
+    def _windows_kept_entry(
+        self, root: Path, path: Path, name: str, depth: int, kind: str, info: os.stat_result
+    ):
         if stat.S_ISDIR(info.st_mode):
-            return self._windows_child(path, entry.name, depth, kind)
-        if stat.S_ISREG(info.st_mode) and self._eligible(path, kind):
+            return self._windows_child(path, name, depth, kind)
+        if stat.S_ISREG(info.st_mode) and self._wanted_file(path, info, kind):
             self.add(path, kind, self._project_of(path, root, kind))
         return None
 
     def _windows_child(self, path: Path, name: str, depth: int, kind: str):
-        if self._directory_excluded(name, kind):
+        if self._directory_excluded(path, kind):
             return None
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")
@@ -1169,11 +1217,24 @@ class _Discovery:
     ) -> None:
         _check_deadline(self.deadline)
         path = current / name
-        _require_safe_entry(path, info, symlink=stat.S_ISLNK(info.st_mode))
+        if self._left_out(path, info, kind, symlink=stat.S_ISLNK(info.st_mode)):
+            return
+        self._posix_kept_entry(root, path, depth, descriptor, kind, name, info)
+
+    def _posix_kept_entry(
+        self,
+        root: Path,
+        path: Path,
+        depth: int,
+        descriptor: int,
+        kind: str,
+        name: str,
+        info: os.stat_result,
+    ) -> None:
         if stat.S_ISDIR(info.st_mode):
             self._posix_child(root, path, depth, descriptor, kind, name, info)
             return
-        if stat.S_ISREG(info.st_mode) and self._eligible(path, kind):
+        if stat.S_ISREG(info.st_mode) and self._wanted_file(path, info, kind):
             self._posix_source(root, path, descriptor, kind, name, info)
 
     def _posix_child(
@@ -1186,7 +1247,7 @@ class _Discovery:
         name: str,
         info: os.stat_result,
     ) -> None:
-        if self._directory_excluded(name, kind):
+        if self._directory_excluded(path, kind):
             return
         if depth >= self.max_depth:
             raise ValueError("corpus depth limit exceeded")
@@ -1304,7 +1365,9 @@ def _add_code_roots(
         _add_code_root(discovery, _existing_path(vault, relative), relative)
 
 
-def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Candidate, ...]:
+def _discover(
+    vault: Path, policy: SnapshotPolicy, deadline: float, pruned: frozenset[str] = frozenset()
+) -> _Discovery:
     discovery = _Discovery(
         vault,
         max_files=policy.max_files,
@@ -1315,10 +1378,15 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
         max_total_bytes=policy.max_total_bytes,
         deadline=deadline,
         include_archives=policy.include_historical or policy.as_of is not None,
+        pruned_directories=pruned,
     )
     _walk_memory(discovery, vault, policy)
     _add_daily_paths(discovery, vault, policy, deadline)
     _add_code_roots(discovery, vault, policy, deadline)
+    return discovery
+
+
+def _discovered(discovery: _Discovery) -> tuple[_Candidate, ...]:
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
 
 
@@ -1333,7 +1401,16 @@ _UNNAMEABLE_PATH = re.compile(r"[\x00-\x1f\x7f\\]")
 def _storable_source_path(relative: str) -> bool:
     if len(relative) > _MAX_SOURCE_PATH_CHARS:
         return False
-    return _UNNAMEABLE_PATH.search(relative) is None
+    return _UNNAMEABLE_PATH.search(relative) is None and _encodes_as_utf8(relative)
+
+
+def _encodes_as_utf8(relative: str) -> bool:
+    """A name the file system gave as bytes that are not UTF-8 cannot be a source's name."""
+    try:
+        relative.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _decodes_as_utf8(content: bytes) -> bool:
@@ -2478,21 +2555,27 @@ def _capture(
     policy: SnapshotPolicy,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    pruned: frozenset[str] = frozenset(),
 ) -> CorpusSnapshot:
-    candidates = _discover(vault, policy, deadline)
+    discovery = _discover(vault, policy, deadline, pruned)
+    candidates = _discovered(discovery)
     capture = _Capture(policy, deadline, cancelled)
     for candidate in candidates:
         _check_deadline(deadline)
         capture.add(candidate)
     _check_deadline(deadline)
-    current = _discover(vault, policy, deadline)
+    current = _discovered(_discover(vault, policy, deadline, pruned))
     _require_stable_membership(candidates, current)
     _require_stable_content(current, policy, capture.hashes, deadline)
     corpus_hash = canonical_source_manifest_sha256(
         (source.record for source in capture.captured), policy
     )
     return CorpusSnapshot(
-        tuple(capture.captured), tuple(capture.chunks), corpus_hash, policy
+        tuple(capture.captured),
+        tuple(capture.chunks),
+        corpus_hash,
+        policy,
+        skipped=tuple(discovery.skipped),
     )
 
 
@@ -2518,13 +2601,14 @@ def _captured_after_retries(
     policy: SnapshotPolicy,
     deadline: float,
     cancelled: Callable[[], bool] | None,
+    pruned: frozenset[str] = frozenset(),
 ) -> CorpusSnapshot:
     """One capture that describes a real instant, retried while the vault moves."""
     last: CorpusChanged | None = None
     for _ in range(MAX_CAPTURE_PASSES):
         _check_processing_stop(deadline, cancelled)
         try:
-            return _capture(root, policy, deadline, cancelled)
+            return _capture(root, policy, deadline, cancelled, pruned)
         except CorpusChanged as exc:
             last = exc
     raise CorpusChanged(f"corpus never held still for one pass: {last}")
@@ -2548,8 +2632,14 @@ def collect_corpus(
     deadline_seconds: float | None = None,
     coordinator: object | None = None,
     cancelled: Callable[[], bool] | None = None,
+    pruned_directories: Iterable[str] = (),
 ) -> CorpusSnapshot:
-    """Capture one immutable corpus and reject any change before returning it."""
+    """Capture one immutable corpus and reject any change before returning it.
+
+    `pruned_directories` are vault-relative POSIX paths the walk never enters: a
+    repository's git-ignored directories at any depth. They are not policy; the
+    membership they leave out is what the caller asked not to read.
+    """
     root = Path(vault).resolve(strict=True)
     if not stat.S_ISDIR(_safe_info(root).st_mode):
         raise ValueError("vault must be a regular directory")
@@ -2576,7 +2666,7 @@ def collect_corpus(
     with gate:
         _check_processing_stop(selected_deadline, cancelled)
         return _captured_after_retries(
-            root, selected_policy, selected_deadline, cancelled
+            root, selected_policy, selected_deadline, cancelled, frozenset(pruned_directories)
         )
 
 

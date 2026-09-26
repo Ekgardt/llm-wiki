@@ -543,11 +543,15 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
     See `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
     """
     from corpus_snapshot import CorpusChanged, collect_corpus
+    from workspace_revision import ignored_directories
 
     try:
         return collect_corpus(
             root,
             code_roots=roots,
+            # What git ignores is not the repository's code at any depth (audit
+            # 2026-09-26 A-8); the freshness walk prunes the same set.
+            pruned_directories=ignored_directories(root, deadline=deadline, cancelled=None),
             # The allowlist is this repository's own selected roots, not the
             # vault's `APPROVED_CODE_ROOTS`. What the collector still enforces
             # is the shape of each path and that the walk would descend into it.
@@ -661,6 +665,11 @@ def _index_receipt(
         "excluded_roots": list(roots.excluded),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
+        # Entries under a root the collector left out rather than refuse the whole
+        # repository — a link, a file past the size bound, a name that is not
+        # UTF-8 — counted and the first twenty named (audit 2026-09-26 A-8).
+        "skipped_entries": len(snapshot.skipped),
+        "skipped_examples": list(snapshot.skipped[:20]),
         # What the collector did, and the cost of it, as a number rather than a
         # label. Under a root it walks the filesystem, not Git's index, so an
         # untracked file that is not pruned is collected. "Indexed" is not

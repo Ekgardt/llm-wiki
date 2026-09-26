@@ -29,13 +29,13 @@ def test_an_ignored_dependency_tree_does_not_reach_the_ceiling(tmp_path: Path, m
     assert ("src/app.ts" in paths, [path for path in paths if path.startswith("node_modules/")]) == (True, [])
 
 
-def test_the_ignored_top_level_set_comes_from_git(tmp_path: Path) -> None:
+def test_the_ignored_set_comes_from_git_at_any_depth(tmp_path: Path) -> None:
     root = _repository(tmp_path / "repo", {"src/app.ts": "x\n", ".gitignore": "dist/\nbuild/\n"})
     (root / "dist").mkdir()
     (root / "dist" / "out.js").write_text("x\n", encoding="utf-8")
     (root / "src" / "build").mkdir()
     (root / "src" / "build" / "x.js").write_text("x\n", encoding="utf-8")
 
-    ignored = workspace_revision.ignored_top_level_directories(root, deadline=None, cancelled=None)
+    ignored = workspace_revision.ignored_directories(root, deadline=None, cancelled=None)
 
-    assert ignored == frozenset({"dist"})
+    assert ignored == frozenset({"dist", "src/build"})

@@ -3984,4 +3984,4 @@ def test_a_cancel_during_the_ignored_folder_query_stops_the_revision(tmp_path: P
     subprocess.run(["git", "init", "-q", str(root)], check=True)
 
     with pytest.raises(TimeoutError, match="cancel"):
-        workspace_revision.ignored_top_level_directories(root, deadline=None, cancelled=lambda: True)
+        workspace_revision.ignored_directories(root, deadline=None, cancelled=lambda: True)

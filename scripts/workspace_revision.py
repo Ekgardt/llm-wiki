@@ -1549,13 +1549,13 @@ def _relevant_files(
     relevant_paths: set[str] | None = None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-    skipped_top_level: frozenset[str] = frozenset(),
+    skipped_directories: frozenset[str] = frozenset(),
 ) -> Iterator[Path]:
     """Every relevant file under the root, in a deterministic walk order.
 
-    `skipped_top_level` names top-level directories git ignores whole; the
-    corpus never walks them either, because it takes only tracked top-level
-    entries (audit A-16).
+    `skipped_directories` names the directories git ignores whole, at any depth,
+    as root-relative POSIX paths; the corpus prunes the same set (audit A-16,
+    audit 2026-09-26 A-8).
     """
     scan = _RelevantScan(
         root=root,
@@ -1575,25 +1575,27 @@ def _relevant_files(
         directories: list[Path] = []
         current = stack.pop()
         yield from _scan_directory(scan, current, directories)
-        stack.extend(reversed(_walkable(root, current, directories, skipped_top_level)))
+        stack.extend(reversed(_walkable(root, current, directories, skipped_directories)))
 
 
 def _walkable(
-    root: Path, current: Path, directories: list[Path], skipped_top_level: frozenset[str]
+    root: Path, current: Path, directories: list[Path], skipped: frozenset[str]
 ) -> list[Path]:
-    if current != root:
+    if not skipped:
         return directories
-    return [directory for directory in directories if directory.name not in skipped_top_level]
+    return [directory for directory in directories if directory.relative_to(root).as_posix() not in skipped]
 
 
-def ignored_top_level_directories(
+def ignored_directories(
     root: Path, *, deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> frozenset[str]:
-    """Top-level directories git ignores whole, e.g. `node_modules`, `dist`.
+    """Directories git ignores whole, at any depth, e.g. `node_modules`, `web/dist`.
 
     Walking them cost 14.8 s and then refused at the 100 000-entry ceiling on a
     TypeScript checkout with its dependencies installed (audit A-16,
-    docs/research/2026-09-25-a-revision-walks-no-ignored-top-level-folder.md).
+    docs/research/2026-09-25-a-revision-walks-no-ignored-top-level-folder.md); a
+    nested `web/node_modules` did the same one level down (audit 2026-09-26 A-8,
+    docs/research/2026-09-26-one-entry-does-not-refuse-a-repository.md).
     Git cannot answer (no repository, a failed command): none is skipped.
     """
     try:
@@ -1611,15 +1613,7 @@ def ignored_top_level_directories(
         raise
     except (ValueError, OSError):
         return frozenset()
-    return frozenset(_top_level_directory(record) for record in output.split(b"\0") if _is_top_level_directory(record))
-
-
-def _is_top_level_directory(record: bytes) -> bool:
-    return record.endswith(b"/") and b"/" not in record[:-1]
-
-
-def _top_level_directory(record: bytes) -> str:
-    return os.fsdecode(record[:-1])
+    return frozenset(os.fsdecode(record[:-1]) for record in output.split(b"\0") if record.endswith(b"/"))
 
 class _VerificationDigests:
     """The SHA-256 every hash needs, plus git's blob hash when one is wanted."""
@@ -3949,7 +3943,7 @@ def _add_relevant_files(build: _RevisionBuild) -> None:
         private_inventory_safe=build.private_safe,
         deadline=build.deadline,
         cancelled=build.cancelled,
-        skipped_top_level=ignored_top_level_directories(
+        skipped_directories=ignored_directories(
             build.root, deadline=build.deadline, cancelled=build.cancelled
         ),
     ):
@@ -4745,7 +4739,7 @@ def _walk_relevant_files(
         relevant_paths=state.relevant,
         deadline=deadline,
         cancelled=cancelled,
-        skipped_top_level=ignored_top_level_directories(root, deadline=deadline, cancelled=cancelled),
+        skipped_directories=ignored_directories(root, deadline=deadline, cancelled=cancelled),
     ):
         normalized = _normalized_path(current_path.relative_to(root).as_posix())
         if normalized in state.paths:
