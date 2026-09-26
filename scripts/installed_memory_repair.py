@@ -1292,7 +1292,27 @@ def _coordinator_database_blockers(
             database, state_root, now, deadline
         )
         blockers.update(transaction_blockers)
+        known |= _recorded_transactions(database, _artifact_ids(state_root, deadline) - known)
     return blockers, known, retained
+
+
+def _artifact_ids(state_root: Path, deadline: float) -> set[str]:
+    entries = _bounded_entries(
+        state_root / "run" / "transactions", state_root=state_root, deadline=deadline
+    )
+    return {_transaction_artifact_id(entry) for entry in entries}
+
+
+def _recorded_transactions(database: sqlite3.Connection, ids: set[str]) -> set[str]:
+    """Which of `ids` the ledger names, asked in slices under SQLite's variable limit."""
+    ordered = sorted(ids)
+    found: set[str] = set()
+    for start in range(0, len(ordered), 500):
+        chunk = ordered[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        rows = database.execute(f'SELECT id FROM "transaction" WHERE id IN ({marks})', chunk).fetchall()
+        found.update(str(row[0]) for row in rows)
+    return found
 
 
 def _coordinator_owner_blockers(
@@ -1322,7 +1342,15 @@ def _coordinator_table_blockers(
 def _transaction_blockers(
     database: sqlite3.Connection, state_root: Path, now: datetime, deadline: float
 ) -> tuple[set[str], set[str], set[str]]:
-    rows = _bounded_rows(database, 'SELECT * FROM "transaction"', deadline=deadline)
+    # A committed row whose artifacts were pruned holds nothing: it produces no
+    # blocker and no retention. Reading all of them hit the 10 000-row bound on
+    # a vault with 23 664 rows and reported the state unreadable (audit
+    # 2026-09-26 A-11, docs/research/2026-09-26-a-backup-takes-what-any-installed-vault-holds.md).
+    rows = _bounded_rows(
+        database,
+        'SELECT * FROM "transaction" WHERE state <> \'committed\' OR artifacts_pruned_at IS NULL',
+        deadline=deadline,
+    )
     cutoff = now.astimezone(timezone.utc) - timedelta(days=_UNDO_RETENTION_DAYS)
     blockers: set[str] = set()
     known: set[str] = set()
@@ -1398,10 +1426,7 @@ def _transaction_artifact_blockers(
     known: set[str],
     retained: set[str],
 ) -> set[str]:
-    entries = _bounded_entries(
-        state_root / "run" / "transactions", state_root=state_root, deadline=deadline
-    )
-    artifact_ids = {_transaction_artifact_id(entry) for entry in entries}
+    artifact_ids = _artifact_ids(state_root, deadline)
     blockers: set[str] = set()
     if retained & artifact_ids:
         blockers.add("transaction_artifact_retained")

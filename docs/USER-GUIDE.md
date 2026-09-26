@@ -595,7 +595,9 @@ tracked file identical to `HEAD` is left out — a clone brings it back — and 
 `cache/`, `logs/`, `run/` (staged separately), `.git/`, `.venv/`, and tool caches such
 as `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache` and `node_modules`. A
 vault that is not a git checkout, or a machine without `git`, is backed up whole.
-Recovery is therefore: clone the repository, install, restore, publish.
+Recovery is therefore: clone the repository, restore, publish, then install. The
+installer creates runtime files of its own, so publishing after it meets them and
+refuses; published first, the installer finds an adopted vault and keeps it.
 
 Restore only to a pre-existing empty directory:
 

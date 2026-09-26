@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The encrypted backup completes on an installed vault: the runtime check reads only transactions that can hold anything (the live ledger had 23 664 rows against a 10 000-row bound and was called unreadable), and the install manifest, retired pre-v3 databases and quarantined or conflicted transactions are carried rather than refused. The guide's recovery order is now clone, restore, publish, then install (audit 2026-09-26 A-11).
 - A redriven capture no longer fails on the decision file its dead parent wrote but never indexed (13 such files on the live vault): the unindexed leftover is removed and the decision made again. The weekly purge keeps a redrive family, named, instead of stopping on it (audit 2026-09-26 A-12).
 - A release of the canonical Markdown writer gate refused by a database busy past its timeout is retried by the same process (1 s … every minute, about an hour) instead of leaving its rows to shut every other writer out until the process exits; the committed operation is no longer reported failed (audit 2026-09-26 A-13).
 - A reinstall is no longer rolled back because the vault had a bad night: the install smoke fails only on an error in a check the installer owns (environment, filesystem, adoption, MCP, integrations) or an error that names no check; other errors are named on stderr and reported as degraded (audit 2026-09-26 A-10).
