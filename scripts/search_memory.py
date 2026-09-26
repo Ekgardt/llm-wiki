@@ -53,7 +53,7 @@ from corpus_snapshot import (  # noqa: E402
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from page_status import current_status_sql, is_retired  # noqa: E402
-from provenance import trust_weight  # noqa: E402
+from provenance import substance_weight, trust_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -3182,10 +3182,15 @@ def _first_line(content: str) -> str:
     return stripped.splitlines()[0][:120]
 
 
+def _chunk_weight(authority: object, page_type: object, content: object) -> float:
+    """Who said it and what the page is, and whether this chunk is prose or a link list."""
+    return trust_weight(authority, page_type) * substance_weight(content)
+
+
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
-    score = -float(row["rank"]) * trust_weight(authority, _row_text(row, "type"))
     content = _row_text(row, "content")
+    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content)
     return {
         "path": row["source_path"],
         "title": row["title"] or Path(row["source_path"]).stem,
@@ -3535,7 +3540,7 @@ def _vector_scored_rows(
             score *= 1.5
         # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
         # that carries none is admitted on its cosine alone rather than refused.
-        score *= trust_weight(result.get("authority"), result.get("type"))
+        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"

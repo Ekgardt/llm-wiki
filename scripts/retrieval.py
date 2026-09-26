@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import lane_score
-from provenance import authority_weight, curated_pages_first, source_type_weight
+from provenance import authority_weight, curated_pages_first, source_type_weight, substance_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
 
@@ -1367,7 +1367,7 @@ def _weigh_by_trust(
     curated_first: bool,
     query: str | None = None,
 ) -> dict[str, float]:
-    """Multiply each fused score by who said it, what the page is, and what it did.
+    """Multiply each fused score by who said it, what the page is, what it did, and whether it is prose.
 
     Every factor is recorded on the candidate separately, so the ordering can be
     explained by name rather than by one opaque number. `curated_first` is what
@@ -1386,11 +1386,13 @@ def _weigh_by_trust(
         )
         carried = standing.get(str(meta[key].get("relative_path")), 1.0)
         near = alongside.get(_page_name(meta[key].get("relative_path")), 1.0)
+        substance = substance_weight(meta[key].get("content"))
         meta[key]["authority_weight"] = authority
         meta[key]["type_weight"] = page
         meta[key]["carried_weight"] = carried
         meta[key]["alongside_weight"] = near
-        weighted[key] = value * authority * page * carried * near
+        meta[key]["substance_weight"] = substance
+        weighted[key] = value * authority * page * carried * near * substance
     return weighted
 
 

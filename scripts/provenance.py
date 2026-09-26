@@ -7,6 +7,8 @@ it from here now, and the weight multiplies whichever score decides the order.
 """
 from __future__ import annotations
 
+import re
+
 # Higher weight = preferred in ranking (typed provenance).
 AUTHORITY_WEIGHTS: dict[str, float] = {
     "user": 1.35,
@@ -137,3 +139,39 @@ def type_weight(value: object) -> float:
 def trust_weight(authority: object, page_type: object) -> float:
     """Both factors, applied once: who said it, and what the page is."""
     return authority_weight(authority) * type_weight(page_type)
+
+
+# A chunk that is mostly links points at answers instead of holding one: a
+# "Related" list, or a heading with nothing under it. Boilerpipe's shallow-text
+# classifier (Kohlschütter et al., WSDM 2010) calls a block with a link density
+# above 0.333333 not content; the same bound here. Such a chunk is kept, since a
+# query may name only the page it links to, but it ranks behind prose (audit
+# 2026-09-26 C-10, docs/research/2026-09-26-a-link-list-is-not-an-answer.md).
+LINK_DENSITY_CONTENT_MAX = 0.333333
+NAVIGATION_WEIGHT = 0.25
+_LINK = re.compile(r"\[\[[^\]\n]*\]\]|\[[^\]\n]*\]\([^)\n]*\)")
+
+
+_WORD = re.compile(r"[^\W_]+")
+
+
+def _link_density(content: str) -> float | None:
+    """Words inside links over all words, headings left out; None when no word is left.
+
+    A slug is counted by its words, as anchor text would be: `secret-shape-decision`
+    is three words, not one token.
+    """
+    body = "\n".join(line for line in content.splitlines() if not line.lstrip().startswith("#"))
+    linked = sum(len(_WORD.findall(match.group(0))) for match in _LINK.finditer(body))
+    total = linked + len(_WORD.findall(_LINK.sub(" ", body)))
+    return linked / total if total else None
+
+
+def substance_weight(content: object) -> float:
+    """1.0 for prose; NAVIGATION_WEIGHT for a link list or a bare heading; 1.0 when unknown."""
+    if not isinstance(content, str) or not content.strip():
+        return 1.0
+    density = _link_density(content)
+    if density is None or density > LINK_DENSITY_CONTENT_MAX:
+        return NAVIGATION_WEIGHT
+    return 1.0
