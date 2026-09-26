@@ -954,10 +954,26 @@ def _nightly_pass(
     failures = _nightly_steps(run_step, log, ownership)
     _require_fence(fence)
     _require_within_bound(deadline)
-    _prune_reports(log)
-    _update_code(log)
+    failures += int(not _housekeeping(log, "pruning", _prune_reports))
+    # An update is never a reason to fail the night; its failure is named only.
+    _housekeeping(log, "update", _update_code)
     log(f"=== Nightly pass complete (failures={failures}) ===")
     return failures
+
+
+def _housekeeping(log, label: str, step) -> bool:
+    """Run a step after the counted ones; its exception is named, never the night's end.
+
+    `_update_code` promised never to fail the night, and a busy state lock in its
+    one `update_state` did exactly that (audit 2026-09-26, regress 8,
+    docs/research/2026-09-26-a-housekeeping-step-names-its-failure.md).
+    """
+    try:
+        step(log)
+    except Exception as exc:  # noqa: BLE001 - named in the log, counted by the caller
+        log(f"  {label} failed: {describe_error(exc)}")
+        return False
+    return True
 
 
 def _record_result_quietly(today: str, failures: int, error: str | None) -> None:
