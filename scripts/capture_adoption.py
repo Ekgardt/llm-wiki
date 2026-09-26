@@ -306,27 +306,59 @@ def complete_pending_capture_intents(
     return outcome
 
 
+# Both recovery passes, in the order a capture needs them: a half-published intent
+# is finished first, so the adoption right after gives it its task. The capture
+# worker and the nightly command run this one list (audit 2026-09-26 C-12;
+# `docs/research/2026-09-26-the-nightly-finishes-what-a-publisher-left-half-way.md`).
+RECOVERY_SWEEPS = (complete_pending_capture_intents, adopt_orphaned_capture_intents)
+
+
+def record_standing_skips(skipped: list[dict[str, Any]]) -> int:
+    """An intent a pass could not recover is a standing loss: say so, once per pass.
+
+    A writer race (`retried`) mends itself on the next pass and is not written.
+    See `docs/research/2026-09-17-the-adoption-pass-says-what-it-skipped-and-looks-past-it.md`.
+    """
+    from capture_diagnostics import record_capture_failure
+
+    standing = [skip for skip in skipped if not skip.get("retried")]
+    if not standing:
+        return 0
+    first = standing[0]
+    record_capture_failure(
+        "capture_adoption",
+        f"{len(standing)} intent(s) not adopted; first {first.get('intent_id')}: {first.get('reason')}",
+    )
+    return len(standing)
+
+
 def adopt_in_active_vault(*, limit: int = MAX_ADOPTED_INTENTS_PER_PASS) -> dict[str, Any]:
-    """Run one adoption pass against the installed vault's active runtime."""
+    """Run both recovery passes against the installed vault's active runtime."""
     from markdown_transaction import active_markdown_coordinator
     from memory_queue import active_memory_queue
 
     vault = Path(ROOT).resolve(strict=True)
     state_root = Path(STATE_ROOT).resolve(strict=True)
-    return adopt_orphaned_capture_intents(
-        active_memory_queue(vault, state_root),
-        active_markdown_coordinator(vault, state_root),
-        state_root=state_root,
-        limit=limit,
-    )
+    queue = active_memory_queue(vault, state_root)
+    coordinator = active_markdown_coordinator(vault, state_root)
+    results = {
+        sweep.__name__: sweep(queue, coordinator, state_root=state_root, limit=limit)
+        for sweep in RECOVERY_SWEEPS
+    }
+    for result in results.values():
+        record_standing_skips(result.get("skipped") or [])
+    return results
 
 
-def _report(result: dict[str, Any]) -> None:
+def _report(results: dict[str, dict[str, Any]]) -> None:
+    pending = results["complete_pending_capture_intents"]
+    adopted = results["adopt_orphaned_capture_intents"]
+    skipped = len(pending["skipped"]) + len(adopted["skipped"])
     print(
-        f"capture adoption: examined {result['examined']}, "
-        f"adopted {len(result['adopted'])}, skipped {len(result['skipped'])}"
+        f"capture adoption: finished {len(pending['completed'])} half-published, "
+        f"adopted {len(adopted['adopted'])}, skipped {skipped}"
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:

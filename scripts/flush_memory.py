@@ -1316,12 +1316,9 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
     worker's job is to drain the queue, and a sweeper that cannot run must never
     be the reason the queue is not drained.
     """
-    from capture_adoption import (
-        adopt_orphaned_capture_intents,
-        complete_pending_capture_intents,
-    )
+    from capture_adoption import RECOVERY_SWEEPS
 
-    for sweep in (complete_pending_capture_intents, adopt_orphaned_capture_intents):
+    for sweep in RECOVERY_SWEEPS:
         _swept_intents(sweep, queue, coordinator)
 
 
@@ -1338,26 +1335,9 @@ def _swept_intents(sweep, queue: object, coordinator: object) -> None:
     except Exception as error:  # noqa: BLE001 - recovery must not break the worker
         _count_dropped_capture("capture_adoption", error, None)
         return
-    _record_adoption_skips(result.get("skipped") or [])
+    from capture_adoption import record_standing_skips
 
-
-def _record_adoption_skips(skipped: Sequence[Mapping[str, object]]) -> None:
-    """An intent the pass could not adopt is a standing loss: say so, once per pass.
-
-    The result used to be thrown away, so an intent that could never be adopted was
-    re-read on every pass and named nowhere. See
-    `docs/research/2026-09-17-the-adoption-pass-says-what-it-skipped-and-looks-past-it.md`.
-    """
-    from capture_diagnostics import record_capture_failure
-
-    standing = [skip for skip in skipped if not skip.get("retried")]
-    if not standing:
-        return
-    first = standing[0]
-    record_capture_failure(
-        "capture_adoption",
-        f"{len(standing)} intent(s) not adopted; first {first.get('intent_id')}: {first.get('reason')}",
-    )
+    record_standing_skips(result.get("skipped") or [])
 
 
 def run_capture_worker_once(
