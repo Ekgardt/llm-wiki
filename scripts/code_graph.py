@@ -1827,7 +1827,7 @@ def _live_dead_candidate(
         "file": str(path),
         "line": function["line"],
         "status": "candidate",
-        "reason": "zero_confirmed_incoming_calls",
+        "reason": _checked_reason("zero_confirmed_incoming_calls", str(path)),
         "graph_complete": False,
     }
 
@@ -1916,7 +1916,24 @@ DEAD_CODE_REASON_ORDER = (
     "zero_confirmed_incoming_calls",
     "referenced_without_call",
     "unresolved_receiver",
+    "references_not_indexed",
 )
+# The value-reference index reads Python only. For a TypeScript, JavaScript, Go
+# or Rust symbol "nothing names it" was never checked, so claiming it was put 8
+# live rows of 11 under the strongest verdict (audit 2026-09-26 A-7,
+# docs/research/2026-09-26-a-dead-code-claim-names-what-it-checked.md).
+_REFERENCE_INDEXED_SUFFIXES = frozenset({".py", ".pyi"})
+
+
+def _references_indexed(path: str) -> bool:
+    return PurePath(path).suffix in _REFERENCE_INDEXED_SUFFIXES
+
+
+def _checked_reason(reason: str, path: str) -> str:
+    """A claim that nothing names the symbol stands only where names were read."""
+    if reason == "unresolved_receiver" or _references_indexed(path):
+        return reason
+    return "references_not_indexed"
 
 
 def _dead_code_reason_rank(reason: str) -> int:
@@ -2047,7 +2064,7 @@ def _dead_candidate_row(
         "file": location[0],
         "line": location[1],
         "status": "candidate",
-        "reason": _dead_code_reason(name, called_names, index),
+        "reason": _checked_reason(_dead_code_reason(name, called_names, index), location[0]),
         "graph_complete": False,
     }
 

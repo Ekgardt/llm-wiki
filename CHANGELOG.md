@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `find_dead_code` no longer calls a TypeScript, JavaScript, Go or Rust symbol dead on a check it never made: the value-reference index reads Python only, so such rows say `references_not_indexed`, the weakest reason, ordered last (audit 2026-09-26 A-7).
 - One symbolic link, one file past 8 MiB, one name that is not UTF-8 or a nested git-ignored folder such as `web/node_modules` no longer makes a whole repository unindexable: under a code root such entries are skipped and named in the receipt (`skipped_entries`), and git-ignored directories are pruned at any depth by both the corpus and the freshness walk (audit 2026-09-26 A-8).
 - The encrypted backup completes on an installed vault: the runtime check reads only transactions that can hold anything (the live ledger had 23 664 rows against a 10 000-row bound and was called unreadable), and the install manifest, retired pre-v3 databases and quarantined or conflicted transactions are carried rather than refused. The guide's recovery order is now clone, restore, publish, then install (audit 2026-09-26 A-11).
 - A redriven capture no longer fails on the decision file its dead parent wrote but never indexed (13 such files on the live vault): the unindexed leftover is removed and the decision made again. The weekly purge keeps a redrive family, named, instead of stopping on it (audit 2026-09-26 A-12).
