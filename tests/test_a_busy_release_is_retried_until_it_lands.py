@@ -21,6 +21,8 @@ from test_writer_gate_reclaims_a_dead_projection import (  # noqa: E402
     _gate_rows,
 )
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
+
 
 def _locked_once(monkeypatch) -> None:
     real_delete = markdown_transaction.MarkdownCoordinator._delete_writer_projection
@@ -38,7 +40,7 @@ def _locked_once(monkeypatch) -> None:
 def _join_release_threads() -> None:
     for thread in threading.enumerate():
         if thread.name == "markdown-writer-release":
-            thread.join(timeout=10)
+            thread.join(timeout=LONG_TIMEOUT)
 
 
 def test_a_busy_release_lands_later_and_the_next_writer_enters(tmp_path, monkeypatch) -> None:
