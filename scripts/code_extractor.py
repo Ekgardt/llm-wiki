@@ -39,7 +39,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v15"  # v15: calls follow package re-exports (audit 2026-09-26 B-6)
+EXTRACTOR_VERSION = "code-extractor/v16"  # v16: a name the function binds hides an import of it (audit 2026-09-26 C-9)
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
@@ -841,6 +841,99 @@ def _syntax_callee(node: object) -> object | None:
     return function
 
 
+# A nested scope binds its names for itself; its own name belongs to the outer one.
+_NESTED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _block_nodes(function: ast.AST) -> list[ast.AST]:
+    """Every node of the function's own block, without entering a nested scope."""
+    found: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if not isinstance(node, _NESTED_SCOPES):
+            pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _stored_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+        return node.id
+    return None
+
+
+# Nodes whose `name` attribute is the name they bind: definitions, `except ... as`,
+# capture patterns, and (3.12+) type parameters.
+_NAMED_BINDERS = (
+    *_DEFINITIONS,
+    ast.ExceptHandler,
+    ast.MatchAs,
+    ast.MatchStar,
+    *(getattr(ast, kind) for kind in ("TypeVar", "ParamSpec", "TypeVarTuple") if hasattr(ast, kind)),
+)
+
+
+def _named_binding(node: ast.AST) -> str | None:
+    if isinstance(node, _NAMED_BINDERS):
+        return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
+    return None
+
+
+def _bound_name(node: ast.AST) -> str | None:
+    """The name this node binds in its block: a target, a parameter, a definition, a handler."""
+    if isinstance(node, ast.arg):
+        return node.arg
+    return _named_binding(node) or _stored_name(node)
+
+
+def _declared_outside(nodes: list[ast.AST]) -> set[str]:
+    return {name for node in nodes if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
+
+
+def _local_bindings(function: ast.AST) -> frozenset[str]:
+    nodes = _block_nodes(function)
+    bound = {_bound_name(node) for node in nodes} - {None}
+    return frozenset(bound - _declared_outside(nodes))
+
+
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _enclosing_functions(node: ast.AST, parent: Mapping[int, ast.AST]) -> list[ast.AST]:
+    found: list[ast.AST] = []
+    current = parent.get(id(node))
+    while current is not None:
+        if isinstance(current, _FUNCTION_SCOPES):
+            found.append(current)
+        current = parent.get(id(current))
+    return found
+
+
+def _declared_global(nodes: list[ast.AST]) -> set[str]:
+    return {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
+
+
+def _scope_chain_bindings(owner: ast.AST, parent: Mapping[int, ast.AST]) -> frozenset[str]:
+    """Names bound in `owner` or in a function around it, minus what `owner` declares global."""
+    outer: set[str] = set()
+    for function in _enclosing_functions(owner, parent):
+        outer.update(_local_bindings(function))
+    return frozenset(_local_bindings(owner) | (outer - _declared_global(_block_nodes(owner))))
+
+
 def _single_local_target(candidates: tuple, shadowed: bool, qualified: bool) -> bool:
     return len(candidates) == 1 and not shadowed and not qualified
 
@@ -928,6 +1021,7 @@ class _Collector:
         # `from x import y [as z]`: a package's re-export (audit 2026-09-26 B-6).
         self.reexports: dict[tuple[str, str], tuple[str, str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
+        self.local_bindings: dict[int, frozenset[str]] = {}
         self.function_body_scope: dict[str, str] = {}
         self.function_parent_scope: dict[str, str] = {}
         self.scope_parent: dict[str, str] = {}
@@ -1606,6 +1700,7 @@ class _Collector:
         owner = self._enclosing_node(node, parent)
         source_node_id = self.node_ast.get(id(owner), ctx.module_id) if owner else ctx.module_id
         span = ctx.span(node)
+        aliases = self._visible_aliases(aliases, owner, parent)
         targets = self._resolve_expression(node.func, ctx.module_name, aliases, owner)
         self._resolved_edge(
             source_node_id, "CALLS", targets, _expression_text(node.func), ctx.source, span,
@@ -2097,6 +2192,31 @@ class _Collector:
         if owner is None:
             return list(self.python_scopes.get((module_name, module_name, expression.id), ()))
         return self._scoped_targets(expression.id, module_name, owner)
+
+    def _visible_aliases(
+        self,
+        aliases: Mapping[str, tuple[str, str]],
+        owner: ast.AST | None,
+        parent: Mapping[int, ast.AST],
+    ) -> Mapping[str, tuple[str, str]]:
+        """The imports a call inside `owner` can still see.
+
+        A name bound anywhere in a function is local to the whole function, and
+        to the functions nested in it, so an import of the same name is not
+        what a call there reaches (audit 2026-09-26 C-9,
+        docs/research/2026-09-26-a-local-name-hides-an-import.md).
+        """
+        hidden = self._shadowing_names(owner, parent).intersection(aliases)
+        if not hidden:
+            return aliases
+        return {name: target for name, target in aliases.items() if name not in hidden}
+
+    def _shadowing_names(self, owner: ast.AST | None, parent: Mapping[int, ast.AST]) -> frozenset[str]:
+        if owner is None:
+            return frozenset()
+        if id(owner) not in self.local_bindings:
+            self.local_bindings[id(owner)] = _scope_chain_bindings(owner, parent)
+        return self.local_bindings[id(owner)]
 
     def _alias_targets(self, module: str, symbol: str) -> list[str]:
         if symbol:
