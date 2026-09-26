@@ -37,7 +37,7 @@ def test_a_repository_refresh_is_retried_after_a_failed_spawn(spawn_results, tmp
         checkout_root=str(tmp_path),
         git_commit="c" * 40,
     )
-    answers = [mcp_server._request_repository_refresh(tmp_path, checkout) for _ in range(3)]
+    answers = [mcp_server._request_repository_refresh(checkout) for _ in range(3)]
     assert (answers, spawn_results) == (
         ["spawn_failed", "started", "already_requested"],
         [4243],

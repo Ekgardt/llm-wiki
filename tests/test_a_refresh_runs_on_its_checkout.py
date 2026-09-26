@@ -36,8 +36,8 @@ def test_each_worktree_is_refreshed_from_its_root(tmp_path: Path, monkeypatch) -
     first, second = _checkout(tmp_path, "main"), _checkout(tmp_path, "feature")
 
     answers = [
-        mcp_server._request_repository_refresh(tmp_path / "main" / "src", first),
-        mcp_server._request_repository_refresh(tmp_path / "feature" / "src", second),
+        mcp_server._request_repository_refresh(first),
+        mcp_server._request_repository_refresh(second),
     ]
 
     assert (answers, [args[-1] for args in spawned]) == (

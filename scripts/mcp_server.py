@@ -2182,7 +2182,7 @@ def _freshness_block(resolved: Path, checkout, generation, generation_id) -> dic
         "generation_commit": generation.git_commit,
         "checkout_commit": checkout.git_commit,
         "stale_by_commit": stale,
-        "refresh": _refresh_action(resolved, checkout, stale),
+        "refresh": _refresh_action(checkout, stale),
     }
 
 
@@ -2192,16 +2192,22 @@ def _is_the_vault(resolved: Path) -> bool:
     return resolved in {Path(ROOT).resolve(), Path(STATE_ROOT).resolve()}
 
 
-def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
+def _refresh_action(checkout, stale: bool) -> str:
+    """What a stale answer does about it, judged on the checkout it belongs to.
+
+    Judging the directory asked about took `<vault>/scripts` for a foreign
+    checkout and refreshed the vault in the daytime (audit 2026-09-26 B-10,
+    docs/research/2026-09-26-the-vault-check-reads-the-checkout-root.md).
+    """
     if not stale:
         return "not_needed"
-    if _is_the_vault(resolved):
+    if _is_the_vault(Path(checkout.checkout_root).resolve()):
         # The vault's own memory generation is rebuilt and activated by the
         # nightly pass. Its code generation is refreshed
         # by the same nightly step as every other checkout's since 2026-09-12;
         # this path does not start one here (audit 3, G-L5).
         return "vault_nightly"
-    return _request_repository_refresh(resolved, checkout)
+    return _request_repository_refresh(checkout)
 
 
 def _refresh_log_paths(identity: str) -> tuple[Path, Path]:
@@ -2212,7 +2218,7 @@ def _refresh_log_paths(identity: str) -> tuple[Path, Path]:
     return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
 
 
-def _request_repository_refresh(resolved: Path, checkout) -> str:
+def _request_repository_refresh(checkout) -> str:
     """Start the bounded refresh once per (checkout, commit); never wait for it.
 
     It ran on the directory asked about, which a subfolder's refresh refused
