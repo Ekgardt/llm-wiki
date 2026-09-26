@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- An interrupted transaction-image prune is settled by `doctor --repair` as well as by the next prune, and is no longer reported as a damaged or unreadable transaction trail (audit 2026-09-26 B-22).
 - The nightly reclaim step names what it could not do and fails when a prune, the history prune, the snapshot or a backlog project failed; doctor treats a queue task that died this week as needing attention instead of calling the queue healthy (audit 2026-09-26 B-23).
 - The live symbol registry reads only regular files of the tree within the size bound: a link out of the tree, an oversized file or a FIFO named `*.py` no longer reaches it (audit 2026-09-26 B-9).
 - Worktrees refused for any reason no longer hold every follow slot night after night: a refusal is remembered with the worktree's commit and asked again only once that commit changes (audit 2026-09-26 B-12).

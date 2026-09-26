@@ -6977,6 +6977,9 @@ class MarkdownCoordinator:
         with self.writer_gate(owner=owner, wait_seconds=writer_wait_seconds):
             if self._recovery_stopped(deadline, cancelled):
                 return []
+            # A prune that died mid-way is settled here too, so `doctor --repair`
+            # heals what it reports (audit 2026-09-26 B-22).
+            self._recover_interrupted_prunes()
             return self._recover_selected(max_transactions, deadline, cancelled)
 
     def _recover_aborting(self, transaction_id: str) -> None:

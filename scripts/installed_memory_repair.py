@@ -1297,10 +1297,21 @@ def _coordinator_database_blockers(
 
 
 def _artifact_ids(state_root: Path, deadline: float) -> set[str]:
-    entries = _bounded_entries(
-        state_root / "run" / "transactions", state_root=state_root, deadline=deadline
-    )
-    return {_transaction_artifact_id(entry) for entry in entries}
+    return {_transaction_artifact_id(entry) for entry in _artifact_entries(state_root, deadline) if not _staged_prune(entry)}
+
+
+def _artifact_entries(state_root: Path, deadline: float) -> list[Path]:
+    return _bounded_entries(state_root / "run" / "transactions", state_root=state_root, deadline=deadline)
+
+
+def _staged_prune(entry: Path) -> bool:
+    """`.<id>.pruning-<uuid>`: images a prune set aside and did not finish removing.
+
+    It read as an invalid artifact name, so an interrupted prune reported the whole
+    transaction state unreadable (audit 2026-09-26 B-22). It is named instead, and
+    the next prune or `doctor --repair` settles it.
+    """
+    return entry.name.startswith(".") and ".pruning-" in entry.name
 
 
 def _recorded_transactions(database: sqlite3.Connection, ids: set[str]) -> set[str]:
@@ -1427,12 +1438,13 @@ def _transaction_artifact_blockers(
     retained: set[str],
 ) -> set[str]:
     artifact_ids = _artifact_ids(state_root, deadline)
-    blockers: set[str] = set()
-    if retained & artifact_ids:
-        blockers.add("transaction_artifact_retained")
-    if artifact_ids - known:
-        blockers.add("transaction_artifact_state_unknown")
-    return blockers
+    staged = any(_staged_prune(entry) for entry in _artifact_entries(state_root, deadline))
+    findings = (
+        (staged, "transaction_prune_interrupted"),
+        (bool(retained & artifact_ids), "transaction_artifact_retained"),
+        (bool(artifact_ids - known), "transaction_artifact_state_unknown"),
+    )
+    return {code for present, code in findings if present}
 
 
 def _transaction_artifact_id(entry: Path) -> str:

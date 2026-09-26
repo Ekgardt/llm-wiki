@@ -675,17 +675,26 @@ def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str],
         limit=MAX_RUNTIME_ENTRIES,
         deadline=deadline,
     )
-    identifiers: set[str] = set()
-    unsafe = truncated or error
-    for entry in entries:
-        if (
-            _safe_kind(entry, state_root)[0] != "directory"
-            or re.fullmatch(r"[0-9a-z_-]{1,128}", entry.name) is None
-        ):
-            unsafe = True
-        else:
-            identifiers.add(entry.name)
-    return identifiers, unsafe
+    kinds = {entry.name: _artifact_kind(entry, state_root) for entry in entries}
+    identifiers = _names_of_kind(kinds, "artifact")
+    return identifiers, bool(truncated or error or _names_of_kind(kinds, "unsafe"))
+
+
+def _names_of_kind(kinds: dict[str, str], wanted: str) -> set[str]:
+    return {name for name, kind in kinds.items() if kind == wanted}
+
+
+def _artifact_kind(entry: Path, state_root: Path) -> str:
+    """`artifact`, `staged` (images a prune set aside and the next prune or repair removes), or `unsafe`.
+
+    A staged prune read as an unsafe entry, so an interrupted prune looked like a
+    damaged transaction trail (audit 2026-09-26 B-22).
+    """
+    if _safe_kind(entry, state_root)[0] != "directory":
+        return "unsafe"
+    if entry.name.startswith(".") and ".pruning-" in entry.name:
+        return "staged"
+    return "artifact" if _TRANSACTION_ID_RE.fullmatch(entry.name) else "unsafe"
 
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
