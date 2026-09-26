@@ -138,8 +138,12 @@ TYPESCRIPT_NOTIFICATIONS = frozenset({"$/typescriptVersion"})
 
 # `logVerbosity: off` keeps tsserver from writing a log file next to the
 # repository; the managed path owns its scratch and writes nothing else.
+# `disableAutomaticTypingAcquisition` keeps tsserver from fetching `@types`
+# packages with npm while it answers: a query makes no network call (audit
+# 2026-09-26 C-8, docs/research/2026-09-26-no-managed-server-reaches-the-network.md).
 TYPESCRIPT_INITIALIZATION_OPTIONS = freeze_profile_value(
     {
+        "disableAutomaticTypingAcquisition": True,
         "hostInfo": "llm-wiki",
         "tsserver": {"logVerbosity": "off", "path": ""},
         "preferences": {"includeCompletionsForModuleExports": False},
@@ -622,10 +626,14 @@ RUST_ENVIRONMENT_TEMPLATE = (
 
 # Read-only defaults: no `cargo check` on save, no build scripts run for a
 # navigation query, and no crate downloads triggered by opening a file.
+# `noDeps`: the managed `CARGO_HOME` is empty and offline, so `cargo metadata`
+# cannot resolve a registry dependency and fails (measured 2026-09-26, exit 101);
+# rust-analyzer then retries with `--no-deps`. Asking for that directly skips the
+# failing run; dependency crates stay unresolved either way (audit C-8).
 RUST_ANALYZER_CONFIGURATION = freeze_profile_value(
     {
         "rust-analyzer": {
-            "cargo": {"buildScripts": {"enable": False}},
+            "cargo": {"buildScripts": {"enable": False}, "noDeps": True},
             "checkOnSave": False,
             "procMacro": {"enable": False},
         }
