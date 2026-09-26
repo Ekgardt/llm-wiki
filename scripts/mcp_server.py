@@ -5326,9 +5326,6 @@ def _newest_page_ns() -> int:
     return max((_mtime_ns(path) for path in sources), default=0)
 
 
-# A generation's source manifest names every source; read whole, bounded.
-MAX_SOURCE_MANIFEST_BYTES = 32 * 1024 * 1024
-
 
 def _directories(root: Path) -> list[Path]:
     return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
@@ -5404,6 +5401,8 @@ def _recorded_memory_digests(generation: str) -> dict[str, str] | None:
     """The memory sources a generation recorded, by path; None when it cannot be read."""
     manifest = _generation_manifest(generation)
     try:
+        from evidence_graph import MAX_SOURCE_MANIFEST_BYTES
+
         value = json.loads(read_stable_bytes(manifest.with_name("source-manifest.json"), MAX_SOURCE_MANIFEST_BYTES, label="source manifest"))
         return {str(item["relative_path"]): str(item["sha256"]) for item in value["sources"] if _is_memory_path(str(item["relative_path"]))}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):

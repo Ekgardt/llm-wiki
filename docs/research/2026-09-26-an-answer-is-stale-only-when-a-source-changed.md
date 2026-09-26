@@ -34,3 +34,10 @@ Date: 2026-09-26. Audit 2026-09-26 B-15 (B-19 of 2026-09-25 incomplete).
 - `scripts/corpus_snapshot.py`
 - `tests/test_an_answer_is_stale_only_when_a_source_changed.py`
 - `CHANGELOG.md`
+
+## Follow-up (2026-09-26): one limit, one place
+
+Fact: the clean run on 356a2f06 failed `tests/test_one_limit_one_place.py`: this change
+added a second `MAX_SOURCE_MANIFEST_BYTES` (32 MiB) beside the graph's own (256 MiB).
+Decision: the freshness check reads the manifest under `evidence_graph.MAX_SOURCE_MANIFEST_BYTES`,
+the bound the graph itself reads it with.
