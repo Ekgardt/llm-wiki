@@ -4333,6 +4333,23 @@ def _run_append_candidate(
     )
 
 
+def _contended_append_candidate(coordinator: MarkdownCoordinator, candidate_id: str, *args, **kwargs):
+    """One attempt; a database busy past its timeout repeats the same attempt.
+
+    Four writers on Windows let `database is locked` escape the append and fail
+    the caller's write (CI run 36204706220, audit 2026-09-26 B-27). The stall
+    guard and the caller's deadline still bound how long it may repeat.
+    Research: docs/research/2026-09-26-a-busy-append-repeats-its-attempt.md
+    """
+    try:
+        return _run_append_candidate(coordinator, candidate_id, *args, **kwargs)
+    except (OSError, sqlite3.Error) as exc:
+        if not _is_transient_writer_contention(exc):
+            raise
+        time.sleep(_writer_retry_delay(0, kwargs["deadline"]))
+        return "retry"
+
+
 def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str | None:
     """The quarantined attempt a retry follows, when the refusal was recorded.
 
@@ -4344,10 +4361,21 @@ def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str 
     the create-outcome proof cannot speak for it — stays an open finding
     forever, and a health check that can never go green stops being read.
     """
-    record = coordinator._record_for_operation_id(candidate_id)
+    record = _record_when_readable(coordinator, candidate_id)
     if record is None or record.state != "quarantined":
         return None
     return record.id
+
+
+def _record_when_readable(coordinator: MarkdownCoordinator, operation_id: str):
+    """The record, read again while the database is only busy (audit 2026-09-26 B-27)."""
+    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            return coordinator._record_for_operation_id(operation_id)
+        except (OSError, sqlite3.Error) as exc:
+            attempt = _retry_or_raise(exc, attempt, deadline)
 
 
 # How long an append may repeat one attempt without advancing before it gives up:
@@ -4394,7 +4422,7 @@ def _append_until_committed(
         coordinator._require_operation_active(deadline, cancelled)
         stall.require_moving()
         candidate_id = _append_candidate_id(operation_id, attempt)
-        outcome = _run_append_candidate(
+        outcome = _contended_append_candidate(
             coordinator,
             candidate_id,
             relative,
