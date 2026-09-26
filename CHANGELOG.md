@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Secret redaction is exact at both ends: a credential word must end its key (`tokenizer_name`, `token_url`, `PWD` and code such as `api_key = os.environ["API_KEY"]` are left alone), paths and URLs are not credentials, a port is not a password; and it now catches `curl -u user:pass`, `mysql -pPASS`, `--password PASS`, `Authorization: Basic …`, quoted passphrases with spaces, long letter-only values and `user:p@ss@host`. In a raw JSON line the value stops before `"`, so the line stays JSON and the turn is no longer dropped from the session record (audit 2026-09-26 A-2, B-2, B-3).
 - Reranking recovers after one slow run: a cost that said "does not fit" is tried again as a background trial after five minutes instead of switching the stage off for the life of the server; and without the reranker installed an answer says `reranker_unavailable` instead of a timeout that never happened (audit 2026-09-26 B-16).
 - Doctor judges each check the moment it returns: a store found broken early stays an `error` with its repair advice, instead of reading "not completed" whenever a later check pushed the run past the time budget (audit 2026-09-26 B-19).
 - A question about a folder inside the vault no longer starts a daytime refresh of the vault's code index: the stale-answer check judges the checkout the folder belongs to (audit 2026-09-26 B-10).
