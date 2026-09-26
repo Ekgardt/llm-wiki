@@ -639,17 +639,23 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _row_value(row: sqlite3.Row, column: str) -> object:
+    return row[column] if column in row.keys() else None
+
+
 def _live_owner(row: sqlite3.Row, now: datetime, *, pid_column: str) -> bool:
-    columns = set(row.keys())
-    pid = row[pid_column] if pid_column in columns else None
-    expiry = _parse_utc(row["expires_at"]) if "expires_at" in columns else None
-    return _owner_pid_live(pid) or _owner_unexpired(expiry, now)
+    identity = _row_value(row, "process_start_identity")
+    expiry = _parse_utc(_row_value(row, "expires_at"))
+    return _owner_pid_live(_row_value(row, pid_column), identity) or _owner_unexpired(expiry, now)
 
 
-def _owner_pid_live(pid: object) -> bool:
+def _owner_pid_live(pid: object, identity: object = None) -> bool:
+    """The recorded start identity, when a row has one, names the process, not the PID (C-12)."""
     if not isinstance(pid, int) or pid <= 0:
         return False
-    return _pid_alive(pid)
+    if not isinstance(identity, str):
+        return _pid_alive(pid)
+    return process_liveness.owner_alive(pid, identity)
 
 
 def _owner_unexpired(expiry: datetime | None, now: datetime) -> bool:

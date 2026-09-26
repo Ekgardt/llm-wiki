@@ -837,8 +837,8 @@ class OwnershipRegistry:
 
     def _remove_orphan_marker(self, relative_path: str) -> str:
         path = self.state_root / relative_path
-        pid = _marker_pid_or_torn(path, self.state_root, relative_path)
-        if pid is not None and _pid_exists(pid):
+        owner = _marker_owner_or_torn(path, self.state_root, relative_path)
+        if owner is not None and _marker_owner_alive(*owner):
             raise OperationalOwnershipError("owner_busy")
         _remove_marker_file(path)
         return "orphan_removed"
@@ -1178,10 +1178,12 @@ def _require_marker_path_of_row(row: sqlite3.Row, relative_path: str) -> None:
 _WHOLE_MARKERS = frozenset({"run/maintenance.lock"})
 
 
-def _marker_pid_or_torn(path: Path, state_root: Path, relative_path: str) -> int | None:
-    """The PID an ownerless marker names, or None for a torn one nobody can still be writing."""
+def _marker_owner_or_torn(
+    path: Path, state_root: Path, relative_path: str
+) -> tuple[int, str] | None:
+    """The owner an ownerless marker names, or None for a torn one nobody can still be writing."""
     try:
-        return _marker_pid(path, state_root)
+        return _marker_owner(path, state_root)
     except OperationalOwnershipError:
         if relative_path in _WHOLE_MARKERS and _marker_is_torn(path, state_root):
             return None
@@ -1197,13 +1199,17 @@ def _marker_is_torn(path: Path, state_root: Path) -> bool:
     return True
 
 
-def _marker_pid(path: Path, state_root: Path) -> int:
-    """The PID an ownerless marker names; anything else refuses by name."""
+def _marker_owner(path: Path, state_root: Path) -> tuple[int, str]:
+    """The PID and start identity an ownerless marker names; anything else refuses by name.
+
+    A marker written before 2026-09-17 has one line and names no identity.
+    """
     try:
         payload = read_runtime_bytes(
             path, state_root, max_bytes=_MAX_MARKER_BYTES, owner_only=False
         )
-        return int(payload.splitlines()[0].decode("ascii").strip())
+        lines = [line.decode("ascii").strip() for line in payload.splitlines()]
+        return int(lines[0]), (lines[1:] or [""])[0]
     except (OSError, ValueError, IndexError, UnicodeDecodeError) as exc:
         raise OperationalOwnershipError("marker_identity_invalid") from exc
 
@@ -1226,12 +1232,21 @@ def _own_start_identity() -> str:
         return ""
 
 
-def _pid_exists(pid: int) -> bool:
-    """Whether a process with this PID exists; doubt refuses by name."""
+def _marker_owner_alive(pid: int, identity: str) -> bool:
+    """Whether the process a marker names still runs; doubt refuses by name.
+
+    With the identity the marker recorded, a PID handed to another process reads
+    as dead, as the registry rows and the other lock files already read it
+    (audit 2026-09-26 C-12). Research:
+    docs/research/2026-09-26-a-marker-is-judged-by-the-process-it-names.md
+    """
     try:
-        return process_start_identity(pid) is not None
+        observed = process_start_identity(pid)
     except (OSError, PermissionError) as exc:
         raise OperationalOwnershipError("owner_liveness_unknown") from exc
+    if observed is None:
+        return False
+    return not identity or observed == identity
 
 
 def _remove_marker_file(path: Path) -> None:

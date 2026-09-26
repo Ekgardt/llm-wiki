@@ -1714,17 +1714,17 @@ def _require_no_sqlite_sidecars(path: Path) -> None:
 
 def _require_legacy_markers_quiescent(run: Path, state_root: Path) -> None:
     for name, parser in (
-        ("compile.pid", _compile_marker_pid),
-        ("maintenance.lock", _maintenance_marker_pid),
+        ("compile.pid", _compile_marker_owner),
+        ("maintenance.lock", _maintenance_marker_owner),
     ):
-        pid = _read_marker_pid(run / name, state_root, parser)
-        if pid is not None:
-            _require_process_absent(pid)
+        owner = _read_marker_owner(run / name, state_root, parser)
+        if owner is not None:
+            _require_process_absent(*owner)
 
 
-def _read_marker_pid(
-    path: Path, state_root: Path, parser: Callable[[bytes], int]
-) -> int | None:
+def _read_marker_owner(
+    path: Path, state_root: Path, parser: Callable[[bytes], tuple[int, str]]
+) -> tuple[int, str] | None:
     kind = _kind(path)
     if kind == "missing":
         return None
@@ -1734,11 +1734,11 @@ def _read_marker_pid(
     return parser(payload)
 
 
-def _compile_marker_pid(payload: bytes) -> int:
+def _compile_marker_owner(payload: bytes) -> tuple[int, str]:
     lines = _ascii_marker_lines(payload)
     _require_compile_marker_lines(lines)
     datetime.fromisoformat(lines[1])
-    return _positive_pid(lines[0])
+    return _positive_pid(lines[0]), (lines[3:] or [""])[0]
 
 
 def _require_compile_marker_lines(lines: list[str]) -> None:
@@ -1749,7 +1749,7 @@ def _require_compile_marker_lines(lines: list[str]) -> None:
         raise ValueError("compile marker owner token is empty")
 
 
-def _maintenance_marker_pid(payload: bytes) -> int:
+def _maintenance_marker_owner(payload: bytes) -> tuple[int, str]:
     """One line before 2026-09-17; a second names the owner's process.
 
     Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
@@ -1757,7 +1757,7 @@ def _maintenance_marker_pid(payload: bytes) -> int:
     lines = _ascii_marker_lines(payload)
     if len(lines) not in {1, 2}:
         raise ValueError("maintenance marker shape is invalid")
-    return _positive_pid(lines[0])
+    return _positive_pid(lines[0]), (lines[1:] or [""])[0]
 
 
 def _ascii_marker_lines(payload: bytes) -> list[str]:
@@ -1775,10 +1775,12 @@ def _positive_pid(value: str) -> int:
     return pid
 
 
-def _require_process_absent(pid: int) -> None:
+def _require_process_absent(pid: int, identity: str) -> None:
+    """A marker's PID given to another process since is not its owner (C-12)."""
     from operational_ownership import process_start_identity
 
-    if process_start_identity(pid) is not None:
+    observed = process_start_identity(pid)
+    if observed is not None and (not identity or observed == identity):
         raise ValueError("live legacy owner blocks offline adoption")
 
 

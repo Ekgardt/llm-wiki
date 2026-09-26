@@ -4553,6 +4553,11 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _row_start_identity(row: sqlite3.Row) -> str | None:
+    """The owner's recorded start identity; a row of an older schema has none (C-12)."""
+    return row["process_start_identity"] if "process_start_identity" in row.keys() else None
+
+
 def _pid_alive(pid: int) -> bool:
     """One probe for every legacy lock (`process_liveness`); doubt is alive."""
     if pid <= 0:
@@ -8264,7 +8269,7 @@ class MarkdownCoordinator:
     def _writer_owner_reclaimable(self, row: sqlite3.Row) -> bool:
         expires_at = row["expires_at"]
         expired = not expires_at or _parse_timestamp(expires_at) <= datetime.now(timezone.utc)
-        return expired or not _pid_alive(row["process_id"])
+        return expired or not process_liveness.owner_alive(row["process_id"], _row_start_identity(row))
 
     def _heartbeat_writer_gate(
         self,

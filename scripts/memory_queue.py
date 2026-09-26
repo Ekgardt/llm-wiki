@@ -7332,12 +7332,12 @@ class _QueueV3CandidateReader:
         """Drop fences whose lease expired or whose owning process died."""
         now = _utc_now()
         rows = database.execute(
-            "SELECT token, owner_pid, expires_at FROM source_fences"
+            "SELECT token, owner_pid, owner_start_identity, expires_at FROM source_fences"
         ).fetchall()
         for row in rows:
             expires_at = _parse_timestamp(str(row["expires_at"]))
             expired = expires_at is None or expires_at <= now
-            if expired or not _pid_is_alive(int(row["owner_pid"])):
+            if expired or not _fence_owner_alive(row):
                 database.execute(
                     "DELETE FROM source_fences WHERE token=?", (row["token"],)
                 )
@@ -12915,6 +12915,13 @@ def _state_root() -> Path:
         return Path(STATE_ROOT)
     except Exception:  # noqa: BLE001
         return Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
+
+
+def _fence_owner_alive(row: sqlite3.Row) -> bool:
+    """A v3 fence names its owner's process, so a reused PID is not its owner (C-12)."""
+    import process_liveness
+
+    return process_liveness.owner_alive(int(row["owner_pid"]), str(row["owner_start_identity"]))
 
 
 def _pid_is_alive(pid: int) -> bool:
