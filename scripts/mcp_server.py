@@ -5202,8 +5202,25 @@ def _quality_of_context(name, data, arguments, limit_clamped) -> dict | None:
 
 
 # Order is behaviour: the first rule that recognises the result answers.
+def _quality_of_vault_status(name, data, arguments, limit_clamped) -> dict | None:
+    """The same compile health the health resource reports: never compiled is not full confidence."""
+    if name != "vault_status" or not isinstance(data, dict):
+        return None
+    return _compile_health_quality(data)
+
+
+# Tools whose successful answer is exact: a page read, a count of files, a write
+# that either happened or raised. Every other tool must be claimed by a rule
+# above, so an estimate never inherits the envelope's default full confidence
+# (audit 2026-09-26 C-10: `vault_status` did, with no compile history at all).
+EXACT_ANSWER_TOOLS = frozenset(
+    {"read_page", "wiki_overview", "log_decision", "compile", "get_context"}
+)
+
+
 _QUALITY_RULES = (
     _quality_of_error,
+    _quality_of_vault_status,
     _quality_of_grounded_recall,
     _quality_of_contradiction,
     _quality_of_results,
