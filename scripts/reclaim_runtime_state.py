@@ -81,7 +81,14 @@ def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, int]:
     return {"removed": sum(1 for size in reclaimed if size), "bytes": sum(reclaimed)}
 
 
-def prune_settled_transactions() -> dict[str, int]:
+# The nightly kills this step after `RECLAIM_STEP_SECONDS`; the image prune stops
+# on its own a margin before that, so the kill never lands inside a prune and the
+# steps after it still run. What it did not reach is pruned the next night.
+RECLAIM_STEP_SECONDS = 180
+RECLAIM_MARGIN_SECONDS = 30
+
+
+def prune_settled_transactions(deadline: float = float("inf")) -> dict[str, object]:
     """Drop the before and after images of transactions that have settled.
 
     The machinery existed and nothing ever called it, so on this vault the trail
@@ -102,7 +109,9 @@ def prune_settled_transactions() -> dict[str, int]:
 
     try:
         coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-        return {"pruned": int(coordinator.prune()), "failed": 0}
+        return {"pruned": int(coordinator.prune(deadline=deadline)), "failed": 0}
+    except TimeoutError:
+        return {"pruned": 0, "failed": 0, "unfinished": True}
     except Exception as error:  # noqa: BLE001
         return {"pruned": 0, "failed": 1, "reason": str(error)[:120]}
 
@@ -183,9 +192,10 @@ def rebuild_co_activation() -> dict[str, object]:
 
 
 def reclaim(budget_seconds: float) -> dict[str, object]:
+    deadline = time.monotonic() + RECLAIM_STEP_SECONDS - RECLAIM_MARGIN_SECONDS
     return {
         "backlog": drain_pending_backlog(budget_seconds),
-        "transactions": prune_settled_transactions(),
+        "transactions": prune_settled_transactions(deadline),
         "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
         "empty_shards": remove_empty_intent_shards(),
@@ -202,7 +212,7 @@ def _report(result: dict[str, object]) -> str:
     snapshot = result["snapshot"]
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
-        f"pruned {transactions['pruned']} settled transaction(s); "
+        f"pruned {transactions['pruned']} settled transaction(s){_unfinished_note(transactions)}; "
         f"dropped {result['history']['transactions']} transaction row(s) and "
         f"{result['history']['attempts']} attempt row(s) past the history window; "
         f"drained {drained} checkpoint(s); "
@@ -212,6 +222,10 @@ def _report(result: dict[str, object]) -> str:
         f"{temporaries['bytes']} byte(s), and {result['empty_shards']} empty intent shard(s)"
         f"{_failure_note(result)}"
     )
+
+
+def _unfinished_note(transactions: dict) -> str:
+    return " (stopped at its deadline; the next night continues)" if transactions.get("unfinished") else ""
 
 
 def _failures(result: dict[str, object]) -> list[str]:

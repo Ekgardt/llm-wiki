@@ -8816,7 +8816,15 @@ class MarkdownCoordinator:
         self._require_retained_undo_images(transaction_id)
 
     def _require_retained_undo_images(self, transaction_id: str) -> None:
-        """Undo needs the before-images; a pruned transaction cannot be undone."""
+        """Undo needs the before-images; a pruned transaction cannot be undone.
+
+        Images a killed prune staged aside are still owned by their row, so they
+        are put back first — under the gate undo holds — instead of refusing an
+        undo the window still allows (audit 2026-09-26 C-12,
+        docs/research/2026-09-26-a-killed-prune-neither-blocks-undo-nor-outruns-its-step.md).
+        """
+        if not (self.transaction_root / transaction_id).is_dir():
+            self._recover_interrupted_prunes()
         if not (self.transaction_root / transaction_id).is_dir():
             raise RuntimeError("transaction undo images are no longer retained")
 

@@ -54,6 +54,7 @@ from operational_ownership import (  # noqa: E402
     heartbeat_owner,
     release_marker_owner,
 )
+from reclaim_runtime_state import RECLAIM_STEP_SECONDS  # noqa: E402
 from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
 from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
@@ -233,7 +234,7 @@ def _reclaim_step() -> _Step:
         "reclaiming runtime state...",
         "reclaim",
         _script("reclaim_runtime_state.py"),
-        180,
+        RECLAIM_STEP_SECONDS,
     )
 
 

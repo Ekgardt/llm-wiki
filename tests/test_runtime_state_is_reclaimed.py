@@ -146,7 +146,7 @@ def test_settled_transactions_are_pruned_by_the_pass(monkeypatch) -> None:
         def __init__(self, *args):
             called.append("built")
 
-        def prune(self):
+        def prune(self, *, deadline: float):
             return 7
 
     import markdown_transaction
