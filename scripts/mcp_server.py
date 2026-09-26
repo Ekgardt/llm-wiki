@@ -5629,7 +5629,8 @@ AGENT_ROW_FIELDS = (
     # answer from a lexical-only one when no trace was reported.
     "vector_score",
     "fused_score",
-    "chunk_id",
+    # No `chunk_id`: it is `candidate_id` again, 64 hex characters per row
+    # (audit 2026-09-26 C-10).
     "heading_ancestry",
     "project",
     "timestamp",

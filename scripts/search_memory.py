@@ -3175,11 +3175,23 @@ def _row_text(row: sqlite3.Row, key: str) -> str:
     return row[key] or ""
 
 
-def _first_line(content: str) -> str:
-    stripped = content.strip()
-    if not stripped:
-        return ""
-    return stripped.splitlines()[0][:120]
+def _page_title(row: sqlite3.Row) -> str:
+    """The page's own title, not the heading of the chunk that matched.
+
+    A row's stored `title` is its chunk's last heading, so a hit in `## Related`
+    was reported as a page called "Related" (audit 2026-09-26 C-10). The first
+    heading of the ancestry is the page's H1.
+    """
+    ancestry = json.loads(row["heading_ancestry"] or "[]")
+    if ancestry:
+        return str(ancestry[0])
+    return row["title"] or Path(row["source_path"]).stem
+
+
+def _first_prose_line(content: str) -> str:
+    """The first line under the headings: a summary that does not repeat the title."""
+    lines = [line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    return lines[0].strip()[:120] if lines else ""
 
 
 def _chunk_weight(authority: object, page_type: object, content: object) -> float:
@@ -3193,8 +3205,8 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
     score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content)
     return {
         "path": row["source_path"],
-        "title": row["title"] or Path(row["source_path"]).stem,
-        "summary": _first_line(content),
+        "title": _page_title(row),
+        "summary": _first_prose_line(content),
         "content": content,
         "score": score,
         "project": _row_text(row, "project"),
