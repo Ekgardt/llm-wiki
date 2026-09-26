@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import os
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -66,7 +67,26 @@ def _kept_subdirectories(directories: list[str]) -> list[str]:
 
 
 def _python_files_in(parent: Path, files: list[str]) -> list[Path]:
-    return [parent / name for name in sorted(files) if name.endswith(".py")]
+    """Python files this tree owns: the registry read a link to anywhere and blocked on a FIFO (audit 2026-09-26 B-9)."""
+    return [parent / name for name in sorted(files) if name.endswith(".py") and own_source_file(parent / name)]
+
+
+# One bound for every live read of a source file, shared with `code_graph`.
+LIVE_SOURCE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def own_source_file(path: Path) -> bool:
+    """A regular file of this tree within the bound; never a link out of it.
+
+    `is_file()` followed a link to any file on the machine, and nothing bounded a
+    file's size (audit C-41,
+    docs/research/2026-09-25-the-live-graph-reads-only-its-own-files.md).
+    """
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size <= LIVE_SOURCE_MAX_BYTES
 
 
 def _workspace_python_files(

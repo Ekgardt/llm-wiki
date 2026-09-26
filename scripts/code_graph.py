@@ -21,7 +21,6 @@ import math
 import os
 import re
 import sqlite3
-import stat
 import time
 from collections import Counter
 from pathlib import Path, PurePath
@@ -33,6 +32,7 @@ try:
         SymbolRegistry,
         build_python_symbol_registry,
         directory_skipped,
+        own_source_file,
         resolve_python_imports_and_calls,
     )
     from .python_parse import PARSE_FAILURES, parse_python
@@ -43,6 +43,7 @@ except ImportError:
         SymbolRegistry,
         build_python_symbol_registry,
         directory_skipped,
+        own_source_file,
         resolve_python_imports_and_calls,
     )
     from python_parse import PARSE_FAILURES, parse_python
@@ -716,26 +717,11 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
 
 # The LSP document bound (`lsp_protocol.MAX_FRAME_BYTES`): nothing larger is a
 # source a live answer should read.
-LIVE_SOURCE_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _parsable_names(parent: Path, names: list[str]) -> list[Path]:
     found = [parent / name for name in names]
-    return [path for path in found if path.suffix.lower() in LANGUAGE_MAP and _own_source(path)]
-
-
-def _own_source(path: Path) -> bool:
-    """A regular file of this tree within the bound; never a link out of it.
-
-    `is_file()` followed a link to any file on the machine, and nothing bounded a
-    file's size (audit C-41,
-    docs/research/2026-09-25-the-live-graph-reads-only-its-own-files.md).
-    """
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return False
-    return stat.S_ISREG(info.st_mode) and info.st_size <= LIVE_SOURCE_MAX_BYTES
+    return [path for path in found if path.suffix.lower() in LANGUAGE_MAP and own_source_file(path)]
 
 
 def _live_source_files(directory: Path) -> list[Path]:

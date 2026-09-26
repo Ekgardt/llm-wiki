@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The live symbol registry reads only regular files of the tree within the size bound: a link out of the tree, an oversized file or a FIFO named `*.py` no longer reaches it (audit 2026-09-26 B-9).
 - Worktrees refused for any reason no longer hold every follow slot night after night: a refusal is remembered with the worktree's commit and asked again only once that commit changes (audit 2026-09-26 B-12).
 - `find_dead_code` answers about one symbol on a graph with more than 10 000 candidates: the name narrows in SQL, and a whole-graph scan past the bound returns its first rows with `candidates_truncated` instead of failing (audit 2026-09-26 B-7).
 - `read_page` returns a page that mentions `daily:` in prose: an unparseable mention is listed as `not_an_evidence_reference` instead of refusing the page; a real reference that does not resolve still refuses it (audit 2026-09-26 B-17).
