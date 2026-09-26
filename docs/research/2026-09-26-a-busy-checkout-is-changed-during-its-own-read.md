@@ -35,3 +35,19 @@ platform.
 
 ## Files
 - tests/test_one_busy_or_broken_checkout_does_not_end_the_pass.py
+
+## Follow-up (2026-09-26): Windows reads by path
+
+Fact: CI run 36209780525 failed the test on every Windows job — `busy` was
+`refreshed`. `corpus_snapshot._Discovery.add` reads through a descriptor walk only
+on POSIX; on Windows the content is read later by `_sealed_source_bytes`, which
+calls `bounded_io.read_stable_bytes`, and never reaches `_read_chunks`. So the
+test's write never happened there.
+
+Decision: `tests/test_one_busy_or_broken_checkout_does_not_end_the_pass.py` places
+the write inside whichever read the platform performs — `_read_chunks` on POSIX,
+`bounded_io._read_open_descriptor` on Windows, whose identity check (device,
+inode, size, mtime) then raises `SourceChangedDuringRead`, mapped to
+`CorpusChanged`. Checked on Linux by calling `_sealed_source_bytes` with the
+Windows-side patch: it is refused with "corpus source changed during read".
+The product code is unchanged.

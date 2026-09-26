@@ -24,12 +24,26 @@ from test_repository_refresh import _isolated_reader_cache, adopted_vault  # noq
 BUSY_FILES = 40
 
 
+def _append(path: Path) -> None:
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("# written while read\n")
+
+
 def _write_while_read(monkeypatch, repository: Path) -> None:
     """Append to a file of `repository` exactly while the capture reads it.
 
     A writer thread wrote only when the reader yielded, so on a fast machine the
     capture found a consistent tree (docs/research/2026-09-26-a-busy-checkout-is-changed-during-its-own-read.md).
+    POSIX reads through a descriptor walk, Windows by path through `bounded_io`,
+    so the write is placed inside whichever read this platform performs.
     """
+    if os.name == "posix":
+        _write_during_descriptor_read(monkeypatch, repository)
+        return
+    _write_during_path_read(monkeypatch, repository)
+
+
+def _write_during_descriptor_read(monkeypatch, repository: Path) -> None:
     import corpus_snapshot
 
     busy = {(info.st_dev, info.st_ino): path for path in repository.rglob("*.py") for info in [path.stat()]}
@@ -39,11 +53,24 @@ def _write_while_read(monkeypatch, repository: Path) -> None:
         opened = os.fstat(descriptor)
         path = busy.get((opened.st_dev, opened.st_ino))
         if path is not None:
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write("# written while read\n")
+            _append(path)
         return real_read(descriptor, max_bytes)
 
     monkeypatch.setattr(corpus_snapshot, "_read_chunks", read_while_written)
+
+
+def _write_during_path_read(monkeypatch, repository: Path) -> None:
+    import bounded_io
+
+    busy = {path.resolve() for path in repository.rglob("*.py")}
+    real_read = bounded_io._read_open_descriptor
+
+    def read_while_written(descriptor, path, identity, *rest):
+        if Path(path).resolve() in busy:
+            _append(Path(path))
+        return real_read(descriptor, path, identity, *rest)
+
+    monkeypatch.setattr(bounded_io, "_read_open_descriptor", read_while_written)
 
 
 def _busy_repository(path: Path) -> Path:
