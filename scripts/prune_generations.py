@@ -263,10 +263,10 @@ def _applied(
     return outcomes
 
 
-def _retention_lines(plan: PrunePlan) -> list[str]:
+def _retention_lines(plan: PrunePlan, memory_registered: bool) -> list[str]:
     """Kept first, then the kinds this pass refuses to decide."""
     kept = [f"keeping {identifier}" for identifier in plan.retained]
-    rootless = _rootless_lines(plan)
+    rootless = _rootless_lines(plan, memory_registered)
     unpaired = [
         f"UNPAIRED: {identifier}: registration and tree disagree"
         for identifier in plan.unpaired
@@ -282,9 +282,19 @@ def _retention_lines(plan: PrunePlan) -> list[str]:
     return kept + rootless + unpaired + pending + orphans
 
 
-def _rootless_lines(plan: PrunePlan) -> list[str]:
+def _rootless_lines(plan: PrunePlan, memory_registered: bool) -> list[str]:
+    """No active generation is an error only when a memory publication is registered.
+
+    A vault whose first memory generation is still to be built has nothing to
+    prune (a code generation is registered and never activated by design); the
+    nightly counted that as a failed step until the build later in the same pass
+    (audit 2026-09-26 C-13, found running a pass on a fresh vault,
+    docs/research/2026-09-26-a-fresh-vault-has-nothing-to-prune.md).
+    """
     if plan.retained:
         return []
+    if not memory_registered:
+        return ["no memory generation is registered yet; nothing to prune"]
     return ["ERROR: catalog names no active generation; nothing is collectable"]
 
 
@@ -299,9 +309,10 @@ def prune_generations(
     deadline = time.monotonic() + budget_seconds
     catalog = GenerationCatalog(state_root or STATE_ROOT)
     plan = plan_prune(catalog, retained_ancestors=retained_ancestors)
+    retention = _retention_lines(plan, bool(_memory_publications(catalog)))
     if not apply:
-        return _retention_lines(plan) + _planned(plan)
-    return _retention_lines(plan) + _applied(catalog, plan, retained_ancestors, deadline)
+        return retention + _planned(plan)
+    return retention + _applied(catalog, plan, retained_ancestors, deadline)
 
 
 def _count_prefixed(outcomes: list[str], prefix: str) -> int:
