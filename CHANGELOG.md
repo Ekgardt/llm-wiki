@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A native language server's verified launch copy is removed with its owner root, so a gopls or rust-analyzer session closes instead of stranding its slot; a dead failure root keeps its records and drops the 43 MB copy (audit 2026-09-26 A-6, C-7).
 - Run as a script, the repository index answers a refusal raised by its worktree and retention helpers as JSON instead of crashing: one opted-out checkout no longer ends the nightly `refresh-all` for every checkout after it (audit 2026-09-26 A-5).
 - Doctor reads open transactions first and then the newest, and the queue its unfinished tasks first: its bounded scan judged the oldest 10 000 rows, so a conflict written today was reported healthy (audit 2026-09-26 A-3).
 - Dead captures get their one redrive for everything that died before the fix reached this checkout (the time HEAD moved, from its reflog), not only before the fix was committed (audit 2026-09-26 B-28).

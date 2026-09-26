@@ -889,8 +889,13 @@ class _OwnerDirectory:
         return _canonical_evidence_record(payload)
 
     def _unlink_posix_scratch(self) -> None:
-        """Remove the evidence files and the cancellation directory."""
-        for name in ("owner.json", "failure.json"):
+        """Remove the evidence files, native launch copies and the cancellation directory.
+
+        A native server's verified copy (`.launch-*`) stayed behind, the root's
+        `rmdir` failed on every close, and the session was stranded (audit
+        2026-09-26 A-6, docs/research/2026-09-26-a-native-server-copy-leaves-with-its-owner.md).
+        """
+        for name in ("owner.json", "failure.json", *_launch_copies(self.owner_handle)):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self.owner_handle)
         with contextlib.suppress(FileNotFoundError):
@@ -6646,21 +6651,56 @@ def _sweep_owner_parent(parent: Path, mine: str) -> None:
             examined += _sweep_one_owner_root(Path(entry.path), entry.name, mine)
 
 
-def _sweep_one_owner_root(root: Path, name: str, mine: str) -> int:
-    """1 when this root was a candidate the sweep examined, else 0."""
-    if not _sweep_candidate(root, name, mine):
-        return 0
+def _launch_copies(directory_handle: int) -> list[str]:
+    """The regular `.launch-*` files directly inside an owner root."""
+    return [name for name in os.listdir(directory_handle) if _is_launch_copy(directory_handle, name)]
+
+
+def _is_launch_copy(directory_handle: int, name: str) -> bool:
+    if not name.startswith(".launch-"):
+        return False
+    try:
+        return stat.S_ISREG(os.stat(name, dir_fd=directory_handle, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _strip_dead_evidence_root(root: Path) -> None:
+    """A failure root keeps its records; its dead server's binary copy is not evidence (C-7)."""
+    copies = _plain_launch_copies(root)
+    if copies and _owner_root_is_dead(root):
+        _unlink_all(copies)
+
+
+def _plain_launch_copies(root: Path) -> list[Path]:
+    return [path for path in root.glob(".launch-*") if _is_plain_file(path)]
+
+
+def _unlink_all(paths: list[Path]) -> None:
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def _is_plain_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def _remove_dead_owner_root(root: Path) -> None:
     if _owner_root_is_dead(root):
         with contextlib.suppress(OSError):
             _remove_owner_root_tree(root)
-    return 1
 
 
-def _sweep_candidate(root: Path, name: str, mine: str) -> bool:
-    """Another owner's root that kept no failure evidence."""
+def _sweep_one_owner_root(root: Path, name: str, mine: str) -> int:
+    """1 when this root was a candidate the sweep examined, else 0."""
     if name == mine or _OWNER_NONCE_PATTERN.fullmatch(name) is None:
-        return False
-    return not (root / "failure.json").exists()
+        return 0
+    if (root / "failure.json").exists():
+        _strip_dead_evidence_root(root)
+        return 0
+    _remove_dead_owner_root(root)
+    return 1
 
 
 def _owner_root_is_dead(root: Path) -> bool:

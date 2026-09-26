@@ -6949,6 +6949,10 @@ def test_posix_scratch_parent_sync_failure_is_retryable_after_directory_removal(
     tmp_path: Path,
 ) -> None:
     class PosixOperations:
+        @staticmethod
+        def listdir(_descriptor: int) -> list[str]:
+            return []
+
         name = "posix"
 
         def __init__(self) -> None:
@@ -7023,6 +7027,10 @@ def test_posix_success_scratch_never_deletes_replacement_owner_directory(
     replacement_deleted = False
 
     class PosixOperations:
+        @staticmethod
+        def listdir(_descriptor: int) -> list[str]:
+            return []
+
         name = "posix"
 
         @staticmethod
