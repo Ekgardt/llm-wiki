@@ -35,7 +35,9 @@ from secret_redact import redact_secrets  # noqa: E402
 # hooks get 5 seconds, the session-end hook 15 (its delegate 10). A writer with
 # no deadline retried until it was killed and left no reason. See
 # `docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md`.
-BREADCRUMB_APPEND_BUDGET_SECONDS = 3.0
+# 2.5 s plus 1 s to start the delegate stays under the host's 5 s with room for
+# the adapter itself (audit 2026-09-26 C-1).
+BREADCRUMB_APPEND_BUDGET_SECONDS = 2.5
 LIFECYCLE_APPEND_BUDGET_SECONDS = 7.0
 
 

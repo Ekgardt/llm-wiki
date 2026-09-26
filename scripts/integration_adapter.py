@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
 from memory_state import MAX_CAPTURE_INTENT_BYTES, ROOT, STATE_ROOT, spawn_detached, update_state
@@ -37,9 +38,15 @@ DELEGATE_TIMEOUT_SECONDS = 10
 # Delegates on the host's 5-second hooks stop before the host stops the hook, so
 # a hang is recorded here instead of vanishing with the process (audit B-11,
 # docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md).
+# One rule for both: the append's own budget plus time to start the interpreter.
+# The prompt delegate was stopped at 2.5 s while its append could try for 3.0 s
+# (audit 2026-09-26 C-1, docs/research/2026-09-26-a-hook-budget-is-one-sum.md).
+HOST_HOOK_TIMEOUT_SECONDS = 5.0
+DELEGATE_STARTUP_SECONDS = 1.0
+_BREADCRUMB_DELEGATE_TIMEOUT = BREADCRUMB_APPEND_BUDGET_SECONDS + DELEGATE_STARTUP_SECONDS
 DELEGATE_TIMEOUTS = {
-    "user_prompt_capture.py": 2.5,
-    "post_tool_capture.py": 3.5,
+    "user_prompt_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
+    "post_tool_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
 }
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 CAPTURE_DRAIN_MAX_TASKS = 20
