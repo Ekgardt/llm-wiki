@@ -1241,6 +1241,43 @@ def _line_references(line: str) -> list[EvidenceRef]:
         references.append(_parsed_reference(candidate))
 
 
+def evidence_candidates(text: str) -> list[EvidenceRef | str]:
+    """Every reference a reader can resolve, and a named reason for each it cannot.
+
+    `extract_evidence_references` refuses the whole text on the first malformed
+    candidate, which is right for a writer; a page that mentions `daily:` in prose
+    lost all its evidence and was refused as a whole (audit 2026-09-26 B-17,
+    docs/research/2026-09-26-a-page-is-read-past-one-bad-reference.md).
+    """
+    if not isinstance(text, str):
+        raise TypeError("evidence source text must be a string")
+    candidates: list[EvidenceRef | str] = []
+    for line in text.splitlines():
+        candidates.extend(_line_candidates(line))
+    return candidates
+
+
+def _line_candidates(line: str) -> list[EvidenceRef | str]:
+    candidates: list[EvidenceRef | str] = []
+    cursor = line.find("daily:")
+    while cursor >= 0:
+        candidate, cursor = _one_candidate(line, cursor)
+        candidates.extend(candidate)
+        cursor = line.find("daily:", cursor)
+    return candidates
+
+
+def _one_candidate(line: str, start: int) -> tuple[list[EvidenceRef | str], int]:
+    """The candidate at `start` and where to look next; a word that only ends in `daily:` is none."""
+    if start and (line[start - 1].isalnum() or line[start - 1] == "_"):
+        return [], start + len("daily:")
+    try:
+        candidate, cursor = _reference_candidate(line, start)
+        return [_parsed_reference(candidate)], cursor
+    except ValueError as exc:
+        return [str(exc)[:200]], start + len("daily:")
+
+
 def _require_reference_prefix(line: str, start: int) -> None:
     if start and (line[start - 1].isalnum() or line[start - 1] == "_"):
         raise ValueError("evidence reference has an invalid prefix")

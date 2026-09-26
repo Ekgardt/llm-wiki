@@ -846,7 +846,10 @@ class TestHelperFunctions:
         page = notes / "page.md"
         page.write_text("`daily:2026-01-01 broken`", encoding="utf-8")
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
-        assert "error" in mcp_server._read_page("page")
+        # Text that parses as no reference is named, the page still read (audit 2026-09-26 B-17).
+        assert mcp_server._read_page("page")["evidence"] == [
+            {"reference": None, "error": "not_an_evidence_reference"}
+        ]
 
         page.write_bytes(b"x" * (mcp_server.MAX_MCP_PAGE_BYTES + 1))
         result = mcp_server._read_page("page")
@@ -875,8 +878,8 @@ class TestHelperFunctions:
         monkeypatch.setattr(mcp_server, "read_stable_bytes", lambda *args, **kwargs: b"evidence")
         monkeypatch.setattr(
             evidence_resolver,
-            "extract_evidence_references",
-            lambda content: ["reference"],
+            "evidence_candidates",
+            lambda content: [object()],
         )
         monkeypatch.setattr(
             evidence_resolver.EvidenceResolver,

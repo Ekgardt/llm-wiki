@@ -1089,39 +1089,49 @@ def _require_evidence_within_bounds(resolved, evidence_bytes: int, error_class) 
     return len(resolved.bytes)
 
 
-def _resolved_evidence(resolver, references, deadline, error_class) -> list:
+def _resolved_evidence(resolver, candidates, deadline, error_class) -> list:
+    """One entry per candidate; a reference that parses must resolve or the page is refused.
+
+    Text that only mentions `daily:` and parses as no reference is named per entry
+    instead of refusing the page (audit 2026-09-26 B-17); a real reference whose
+    bytes do not match is still a page that cannot be trusted.
+    """
     evidence = []
-    evidence_bytes = 0
-    for reference in references:
+    spent = [0]
+    for candidate in candidates:
         _check_deadline(deadline)
-        resolved = resolver.resolve(reference)
-        evidence_bytes += _require_evidence_within_bounds(
-            resolved, evidence_bytes, error_class
-        )
-        evidence.append(
-            {
-                "reference": str(reference),
-                "sha256": resolved.sha256,
-                "text": resolved.bytes.decode("utf-8", errors="strict"),
-            }
-        )
+        evidence.append(_evidence_entry(resolver, candidate, spent, error_class))
     return evidence
 
 
+def _evidence_entry(resolver, candidate, spent: list[int], error_class) -> dict:
+    if isinstance(candidate, str):
+        return {"reference": None, "error": "not_an_evidence_reference"}
+    return _resolved_entry(resolver.resolve(candidate), candidate, spent, error_class)
+
+
+def _resolved_entry(resolved, reference, spent: list[int], error_class) -> dict:
+    spent[0] += _require_evidence_within_bounds(resolved, spent[0], error_class)
+    return {
+        "reference": str(reference),
+        "sha256": resolved.sha256,
+        "text": resolved.bytes.decode("utf-8", errors="strict"),
+    }
+
+
 def _page_evidence(root, state_root, content: str, resolve_evidence: bool, deadline):
-    """Return resolved evidence, or the error dict the caller must hand back."""
+    """Resolved evidence, or the error dict the caller must hand back."""
     from evidence_resolver import (
         EvidenceResolutionError,
         EvidenceResolver,
-        extract_evidence_references,
+        evidence_candidates,
     )
 
+    if not resolve_evidence:
+        return []
     resolver = EvidenceResolver(root, state_root=state_root)
     try:
-        references = extract_evidence_references(content) if resolve_evidence else []
-        return _resolved_evidence(
-            resolver, references, deadline, EvidenceResolutionError
-        )
+        return _resolved_evidence(resolver, evidence_candidates(content), deadline, EvidenceResolutionError)
     except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Evidence resolution failed: {_safe_evidence_error(exc)}"}
 
@@ -1153,7 +1163,7 @@ def _record_page_reads(page_path: str, evidence: list) -> None:
 
         kinds = [
             ("page_read", page_path),
-            *(("evidence_read", item["sha256"]) for item in evidence),
+            *(("evidence_read", item["sha256"]) for item in evidence if "sha256" in item),
         ]
         events = _page_read_events(best_effort_make_event, kinds)
         if events:
