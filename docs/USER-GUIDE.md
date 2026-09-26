@@ -195,9 +195,10 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
 output is used when the installed SDK supports it. The envelope's top-level
-`index_timestamp` is null and its freshness comes from the per-component generation
-fields; the legacy index it once read was retired on 2026-09-23. Treat row-level
-generation and fallback fields as the current retrieval truth.
+`index_timestamp` says when the corpus behind the answer was read: the build time of the
+generation a recall or code answer came from, or the collection time of a `get_context`
+answer; it is null when neither is known. Treat row-level generation and fallback fields
+as the current retrieval truth.
 
 ## Repository indexes follow your worktrees
 
@@ -320,13 +321,13 @@ NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
   its vectors) → compact retrieval telemetry → write the health report → prune
   old reports → fast-forward the checkout
 
-The fast-forward brings new code in; it does not bring everything into force. Optional
-extras are never upgraded unattended (the `reranker` extra alone pins gigabytes), and owned
-resources — scheduler entries, agent hook blocks, shell profile lines — are written only by
-an explicit install. So when the update moves `uv.lock` the report names the extras you have
-installed, and when it changes what the installer renders it says `owned resources
-rerun_installer`. Resync an extra with `uv sync --locked --no-default-groups --inexact
---extra <name>`, and re-render owned resources by running the installer again.
+The fast-forward brings new code in; it does not bring everything into force. The update
+syncs the locked baseline together with the extras you have installed (it reads them from
+the environment) in one `--inexact` sync, and names them in the report; a sync that fails is
+recorded as `dependencies stale` and tried again on the next quiet night. Owned resources —
+scheduler entries, agent hook blocks, shell profile lines — are written only by an explicit
+install: when the update changes what the installer renders it says `owned resources
+rerun_installer`, and keeps saying it until the installer has run.
 
 SUNDAY 04:00 (scheduler; its own pass, not a second nightly)
   OKF conformance sweep → queue status → archive and purge finished queue work
@@ -352,8 +353,9 @@ pass a session start already spawns runs that day's nightly once, claimed in
 Two of the four backends can kill a pass that overruns: the systemd timer carries
 `TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 4 hours nightly and 6 hours
 weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
-bounds only how long it waits after asking a job to stop — so there a hung pass ends when its
-maintenance lease is reclaimed, not on a clock. The scheduler's own log
+bounds only how long it waits after asking a job to stop — so there a hung pass is not stopped
+on a clock: it keeps the maintenance fence until it exits, and the passes that meet it are
+recorded as skipped, which doctor names. The scheduler's own log
 (`logs/scheduled-*.log`, `logs/cron-*.log`) is kept by the same retention as the maintenance
 reports: 30 days, 60 files, 32 MB per family.
 
@@ -574,6 +576,12 @@ transaction-API writers; concurrent external edits are unsupported and detected
 best-effort.
 
 ### Encrypted private-vault backup and validated restore
+
+Besides this encrypted backup, the nightly keeps a plain second copy of the whole
+`knowledge/` tree — private pages, daily logs and the redacted session records under
+`knowledge/raw/sessions/` included — as a local Git history in `~/llm-wiki-snapshots`
+(or `LLM_WIKI_SNAPSHOT_ROOT`). It is not encrypted: keep it out of synchronised or
+shared folders, and treat it as private as the vault itself.
 
 Install exact Restic `0.19.1`, initialize a repository outside the vault, and keep
 its credentials in Restic's standard external environment, protected password file,

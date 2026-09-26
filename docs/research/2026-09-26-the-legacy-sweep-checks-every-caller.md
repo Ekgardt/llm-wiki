@@ -4,7 +4,7 @@ Date: 2026-09-26. Audit 2026-09-26 C-15.
 
 ## Facts
 
-Checked with the code graph (project `home-user-llm-wiki`, `trace_path` inbound,
+Checked with the code graph (`trace_path` inbound,
 tests included) and `grep` over `scripts/ integrations/ benchmark/ install.* skills/
 rules/` of the worktree on 2026-09-26:
 

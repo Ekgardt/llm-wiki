@@ -439,7 +439,7 @@ once per MCP process and reused while `catalog.sqlite3`, the generation's
 `evidence.sqlite3` and the checkout's Git state keep their stat identity. It holds
 no state on disk and adds no runtime root. A foreign repository's generation is
 refreshed incrementally by `repository_index.py refresh` — spawned detached by the
-MCP server once per repository and commit when a structural answer finds the
+MCP server once per checkout and commit when a structural answer finds the
 checkout's commit ahead of the generation's, and by the nightly `refresh-all`
 step — under the ownership registry's `doctor` role scoped
 `repository:<repository_id>`. It is not a daemon: the process exits when the

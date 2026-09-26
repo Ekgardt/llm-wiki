@@ -105,7 +105,7 @@ Every structural answer read from a generation carries a `freshness` block:
 ```
 
 `refresh` is `not_needed`, `started` (the bounded incremental refresh was
-spawned detached — once per repository and commit in this process; the
+spawned detached — once per checkout and commit in this process; the
 answer itself came from the generation the vault has, and the session never
 waits), `already_requested`, `spawn_failed`, or `vault_nightly` (the vault's
 own generation is rebuilt by the nightly pass and the freshness watch).

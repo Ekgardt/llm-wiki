@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The guide and the structure notes say what the code does: `index_timestamp` is filled, the update syncs the extras you installed, a hung pass on macOS or cron keeps the fence until it exits, the detached refresh runs once per checkout and commit, and the plain unencrypted `knowledge/` snapshot in `~/llm-wiki-snapshots` is named (audit 2026-09-26 C-14).
 - Doctor knows the coordinator's `aborting` and `aborted` states (an aborting transaction counts as unsettled instead of "a state this runtime does not define"), and the daily `compile-drops-*.jsonl` logs get the same retention as the other maintenance reports (audit 2026-09-26 C-12, two of its parts).
 - A hook delegate is stopped only after its append's own budget has run out: both breadcrumb delegates stop at the 2.5 s append budget plus 1 s to start, under the host's 5 s, instead of the prompt delegate being killed at 2.5 s while its writer could try for 3 s (audit 2026-09-26 C-1).
 - A session record's tool line is redacted before it is cut to 200 characters, so a secret split at the bound no longer leaves its first characters in the record (audit 2026-09-26 C-6).
