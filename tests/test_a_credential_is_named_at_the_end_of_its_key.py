@@ -23,15 +23,15 @@ KEPT = [
     "password: required",
     "docker login --password-stdin",
 ]
-SECRET = "S3cretPassw0rd"
+SECRET = "S3cretPassw0rd"  # gitleaks:allow — invented input the redactor must hide
 LEAKED = [
-    f"curl -u admin:{SECRET} https://example.test",
+    f"curl -u admin:{SECRET} https://example.test",  # gitleaks:allow — invented input the redactor must hide
     f"mysql -u root -p{SECRET} db",
     f"docker login -u me --password {SECRET}",
     f'password="{SECRET} with spaces"',
     f"postgres://user:p@{SECRET}@host/db",
     f"client_secret=abcdefghijklmnop{SECRET}"[:30],
-    "password: correcthorsebatteryS3cretPassw0rd",
+    "password: correcthorsebatteryS3cretPassw0rd",  # gitleaks:allow — invented input the redactor must hide
 ]
 
 
