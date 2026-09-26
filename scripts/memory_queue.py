@@ -2594,6 +2594,15 @@ def _require_capture_decision_path(value: str, intent_id: str, stage: str) -> No
         raise ValueError("decision path is invalid")
 
 
+def _in_redrive_family(database: sqlite3.Connection, task_id: str) -> bool:
+    """The task was redriven, or is itself a redrive."""
+    row = database.execute(
+        "SELECT 1 FROM tasks WHERE (id=? AND redrive_of IS NOT NULL) OR redrive_of=? LIMIT 1",
+        (task_id, task_id),
+    ).fetchone()
+    return row is not None
+
+
 def _capture_decision_relative_path(intent_id: str, stage: str) -> str:
     key = sha256_bytes(canonical_json_bytes({"intent_id": intent_id, "stage": stage}))
     return f"run/queue-results/capture-decision-{key}.json"
@@ -11851,6 +11860,15 @@ class _QueueV3CandidateReader:
         ).fetchone()
         if link is None:
             return True
+        # A redriven capture's parent and child share one intent, and the terminal
+        # record binds only the task that finished it: the parent failed the proof
+        # and the whole weekly purge stopped (audit 2026-09-26 A-12). The family is
+        # kept, named in `retained`, and never purged half.
+        if _in_redrive_family(database, task_id):
+            return False
+        return self._capture_proof_settled(database, task_id)
+
+    def _capture_proof_settled(self, database: sqlite3.Connection, task_id: str) -> bool:
         binding = self.active_capture_binding(database, task_id)
         blocker = self._capture_terminal_blocker(database, task_id, binding)
         if blocker in (None, "capture_intent_unresolved"):

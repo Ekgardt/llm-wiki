@@ -882,6 +882,8 @@ def _existing_capture_decision(
         owner_only=True,
     )
     decision = _decode_capture_decision(encoded)
+    if _orphaned_by_another_task(indexed, decision, active):
+        return _retire_orphaned_decision(candidate)
     _require_capture_decision_identity(decision, intent, active)
     if indexed is None:
         indexed = _index_capture_decision(
@@ -895,6 +897,28 @@ def _existing_capture_decision(
             encoded,
         )
     return indexed, decision
+
+
+def _orphaned_by_another_task(indexed: object, decision: Mapping[str, object], active: object) -> bool:
+    """A decision file no queue row indexes, written for a task that is not this one.
+
+    A task that died between writing its decision and indexing it left the file
+    under the intent's key, so its redrive met "capture decision conflicts with
+    its binding" and spent its one second chance (audit 2026-09-26 A-12,
+    docs/research/2026-09-26-a-redriven-capture-meets-no-leftovers.md).
+    """
+    binding = decision.get("processing_binding")
+    named = binding.get("task_id") if isinstance(binding, dict) else None
+    return indexed is None and named != active.task_id
+
+
+def _retire_orphaned_decision(candidate: Path) -> None:
+    """Nothing indexes the file, so it is derived and unreferenced: the decision is made again."""
+    from reliable_memory import fsync_directory
+
+    candidate.unlink(missing_ok=True)
+    fsync_directory(candidate.parent)
+    return None
 
 
 def _publish_capture_decision(
