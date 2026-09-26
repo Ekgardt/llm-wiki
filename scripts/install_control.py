@@ -1250,11 +1250,17 @@ def _launchd_label(name: str) -> str:
     return name.removesuffix(".plist")
 
 
+# `launchctl print` exits 113 ("Could not find service") for a job launchd does not
+# have; any other failure says nothing about the job (audit 2026-09-26, regress 11,
+# docs/research/2026-09-26-launchd-absent-only-when-launchd-says-so.md).
+LAUNCHD_SERVICE_NOT_FOUND = 113
+_LAUNCHD_PRINT_STATES = {0: "active", LAUNCHD_SERVICE_NOT_FOUND: "absent"}
+
+
 def _launchd_job_state(runner: CommandRunner, launchctl: str, domain: str, label: str) -> str:
+    """`active`, `absent`, or `unknown` when launchctl failed for another reason."""
     exit_code, _output = runner((launchctl, "print", f"{domain}/{label}"), None)
-    if exit_code == 0:
-        return "active"
-    return "absent"
+    return _LAUNCHD_PRINT_STATES.get(exit_code, "unknown")
 
 
 def _launchd_projection_state(
@@ -1301,9 +1307,12 @@ def _uninstall_launchd(
 def _bootout_if_loaded(runner: CommandRunner, launchctl: str, domain: str, label: str) -> None:
     """A job launchd no longer has is already out; `bootout` of it fails and blocked the uninstall.
 
-    Audit C-34, docs/research/2026-09-25-the-installers-agree.md.
+    Only a job launchd says it does not have is skipped: a `print` that failed
+    otherwise still gets its `bootout`, whose failure then stops the uninstall
+    instead of leaving the job loaded. Audit C-34,
+    docs/research/2026-09-25-the-installers-agree.md.
     """
-    if _launchd_job_state(runner, launchctl, domain, label) != "active":
+    if _launchd_job_state(runner, launchctl, domain, label) == "absent":
         return
     _require_command(runner, (launchctl, "bootout", f"{domain}/{label}"))
 
