@@ -837,8 +837,8 @@ class OwnershipRegistry:
 
     def _remove_orphan_marker(self, relative_path: str) -> str:
         path = self.state_root / relative_path
-        pid = _marker_pid(path, self.state_root)
-        if _pid_exists(pid):
+        pid = _marker_pid_or_torn(path, self.state_root, relative_path)
+        if pid is not None and _pid_exists(pid):
             raise OperationalOwnershipError("owner_busy")
         _remove_marker_file(path)
         return "orphan_removed"
@@ -1125,8 +1125,31 @@ class OwnershipRegistry:
 
 
 def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> MarkerIdentity:
+    """Write the marker whole beside its name, then link it in: never torn, never replaced.
+
+    The marker used to be created empty and filled afterwards, so a crash in
+    between left a file no reader could parse, and every later pass refused on
+    it (audit 2026-09-26 B-21). `os.link` fails when the name exists, which is
+    the exclusivity `O_EXCL` gave. Research:
+    docs/research/2026-09-26-a-marker-is-published-whole.md
+    """
     path = Path(state_root) / restricted_relative_path(relative_path, ("run",))
     path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    _write_whole(staged, payload)
+    try:
+        os.link(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+    return MarkerIdentity(
+        relative_path=relative_path,
+        sha256=sha256_bytes(payload),
+        file_identity=capture_runtime_file_identity(path, state_root=Path(state_root)),
+        pid=os.getpid(),
+    )
+
+
+def _write_whole(path: Path, payload: bytes) -> None:
     descriptor = os.open(
         path,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
@@ -1142,18 +1165,36 @@ def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> Mar
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    return MarkerIdentity(
-        relative_path=relative_path,
-        sha256=sha256_bytes(payload),
-        file_identity=capture_runtime_file_identity(path, state_root=Path(state_root)),
-        pid=os.getpid(),
-    )
 
 
 def _require_marker_path_of_row(row: sqlite3.Row, relative_path: str) -> None:
     marker = _marker_from_row(row)
     if marker is None or marker.relative_path != relative_path:
         raise OperationalOwnershipError("marker_identity_invalid")
+
+
+# Markers only `_publish_marker` writes, which a live writer never leaves torn.
+# `run/compile.pid` is not one: the pre-registry compile lock writes it in place.
+_WHOLE_MARKERS = frozenset({"run/maintenance.lock"})
+
+
+def _marker_pid_or_torn(path: Path, state_root: Path, relative_path: str) -> int | None:
+    """The PID an ownerless marker names, or None for a torn one nobody can still be writing."""
+    try:
+        return _marker_pid(path, state_root)
+    except OperationalOwnershipError:
+        if relative_path in _WHOLE_MARKERS and _marker_is_torn(path, state_root):
+            return None
+        raise
+
+
+def _marker_is_torn(path: Path, state_root: Path) -> bool:
+    """Readable bytes that name no PID; an unreadable file is not proof of anything."""
+    try:
+        read_runtime_bytes(path, state_root, max_bytes=_MAX_MARKER_BYTES, owner_only=False)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _marker_pid(path: Path, state_root: Path) -> int:

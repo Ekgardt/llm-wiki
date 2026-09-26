@@ -142,12 +142,18 @@ def test_an_ownerless_marker_of_a_living_pid_refuses(tmp_path):
     assert marker_path.read_bytes() == str(os.getpid()).encode("ascii")
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a file its owner cannot read")
 def test_an_unreadable_ownerless_marker_refuses_by_name(tmp_path):
+    """A file that cannot be read proves nothing; a readable torn one is taken back.
+
+    The torn case is `tests/test_a_marker_is_published_whole.py` (audit 2026-09-26 B-21).
+    """
     state_root = tmp_path / "state"
     _candidate(state_root)
     marker_path = state_root / MARKER
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_bytes(b"not a pid")
+    marker_path.chmod(0)
 
     with pytest.raises(ownership.OperationalOwnershipError) as error:
         ownership.acquire_scheduled_owner("nightly", state_root=state_root)
