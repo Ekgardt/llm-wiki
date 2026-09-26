@@ -2148,6 +2148,16 @@ def _without_edges_query(
     return sql, parameters
 
 
+def _metadata_values_clause(
+    values: Sequence[str] | None, clauses: list[str], parameters: list[object]
+) -> None:
+    if values is None:
+        return
+    checked = [_text(value, "node value", maximum=4096) for value in values]
+    clauses.append(f"json_extract(metadata_json, '$.value') IN ({','.join('?' for _ in checked) or 'NULL'})")
+    parameters.extend(checked)
+
+
 def _metadata_clause(
     value: str | None,
     field: str,
@@ -2972,15 +2982,22 @@ class EvidenceGraph:
         kinds: Sequence[str] | None = None,
         name: str | None = None,
         path: str | None = None,
+        values: Sequence[str] | None = None,
         max_rows: int = 100,
         deadline: float | None = None,
     ) -> list[dict[str, object]]:
-        """Find bounded nodes by indexed kind and exact metadata fields."""
+        """Find bounded nodes by indexed kind and exact metadata fields.
+
+        `values` matches the metadata `value` against a list in SQL, so a caller
+        after a few named files does not read every file node first (audit
+        2026-09-26 B-8).
+        """
         clauses: list[str] = []
         parameters: list[object] = []
         _kind_clause(kinds, clauses, parameters)
         _metadata_clause(name, "name", 1024, clauses, parameters)
         _metadata_clause(path, "path", 4096, clauses, parameters)
+        _metadata_values_clause(values, clauses, parameters)
         where = "" if not clauses else " WHERE " + " AND ".join(clauses)
         rows = self._execute(
             "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "

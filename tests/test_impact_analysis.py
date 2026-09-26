@@ -41,6 +41,15 @@ def _repository(tmp_path: Path) -> Path:
     return root
 
 
+def _verifications(calls: list[tuple]) -> list[tuple]:
+    return [arguments for arguments in calls if arguments[:2] == ("rev-parse", "--verify")]
+
+
+def _diff_endpoints_are_oids(calls: list[tuple]) -> bool:
+    diff = next(arguments for arguments in calls if arguments[0] == "diff")
+    return all(len(oid) in {40, 64} and int(oid, 16) >= 0 for oid in diff[-3:-1])
+
+
 class TestGitComparisons:
     def test_default_unions_staged_and_unstaged_changes(self, tmp_path):
         root = _repository(tmp_path)
@@ -172,13 +181,15 @@ class TestGitComparisons:
             target="HEAD",
         )
 
-        assert calls[:2] == [
-            ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
-            ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
-        ]
-        diff = next(arguments for arguments in calls if arguments[0] == "diff")
-        endpoints = diff[-3:-1]
-        assert all(len(oid) in {40, 64} and int(oid, 16) >= 0 for oid in endpoints)
+        # The top of the repository is asked first (audit 2026-09-26 B-8); the
+        # verifications follow it.
+        assert (_verifications(calls)[:2], _diff_endpoints_are_oids(calls)) == (
+            [
+                ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
+                ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
+            ],
+            True,
+        )
 
     def test_requested_root_ignores_ambient_git_repository_and_config_selectors(
         self, tmp_path, monkeypatch

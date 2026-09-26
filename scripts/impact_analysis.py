@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import math
 import os
 import re
@@ -425,6 +426,21 @@ def _object_blob(
     return _git(root, ["cat-file", "blob", oid], deadline=deadline, max_bytes=limit)
 
 
+def repository_top(directory: Path, deadline: float) -> Path:
+    """The working tree's top: Git names changed paths from there, not from a subfolder.
+
+    Asked from a subfolder, the diff's `pkg/a.py` was read as `<subfolder>/pkg/a.py`
+    (audit 2026-09-26 B-8, docs/research/2026-09-26-an-impact-names-each-edit.md).
+    A directory Git cannot place is used as given.
+    """
+    try:
+        top = _git(directory, ["rev-parse", "--show-toplevel"], deadline=deadline, max_bytes=8192)
+    except (OSError, ValueError, RuntimeError):
+        return directory
+    text = top.decode("utf-8", "surrogateescape").strip()
+    return Path(text).resolve() if text else directory
+
+
 def _worktree_blob(root: Path, relative: str, limit: int) -> bytes | None:
     components = relative.split("/")
     if not components or any(part in {"", ".", ".."} for part in components):
@@ -488,10 +504,11 @@ def collect_git_changes(
 ) -> list[dict]:
     """Collect NUL-safe diff records and their bounded old/new blobs."""
     bounds = _limits_or_default(limits)
-    root = Path(root).resolve(strict=True)
     if comparison not in COMPARISONS:
         raise ValueError(f"comparison must be one of: {', '.join(sorted(COMPARISONS))}")
-    collector = _ChangeCollector(root, bounds, _deadline_or_default(deadline, bounds, time.monotonic))
+    deadline = _deadline_or_default(deadline, bounds, time.monotonic)
+    root = repository_top(Path(root).resolve(strict=True), deadline)
+    collector = _ChangeCollector(root, bounds, deadline)
     for phase, arguments, worktree_new in _diff_arguments(
         comparison, base=base, target=target, branch=branch, root=root, deadline=collector.deadline
     ):
@@ -761,14 +778,34 @@ def _changed_ranges(
     if prefix == len(old_lines) == len(new_lines):
         return []
     suffix = _common_suffix(old_lines, new_lines, prefix, deadline)
-    old_side = _range_side(prefix, len(old_lines) - suffix, old_offsets)
-    inserted = new_lines[prefix : len(new_lines) - suffix]
-    return [
-        {
-            "old": _anchored_insertion(old_side, prefix, inserted),
-            "new": _range_side(prefix, len(new_lines) - suffix, new_offsets),
-        }
-    ]
+    hunks = _hunks(old_lines, new_lines, prefix, suffix)
+    return [_hunk_ranges(hunk, new_lines, old_offsets, new_offsets) for hunk in hunks]
+
+
+# Two edits in one file were one range from the first to the last, so every
+# symbol between them read as changed (audit 2026-09-26 B-8,
+# docs/research/2026-09-26-an-impact-names-each-edit.md). Past this many lines
+# between the common ends the one-range answer is kept, bounded and honest.
+MAX_DIFF_LINES = 20_000
+
+
+def _hunks(old_lines: list[bytes], new_lines: list[bytes], prefix: int, suffix: int) -> list[tuple[int, int, int, int]]:
+    """Each edited run as (old start, old end, new start, new end), between the common ends."""
+    old_middle = old_lines[prefix : len(old_lines) - suffix]
+    new_middle = new_lines[prefix : len(new_lines) - suffix]
+    if max(len(old_middle), len(new_middle)) > MAX_DIFF_LINES:
+        return [(prefix, len(old_lines) - suffix, prefix, len(new_lines) - suffix)]
+    opcodes = difflib.SequenceMatcher(None, old_middle, new_middle, autojunk=False).get_opcodes()
+    return [(prefix + i1, prefix + i2, prefix + j1, prefix + j2) for tag, i1, i2, j1, j2 in opcodes if tag != "equal"]
+
+
+def _hunk_ranges(hunk: tuple[int, int, int, int], new_lines: list[bytes], old_offsets: list[int], new_offsets: list[int]) -> dict:
+    old_start, old_end, new_start, new_end = hunk
+    old_side = _range_side(old_start, old_end, old_offsets)
+    return {
+        "old": _anchored_insertion(old_side, old_start, new_lines[new_start:new_end]),
+        "new": _range_side(new_start, new_end, new_offsets),
+    }
 
 
 def _continues_the_block_above(inserted: list[bytes]) -> bool:
@@ -999,10 +1036,14 @@ def _map_symbols(graph, changes: list[dict], bounds: ImpactLimits, deadline: flo
 def _project_file_ids(graph, changes: list[dict], bounds: ImpactLimits, deadline: float) -> set[str]:
     """Resolve project-journal file values before following checkpoint edges."""
     paths = _changed_path_values(changes)
-    if not paths:
-        return set()
-    nodes = graph.find_nodes(kinds=("file",), max_rows=bounds.max_graph_rows, deadline=deadline)
-    return {str(node["node_id"]) for node in nodes if _file_node_value(node) in paths}
+    spellings = sorted(paths | {path.replace("/", "\\") for path in paths})
+    found: set[str] = set()
+    for start in range(0, len(spellings), 400):
+        nodes = graph.find_nodes(
+            kinds=("file",), values=spellings[start : start + 400], max_rows=bounds.max_graph_rows, deadline=deadline
+        )
+        found.update(str(node["node_id"]) for node in nodes if _file_node_value(node) in paths)
+    return found
 
 
 def _changed_path_values(changes: list[dict]) -> set[str]:
@@ -1178,8 +1219,8 @@ def analyze_impact(
     word-match guesses anyway (the session start, audit 3 B30).
     """
     bounds = _limits_or_default(limits)
-    root = Path(root).resolve(strict=True)
     deadline = _deadline_or_default(deadline, bounds, monotonic)
+    root = repository_top(Path(root).resolve(strict=True), deadline)
     _check_impact_stop(deadline, cancelled)
     run = _ImpactRun(bounds, deadline, cancelled)
     run.collect(root, comparison=comparison, base=base, target=target, branch=branch)
