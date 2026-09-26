@@ -39,6 +39,11 @@ from scheduled_nightly import StepLog  # noqa: E402
 # See `docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md`.
 REFLECTION_BUDGET_SECONDS = 1800
 CONTRADICTIONS_STEP_SECONDS = 1800
+# A weekly that met the nightly holding the shared fence skipped the whole week
+# (audit 2026-09-26 B-20). It now asks again every minute, for as long as the
+# nightly can run by its own bounds; the scheduler's limit counts that wait.
+# Research: docs/research/2026-09-26-a-weekly-waits-for-the-nightly.md
+FENCE_POLL_SECONDS = 60.0
 
 
 # The queue keeps finished work for `queue_result_retention_days`; the designed
@@ -205,8 +210,34 @@ def worst_case_seconds() -> float:
 
     steps = sum(timeout for _message, _label, _command, timeout in _script_steps())
     reflection = REFLECTION_BUDGET_SECONDS + DEFAULT_TIMEOUT_S
-    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS
+    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS + _fence_wait_seconds() + FENCE_POLL_SECONDS
     return float(waits + steps + CONTRADICTIONS_STEP_SECONDS + reflection)
+
+
+def _fence_wait_seconds() -> float:
+    return scheduled_nightly.worst_case_seconds()
+
+
+def _fence_unless_busy():
+    """The weekly fence, or None while another pass holds it; any other refusal raises."""
+    from operational_ownership import OperationalOwnershipError
+
+    try:
+        return scheduled_nightly.take_scheduled_fence("weekly")
+    except OperationalOwnershipError as exc:
+        if exc.code != "owner_busy":
+            raise
+        return None
+
+
+def _fence_after_waiting(sleep=time.sleep, clock=time.monotonic):
+    """Wait out a nightly that holds the fence; None only once it outlasted its own bounds."""
+    deadline = clock() + _fence_wait_seconds()
+    while True:
+        fence = _fence_unless_busy()
+        if fence is not None or clock() >= deadline:
+            return fence
+        sleep(FENCE_POLL_SECONDS)
 
 
 def _build_tiers(log: StepLog) -> int:
@@ -313,7 +344,7 @@ def main() -> int:
     from secret_redact import describe_error_chain
 
     try:
-        fence = scheduled_nightly.take_scheduled_fence("weekly")
+        fence = _fence_after_waiting()
     except OperationalOwnershipError as exc:
         return _skipped(str(exc.code))
     except Exception as exc:

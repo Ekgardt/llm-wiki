@@ -5332,9 +5332,23 @@ def _weekly_verdict(state: dict, now: datetime) -> tuple[str, str] | None:
     """(status, message) when the weekly pass needs attention, else None."""
     if state.get("last_weekly_status") == "failed":
         return "error", "Last weekly maintenance failed."
+    lateness = _weekly_lateness(state, now)
+    if lateness is None:
+        return None
+    return "degraded", f"{lateness}{_weekly_skip_note(state)}"
+
+
+def _weekly_lateness(state: dict, now: datetime) -> str | None:
     if _weekly_is_stale(_parse_utc(state.get("last_weekly_at")), now):
-        return "degraded", f"Weekly maintenance is stale.{_weekly_skip_note(state)}"
+        return "Weekly maintenance is stale."
+    if _weekly_never_ran_but_skipped(state):
+        return "Weekly maintenance has never completed."
     return None
+
+
+def _weekly_never_ran_but_skipped(state: dict) -> bool:
+    """A weekly with no run on record but a skip was due and did not happen (audit 2026-09-26 B-20)."""
+    return state.get("last_weekly_at") is None and isinstance(state.get("last_weekly_skip"), dict)
 
 
 def _weekly_skip_note(state: dict) -> str:
