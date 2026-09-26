@@ -44,3 +44,10 @@ text order equal to time order.
 - `scripts/project_journal.py`
 - `scripts/repair_orphaned_checkpoint_names.py`
 - `tests/test_every_stored_instant_has_one_width.py`
+
+## Against recurrence
+
+`tests/test_every_stored_instant_has_one_width.py` finds every script that compares
+a `*_at` column with a bound parameter in SQL and fails when that script calls
+`isoformat()` without `timespec` on anything but a calendar date. A new module that
+starts comparing times in SQL is covered without being listed.
