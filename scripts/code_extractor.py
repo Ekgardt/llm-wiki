@@ -159,9 +159,18 @@ def _optional_parser(language: str):
         return None
 
 
+class ExtractionCeilingExceeded(ValueError):
+    """A repository bigger than one extraction may hold: a named refusal, not a crash.
+
+    Audit 2026-09-26 B-11, docs/research/2026-09-26-a-ceiling-is-a-named-refusal.md.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractionLimits:
-    max_sources: int = 10_000
+    # The same ceiling `repository_index.MAX_INDEXED_SOURCES` admits; at 10 000
+    # a checkout of 10 001-20 000 files was collected and then crashed here.
+    max_sources: int = 20_000
     max_source_bytes: int = 16 * 1024 * 1024
     max_total_bytes: int = 512 * 1024 * 1024
     max_nodes: int = 250_000
@@ -249,7 +258,7 @@ def _bounded_values(
     for value in values:
         _check_stop(deadline, cancelled)
         if len(retained) >= maximum:
-            raise ValueError(f"code extraction {label} ceiling exceeded")
+            raise ExtractionCeilingExceeded(f"code extraction {label} ceiling exceeded")
         retained.append(value)
     return tuple(retained)
 
@@ -932,7 +941,7 @@ class _Collector:
     def check(self, records: object, maximum: int, label: str) -> None:
         self.check_stop()
         if len(records) > maximum:  # type: ignore[arg-type]
-            raise ValueError(f"code extraction {label} ceiling exceeded")
+            raise ExtractionCeilingExceeded(f"code extraction {label} ceiling exceeded")
 
     def check_stop(self) -> None:
         """The stop checks alone: the constructor already validated both arguments."""
@@ -1071,7 +1080,7 @@ class _Collector:
             return
         self.candidate_dependency_count += len(candidate_sources)
         if self.candidate_dependency_count > self.limits.max_candidate_dependencies:
-            raise ValueError("code extraction candidate dependency ceiling exceeded")
+            raise ExtractionCeilingExceeded("code extraction candidate dependency ceiling exceeded")
         self.observation_source_dependencies[observation_id] = candidate_sources
 
     def _add_evidence(
@@ -1745,7 +1754,7 @@ class _Collector:
             node = pending.pop()
             nodes.append(node)
             if len(nodes) > maximum:
-                raise ValueError("code extraction syntax node ceiling exceeded")
+                raise ExtractionCeilingExceeded("code extraction syntax node ceiling exceeded")
             pending.extend(reversed(node.named_children))
         self.check_stop()
         return nodes
@@ -2307,7 +2316,7 @@ def _checked_source_size(source: _CapturedSource, bounds: ExtractionLimits, tota
     _require_source_shape(source)
     size = len(source.content)
     if size > bounds.max_source_bytes or total + size > bounds.max_total_bytes:
-        raise ValueError("code extraction source byte ceiling exceeded")
+        raise ExtractionCeilingExceeded("code extraction source byte ceiling exceeded")
     _require_recorded_content(source)
     return size
 

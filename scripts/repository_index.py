@@ -618,6 +618,19 @@ def _fresh_generation_id(catalog) -> str:
 
 def _build(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
     """Build and register; `activate=False` is the whole safety property here."""
+    from code_extractor import ExtractionCeilingExceeded
+
+    try:
+        return _built_generation(catalog, admission, snapshot, parent_id, deadline, cancelled)
+    except ExtractionCeilingExceeded as error:
+        raise _refuse(
+            "repository_exceeds_extraction_bounds",
+            f"the code extractor refused this repository: {error}",
+            directory=str(admission.root),
+        ) from error
+
+
+def _built_generation(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
     import doctor
     from evidence_graph_builder import build_incremental_generation
 
