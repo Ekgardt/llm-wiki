@@ -6,7 +6,6 @@ reflection had no bound at all. Research:
 """
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -18,10 +17,9 @@ import scheduled_weekly  # noqa: E402
 
 
 def _weekly_limit_seconds() -> float:
-    script = (ROOT / "scripts" / "install-scheduled-tasks.ps1").read_text(encoding="utf-8")
-    weekly = script.split("$weeklySettings", 1)[1].split("Register-ScheduledTask", 1)[0]
-    hours = re.search(r"-ExecutionTimeLimit \(New-TimeSpan -Hours (\d+)\)", weekly)
-    return float(hours.group(1)) * 3600
+    from tests.test_the_scheduler_outlasts_the_pass import script_limit_hours
+
+    return float(script_limit_hours()["weekly"]) * 3600
 
 
 def test_the_weekly_task_is_not_killed_inside_its_own_bounds():

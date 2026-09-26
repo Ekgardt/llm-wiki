@@ -617,7 +617,8 @@ def _scheduled_path(uv_path: Path) -> str:
 
 # How long a scheduler lets each pass run: above each pass's own worst case in auto
 # provider mode, which counts the checkout update and the whole provider order one
-# model call may walk (about 3.2 h and 4.9 h). One table for every scheduler; the
+# model call may walk (`worst_case_seconds` of each; tests hold the order, and no
+# comment carries a measured figure that drifts). One table for every scheduler; the
 # systemd units once said 3 h and 5 h while the Windows tasks said 4 h and 6 h.
 # Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md,
 # docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md

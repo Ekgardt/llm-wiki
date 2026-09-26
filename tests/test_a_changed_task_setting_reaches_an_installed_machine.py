@@ -120,12 +120,17 @@ def test_an_update_registers_the_tasks_again_under_the_new_contract(tmp_path, mo
 
 
 def test_the_specification_names_the_limits_the_script_registers() -> None:
-    script = SCRIPT.read_text(encoding="utf-8")
-    registered = [int(hours) for hours in re.findall(r"-ExecutionTimeLimit \(New-TimeSpan -Hours (\d+)\)", script)]
-    checked = [int(hours) for hours in re.findall(r"LimitHours = (\d+)", script)]
-    promised = list(install_control.WINDOWS_TASK_LIMIT_HOURS.values())
+    from tests.test_the_scheduler_outlasts_the_pass import script_limit_hours
 
-    assert (registered, checked) == (promised, promised)
+    script = SCRIPT.read_text(encoding="utf-8")
+    registered = re.findall(r"-ExecutionTimeLimit \(New-TimeSpan -Hours \$LimitHours\.(\w+)\)", script)
+    checked = re.findall(r"LimitHours = \$LimitHours\.(\w+)", script)
+
+    assert (registered, checked, script_limit_hours()) == (
+        ["nightly", "weekly"],
+        ["nightly", "weekly"],
+        install_control.WINDOWS_TASK_LIMIT_HOURS,
+    )
 
 
 def _pwsh() -> str:
