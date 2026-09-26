@@ -375,6 +375,26 @@ def _gap_note(entry: Mapping[str, object] | None) -> str | None:
     return str(entry.get("note") or "")
 
 
+def _kept_whole(entry: Mapping[str, object]) -> bool:
+    return bool(_entry_role(entry)) or _gap_note(entry) is not None
+
+
+def is_service_record(line: str) -> bool:
+    """A JSON record the renderer drops whole, whatever surrounds it.
+
+    Not a user or assistant turn and not a capture gap: a Claude
+    `file-history-snapshot`, a Codex item that is no turn or tool call. A line
+    that is not JSON is not one — a plain-text transcript is kept verbatim.
+    """
+    decoded = _decoded_entry(line)
+    if decoded is None:
+        return False
+    entry = _conversation_entry(decoded)
+    if entry is None:
+        return True
+    return not _kept_whole(entry)
+
+
 def _is_conversation(entry: Mapping[str, object] | None) -> bool:
     return entry is not None and _gap_note(entry) is None
 

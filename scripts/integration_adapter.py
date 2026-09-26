@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import partial
@@ -2669,18 +2669,57 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
         raise ValueError("capture transcript changed while it was read")
 
 
+# How far past its window an edge of a long transcript is searched for turns. A
+# session's head can be all `file-history-snapshot` records; measured on this
+# machine on 2026-09-26, two of six transcripts over the capture bound held no
+# turn in their first 450 KiB, and filling the window with turns took up to 9.04
+# windows of reading (0.23 s for 16). See
+# `docs/research/2026-09-26-a-long-session-keeps-its-first-turns.md`.
+EDGE_SCAN_WINDOWS = 16
+
+
 def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
-    """Head and tail of a transcript too large to hold whole."""
+    """Head and tail of a transcript too large to hold whole, each of its turns."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
-        head = _read_transcript_edge(descriptor, 0, side)
-        tail = _read_transcript_edge(descriptor, before.st_size - side, side)
+        scan = min(side * EDGE_SCAN_WINDOWS, before.st_size // 2)
+        head = _read_transcript_edge(descriptor, 0, scan)
+        tail = _read_transcript_edge(descriptor, before.st_size - scan, scan)
         _require_stable_transcript(before, os.fstat(descriptor))
     finally:
         os.close(descriptor)
-    return head, tail, before.st_size
+    return _turns_head(head, side), _turns_tail(tail, side), before.st_size
+
+
+def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
+    """Lines in the given order, service records skipped, until the window is full."""
+    from session_evidence import is_service_record
+
+    kept: list[bytes] = []
+    used = 0
+    for line in lines:
+        if is_service_record(line.decode("utf-8", errors="replace")):
+            continue
+        used += len(line) + 1
+        if used > side:
+            break
+        kept.append(line)
+    return kept
+
+
+def _turns_head(window: bytes, side: int) -> bytes:
+    """The first turns; the raw window when not one whole turn fits in it."""
+    kept = _turn_lines(window.split(b"\n")[:-1], side)
+    return b"".join(line + b"\n" for line in kept) or window[:side]
+
+
+def _turns_tail(window: bytes, side: int) -> bytes:
+    """The last turns; the raw window when not one whole turn fits in it."""
+    lines = [line for line in window.split(b"\n")[1:] if line]
+    kept = _turn_lines(reversed(lines), side)
+    return b"".join(line + b"\n" for line in reversed(kept)) or window[-side:]
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
@@ -2690,25 +2729,9 @@ def _capture_excerpt_marker(dropped: int) -> str:
     return f"\n{capture_gap_line(dropped)}\n"
 
 
-def _whole_lines_head(head: bytes) -> bytes:
-    """Whole lines where the window holds one, the raw window otherwise.
-
-    One transcript line can be larger than the window -- a tool result arrives
-    as a single JSON line -- and trimming to a boundary that is not there would
-    drop the side entirely.
-    """
-    return head[: head.rfind(b"\n") + 1] or head
-
-
-def _whole_lines_tail(tail: bytes) -> bytes:
-    return tail[tail.find(b"\n") + 1 :] or tail
-
-
 def _capture_excerpt_text(path: Path, limit: int) -> str:
     """A bounded excerpt that says, in the evidence itself, what it dropped."""
-    raw_head, raw_tail, size = _read_transcript_edges(path, limit // 2)
-    head = _whole_lines_head(raw_head)
-    tail = _whole_lines_tail(raw_tail)
+    head, tail, size = _read_transcript_edges(path, limit // 2)
     dropped = size - len(head) - len(tail)
     return (
         _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
