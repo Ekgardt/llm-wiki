@@ -764,9 +764,9 @@ def advisory_block(slug: str | None = None) -> str:
 def guardrails_block(slug: str | None = None) -> str:
     """Learned rules from past corrections — prevents repeating mistakes.
 
-    Reads promoted feedback candidates + correction-type knowledge
-    pages and injects them as compact rules the agent sees BEFORE
-    acting. Non-LLM, <50ms.
+    Reads correction-type knowledge pages (feedback candidates were retired on
+    2026-09-25) and injects them as compact rules the agent sees BEFORE acting.
+    Non-LLM, <50ms.
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))

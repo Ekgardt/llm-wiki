@@ -145,27 +145,28 @@ class TestTranscriptPathContainment:
         "~/.docker/config.json",
     ]
 
+    # These asked `flush_memory._transcript_path_allowed`, removed long ago, behind
+    # `hasattr`, so they passed without testing anything (audit 2026-09-26 C-15).
+    # The capture path is validated by `integration_adapter`; a path that does
+    # not exist is refused as well, with FileNotFoundError, an OSError.
     @pytest.mark.parametrize("sensitive", SENSITIVE_PATHS)
     def test_sensitive_paths_rejected(self, sensitive):
-        """Each sensitive file path must be rejected by flush_memory."""
-        import flush_memory
+        """Each sensitive file path must be refused as a capture transcript."""
+        import integration_adapter
 
-        if hasattr(flush_memory, "_transcript_path_allowed"):
-            p = Path(sensitive).expanduser()
-            assert not flush_memory._transcript_path_allowed(p), (
-                f"Transcript path {sensitive} should be rejected"
-            )
+        with pytest.raises(OSError):
+            integration_adapter._validated_capture_transcript_path(str(Path(sensitive).expanduser()))
 
-    def test_transcript_must_have_known_extension(self):
-        """Transcripts with arbitrary extensions (e.g. .key, .pem) must be rejected."""
-        import flush_memory
+    @pytest.mark.parametrize("ext", (".pem", ".key", ".env", ".db", ".sqlite"))
+    def test_transcript_must_have_known_extension(self, ext, tmp_path):
+        """Transcripts with arbitrary extensions (e.g. .key, .pem) must be refused."""
+        import integration_adapter
 
-        if hasattr(flush_memory, "_transcript_path_allowed"):
-            for ext in (".pem", ".key", ".env", ".db", ".sqlite"):
-                p = Path.home() / ".claude" / f"session{ext}"
-                assert not flush_memory._transcript_path_allowed(p), (
-                    f"Extension {ext} should be rejected for transcript paths"
-                )
+        candidate = tmp_path / f"session{ext}"
+        candidate.write_text("secret\n", encoding="utf-8")
+
+        with pytest.raises(PermissionError, match="extension"):
+            integration_adapter._validated_capture_transcript_path(str(candidate))
 
 
 # ---------------------------------------------------------------------------
