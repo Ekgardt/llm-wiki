@@ -804,7 +804,7 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - `search_memory.py --rebuild` rebuilds the evidence generation, the one index
 
 ### "Hook errors"
-- Check `logs/hook-errors.log` for captured exceptions
+- Check `logs/hook-errors.log` for captured exceptions (past 2 MB it moves to `logs/hook-errors.log.1`)
 - All hooks exit 0 on any error (never break your session), so errors are
   silent unless you check the log
 

@@ -179,7 +179,8 @@ def test_keeping_the_previous_state_never_leaves_a_staged_link(tmp_path: Path, m
 
 
 def test_the_hook_error_log_is_bounded_with_the_scheduler_logs() -> None:
-    assert "hook-errors.log" in maintenance_helpers.SCHEDULER_LOG_NAMES
+    """Bounded by rotation since 2026-09-26: its writers are independent hooks."""
+    assert "hook-errors.log" in maintenance_helpers.ROTATED_LOG_NAMES
 
 
 # --- the queue --------------------------------------------------------------

@@ -68,10 +68,16 @@ SCHEDULER_LOG_NAMES = (
     "scheduled-weekly.log",
     "cron-nightly.log",
     "cron-weekly.log",
-    # Appended by every hook that fails; 924 KB on 2026-09-24 with nothing
-    # bounding it. See `docs/research/2026-09-24-every-store-has-a-bound.md`.
-    "hook-errors.log",
 )
+# Appended by every hook that fails, each hook opening, appending and closing on
+# its own (924 KB on 2026-09-24 with nothing bounding it). An in-place trim races
+# those writers — a line appended between reading the tail and truncating is cut
+# off — so this log is rotated instead: renamed to `<name>.1`, replacing the one
+# before, and the next hook creates a fresh file. A hook that opened the old file
+# just before finishes its line there. See
+# `docs/research/2026-09-24-every-store-has-a-bound.md` and
+# `docs/research/2026-09-26-a-log-many-writers-append-to-is-rotated-not-trimmed.md`.
+ROTATED_LOG_NAMES = ("hook-errors.log",)
 SCHEDULER_LOG_KEEP_BYTES = 2 * 1024 * 1024
 
 
@@ -326,16 +332,37 @@ def _trim_one_scheduler_log(path: Path, keep_bytes: int) -> int:
     return size - keep_bytes
 
 
-def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
-    """Bound the append-only logs a scheduler redirects a pass into.
+def rotated_log_previous(path: Path) -> Path:
+    """Where a rotated log's previous generation lives."""
+    return path.with_name(f"{path.name}.1")
 
-    Returns how many bytes were dropped in total. A log held open with no
-    sharing (Windows) is left exactly as it is.
+
+def _rotate_one_log(path: Path, keep_bytes: int) -> int:
+    """Bytes moved out of the live name; 0 when small enough or cannot be renamed."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= keep_bytes:
+        return 0
+    try:
+        os.replace(path, rotated_log_previous(path))
+    except OSError:
+        return 0
+    return size
+
+
+def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
+    """Bound the append-only logs: trim a scheduler's own, rotate the hooks' one.
+
+    Returns how many bytes were dropped or moved in total. A log held open with
+    no sharing (Windows) is left exactly as it is.
     """
-    return sum(
+    trimmed = sum(
         _trim_one_scheduler_log(REPORTS_DIR / name, keep_bytes)
         for name in SCHEDULER_LOG_NAMES
     )
+    return trimmed + sum(_rotate_one_log(REPORTS_DIR / name, keep_bytes) for name in ROTATED_LOG_NAMES)
 
 
 def wait_for_compile_idle(log_fn) -> None:

@@ -4943,6 +4943,24 @@ CONTENTION_MESSAGES = (
 )
 
 
+def _hook_error_generations(path: Path, state_root: Path) -> list[Path]:
+    """The rotated generation, then the live one: a rotation must not hide a burst.
+
+    See `docs/research/2026-09-26-a-log-many-writers-append-to-is-rotated-not-trimmed.md`.
+    """
+    from maintenance_helpers import rotated_log_previous
+
+    candidates = (rotated_log_previous(path), path)
+    return [part for part in candidates if _safe_kind(part, state_root)[0] != "missing"]
+
+
+def _hook_error_trail(generations: list[Path]) -> list[str]:
+    lines: list[str] = []
+    for part in generations:
+        lines.extend(_hook_error_lines(part))
+    return lines
+
+
 def _hook_error_lines(path: Path) -> list[str]:
     """The end of the trail, bounded, so an unbounded log cannot stall health.
 
@@ -5134,9 +5152,10 @@ def _hook_error_check(state_root: Path, now: datetime) -> dict:
     """Report what the lifecycle hooks failed at, so a silent outage is visible."""
     path = Path(state_root) / "logs" / "hook-errors.log"
     details: dict[str, Any] = {"trail": "logs/hook-errors.log", "window_bytes": 0}
-    if _safe_kind(path, state_root)[0] == "missing":
+    generations = _hook_error_generations(path, state_root)
+    if not generations:
         return _result("hooks", "ok", "No hook failure trail exists.", details)
-    records = _hook_error_records(_hook_error_lines(path))
+    records = _hook_error_records(_hook_error_trail(generations))
     if not records:
         return _result("hooks", "ok", "No hook failure is recorded.", details)
     last_at = max(at for at, _kind in records)
