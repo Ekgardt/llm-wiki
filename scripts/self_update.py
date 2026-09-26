@@ -300,11 +300,35 @@ def _requirement_name(requirement: object) -> str:
     return canonical_name(match.group(1))
 
 
-def _installed_distributions() -> set[str]:
+def _unconditional(requirement: str) -> bool:
+    """A requirement the distribution always brings, not one of its own extras'."""
+    return "extra" not in requirement.partition(";")[2]
+
+
+def _installed_distributions() -> dict[str, set[str]]:
+    """Each installed distribution and the distributions it always requires."""
     from importlib.metadata import distributions
 
-    named = (distribution.metadata["Name"] for distribution in distributions())
-    return {canonical_name(name) for name in named if name}
+    installed: dict[str, set[str]] = {}
+    for distribution in distributions():
+        name = distribution.metadata["Name"]
+        if name:
+            requires = filter(_unconditional, distribution.requires or ())
+            installed[canonical_name(name)] = {_requirement_name(value) for value in requires}
+    return installed
+
+
+def _chosen_by_itself(
+    exclusive: set[str], own: set[str], installed: dict[str, set[str]]
+) -> bool:
+    """An exclusive distribution is installed and nothing outside the extra pulled it in.
+
+    `transformers` (reranker) requires `huggingface-hub` (semantic's own), so the
+    reranker alone read as a semantic choice (audit 2026-09-26, regress 9,
+    docs/research/2026-09-26-an-extra-is-chosen-by-what-nothing-else-pulled-in.md).
+    """
+    pulled_in = set().union(*(needs for name, needs in installed.items() if name not in own))
+    return bool((exclusive & installed.keys()) - pulled_in)
 
 
 def _project(root: Path) -> dict:
@@ -348,9 +372,13 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     code that needs it. See
     `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
     """
-    present = _installed_distributions()
-    exclusive = _exclusive_names(_project(root))
-    return tuple(sorted(extra for extra, names in exclusive.items() if names & present))
+    installed = _installed_distributions()
+    project = _project(root)
+    own = _own_names(project)
+    exclusive = _exclusive_names(project)
+    return tuple(
+        sorted(extra for extra, names in exclusive.items() if _chosen_by_itself(names, own[extra], installed))
+    )
 
 
 # What the installer renders owned resources from — units, plists, task settings,

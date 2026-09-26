@@ -70,7 +70,7 @@ def _advance(checkout: Path, *changed: str) -> dict:
 
 def test_an_extra_is_chosen_by_a_package_only_it_brings_under_its_canonical_name(checkout, monkeypatch) -> None:
     """`huggingface_hub` is how the environment spells `huggingface-hub`."""
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "huggingface-hub"})
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy": set(), "huggingface-hub": set()})
 
     outcome = _advance(checkout, "scripts/search_memory.py")
 
@@ -78,16 +78,26 @@ def test_an_extra_is_chosen_by_a_package_only_it_brings_under_its_canonical_name
 
 
 def test_an_aggregate_is_never_chosen_by_itself_but_its_parts_are(checkout, monkeypatch) -> None:
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy", "onnxruntime", "torch"})
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy": set(), "onnxruntime": set(), "torch": set()})
 
     outcome = _advance(checkout, "uv.lock")
 
     assert outcome["extras"] == ("reranker", "semantic")
 
 
+def test_a_package_another_extra_pulled_in_chooses_nothing(checkout, monkeypatch) -> None:
+    """`transformers` requires `huggingface-hub`: the reranker alone is not a semantic choice."""
+    installed = {"torch": set(), "transformers": {"huggingface-hub"}, "huggingface-hub": set()}
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: installed)
+
+    outcome = _advance(checkout, "uv.lock")
+
+    assert outcome["extras"] == ("reranker",)
+
+
 def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
     """`numpy` belongs to more than one extra, so it says nothing about the choice."""
-    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy"})
+    monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy": set()})
 
     outcome = _advance(checkout, "uv.lock")
 
