@@ -144,7 +144,9 @@ def trust_weight(authority: object, page_type: object) -> float:
 # A chunk that is mostly links points at answers instead of holding one: a
 # "Related" list, or a heading with nothing under it. Boilerpipe's shallow-text
 # classifier (Kohlschütter et al., WSDM 2010) calls a block with a link density
-# above 0.333333 not content; the same bound here. Such a chunk is kept, since a
+# above 0.333333 not content; the same bound here. A "See also" list whose items
+# each open with a link is navigation too, however long its annotations -- on
+# this vault an annotated Related list measured 0.31. Such a chunk is kept, since a
 # query may name only the page it links to, but it ranks behind prose (audit
 # 2026-09-26 C-10, docs/research/2026-09-26-a-link-list-is-not-an-answer.md).
 LINK_DENSITY_CONTENT_MAX = 0.333333
@@ -167,11 +169,41 @@ def _link_density(content: str) -> float | None:
     return linked / total if total else None
 
 
+_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+
+
+def _body_lines(content: str) -> list[str]:
+    return [line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def _link_led_list(content: str) -> bool:
+    """Only list items, each opening with a link: a "See also" list, annotated or not.
+
+    Indented lines continue the item above them; any other unindented line is prose.
+    """
+    items = [_LIST_ITEM.match(line) for line in _item_starts(content)]
+    if not items or None in items:
+        return False
+    return all(map(_opens_with_link, items))
+
+
+def _item_starts(content: str) -> list[str]:
+    return [line for line in _body_lines(content) if not line[:1].isspace()]
+
+
+def _opens_with_link(item: re.Match[str]) -> bool:
+    return _LINK.match(item.group(1)) is not None
+
+
+def _navigation(content: str) -> bool:
+    density = _link_density(content)
+    if density is None or density > LINK_DENSITY_CONTENT_MAX:
+        return True
+    return _link_led_list(content)
+
+
 def substance_weight(content: object) -> float:
     """1.0 for prose; NAVIGATION_WEIGHT for a link list or a bare heading; 1.0 when unknown."""
     if not isinstance(content, str) or not content.strip():
         return 1.0
-    density = _link_density(content)
-    if density is None or density > LINK_DENSITY_CONTENT_MAX:
-        return NAVIGATION_WEIGHT
-    return 1.0
+    return NAVIGATION_WEIGHT if _navigation(content) else 1.0
