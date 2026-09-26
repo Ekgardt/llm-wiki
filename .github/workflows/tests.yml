@@ -180,7 +180,8 @@ jobs:
       # The name of the test a killed process was running comes from
       # LLM_WIKI_TEST_PROGRESS_FILE, one line per test, uploaded below. `-v` was
       # tried first and cost two runs: a 40-minute and then a 60-minute cap on
-      # Windows shards that normally take 22-26 minutes.
+      # Windows shards that stayed well under both without it. Shard cost comes
+      # from tests/shard_weights.json (see tests/shard_plan.py).
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
           --shard ${{ matrix.shard }} --of 4 --
