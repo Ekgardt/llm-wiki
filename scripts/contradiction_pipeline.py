@@ -165,11 +165,12 @@ def _time_key(value: object, *, upper: bool) -> datetime:
 
 
 def _instant(text: str) -> datetime:
-    """Read `Z` as `+00:00`: `fromisoformat` accepts `Z` only from Python 3.11."""
+    """A date or instant as the page wrote it, read the same on Python 3.10 and 3.11+ (audit 2026-09-26 C-4)."""
+    from iso_time import parse_instant
+
     if "T" not in text:
         text = f"{text}T00:00:00+00:00"
-    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return parse_instant(text)
 
 
 def intervals_overlap(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
