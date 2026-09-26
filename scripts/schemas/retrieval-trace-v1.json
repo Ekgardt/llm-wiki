@@ -100,6 +100,12 @@
         {"type": "integer", "minimum": 0, "maximum": 3600000}
       ]
     },
+    "signals_requested": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {"type": "string", "enum": ["lexical", "dense", "graph"]},
+      "uniqueItems": true
+    },
     "reranker_fallback_reason": {
       "oneOf": [
         {"type": "null"},

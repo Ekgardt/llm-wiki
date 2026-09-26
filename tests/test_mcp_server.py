@@ -1666,7 +1666,7 @@ class TestHandleToolCall:
             "schema_version", "requested_mode", "effective_mode", "signals_used",
             "fallback_reason", "corpus_generation", "partial", "reranker_applied",
             "reranker_model_id", "reranker_model_revision", "reranker_depth",
-            "reranker_duration_ms", "reranker_fallback_reason",
+            "reranker_duration_ms", "reranker_fallback_reason", "signals_requested",
         }
         assert "_meta" in data
 

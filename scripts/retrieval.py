@@ -563,6 +563,10 @@ class RetrievalTrace:
     reranker_depth: int | None = None
     reranker_duration_ms: int | None = None
     reranker_fallback_reason: str | None = None
+    # The signals the run asked for. A planned GRAPH run adds dense to what its
+    # profile declares, so the profile alone cannot say a dense leg went missing
+    # (audit 2026-09-26 C-10).
+    signals_requested: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3777,6 +3781,7 @@ def _retrieval_trace(
     corpus_generation: str,
     partial: bool,
     rerank_trace: _RerankTrace,
+    wanted: Sequence[str] = (),
 ) -> RetrievalTrace:
     return RetrievalTrace(
         requested_mode=requested,
@@ -3791,6 +3796,7 @@ def _retrieval_trace(
         reranker_depth=_as_optional_int(rerank_trace.depth),
         reranker_duration_ms=_as_optional_int(rerank_trace.duration_ms),
         reranker_fallback_reason=rerank_trace.fallback_reason,
+        signals_requested=tuple(wanted),
     )
 
 
@@ -3874,6 +3880,7 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
             corpus_generation=progress.corpus_generation,
             partial=True,
             rerank_trace=progress.rerank_trace,
+            wanted=progress.wanted,
         ),
         analysis=progress.analysis,
         display_meta=display_meta,
@@ -3991,6 +3998,7 @@ def _executed_plan(
             corpus_generation=progress.corpus_generation,
             partial=partial,
             rerank_trace=rerank_trace,
+            wanted=progress.wanted,
         ),
         analysis=progress.analysis,
         display_meta=display_meta,
@@ -4112,6 +4120,7 @@ def _legacy_trace_fields(trace: RetrievalTrace) -> dict[str, Any]:
         "reranker_depth": trace.reranker_depth,
         "reranker_duration_ms": trace.reranker_duration_ms,
         "reranker_fallback_reason": trace.reranker_fallback_reason,
+        "signals_requested": list(trace.signals_requested),
     }
 
 

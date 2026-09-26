@@ -965,6 +965,7 @@ def _reported_trace(reported: Mapping[str, object]) -> dict[str, object]:
         "reranker_depth": reported.get("reranker_depth"),
         "reranker_duration_ms": reported.get("reranker_duration_ms"),
         "reranker_fallback_reason": reported.get("reranker_fallback_reason"),
+        "signals_requested": list(reported.get("signals_requested") or ()),
     }
 
 
@@ -5453,7 +5454,7 @@ def _requested_signals(trace: dict) -> tuple[str, ...]:
     from retrieval import PROFILE_SIGNALS
 
     mode = str(trace.get("requested_mode") or "").upper()
-    declared = PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+    declared = trace.get("signals_requested") or PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
     return tuple(dict.fromkeys((*declared, *trace.get("signals_used", ()))))
 
 
