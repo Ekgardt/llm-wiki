@@ -309,8 +309,8 @@ END OF SESSION (agent idle or you close)
   MAJOR triggers background compile (detached, doesn't block you)
 
 NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
-  Adopt undispatched capture intents → reclaim runtime state (settle quarantines,
-  snapshot the knowledge) → redrive captures that died before a code change →
+  Adopt undispatched capture intents → reclaim runtime state (prune settled
+  transactions, snapshot the knowledge) → redrive captures that died before a code change →
   drain the deferred queue → consolidate pending session records into the daily
   log → compile all pending → post fact keys → structural lint → add owed
   backlinks → refresh registered repository generations and retire the unread

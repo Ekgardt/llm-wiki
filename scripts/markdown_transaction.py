@@ -683,13 +683,6 @@ def _abandoned_artifact_root(root: Path, named: frozenset[str], cutoff: float) -
     return root.stat().st_mtime < cutoff
 
 
-_SETTLE_ROLLED_BACK_QUARANTINES = (
-    'UPDATE "transaction" SET state = \'discarded\', updated_at = ? '
-    "WHERE state = 'quarantined' AND NOT EXISTS ("
-    'SELECT 1 FROM operation WHERE operation.transaction_id = "transaction".id '
-    "AND operation.applied = 1)"
-)
-
 # Transaction states a reserved checkpoint can never recover from: the write it
 # stood for did not happen and no longer can. `preparing`, `prepared`,
 # `applying` and `aborting` are absent on purpose — those may still commit, and
@@ -7538,17 +7531,6 @@ class MarkdownCoordinator:
                 if _parse_timestamp(row["updated_at"]) < cutoff:
                     pruned += self._prune_one(row, deadline, cancelled)
         return pruned
-
-    def settle_rolled_back_quarantines(self) -> int:
-        """A quarantine whose every operation was undone left nothing: it is discarded.
-
-        Quarantine is terminal and nothing moved it, so 117 rows and 69 MB of images
-        sat here for good and held `run/` out of deletion; none had an operation
-        still applied. One that has keeps its quarantine (audit B-16,
-        docs/research/2026-09-25-a-rolled-back-quarantine-is-settled.md).
-        """
-        with self.writer_gate(), self._connect() as database, begin_immediate(database):
-            return database.execute(_SETTLE_ROLLED_BACK_QUARANTINES, (_now(),)).rowcount
 
     def prune_history(
         self, *, retention_days: int = HISTORY_RETENTION_DAYS, now: datetime | None = None

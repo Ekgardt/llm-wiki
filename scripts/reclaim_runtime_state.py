@@ -139,17 +139,6 @@ def _empty_shards_removed(root: Path) -> int:
     return sum(_removed_if_empty(shard) for shard in root.iterdir())
 
 
-def settle_rolled_back_quarantines() -> dict[str, int]:
-    """Quarantined transactions that left nothing behind become discarded (B-16)."""
-    from markdown_transaction import active_or_legacy_coordinator
-
-    try:
-        coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-        return {"settled": coordinator.settle_rolled_back_quarantines(), "failed": 0}
-    except Exception as error:  # noqa: BLE001
-        return {"settled": 0, "failed": 1, "reason": str(error)[:120]}
-
-
 def _removed_if_empty(shard: Path) -> int:
     try:
         shard.rmdir()
@@ -196,7 +185,6 @@ def rebuild_co_activation() -> dict[str, object]:
 def reclaim(budget_seconds: float) -> dict[str, object]:
     return {
         "backlog": drain_pending_backlog(budget_seconds),
-        "quarantines": settle_rolled_back_quarantines(),
         "transactions": prune_settled_transactions(),
         "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
@@ -214,7 +202,6 @@ def _report(result: dict[str, object]) -> str:
     snapshot = result["snapshot"]
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
-        f"settled {result['quarantines']['settled']} rolled-back quarantine(s); "
         f"pruned {transactions['pruned']} settled transaction(s); "
         f"dropped {result['history']['transactions']} transaction row(s) and "
         f"{result['history']['attempts']} attempt row(s) past the history window; "
