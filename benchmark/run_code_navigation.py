@@ -178,6 +178,19 @@ class _ProbeRacedError(RuntimeError):
     """Raised when the server answered before the probe could interrupt it."""
 
 
+def _unmeasured_reason(error: BaseException) -> str:
+    """Why an attempt measured nothing, as the report names it.
+
+    A Windows CI run (2026-09-26, run 36252530355) reported the timeout scenario
+    unavailable and said nothing more; the next one names its cause. Research:
+    docs/research/2026-09-26-an-ownership-probe-says-why-it-measured-nothing.md
+    """
+    if isinstance(error, _ProbeRacedError):
+        return "raced"
+    cause = error.__cause__
+    return type(error).__name__ if cause is None else f"{type(error).__name__}:{type(cause).__name__}"
+
+
 def _wait_one_poll(completed: threading.Event, deadline: float) -> None:
     """Yield for one poll interval, whether or not the request has finished."""
     wait_for = min(_OWNERSHIP_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
@@ -1663,6 +1676,7 @@ class _RealNavigationRuntime:
             scenario: {"available": False, "orphan_count": None}
             for scenario in _OWNERSHIP_SCENARIOS
         }
+        self.ownership_reasons = {}
         for scenario in _OWNERSHIP_SCENARIOS:
             if self.cleanup_failed:
                 break
@@ -1678,12 +1692,20 @@ class _RealNavigationRuntime:
         """The retained-owner count, or None and whether a retry is worthwhile."""
         try:
             return self._run_ownership_scenario(scenario, deadline), False
-        except _ProbeRacedError:
+        except _ProbeRacedError as error:
             self._recover_ownership_scenario()
+            self._note_unmeasured(scenario, error)
             return None, True
-        except Exception:
+        except Exception as error:
             self._recover_ownership_scenario()
+            self._note_unmeasured(scenario, error)
             return None, False
+
+    def _note_unmeasured(self, scenario: str, error: BaseException) -> None:
+        """Keep the last reason a scenario measured nothing, for the report."""
+        reasons = getattr(self, "ownership_reasons", None) or {}
+        reasons[scenario] = _unmeasured_reason(error)
+        self.ownership_reasons = reasons
 
     def _ownership_attempt_or_stop(self, scenario: str, deadline: float) -> tuple[int | None, bool]:
         """One attempt, or (None, False) when no attempt may start."""
@@ -2594,11 +2616,19 @@ class _FixtureRun:
             if not self._crash_cycle(crash_request, crash_query):
                 break
 
+    def _name_unmeasured_ownership(self) -> None:
+        """Each scenario that measured nothing says why, so a failed gate is diagnosable."""
+        reasons = getattr(self.runtime, "ownership_reasons", {})
+        for scenario, outcome in self.ownership.items():
+            if not outcome["available"]:
+                self.errors.append({"phase": f"ownership:{scenario}", "code": reasons.get(scenario, "not_attempted")})
+
     def ownership_phase(self) -> None:
         if getattr(self.runtime, "cleanup_failed", False):
             return
         try:
             self.ownership = self.runtime.ownership_checks(deadline=self.operation_deadline())
+            self._name_unmeasured_ownership()
             self.check()
             if getattr(self.runtime, "cleanup_failed", False):
                 self.errors.append({"phase": "ownership", "code": "CleanupTerminal"})
