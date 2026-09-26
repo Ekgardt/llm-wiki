@@ -282,11 +282,25 @@ def test_status_reads_all_streams_from_one_coherent_snapshot(
     assert status["tasks"] == [task]
 
 
+# Sized to what the test proves — status reads stay coherent while claims and
+# completions land — not to a throughput. Each blackboard write is a fenced
+# transaction of about fifteen `synchronous=FULL` commits, so its cost is the
+# disk's: measured 2026-09-26 on Linux, 0.3 s per claim idle and 2.3-3.5 s under a
+# parallel suite; the old four writers of six tasks and 160 reads took 20 s idle,
+# 147 s loaded, 82-229 s on the Windows runners against a 300 s hang bound, and
+# once 337 s (CI run 36170944200). Two writers of three tasks and 24 reads took
+# 3.4 s idle and keep every interleaving the assertion needs. See
+# `docs/research/2026-09-26-a-race-test-is-sized-to-what-it-proves.md`.
+STATUS_RACE_WRITERS = 2
+STATUS_RACE_TASKS_PER_WRITER = 3
+STATUS_RACE_READS = 12
+
+
 def _status_race_batches(vault: Path, state_root: Path, writers: int, per_writer: int):
-    """Four writers and two readers over one blackboard; the batches they wrote."""
-    with concurrent.futures.ProcessPoolExecutor(max_workers=6) as executor:
+    """Writers and two readers over one blackboard; the batches they wrote."""
+    with concurrent.futures.ProcessPoolExecutor(max_workers=writers + 2) as executor:
         readers = [
-            executor.submit(_read_blackboard_status, str(vault), str(state_root), 80)
+            executor.submit(_read_blackboard_status, str(vault), str(state_root), STATUS_RACE_READS)
             for _ in range(2)
         ]
         writes = [
@@ -304,8 +318,8 @@ def test_multiprocess_status_reads_remain_coherent_during_claim_and_complete(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
     vault, state_root = blackboard_vault
-    writers = 4
-    tasks_per_writer = 6
+    writers = STATUS_RACE_WRITERS
+    tasks_per_writer = STATUS_RACE_TASKS_PER_WRITER
 
     batches, reads = _status_race_batches(vault, state_root, writers, tasks_per_writer)
 
