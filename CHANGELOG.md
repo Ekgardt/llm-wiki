@@ -7,6 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The nightly removes a staged copy a killed write left beside a Markdown page (three on this vault, the oldest from 2026-08-26); every staging name in the code has the one shape the sweep recognises, held by a test.
+- The 90-day history prune keeps only the families other records read back and bounds every other one, including project and session-evidence rows and any family added later; a committed checkpoint releases its settled transaction (audit 2026-09-26 C-11).
+- A maintenance marker, doctor's owner rows, offline adoption, the writer gate and queue source fences judge an owner by the process it recorded, so a reused PID no longer keeps a dead owner alive (audit 2026-09-26 C-12).
+- The nightly capture adoption also finishes half-published intents and writes what it could not recover to the capture-failure trail (audit 2026-09-26 C-12).
+- The nightly image prune stops before its step is killed, and undo puts back images a killed prune left staged (audit 2026-09-26 C-12).
+- `logs/hook-errors.log` is rotated to `hook-errors.log.1` instead of trimmed under its writers; doctor reads both (audit 2026-09-26 C-12).
+- Doctor reports a project whose checkpoints have waited in the queue for more than 36 hours (audit 2026-09-26 C-12).
+- The blackboard race test is sized to what it proves, so it no longer runs into its hang bound on slow runners (audit 2026-09-26 B-27).
+- The guide names the state recovery sets for an unexplained target: `conflicted`.
 - A long session keeps its first and last turns: each edge of an over-bound transcript skips service records and keeps whole turns (audit 2026-09-26 C-5).
 - A nightly housekeeping step names its failure instead of ending the night; a failed update is named, a failed retention counts once (audit 2026-09-26 C-13).
 - An extra counts as chosen only by a distribution nothing outside it pulls in, so the reranker's `transformers` no longer implies `semantic` (audit 2026-09-26 C-13).

@@ -73,7 +73,7 @@ _ALLOWED_CALLERS = {
     ("memory_queue.py", "_pid_is_alive"),
     ("memory_queue.py", "_descendant_alive"),
     ("memory_queue.py", "_kill_windows_tree"),
-    ("memory_queue.py", "_delete_stale_source_fences"),
+    ("memory_queue.py", "MemoryQueue._delete_stale_source_fences"),
     ("memory_state.py", "_is_pid_alive"),
     ("doctor.py", "_pid_alive"),
     ("process_liveness.py", "owner_alive"),
@@ -99,12 +99,21 @@ def _judges_by_number(node: ast.AST) -> bool:
     return _identity_used_as_existence(node)
 
 
+def _functions(body: list[ast.stmt], prefix: str = "") -> list[tuple[str, ast.AST]]:
+    """Every function with its qualified name, so two classes' methods stay apart."""
+    found: list[tuple[str, ast.AST]] = []
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            found += _functions(node.body, f"{prefix}{node.name}.")
+        elif isinstance(node, ast.FunctionDef):
+            found.append((prefix + node.name, node))
+    return found
+
+
 def _bare_probe_callers(path: Path) -> set[tuple[str, str]]:
-    functions = ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+    functions = _functions(ast.parse(path.read_text(encoding="utf-8")).body)
     return {
-        (path.name, function.name)
-        for function in functions
-        if isinstance(function, ast.FunctionDef) and any(map(_judges_by_number, ast.walk(function)))
+        (path.name, name) for name, function in functions if any(map(_judges_by_number, ast.walk(function)))
     }
 
 
