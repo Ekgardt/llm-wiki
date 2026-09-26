@@ -2152,19 +2152,26 @@ def _dropped_counts(rules: list[str], index) -> dict[str, object]:
     return {**report, **index.as_report()}
 
 
-def _stored_dead_nodes(graph) -> list[dict]:
+# The most dead-code candidates one answer reads; past it the answer says it was cut.
+MAX_DEAD_CODE_NODES = 10_000
+
+
+def _stored_dead_nodes(graph, name: str | None = None) -> tuple[list[dict], bool]:
     """Function and method nodes no resolved CALLS reaches and no EXPOSES names.
 
     The anti-join runs in SQL, so this reads its own answer — measured 3,621
     rows in 0.17 s — instead of the 19,153 nodes and 35,313 edges the old shape
-    materialised before refusing at the row ceiling.
+    materialised before refusing at the row ceiling. A named symbol narrows in
+    SQL, and a graph past the bound returns its first rows and says so instead of
+    refusing (audit 2026-09-26 B-7).
     """
     return graph.nodes_without_edges(
         kinds=("function", "method"),
         incoming_edge_types=("CALLS",),
         outgoing_edge_types=("EXPOSES",),
         exclude_name_prefixes=DEAD_CODE_NAME_PREFIXES,
-        max_rows=10_000,
+        name=name,
+        max_rows=MAX_DEAD_CODE_NODES,
     )
 
 
@@ -2181,13 +2188,11 @@ def _scope_names(symbol: str | None) -> frozenset[str] | None:
     return frozenset(part for part in str(symbol).split(".") if part)
 
 
-def _dead_nodes_for(graph, symbol: str | None) -> list[dict]:
-    """Every candidate node, or only those the named symbol could be."""
-    nodes = _stored_dead_nodes(graph)
+def _dead_nodes_for(graph, symbol: str | None) -> tuple[list[dict], bool]:
+    """Every candidate node, or only those the named symbol could be, and whether cut."""
     if not symbol:
-        return nodes
-    wanted = str(symbol).rsplit(".", 1)[-1]
-    return [node for node in nodes if str(node["metadata"].get("name")) == wanted]
+        return _stored_dead_nodes(graph)
+    return _stored_dead_nodes(graph, str(symbol).rsplit(".", 1)[-1])
 
 
 def _store_find_dead_code(
@@ -2197,13 +2202,13 @@ def _store_find_dead_code(
     if graph is None:
         return None
     try:
-        nodes = _dead_nodes_for(graph, symbol)
+        nodes, truncated = _dead_nodes_for(graph, symbol)
         candidates, dropped = _classified_dead_nodes(
             graph, nodes, directory, _scope_names(symbol)
         )
         report = _store_report(graph)
         ordered = _marked_complete(candidates, report)
-        counts = {**_dead_code_counts(ordered), **dropped}
+        counts = {**_dead_code_counts(ordered), **dropped, "candidates_truncated": truncated}
         return _with_report("candidates", ordered, {**report, **counts}, with_report)
     finally:
         graph.close()

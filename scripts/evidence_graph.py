@@ -2126,6 +2126,28 @@ def _kind_clause(
     parameters.extend(values)
 
 
+def _without_edges_query(
+    kinds: Sequence[str] | None,
+    incoming_edge_types: Sequence[str],
+    outgoing_edge_types: Sequence[str],
+    exclude_name_prefixes: Sequence[str],
+    name: str | None,
+) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    parameters: list[object] = []
+    _kind_clause(kinds, clauses, parameters)
+    _metadata_clause(name, "name", 1024, clauses, parameters)
+    where = " WHERE " + " AND ".join(clauses) if clauses else " WHERE 1"
+    where += _name_prefix_exclusions(exclude_name_prefixes, parameters)
+    where += _without_edge_clause("target_node_id", incoming_edge_types, parameters)
+    where += _without_edge_clause("source_node_id", outgoing_edge_types, parameters)
+    sql = (
+        "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
+        f"FROM node{where} ORDER BY kind, identity_key, node_id LIMIT ?"
+    )
+    return sql, parameters
+
+
 def _metadata_clause(
     value: str | None,
     field: str,
@@ -3036,31 +3058,25 @@ class EvidenceGraph:
         incoming_edge_types: Sequence[str] = (),
         outgoing_edge_types: Sequence[str] = (),
         exclude_name_prefixes: Sequence[str] = (),
+        name: str | None = None,
         max_rows: int = 100,
         deadline: float | None = None,
-    ) -> list[dict[str, object]]:
-        """Return bounded nodes that no resolved assertion of the named types reaches.
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Nodes no resolved assertion of the named types reaches, and whether more matched.
 
         The anti-join runs in SQL, so a whole-graph question about unreferenced
         symbols reads its own answer instead of every node and every edge.
         `incoming_edge_types` excludes a node that is any such assertion's
-        target; `outgoing_edge_types` excludes one that is its source.
+        target; `outgoing_edge_types` excludes one that is its source; `name`
+        narrows in SQL. Past `max_rows` the first rows come back with the flag
+        set: a graph with more candidates than the bound refused even a question
+        about one name (audit 2026-09-26 B-7).
         """
-        clauses: list[str] = []
-        parameters: list[object] = []
-        _kind_clause(kinds, clauses, parameters)
-        where = " WHERE " + " AND ".join(clauses) if clauses else " WHERE 1"
-        where += _name_prefix_exclusions(exclude_name_prefixes, parameters)
-        where += _without_edge_clause("target_node_id", incoming_edge_types, parameters)
-        where += _without_edge_clause("source_node_id", outgoing_edge_types, parameters)
-        rows = self._execute(
-            "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
-            f"FROM node{where} ORDER BY kind, identity_key, node_id LIMIT ?",
-            parameters,
-            max_rows=max_rows,
-            deadline=deadline,
+        sql, parameters = _without_edges_query(
+            kinds, incoming_edge_types, outgoing_edge_types, exclude_name_prefixes, name
         )
-        return [self._node(row) for row in rows]
+        rows, truncated = self._execute_top(sql, parameters, max_rows=max_rows, deadline=deadline)
+        return [self._node(row) for row in rows], truncated
 
     def top_incoming_edge_counts(
         self,

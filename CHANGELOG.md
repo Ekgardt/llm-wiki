@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `find_dead_code` answers about one symbol on a graph with more than 10 000 candidates: the name narrows in SQL, and a whole-graph scan past the bound returns its first rows with `candidates_truncated` instead of failing (audit 2026-09-26 B-7).
 - `read_page` returns a page that mentions `daily:` in prose: an unparseable mention is listed as `not_an_evidence_reference` instead of refusing the page; a real reference that does not resolve still refuses it (audit 2026-09-26 B-17).
 - A code update that left dependencies unsynced or asked for an installer run stays named: the next quiet night syncs the dependencies again and keeps asking for the installer until it has run; doctor's advice no longer suggests a `uv sync` that removes optional extras (audit 2026-09-26 B-24).
 - A weekly pass that starts while the nightly holds the shared fence waits for it (asking every minute, for as long as the nightly can run) instead of losing the week, and doctor names a weekly that has only ever been skipped (audit 2026-09-26 B-20).

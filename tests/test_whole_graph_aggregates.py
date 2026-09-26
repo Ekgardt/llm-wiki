@@ -212,7 +212,7 @@ def test_the_dead_code_anti_join_answers_under_a_budget_smaller_than_the_graph(g
     with pytest.raises(ValueError, match="row ceiling exceeded"):
         graph.find_nodes(kinds=("function", "method"), max_rows=3)
 
-    dead = graph.nodes_without_edges(
+    dead, truncated = graph.nodes_without_edges(
         kinds=("function", "method"),
         incoming_edge_types=("CALLS",),
         outgoing_edge_types=("EXPOSES",),
@@ -220,11 +220,10 @@ def test_the_dead_code_anti_join_answers_under_a_budget_smaller_than_the_graph(g
         max_rows=3,
     )
 
-    assert sorted(node["metadata"]["name"] for node in dead) == [
-        "helper",
-        "lonely",
-        "stale",
-    ]
+    assert (sorted(node["metadata"]["name"] for node in dead), truncated) == (
+        ["helper", "lonely", "stale"],
+        False,
+    )
 
 
 def test_the_caller_ranking_is_counted_in_sql_and_reports_its_own_bound(graph):
