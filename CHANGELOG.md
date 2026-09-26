@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A release of the canonical Markdown writer gate refused by a database busy past its timeout is retried by the same process (1 s … every minute, about an hour) instead of leaving its rows to shut every other writer out until the process exits; the committed operation is no longer reported failed (audit 2026-09-26 A-13).
 - A reinstall is no longer rolled back because the vault had a bad night: the install smoke fails only on an error in a check the installer owns (environment, filesystem, adoption, MCP, integrations) or an error that names no check; other errors are named on stderr and reported as degraded (audit 2026-09-26 A-10).
 - The nightly code update no longer stops on an untracked file identical to one it adds (a research note merged through a pull request): the copy is set aside and recreated by the fast-forward, and put back if the merge fails; a differing file stops the update as `untracked_files_conflict`, by name. A failed git call now carries git's own words (audit 2026-09-26 A-9).
 - A native language server's verified launch copy is removed with its owner root, so a gopls or rust-analyzer session closes instead of stranding its slot; a dead failure root keeps its records and drops the 43 MB copy (audit 2026-09-26 A-6, C-7).

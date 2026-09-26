@@ -109,6 +109,10 @@ _ADOPTION_VALIDATION_LOCK = threading.Lock()
 # Nested gate releases that failed in this process: (database, owner token, fencing epoch).
 # Set operations are atomic under the interpreter lock; an entry is proof the row is residue.
 _UNRELEASED_PROJECTIONS: set[tuple[str, str, int]] = set()
+# When a busy canonical release is tried again: soon, then once a minute for about
+# an hour (audit 2026-09-26 A-13,
+# docs/research/2026-09-26-a-busy-release-is-retried-until-it-lands.md).
+_RELEASE_RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0, 30.0) + (60.0,) * 60
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -7946,15 +7950,49 @@ class MarkdownCoordinator:
         stop.set()
         heartbeat.join(timeout=lease.heartbeat_seconds * 2)
         try:
-            # A heartbeat that failed transiently is not a lost gate. What
-            # proves the loss is the projection row: reclaiming it deletes
-            # this owner's row and bumps the fence, so a delete that removes
-            # our row means nobody else ever took the gate.
-            with self._connect() as database, begin_immediate(database):
-                self._delete_writer_projection(database, lease)
-                registry._release_in_transaction(database, lease)
+            self._release_canonical_lease(registry, lease)
+        except (OSError, sqlite3.Error) as exc:
+            if not _is_transient_writer_contention(exc):
+                raise
+            self._release_later(registry, lease)
         finally:
             self._clear_gate()
+
+    def _release_canonical_lease(self, registry: object, lease: OwnerLease) -> None:
+        # A heartbeat that failed transiently is not a lost gate. What
+        # proves the loss is the projection row: reclaiming it deletes
+        # this owner's row and bumps the fence, so a delete that removes
+        # our row means nobody else ever took the gate.
+        with self._connect() as database, begin_immediate(database):
+            self._delete_writer_projection(database, lease)
+            registry._release_in_transaction(database, lease)
+
+    def _release_later(self, registry: object, lease: OwnerLease) -> None:
+        """Keep trying a release the busy database refused; nobody else may take our row.
+
+        The registry reclaims only a dead owner, and this process is alive, so a
+        release left undone shut every other writer out until it exited (A-13).
+        """
+        threading.Thread(
+            target=self._retry_release,
+            args=(registry, lease),
+            name="markdown-writer-release",
+            daemon=True,
+        ).start()
+
+    def _retry_release(self, registry: object, lease: OwnerLease) -> None:
+        for delay in _RELEASE_RETRY_DELAYS:
+            time.sleep(delay)
+            if self._release_settled(registry, lease):
+                return
+
+    def _release_settled(self, registry: object, lease: OwnerLease) -> bool:
+        """True once released, or once the failure is not contention and waiting cannot help."""
+        try:
+            self._release_canonical_lease(registry, lease)
+        except (OSError, sqlite3.Error) as exc:
+            return not _is_transient_writer_contention(exc)
+        return True
 
     @staticmethod
     def _insert_writer_projection(database: sqlite3.Connection, owner: OwnerLease) -> None:
