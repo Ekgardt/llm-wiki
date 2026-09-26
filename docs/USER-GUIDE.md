@@ -570,7 +570,11 @@ target that matches neither its recorded before nor after hash. It never overwri
 unknown bytes. Undo creates a new forward transaction and works only while every
 target still matches the original committed after-hash. Pruning removes expired
 transaction images; after the 2-day undo window, or after an explicit prune, that
-undo history is gone. External editors may briefly observe a mixed tree while a
+undo history is gone. The rows themselves go after 90 days, settled and pruned of
+their images, except the families other records read back (compile receipts and
+quarantines, daily-archive removals, capture decisions, episode consolidation) and
+any transaction an unsettled project checkpoint still names; a committed checkpoint
+keeps its own event, which is what a journal rebuild reads. External editors may briefly observe a mixed tree while a
 multi-file transaction applies. CAS safety is guaranteed only for cooperating
 transaction-API writers; concurrent external edits are unsupported and detected
 best-effort.

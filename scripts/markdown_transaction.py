@@ -655,12 +655,17 @@ _PRUNE_COMMITTED_ATTEMPTS = (
     "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
     "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
 )
-# The only operation families the prune may remove: hook breadcrumbs, which
-# nothing reads back after their own replay window. Compile, archive, capture,
-# session and episode rows are authority for receipts, bags and terminal records
-# that outlive the window. See
-# `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md`.
-PRUNABLE_OPERATION_FAMILIES = ("post-tool", "user-prompt")
+# The operation families whose settled rows are authority for something that
+# outlives them, and so are never pruned: compile receipts and quarantine records,
+# daily archive attestations, capture terminal records and episode consolidation.
+# Every other family goes once settled, pruned of its images and past the window:
+# its content lives in the Markdown it wrote, and the only thing the row still
+# answers is a replay of the same operation, whose sources (hook replays within
+# seconds, queue tasks kept 30 days) are gone long before 90 days. Kept by name,
+# pruned by default, so a new family is bounded without being listed. See
+# `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md` and
+# `docs/research/2026-09-26-a-new-operation-family-is-bounded-by-default.md`.
+KEPT_OPERATION_FAMILIES = ("compile", "compile-quarantine", "archive-remove", "capture-markdown", "episodes")
 
 # A reservation on a checkpoint another attempt committed will never run (C-11).
 _PRUNE_SPENT_RESERVATIONS = (
@@ -668,10 +673,18 @@ _PRUNE_SPENT_RESERVATIONS = (
     "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
     "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
 )
+_SETTLED_PAST_WINDOW = (
+    "state IN ('committed', 'discarded') AND artifacts_pruned_at IS NOT NULL AND updated_at < ?"
+)
+# A committed checkpoint carries its own event, and `rebuild_journal` reads only
+# that; the transaction that appended it is history once settled past the window.
+_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS = (
+    "UPDATE project_checkpoints SET transaction_id = NULL WHERE state = 'committed' "
+    'AND transaction_id IN (SELECT id FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + ")"
+)
 _PRUNE_SETTLED_TRANSACTIONS = (
-    'DELETE FROM "transaction" WHERE state IN (\'committed\', \'discarded\') '
-    "AND artifacts_pruned_at IS NOT NULL AND updated_at < ? "
-    "AND (" + " OR ".join("operation_id LIKE ?" for _ in PRUNABLE_OPERATION_FAMILIES) + ") "
+    'DELETE FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + " "
+    "AND NOT (" + " OR ".join("operation_id LIKE ?" for _ in KEPT_OPERATION_FAMILIES) + ") "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
 )
@@ -7572,16 +7585,18 @@ class MarkdownCoordinator:
     ) -> dict[str, int]:
         """Drop settled history past its window: committed attempts, then settled rows.
 
-        Attempts first, so the transactions they named are no longer named. Only
-        breadcrumb families go (`PRUNABLE_OPERATION_FAMILIES`); a transaction a
-        checkpoint row names stays, and so does every quarantined one; operations
-        go with their transaction (`ON DELETE CASCADE`).
+        Attempts first, so the transactions they named are no longer named, then a
+        committed checkpoint lets go of its settled transaction. Every family but
+        the authority ones (`KEPT_OPERATION_FAMILIES`) goes; a transaction an
+        unsettled checkpoint names stays, and so does every quarantined one;
+        operations go with their transaction (`ON DELETE CASCADE`).
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
             spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
             attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
-            families = tuple(f"{family}:%" for family in PRUNABLE_OPERATION_FAMILIES)
+            database.execute(_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS, (cutoff,))
+            families = tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
             transactions = database.execute(
                 _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
             ).rowcount
