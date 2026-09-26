@@ -52,11 +52,32 @@ function Get-ClaudeMcpState {
     return "elsewhere"
 }
 
+# The same line install.sh's claude_status_line prints for each entry state: only a
+# current entry is "active automatic" (audit 2026-09-26 C-13,
+# docs/research/2026-09-26-the-installers-register-claude-mcp-alike.md).
 function Get-ClaudeStatusLine {
     param([bool]$Automatic, [string]$McpState)
     if (-not $Automatic) { return "Claude Code: not wired (install transaction failed)" }
+    if ($McpState -eq "current") { return "Claude Code: active automatic" }
     if ($McpState -eq "elsewhere") { return "Claude Code: hooks active; MCP entry points at another vault" }
-    return "Claude Code: active automatic"
+    return "Claude Code: hooks active; MCP server not registered"
+}
+
+function Write-ClaudeRegistration {
+    param([string]$McpState, [string]$VaultRoot)
+    if ($McpState -eq "current") { Ok "Claude MCP server registered: llm-wiki"; return }
+    Warn "Existing ~/.claude.json found without llm-wiki; add it with:"
+    Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VaultRoot python scripts/mcp_server.py"
+}
+
+# ~/.claude.json is Claude Code's live state file: it is never rewritten here. Its own
+# CLI adds the entry, as install.sh does; without the CLI the command is printed.
+function Register-ClaudeMcp {
+    param([string]$VaultRoot)
+    if ($null -eq (Get-Command claude -ErrorAction SilentlyContinue)) { return "absent" }
+    & claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VaultRoot python scripts/mcp_server.py *> $null
+    if ($LASTEXITCODE -ne 0) { return "absent" }
+    return "current"
 }
 
 function Invoke-NativeCommand {
@@ -585,15 +606,15 @@ if ($claudeDetected) {
         mcpServers = [ordered]@{ "llm-wiki" = $claudeEntryObject }
     }
     $claudeJson = $claudeConfigObject | ConvertTo-Json -Depth 6 -Compress
-    $claudeMerge = ([ordered]@{ "llm-wiki" = $claudeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
     if (-not (Test-Path $claudeMcp)) {
         Write-Utf8NoBom $claudeMcp $claudeJson
+        $claudeMcpState = "current"
         Ok "Claude MCP config created -> $claudeMcp"
     } else {
         $claudeMcpState = Get-ClaudeMcpState -Config $claudeMcp -VaultRoot $VAULT_ROOT
         if ($claudeMcpState -eq "absent") {
-            Warn 'Existing ~/.claude.json found without llm-wiki; merge this under top-level "mcpServers":'
-            Warn "  $claudeMerge"
+            $claudeMcpState = Register-ClaudeMcp -VaultRoot $VAULT_ROOT
+            Write-ClaudeRegistration -McpState $claudeMcpState -VaultRoot $VAULT_ROOT
         }
         if ($claudeMcpState -eq "elsewhere") {
             Warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
