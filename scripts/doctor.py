@@ -8309,21 +8309,31 @@ def _collect_checks(
     generated_at: datetime,
     deadline: float,
 ) -> list[dict]:
-    checks = [
-        _environment_check(root_path, state_path),
-        _runtime_check(state_path),
-        _adoption_check(root_path, state_path),
-        _filesystem_check(state_path, deadline),
-        _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
-        _queue_check(state_path, generated_at, deadline),
-        _archive_check(root_path, state_path, deadline),
-        _claim_check(root_path, state_path, deadline),
+    """Every check, each judged the moment it returns.
+
+    Judging all of them after the last one called a corrupt store found early
+    "not completed" whenever a later check ran past the deadline (audit
+    2026-09-26 B-19, docs/research/2026-09-26-a-check-is-judged-when-it-ends.md).
+    """
+    runs = [
+        lambda: _environment_check(root_path, state_path),
+        lambda: _runtime_check(state_path),
+        lambda: _adoption_check(root_path, state_path),
+        lambda: _filesystem_check(state_path, deadline),
+        lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
+        lambda: _queue_check(state_path, generated_at, deadline),
+        lambda: _archive_check(root_path, state_path, deadline),
+        lambda: _claim_check(root_path, state_path, deadline),
     ]
-    for check_id, operation in _deferrable_checks(
-        root_path, state_path, home_path, generated_at
-    ):
-        checks.append(_completed_or_deferred(check_id, operation, deadline, deadline))
-    return [_unfinished_when_late(check, deadline) for check in checks]
+    runs.extend(
+        _deferred_run(check_id, operation, deadline)
+        for check_id, operation in _deferrable_checks(root_path, state_path, home_path, generated_at)
+    )
+    return [_unfinished_when_late(run(), deadline) for run in runs]
+
+
+def _deferred_run(check_id: str, operation, deadline: float):
+    return lambda: _completed_or_deferred(check_id, operation, deadline, deadline)
 
 
 def _mark_repair_deferred(check: dict) -> None:

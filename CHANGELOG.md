@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Doctor judges each check the moment it returns: a store found broken early stays an `error` with its repair advice, instead of reading "not completed" whenever a later check pushed the run past the time budget (audit 2026-09-26 B-19).
 - A question about a folder inside the vault no longer starts a daytime refresh of the vault's code index: the stale-answer check judges the checkout the folder belongs to (audit 2026-09-26 B-10).
 - A day whose log holds two entries written in the same second compiles again: an evidence reference picks the entry that holds its byte span, as the compiler's quote did, instead of refusing every repeated id (the live compile had stopped on 2026-09-25 and every later day waited); a prompt breadcrumb is one line, so a pasted log excerpt can no longer forge an entry (audit 2026-09-26 A-1, B-4).
 - On Python 3.10 a Python file with a very long operator chain no longer kills the indexer or the MCP server with a C stack overflow (seen on Windows CI): every reader of repository code parses through `python_parse.parse_python`, which refuses such a line with `RecursionError`, as Python 3.11 and later do on their own.
