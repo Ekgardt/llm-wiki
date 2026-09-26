@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- Doctor reads open transactions first and then the newest, and the queue its unfinished tasks first: its bounded scan judged the oldest 10 000 rows, so a conflict written today was reported healthy (audit 2026-09-26 A-3).
 - Dead captures get their one redrive for everything that died before the fix reached this checkout (the time HEAD moved, from its reflog), not only before the fix was committed (audit 2026-09-26 B-28).
 - Secret redaction is exact at both ends: a credential word must end its key (`tokenizer_name`, `token_url`, `PWD` and code such as `api_key = os.environ["API_KEY"]` are left alone), paths and URLs are not credentials, a port is not a password; and it now catches `curl -u user:pass`, `mysql -pPASS`, `--password PASS`, `Authorization: Basic …`, quoted passphrases with spaces, long letter-only values and `user:p@ss@host`. In a raw JSON line the value stops before `"`, so the line stays JSON and the turn is no longer dropped from the session record (audit 2026-09-26 A-2, B-2, B-3).
 - Reranking recovers after one slow run: a cost that said "does not fit" is tried again as a background trial after five minutes instead of switching the stage off for the life of the server; and without the reranker installed an answer says `reranker_unavailable` instead of a timeout that never happened (audit 2026-09-26 B-16).

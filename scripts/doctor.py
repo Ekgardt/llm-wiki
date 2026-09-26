@@ -690,14 +690,21 @@ def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str],
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _TRANSACTION_ID_RE = re.compile(r"[0-9a-z_-]{1,128}")
+# Open states first, then newest: an unordered bounded scan judged the oldest
+# 10 000 rows and never the ones that matter now (audit 2026-09-26 A-3,
+# docs/research/2026-09-26-doctor-reads-the-open-rows-first.md).
+_TRANSACTION_ORDER = " ORDER BY state IN ('committed', 'discarded'), rowid DESC"
 _TRANSACTION_QUERY = (
     "SELECT id, operation_id, request_hash, state, preconditions_json, "
     "plan_hash, created_at, updated_at, artifacts_pruned_at "
-    'FROM "transaction"'
+    'FROM "transaction"' + _TRANSACTION_ORDER
 )
 _OPERATION_QUERY = (
-    "SELECT transaction_id, position, kind, path, before_hash, "
-    'after_hash, parent_device, parent_inode, applied FROM "operation"'
+    "SELECT operation.transaction_id, operation.position, operation.kind, "
+    "operation.path, operation.before_hash, operation.after_hash, "
+    "operation.parent_device, operation.parent_inode, operation.applied "
+    'FROM "operation" JOIN "transaction" ON "transaction".id = operation.transaction_id'
+    " ORDER BY \"transaction\".state IN ('committed', 'discarded'), \"transaction\".rowid DESC"
 )
 _OWNER_TABLE_QUERIES = {
     "writer_owners": "SELECT * FROM writer_owners LIMIT ?",
@@ -1927,7 +1934,8 @@ def _scan_queue_tasks(
 
 def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqlite3.Row]:
     rows = database.execute(
-        "SELECT * FROM tasks LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC LIMIT ?",
+        (MAX_OPERATIONAL_ROWS + 1,),
     ).fetchall()
     if len(rows) <= MAX_OPERATIONAL_ROWS:
         return rows
