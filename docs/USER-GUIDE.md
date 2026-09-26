@@ -565,9 +565,9 @@ uv run --locked --no-sync python scripts/repair_refused_page_creation.py  # page
 uv run --locked --no-sync python scripts/repair_exhausted_queue_tasks.py  # tasks out of attempts that still look ready
 ```
 
-Recovery rolls verified prepared/applying transactions forward and quarantines a
-target that matches neither its recorded before nor after hash. It never overwrites
-unknown bytes. Undo creates a new forward transaction and works only while every
+Recovery rolls verified prepared/applying transactions forward and marks a
+transaction `conflicted` (`unknown_target_bytes`) when a target matches neither its
+recorded before nor after hash. It never overwrites unknown bytes. Undo creates a new forward transaction and works only while every
 target still matches the original committed after-hash. Pruning removes expired
 transaction images; after the 2-day undo window, or after an explicit prune, that
 undo history is gone. The rows themselves go after 90 days, settled and pruned of
