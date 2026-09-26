@@ -5304,9 +5304,14 @@ def _build_operation_envelope(
     *,
     components: dict[str, dict[str, object]] | None = None,
     index_timestamp: str | None = None,
+    source_root: str | None = None,
 ) -> dict:
     envelope = build_envelope(
-        data, components=components, index_timestamp=index_timestamp, **(quality or {})
+        data,
+        components=components,
+        index_timestamp=index_timestamp,
+        source_root=source_root,
+        **(quality or {}),
     )
     if components and envelope["freshness"] == "stale":
         _degrade_stale_envelope(envelope)
@@ -6159,8 +6164,24 @@ def _tool_call_envelope(
     components = _components_for(name, data)
     _check_deadline(operation_deadline)
     return _build_operation_envelope(
-        data, quality, components=components, index_timestamp=_index_timestamp(name, data)
+        data,
+        quality,
+        components=components,
+        index_timestamp=_index_timestamp(name, data),
+        source_root=_answer_source_root(name, arguments),
     )
+
+
+def _answer_source_root(name: str, arguments) -> str | None:
+    """The checkout a directory-scoped tool read, or None for the vault's answers.
+
+    Found from the schema, so a tool that gains a `directory` argument is
+    covered without being listed here (audit 2026-09-26 C-9).
+    """
+    if "directory" not in TOOL_INPUT_SCHEMAS.get(name, {}).get("properties", {}):
+        return None
+    directory = _dict_arguments(arguments).get("directory")
+    return directory if isinstance(directory, str) else ""
 
 
 def _record_answer_cost(envelope: dict, started: float, operation_deadline: float) -> None:
