@@ -2111,6 +2111,7 @@ def _scan_queue_database(
             rows, now=now, deadline=deadline, details=details, states=states
         )
         _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
+        details["recent_dead"] = _recent_dead_count(rows, now)
         _count_queue_side_tables(database, tables, details, now)
         _validate_queue_results(state_root, references, result_hashes, details)
         return _QueueScan(None, unknown_state, corrupt_metadata)
@@ -2125,7 +2126,24 @@ def _queue_error_state(
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    return bool(states["ready"] or states["leased"] or states["blocked"])
+    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("recent_dead"))
+
+
+# A task that died this week is work that did not happen: 25 of them were
+# reported healthy (audit 2026-09-26 B-23). Older dead tasks are history the
+# weekly purge exports and removes.
+DEAD_TASK_LIVE_SECONDS = 7 * 24 * 3600
+
+
+def _recent_dead_count(rows: list[sqlite3.Row], now: datetime) -> int:
+    return sum(1 for row in rows if _died_recently(row, now))
+
+
+def _died_recently(row: sqlite3.Row, now: datetime) -> bool:
+    if row["state"] != "dead" or "updated_at" not in row.keys():
+        return False
+    moment = _parse_utc(row["updated_at"])
+    return moment is not None and (now - moment).total_seconds() <= DEAD_TASK_LIVE_SECONDS
 
 
 def _queue_status(

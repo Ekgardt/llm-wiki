@@ -210,7 +210,33 @@ def _report(result: dict[str, object]) -> str:
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
         f"{temporaries['bytes']} byte(s), and {result['empty_shards']} empty intent shard(s)"
+        f"{_failure_note(result)}"
     )
+
+
+def _failures(result: dict[str, object]) -> list[str]:
+    """What this pass could not do; the report printed counts and hid these (audit 2026-09-26 B-23)."""
+    failed = [f"{key}: {result[key].get('reason', 'failed')}" for key in ("transactions", "history") if result[key].get("failed")]
+    failed.extend(_snapshot_failure(result["snapshot"]))
+    failed.extend(_backlog_failure(result["backlog"]))
+    return failed
+
+
+def _snapshot_failure(snapshot: dict) -> list[str]:
+    status = str(snapshot.get("status"))
+    return [f"snapshot: {status}"] if status.startswith("failed") else []
+
+
+def _backlog_failure(backlog: dict) -> list[str]:
+    count = len(backlog["failed"])
+    return [f"backlog: {count} project(s) failed"] if count else []
+
+
+def _failure_note(result: dict[str, object]) -> str:
+    failed = _failures(result)
+    derived = result["co_activation"].get("co_activation_error")
+    notes = [*failed, *([f"co-activation: {derived}"] if derived else [])]
+    return f"; FAILED: {'; '.join(notes)}" if notes else ""
 
 
 def main() -> int:
@@ -222,8 +248,11 @@ def main() -> int:
         help="how long the backlog drain may run before it stops",
     )
     args = parser.parse_args()
-    print(_report(reclaim(args.budget_seconds)))
-    return 0
+    result = reclaim(args.budget_seconds)
+    print(_report(result))
+    # A derived table that failed is named and costs nothing else; a real
+    # maintenance failure fails the step, so the night records it.
+    return 1 if _failures(result) else 0
 
 
 if __name__ == "__main__":
