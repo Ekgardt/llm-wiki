@@ -5168,7 +5168,8 @@ _UPDATE_ATTENTION = {
         "A local change stops the nightly code update; see the nightly log."
     ),
     ("dependencies", "stale"): (
-        "The code was updated but its dependencies were not synced; run `uv sync`."
+        "The code was updated but its dependencies were not synced; the nightly syncs "
+        "them again, or run `uv sync --locked --inexact` with your `--extra` flags."
     ),
     ("resources", "rerun_installer"): (
         "The update changed what the installer renders; rerun the installer."

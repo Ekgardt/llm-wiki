@@ -707,7 +707,8 @@ def _update_code(log) -> None:
     from self_update import update_checkout
 
     log.step("updating the vault code...")
-    outcome = update_checkout(ROOT)
+    previous = load_state().get("last_update")
+    outcome = _carried_forward(update_checkout(ROOT), previous)
     update_state(lambda state: state.__setitem__("last_update", update_record(outcome)))
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
@@ -715,7 +716,46 @@ def _update_code(log) -> None:
     _log_update_aftermath(log, outcome)
 
 
-UPDATE_RECORD_FIELDS = ("status", "reason", "dependencies", "resources")
+UPDATE_RECORD_FIELDS = ("status", "reason", "dependencies", "resources", "resources_since")
+
+
+def _carried_forward(outcome: dict, previous: object) -> dict:
+    """What an earlier update left undone stays named until it is done.
+
+    A night with nothing to fetch overwrote the record, and "dependencies were
+    not synced" or "rerun the installer" vanished while still true (audit
+    2026-09-26 B-24, docs/research/2026-09-26-an-unfinished-update-stays-named.md).
+    Stale dependencies are synced again here; a needed installer run is kept until
+    the installer has run since.
+    """
+    if outcome.get("status") != "current" or not isinstance(previous, dict):
+        return outcome
+    return {**outcome, **_pending_dependencies(previous), **_pending_resources(previous)}
+
+
+def _pending_dependencies(previous: dict) -> dict:
+    from self_update import sync_dependencies
+
+    if previous.get("dependencies") != "stale":
+        return {}
+    return {"dependencies": sync_dependencies(ROOT)}
+
+
+def _pending_resources(previous: dict) -> dict:
+    since = previous.get("resources_since") or previous.get("at")
+    if previous.get("resources") != "rerun_installer" or _installed_since(since):
+        return {}
+    return {"resources": "rerun_installer", "resources_since": since}
+
+
+def _installed_since(moment: object) -> bool:
+    """Whether the installer committed after `moment`; doubt keeps the warning."""
+    try:
+        manifest = json.loads((STATE_ROOT / "run" / "install" / "manifest.json").read_text(encoding="utf-8"))
+        installed = datetime.fromisoformat(str(manifest["committed_at"]).replace("Z", "+00:00"))
+        return installed > datetime.fromisoformat(str(moment).replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def update_record(outcome: dict) -> dict:

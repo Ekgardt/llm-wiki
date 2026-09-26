@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A code update that left dependencies unsynced or asked for an installer run stays named: the next quiet night syncs the dependencies again and keeps asking for the installer until it has run; doctor's advice no longer suggests a `uv sync` that removes optional extras (audit 2026-09-26 B-24).
 - A weekly pass that starts while the nightly holds the shared fence waits for it (asking every minute, for as long as the nightly can run) instead of losing the week, and doctor names a weekly that has only ever been skipped (audit 2026-09-26 B-20).
 - A torn `run/maintenance.lock` no longer stops every later maintenance pass: the marker is written whole and linked in, so a live writer never shows a partial file, and an ownerless one that names no PID is taken back like a dead owner's (audit 2026-09-26 B-21).
 - A code file whose bytes are not UTF-8 is named in the index receipt's `skipped_examples` instead of vanishing from the graph in silence (audit 2026-09-26 B-13).
