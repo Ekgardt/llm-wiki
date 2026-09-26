@@ -36,7 +36,10 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # every scheduler uses, and the only place these hours are written in this script.
 # Each sits above its pass's own bound (scheduled_nightly.worst_case_seconds,
 # scheduled_weekly.worst_case_seconds); tests hold both facts.
-$LimitHours = @{ nightly = 4; weekly = 6 }
+# A function, not only a script variable: the status check calls it, so a caller
+# that loads the check alone still reads the same table.
+function Get-LLMWikiLimitHours { return @{ nightly = 4; weekly = 6 } }
+$LimitHours = Get-LLMWikiLimitHours
 
 # Detect dot-sourcing at TOP LEVEL (outside any function).
 # Inside a function, $MyInvocation.CommandOrigin is always 'Internal',
@@ -99,9 +102,10 @@ function Test-LLMWikiScheduledTasks {
         [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
     $verified = $true
+    $limits = Get-LLMWikiLimitHours
     $specifications = @(
-        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $LimitHours.nightly },
-        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $LimitHours.weekly }
+        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $limits.nightly },
+        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $limits.weekly }
     )
     foreach ($specification in $specifications) {
         $name = $specification.Name

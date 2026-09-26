@@ -397,7 +397,10 @@ jobs:
     env:
       LLM_WIKI_ROOT: ${{ github.workspace }}
       LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-e2e-state-${{ matrix.platform }}
-      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-e2e-env-${{ matrix.platform }}
+      # No UV_PROJECT_ENVIRONMENT: the installer always builds the vault's own `.venv`
+      # and the scheduler runs `uv run` without one, so every step here reads the
+      # environment an operator's install does. With it set, the steps after the
+      # install ran in an empty environment (`No module named 'yaml'`, 2026-09-26).
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

@@ -274,6 +274,7 @@
   "test_an_impact_git_child_is_never_orphaned.py": 0.01,
   "test_an_impact_hears_its_cancel.py": 0.33,
   "test_an_impact_names_each_edit.py": 0.09,
+  "test_an_installed_vault_is_checked_in_its_own_environment.py": 0.05,
   "test_an_interrupted_prune_is_repaired_not_reported_as_damage.py": 2.92,
   "test_an_open_that_runs_out_of_time_closes_its_database.py": 0.95,
   "test_an_oversized_reply_fails_its_request_not_its_server.py": 0.06,

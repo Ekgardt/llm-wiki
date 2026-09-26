@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- The CI installer job checks the installed vault in the `.venv` the install built, as the scheduler does, and a test refuses an installing job that points uv elsewhere; the Windows task check reads its hour limits through a function, so it works for any caller.
 - No test gives work it expects to finish a literal few-second deadline: 572 of them name the shared scaled timeout, and a guard refuses a new one outside a test about time running out; a full run had failed on one under load.
 - The nightly removes a staged copy a killed write left beside a Markdown page (three on this vault, the oldest from 2026-08-26); every staging name in the code has the one shape the sweep recognises, held by a test.
 - The 90-day history prune keeps only the families other records read back and bounds every other one, including project and session-evidence rows and any family added later; a committed checkpoint releases its settled transaction (audit 2026-09-26 C-11).

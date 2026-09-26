@@ -4556,7 +4556,8 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
             {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
-            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec', 'Test-LLMWikiScheduledTasks'
+            'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
+            'Test-LLMWikiScheduledTasks'
         )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

@@ -124,7 +124,7 @@ def test_the_specification_names_the_limits_the_script_registers() -> None:
 
     script = SCRIPT.read_text(encoding="utf-8")
     registered = re.findall(r"-ExecutionTimeLimit \(New-TimeSpan -Hours \$LimitHours\.(\w+)\)", script)
-    checked = re.findall(r"LimitHours = \$LimitHours\.(\w+)", script)
+    checked = re.findall(r"LimitHours = \$limits\.(\w+)", script)
 
     assert (registered, checked, script_limit_hours()) == (
         ["nightly", "weekly"],
