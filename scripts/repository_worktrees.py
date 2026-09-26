@@ -318,13 +318,61 @@ def _followed(path: Path, roots, state_root, deadline) -> dict:
         return {"directory": str(path), **index.deferred(stopped)}
 
 
+# A worktree refused at one commit is refused again at the same commit, so it is
+# not asked again until it moves; eight such worktrees held every slot of the
+# pass (audit 2026-09-26 B-12,
+# docs/research/2026-09-26-a-refused-worktree-waits-for-a-new-commit.md).
+REFUSALS_KEY = "worktree_refusals"
+MAX_REMEMBERED_REFUSALS = 256
+
+
 def follow_worktrees(
     rows: list[Mapping], *, state_root: Path | None = None, deadline: float
 ) -> list[dict]:
     """The timer's half: index up to `MAX_FOLLOWED_PER_PASS` new worktrees."""
+    refused = _remembered_refusals()
     outcomes = []
-    for path, roots in unindexed_worktrees(rows)[:MAX_FOLLOWED_PER_PASS]:
+    for path, roots, head in _worth_asking(unindexed_worktrees(rows), refused)[:MAX_FOLLOWED_PER_PASS]:
         if time.monotonic() >= deadline:
             break
-        outcomes.append(_followed(path, roots, state_root, deadline))
+        outcome = _followed(path, roots, state_root, deadline)
+        _remember(refused, str(path), head, outcome)
+        outcomes.append(outcome)
+    _store_refusals(refused)
     return outcomes
+
+
+def _worth_asking(candidates, refused: dict[str, str]) -> list[tuple[Path, list[str] | None, str | None]]:
+    """Candidates with their HEAD, less those refused before at the same HEAD."""
+    with_heads = [(path, roots, _head(path)) for path, roots in candidates]
+    return [item for item in with_heads if item[2] is None or refused.get(str(item[0])) != item[2]]
+
+
+def _head(path: Path) -> str | None:
+    try:
+        completed = _git(path, "rev-parse", "HEAD")
+    except (OSError, index.RepositoryIndexRefused):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.decode("ascii", "replace").strip() or None
+
+
+def _remember(refused: dict[str, str], path: str, head: str | None, outcome: Mapping) -> None:
+    refused.pop(path, None)
+    if head is not None and outcome.get("status") == "refused":
+        refused[path] = head
+
+
+def _remembered_refusals() -> dict[str, str]:
+    from memory_state import load_state
+
+    stored = load_state().get(REFUSALS_KEY)
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def _store_refusals(refused: dict[str, str]) -> None:
+    from memory_state import update_state
+
+    kept = dict(list(refused.items())[-MAX_REMEMBERED_REFUSALS:])
+    update_state(lambda state: state.__setitem__(REFUSALS_KEY, kept))
