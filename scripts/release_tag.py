@@ -32,9 +32,18 @@ class Release:
     message: str
 
 
+# A release tool reads tags and blobs; a hung git is an error, not a wait.
+GIT_TIMEOUT_SECONDS = 60
+
+
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *arguments], cwd=str(root), capture_output=True, text=True, check=False
+        ["git", *arguments],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=GIT_TIMEOUT_SECONDS,
     )
 
 

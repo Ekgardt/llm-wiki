@@ -38,6 +38,10 @@ from typing import Any
 import process_liveness
 from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
 
+# Every hook imports this module, and the probe below runs at import. A hook's
+# whole budget is seconds; `rev-parse` answers in milliseconds.
+ROOT_PROBE_TIMEOUT_SECONDS = 2.0
+
 
 def _resolve_vault_root(start: Path) -> Path:
     """Resolve the canonical vault root even from inside a git worktree.
@@ -53,12 +57,13 @@ def _resolve_vault_root(start: Path) -> Path:
             cwd=str(start),
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=ROOT_PROBE_TIMEOUT_SECONDS,
         ).strip()
         git_common_dir = Path(out) if Path(out).is_absolute() else (start / out).resolve()
         git_common_dir = git_common_dir.resolve()
         if git_common_dir.name == ".git":
             return git_common_dir.parent
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         pass
     return start
 

@@ -216,6 +216,9 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
 
 # ---------- individual checks ----------
 
+GIT_LS_FILES_TIMEOUT_SECONDS = 30
+
+
 def _git_tracked_paths() -> set[str] | None:
     """Return repo-relative posix paths of git-tracked files, or None if unavailable.
 
@@ -227,8 +230,9 @@ def _git_tracked_paths() -> set[str] | None:
             ["git", "-c", "core.fsmonitor=false", "ls-files", "-z"],
             cwd=str(ROOT),
             stderr=subprocess.DEVNULL,
+            timeout=GIT_LS_FILES_TIMEOUT_SECONDS,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return None
     if not out:
         return set()

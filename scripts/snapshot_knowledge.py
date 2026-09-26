@@ -69,14 +69,34 @@ def snapshot_root(home: Path | None = None) -> Path:
     return Path(home) / DEFAULT_SNAPSHOT_ROOT.name
 
 
+# A snapshot adds and commits a 20 MB tree; a git that hangs (a stale lock, a
+# signing agent waiting for a passphrase) must not hold the nightly pass.
+GIT_TIMEOUT_SECONDS = 120
+
+
+def _snapshot_git_environment() -> dict[str, str]:
+    """The operator's global and system git config stay out of the copy's commits.
+
+    A global `commit.gpgsign`, `core.hooksPath` or `core.fsmonitor` made the
+    snapshot sign, run hooks or start a monitor (audit 2026-09-26 C-13,
+    docs/research/2026-09-26-every-git-call-has-a-deadline.md).
+    """
+    return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *arguments],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_snapshot_git_environment(),
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SnapshotFailed(f"git {arguments[0]} timed out after {GIT_TIMEOUT_SECONDS} s") from exc
 
 
 def _initialised(root: Path) -> None:
@@ -85,9 +105,9 @@ def _initialised(root: Path) -> None:
     root.chmod(0o700)
     if (root / ".git").is_dir():
         return
-    _git(root, "init", "--quiet")
-    _git(root, "config", "user.name", "llm-wiki snapshot")
-    _git(root, "config", "user.email", "snapshot@localhost")
+    _require_success(_git(root, "init", "--quiet"), "git init")
+    _require_success(_git(root, "config", "user.name", "llm-wiki snapshot"), "git config")
+    _require_success(_git(root, "config", "user.email", "snapshot@localhost"), "git config")
 
 
 def _mirrored(source: Path, destination: Path) -> None:
