@@ -448,8 +448,8 @@ refresh does. Answers carry a `freshness` block naming both commits.
 The runtime starts a managed language server lazily within the owning MCP process,
 exposes only allowlisted read operations, reports readiness and capability
 limitations, and falls back to existing structural evidence when unavailable. The
-server is chosen by file suffix from the four managed profiles; a suffix no profile
-claims falls back to Pyright and degrades to structural evidence. Exact small results
+server is chosen by file suffix from the four managed profiles; a file whose suffix
+no profile claims answers `unsupported` before any server is asked. Exact small results
 use a deterministic compact renderer; the Context Compiler remains responsible for
 broad multi-source synthesis. Installation is a separate explicit operator action
 per profile: `scripts/install_pyright.py`, or

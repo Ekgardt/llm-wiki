@@ -3495,11 +3495,9 @@ def _navigation_profile(normalized_path: str):
     two profiles, so the table is a function by construction. See
     `docs/research/2026-08-28-wiring-a-second-language-server.md`, question 1.
 
-    A suffix no profile claims falls back to Pyright, which is exactly what this
-    path did before profiles existed: the session opens the file, answers
-    nothing, and the caller degrades to structural evidence. Routing such a file
-    straight to the structural tier is the better shape and is deliberately not
-    done here, because `CodeNavigation` requires a session.
+    A suffix no profile claims is still handed a Pyright session, because
+    `CodeNavigation` requires one; `CodeNavigation.query` answers such a file
+    `unsupported` before the session is asked anything (audit 2026-09-26 C-9).
     """
     from lsp_profiles import PYRIGHT_PROFILE, profile_for_path
 

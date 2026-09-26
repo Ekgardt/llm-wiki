@@ -88,8 +88,8 @@ The implemented slice keeps structural discovery in the existing Evidence
 Graph and adds an owned, Python 3.10-compatible LSP path through four pinned managed
 language servers: Pyright 1.1.411 for Python, `typescript-language-server` 6.0.0
 (tsserver 5.9.3) for TypeScript and JavaScript, gopls v0.23.0 for Go and
-rust-analyzer 1.98.1 for Rust. A query is routed to one of them by file suffix, and a
-suffix none claims falls back to Pyright and then to structural evidence. The
+rust-analyzer 1.98.1 for Rust. A query is routed to one of them by file suffix; a
+file whose suffix none claims answers `unsupported` without starting a server. The
 existing `get_architecture` tool routes precise modes through one lazy
 repository-scoped session. The facade validates input bytes, synchronizes documents,
 normalizes provider facts, merges explicit structural fallback, and proves the
