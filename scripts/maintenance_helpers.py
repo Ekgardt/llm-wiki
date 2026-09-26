@@ -53,6 +53,9 @@ MAINTENANCE_REPORT_PATTERNS = (
     "lint-*.md",
     "scheduled-*.log",
     "cron-*.log",
+    # One file per day of dropped compile candidates, which nothing pruned
+    # (audit 2026-09-26 C-12).
+    "compile-drops-*.jsonl",
 )
 ARTIFACT_PATTERN = "*.log"
 # The files a scheduler redirects a pass into: launchd writes the first pair,

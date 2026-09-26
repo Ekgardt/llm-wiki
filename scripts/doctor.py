@@ -111,7 +111,13 @@ TRANSACTION_STATES = (
     "discarded",
     "conflicted",
     "quarantined",
+    # An operator discard rolls back through `aborting` to `aborted`; doctor
+    # called both "a state this runtime does not define" (audit 2026-09-26 C-12).
+    "aborting",
+    "aborted",
 )
+# Transactions still on their way somewhere: a crash here needs recovery.
+UNSETTLED_TRANSACTION_STATES = ("preparing", "prepared", "applying", "aborting")
 QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 # One source of truth for the window; it was 30 in four files. See
 # `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
@@ -1575,7 +1581,7 @@ def _transaction_status(
 
 def _append_state_deletion_codes(details: dict, states: dict[str, int]) -> None:
     nonterminal = any(
-        states.get(state, 0) for state in ("preparing", "prepared", "applying")
+        states.get(state, 0) for state in UNSETTLED_TRANSACTION_STATES
     )
     ordered = (
         (nonterminal, "transaction_nonterminal"),
@@ -1600,7 +1606,7 @@ def _append_live_deletion_codes(details: dict) -> None:
 
 def _unsettled_count(states: dict[str, int]) -> int:
     return (
-        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        sum(states[state] for state in UNSETTLED_TRANSACTION_STATES)
         + states["conflicted"]
     )
 
@@ -1639,7 +1645,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     details["codes"] = sorted(set(details["codes"]))
     details["deletion_codes"] = list(dict.fromkeys(details["deletion_codes"]))
     problem = (
-        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        sum(states[state] for state in UNSETTLED_TRANSACTION_STATES)
         + states["conflicted"]
         + details["quarantined_unresolved"]
     )
